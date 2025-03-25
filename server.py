@@ -27,10 +27,122 @@ MCP_DIR = Path("C:/AltiumMCP")
 REQUEST_FILE = MCP_DIR / "request.json"
 RESPONSE_FILE = MCP_DIR / "response.json"
 CONFIG_FILE = MCP_DIR / "config.json"
-DEFAULT_SCRIPT_PATH = MCP_DIR / "AltiumScript" / "Altium_API.PrjScr"  # Updated path
+DEFAULT_SCRIPT_PATH = MCP_DIR / "AltiumScript" / "Altium_API.PrjScr"
+COMPONENT_DATA_FILE = MCP_DIR / "component_data.json"
 
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
+
+class ComponentDataManager:
+    """Class to manage component data"""
+    def __init__(self):
+        self.component_data = {}
+        self.is_loaded = False
+        self.is_initialized = False
+    
+    def load_data(self):
+        """Load component data from file if it exists"""
+        if COMPONENT_DATA_FILE.exists():
+            try:
+                with open(COMPONENT_DATA_FILE, "r") as f:
+                    self.component_data = json.load(f)
+                logger.info(f"Loaded component data from {COMPONENT_DATA_FILE}")
+                self.is_loaded = True
+                return True
+            except Exception as e:
+                logger.error(f"Error loading component data: {e}")
+                return False
+        else:
+            logger.info("No component data file found")
+            return False
+    
+    def save_data(self, data):
+        """Save component data to file"""
+        try:
+            # Create a dictionary to quickly access components by designator
+            indexed_data = {}
+            
+            try:
+                # Try parsing the data as a string first (in case it's a JSON string)
+                if isinstance(data, str):
+                    components_list = json.loads(data)
+                else:
+                    components_list = data
+                
+                # Create an index by designator
+                for component in components_list:
+                    if isinstance(component, dict) and "designator" in component:
+                        indexed_data[component["designator"]] = component
+            except Exception as e:
+                logger.error(f"Error parsing component data: {e}")
+                return False
+            
+            # Save the indexed data to file
+            with open(COMPONENT_DATA_FILE, "w") as f:
+                json.dump(indexed_data, f, indent=2)
+            
+            self.component_data = indexed_data
+            self.is_loaded = True
+            self.is_initialized = True
+            logger.info(f"Saved component data to {COMPONENT_DATA_FILE}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving component data: {e}")
+            return False
+    
+    async def ensure_initialized(self, bridge):
+        """Ensure component data is initialized (lazy initialization)"""
+        # First try to load from file
+        if not self.is_loaded:
+            self.load_data()
+        
+        # If still not loaded or initialized, fetch from Altium
+        if not self.is_initialized:
+            logger.info("Initializing component data on first request...")
+            
+            # Execute the command in Altium to get all component data
+            response = await bridge.execute_command(
+                "get_all_component_data",
+                {}  # No parameters needed
+            )
+            
+            # Check for success
+            if not response.get("success", False):
+                error_msg = response.get("error", "Unknown error")
+                logger.error(f"Error getting component data: {error_msg}")
+                return False
+            
+            # Get the component data
+            component_data = response.get("result", [])
+            
+            # Save the component data
+            success = self.save_data(component_data)
+            
+            if success:
+                logger.info("Component data initialized successfully")
+                self.is_initialized = True
+                return True
+            else:
+                logger.error("Failed to initialize component data")
+                return False
+        
+        return self.is_initialized
+    
+    def get_component(self, designator):
+        """Get component data by designator"""
+        if not self.is_loaded:
+            if not self.load_data():
+                return None
+        
+        return self.component_data.get(designator)
+    
+    def get_all_components(self):
+        """Get all components data"""
+        if not self.is_loaded:
+            if not self.load_data():
+                return []
+        
+        return list(self.component_data.values())
 
 class AltiumConfig:
     def __init__(self):
@@ -145,6 +257,9 @@ class AltiumBridge:
         # Load configuration
         self.config = AltiumConfig()
         self.config.verify_paths()
+        
+        # Initialize component data manager
+        self.component_manager = ComponentDataManager()
     
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
@@ -268,34 +383,34 @@ class AltiumBridge:
 altium_bridge = AltiumBridge()
 
 @mcp.tool()
-async def get_cmp_description(ctx: Context, cmp_designator: str) -> str:
+async def get_component_data(ctx: Context, cmp_designator: str) -> str:
     """
-    Get the description of a component in Altium
+    Get all data for a component in Altium
     
     Args:
         cmp_designator (str): The designator of the component (e.g., "R1", "C5", "U3")
     
     Returns:
-        str: The component description
+        str: JSON object with all component data
     """
-    logger.info(f"Getting description for component: {cmp_designator}")
+    logger.info(f"Getting data for component: {cmp_designator}")
     
-    # Execute the command in Altium
-    response = await altium_bridge.execute_command(
-        "get_cmp_description",
-        {"cmp_designator": cmp_designator}
-    )
+    # Ensure data is initialized (lazy initialization on first request)
+    initialized = await altium_bridge.component_manager.ensure_initialized(altium_bridge)
     
-    # Check for success
-    if not response.get("success", False):
-        error_msg = response.get("error", "Unknown error")
-        logger.error(f"Error getting component description: {error_msg}")
-        return f"Error: {error_msg}"
+    if not initialized:
+        logger.error("Component data could not be initialized")
+        return json.dumps({"error": "Failed to initialize component data"})
     
-    # Return the description
-    description = response.get("result", "No description available")
-    logger.info(f"Got description for {cmp_designator}: {description}")
-    return description
+    # Get component data from cache
+    component = altium_bridge.component_manager.get_component(cmp_designator)
+    
+    if component:
+        logger.info(f"Found component data for {cmp_designator} in cache")
+        return json.dumps(component, indent=2)
+    else:
+        logger.info(f"Component {cmp_designator} not found in cache")
+        return json.dumps({"error": f"Component {cmp_designator} not found"})
 
 @mcp.tool()
 async def get_all_designators(ctx: Context) -> str:
@@ -305,52 +420,23 @@ async def get_all_designators(ctx: Context) -> str:
     Returns:
         str: JSON array of all component designators on the current board
     """
-    logger.info("Getting all component designators from current board")
+    logger.info("Getting all component designators")
     
-    # Execute the command in Altium
-    response = await altium_bridge.execute_command(
-        "get_all_designators",
-        {}  # No parameters needed
-    )
+    # Ensure data is initialized (lazy initialization on first request)
+    initialized = await altium_bridge.component_manager.ensure_initialized(altium_bridge)
     
-    # Check for success
-    if not response.get("success", False):
-        error_msg = response.get("error", "Unknown error")
-        raw_response = response.get("raw_response", "")
-        logger.error(f"Error getting component designators: {error_msg}")
-        if raw_response:
-            logger.error(f"Raw response: {raw_response}")
-        return f"Error: {error_msg}"
+    if not initialized:
+        logger.error("Component data could not be initialized")
+        return json.dumps({"error": "Failed to initialize component data"})
     
-    # Get the designators list
-    designators = response.get("result", [])
-    logger.info(f"Result type: {type(designators)}")
+    # Get all components from cache
+    components = altium_bridge.component_manager.get_all_components()
     
-    if isinstance(designators, str):
-        logger.info(f"Result is a string, length: {len(designators)}")
-        logger.info(f"First 100 chars: {designators[:100]}")
-        
-        try:
-            # If the result is a string, try to parse it as JSON
-            designators_list = json.loads(designators)
-            logger.info(f"Successfully parsed designators string into JSON. Found {len(designators_list)} designators")
-            return json.dumps(designators_list)
-        except json.JSONDecodeError as e:
-            logger.error(f"Error parsing designators JSON: {e}")
-            logger.error(f"Error at position {e.pos}, line {e.lineno}, column {e.colno}")
-            logger.error(f"Character at error position: '{designators[e.pos:e.pos+10]}...'")
-            
-            # Try to manually extract the array if it looks like an array
-            if designators.startswith('[') and designators.endswith(']'):
-                logger.info("Designators string looks like a JSON array, returning as is")
-                return designators
-            return "[]"
-    elif isinstance(designators, list):
-        logger.info(f"Result is already a list with {len(designators)} items")
-        return json.dumps(designators)
-    else:
-        logger.info(f"Result is of unexpected type: {type(designators)}")
-        return "[]"
+    # Extract designators
+    designators = [comp.get("designator") for comp in components if "designator" in comp]
+    
+    logger.info(f"Found {len(designators)} designators")
+    return json.dumps(designators)
 
 @mcp.tool()
 async def get_server_status(ctx: Context) -> str:
@@ -360,7 +446,10 @@ async def get_server_status(ctx: Context) -> str:
         "altium_exe": altium_bridge.config.altium_exe_path,
         "script_path": altium_bridge.config.script_path,
         "altium_found": os.path.exists(altium_bridge.config.altium_exe_path),
-        "script_found": os.path.exists(altium_bridge.config.script_path)
+        "script_found": os.path.exists(altium_bridge.config.script_path),
+        "component_data_loaded": altium_bridge.component_manager.is_loaded,
+        "component_data_initialized": altium_bridge.component_manager.is_initialized,
+        "component_count": len(altium_bridge.component_manager.component_data) if altium_bridge.component_manager.is_loaded else 0
     }
     
     return json.dumps(status, indent=2)
@@ -383,6 +472,13 @@ if __name__ == "__main__":
     # Print status
     print(f"Altium executable: {altium_bridge.config.altium_exe_path}")
     print(f"Script path: {altium_bridge.config.script_path}")
+    
+    # Try to load existing component data if available
+    # (but don't initialize from Altium yet - will do that on first request)
+    if altium_bridge.component_manager.load_data():
+        print(f"Loaded cached component data with {len(altium_bridge.component_manager.component_data)} components")
+    else:
+        print("No cached component data found. Will initialize on first request.")
     
     # Run the server
     mcp.run(transport='stdio')
