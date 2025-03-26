@@ -29,6 +29,7 @@ RESPONSE_FILE = MCP_DIR / "response.json"
 CONFIG_FILE = MCP_DIR / "config.json"
 DEFAULT_SCRIPT_PATH = MCP_DIR / "AltiumScript" / "Altium_API.PrjScr"
 COMPONENT_DATA_FILE = MCP_DIR / "component_data.json"
+SCHEMATIC_DATA_FILE = MCP_DIR / "schematic_data.json"
 
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
@@ -92,41 +93,38 @@ class ComponentDataManager:
     
     async def ensure_initialized(self, bridge):
         """Ensure component data is initialized (lazy initialization)"""
-        # First try to load from file
-        if not self.is_loaded:
-            self.load_data()
+        # If already initialized, return immediately
+        if self.is_initialized:
+            return True
         
-        # If still not loaded or initialized, fetch from Altium
-        if not self.is_initialized:
-            logger.info("Initializing component data on first request...")
-            
-            # Execute the command in Altium to get all component data
-            response = await bridge.execute_command(
-                "get_all_component_data",
-                {}  # No parameters needed
-            )
-            
-            # Check for success
-            if not response.get("success", False):
-                error_msg = response.get("error", "Unknown error")
-                logger.error(f"Error getting component data: {error_msg}")
-                return False
-            
-            # Get the component data
-            component_data = response.get("result", [])
-            
-            # Save the component data
-            success = self.save_data(component_data)
-            
-            if success:
-                logger.info("Component data initialized successfully")
-                self.is_initialized = True
-                return True
-            else:
-                logger.error("Failed to initialize component data")
-                return False
+        # Always fetch fresh data from Altium on first request
+        logger.info("Initializing component data on first request...")
         
-        return self.is_initialized
+        # Execute the command in Altium to get all component data
+        response = await bridge.execute_command(
+            "get_all_component_data",
+            {}  # No parameters needed
+        )
+        
+        # Check for success
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            logger.error(f"Error getting component data: {error_msg}")
+            return False
+        
+        # Get the component data
+        component_data = response.get("result", [])
+        
+        # Save the component data
+        success = self.save_data(component_data)
+        
+        if success:
+            logger.info("Component data initialized successfully")
+            self.is_initialized = True
+            return True
+        else:
+            logger.error("Failed to initialize component data")
+            return False
     
     def get_component(self, designator):
         """Get component data by designator"""
@@ -143,6 +141,114 @@ class ComponentDataManager:
                 return []
         
         return list(self.component_data.values())
+    
+class SchematicDataManager:
+    """Class to manage schematic component data"""
+    def __init__(self):
+        self.schematic_data = {}
+        self.is_loaded = False
+        self.is_initialized = False
+    
+    def load_data(self):
+        """Load schematic data from file if it exists"""
+        if SCHEMATIC_DATA_FILE.exists():
+            try:
+                with open(SCHEMATIC_DATA_FILE, "r") as f:
+                    self.schematic_data = json.load(f)
+                logger.info(f"Loaded schematic data from {SCHEMATIC_DATA_FILE}")
+                self.is_loaded = True
+                return True
+            except Exception as e:
+                logger.error(f"Error loading schematic data: {e}")
+                return False
+        else:
+            logger.info("No schematic data file found")
+            return False
+    
+    def save_data(self, data):
+        """Save schematic data to file"""
+        try:
+            # Create a dictionary to quickly access components by designator
+            indexed_data = {}
+            
+            try:
+                # Try parsing the data as a string first (in case it's a JSON string)
+                if isinstance(data, str):
+                    components_list = json.loads(data)
+                else:
+                    components_list = data
+                
+                # Create an index by designator
+                for component in components_list:
+                    if isinstance(component, dict) and "designator" in component:
+                        indexed_data[component["designator"]] = component
+            except Exception as e:
+                logger.error(f"Error parsing schematic data: {e}")
+                return False
+            
+            # Save the indexed data to file
+            with open(SCHEMATIC_DATA_FILE, "w") as f:
+                json.dump(indexed_data, f, indent=2)
+            
+            self.schematic_data = indexed_data
+            self.is_loaded = True
+            self.is_initialized = True
+            logger.info(f"Saved schematic data to {SCHEMATIC_DATA_FILE}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving schematic data: {e}")
+            return False
+    
+    async def ensure_initialized(self, bridge):
+        """Ensure schematic data is initialized (lazy initialization)"""
+        # If already initialized, return immediately
+        if self.is_initialized:
+            return True
+        
+        # Always fetch fresh data from Altium on first request
+        logger.info("Initializing schematic data on first request...")
+        
+        # Execute the command in Altium to get all schematic data
+        response = await bridge.execute_command(
+            "get_schematic_data",
+            {}  # No parameters needed
+        )
+        
+        # Check for success
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            logger.error(f"Error getting schematic data: {error_msg}")
+            return False
+        
+        # Get the schematic data
+        schematic_data = response.get("result", [])
+        
+        # Save the schematic data
+        success = self.save_data(schematic_data)
+        
+        if success:
+            logger.info("Schematic data initialized successfully")
+            self.is_initialized = True
+            return True
+        else:
+            logger.error("Failed to initialize schematic data")
+            return False
+    
+    def get_component(self, designator):
+        """Get schematic component data by designator"""
+        if not self.is_loaded:
+            if not self.load_data():
+                return None
+        
+        return self.schematic_data.get(designator)
+    
+    def get_all_components(self):
+        """Get all schematic components data"""
+        if not self.is_loaded:
+            if not self.load_data():
+                return []
+        
+        return list(self.schematic_data.values())
 
 class AltiumConfig:
     def __init__(self):
@@ -258,8 +364,9 @@ class AltiumBridge:
         self.config = AltiumConfig()
         self.config.verify_paths()
         
-        # Initialize component data manager
+        # Initialize data managers
         self.component_manager = ComponentDataManager()
+        self.schematic_manager = SchematicDataManager()
     
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
@@ -383,6 +490,111 @@ class AltiumBridge:
 altium_bridge = AltiumBridge()
 
 @mcp.tool()
+async def get_all_component_property_names(ctx: Context) -> str:
+    """
+    Get all available component property names (JSON keys) from all components
+    
+    Returns:
+        str: JSON array with all unique property names
+    """
+    logger.info("Getting all component property names")
+    
+    # Ensure data is initialized (lazy initialization on first request)
+    initialized = await altium_bridge.component_manager.ensure_initialized(altium_bridge)
+    
+    if not initialized:
+        logger.error("Component data could not be initialized")
+        return json.dumps({"error": "Failed to initialize component data"})
+    
+    # Get all components from cache
+    components = altium_bridge.component_manager.get_all_components()
+    
+    if not components:
+        logger.info("No component data found in cache")
+        return json.dumps({"error": "No component data found"})
+    
+    # Extract all unique property names from all components
+    property_names = set()
+    for component in components:
+        property_names.update(component.keys())
+    
+    # Convert set to sorted list for consistent output
+    property_list = sorted(list(property_names))
+    
+    logger.info(f"Found {len(property_list)} unique property names")
+    return json.dumps(property_list, indent=2)
+
+@mcp.tool()
+async def get_component_property_values(ctx: Context, property_name: str) -> str:
+    """
+    Get values of a specific property for all components
+    
+    Args:
+        property_name (str): The name of the property to get values for
+    
+    Returns:
+        str: JSON array with objects containing designator and property value
+    """
+    logger.info(f"Getting values for property: {property_name}")
+    
+    # Ensure data is initialized (lazy initialization on first request)
+    initialized = await altium_bridge.component_manager.ensure_initialized(altium_bridge)
+    
+    if not initialized:
+        logger.error("Component data could not be initialized")
+        return json.dumps({"error": "Failed to initialize component data"})
+    
+    # Get all components from cache
+    components = altium_bridge.component_manager.get_all_components()
+    
+    if not components:
+        logger.info("No component data found in cache")
+        return json.dumps({"error": "No component data found"})
+    
+    # Extract the property values along with designators
+    property_values = []
+    for component in components:
+        designator = component.get("designator")
+        if designator and property_name in component:
+            property_values.append({
+                "designator": designator,
+                "value": component.get(property_name)
+            })
+    
+    logger.info(f"Found {len(property_values)} components with property '{property_name}'")
+    return json.dumps(property_values, indent=2)
+
+@mcp.tool()
+async def get_schematic_data(ctx: Context, cmp_designator: str) -> str:
+    """
+    Get schematic data for a component in Altium
+    
+    Args:
+        cmp_designator (str): The designator of the component (e.g., "R1", "C5", "U3")
+    
+    Returns:
+        str: JSON object with schematic component data
+    """
+    logger.info(f"Getting schematic data for component: {cmp_designator}")
+    
+    # Ensure data is initialized (lazy initialization on first request)
+    initialized = await altium_bridge.schematic_manager.ensure_initialized(altium_bridge)
+    
+    if not initialized:
+        logger.error("Schematic data could not be initialized")
+        return json.dumps({"error": "Failed to initialize schematic data"})
+    
+    # Get schematic data from cache
+    component = altium_bridge.schematic_manager.get_component(cmp_designator)
+    
+    if component:
+        logger.info(f"Found schematic data for {cmp_designator} in cache")
+        return json.dumps(component, indent=2)
+    else:
+        logger.info(f"Schematic data for {cmp_designator} not found in cache")
+        return json.dumps({"error": f"Schematic data for component {cmp_designator} not found"})
+
+@mcp.tool()
 async def get_component_data(ctx: Context, cmp_designator: str) -> str:
     """
     Get all data for a component in Altium
@@ -411,6 +623,60 @@ async def get_component_data(ctx: Context, cmp_designator: str) -> str:
     else:
         logger.info(f"Component {cmp_designator} not found in cache")
         return json.dumps({"error": f"Component {cmp_designator} not found"})
+    
+@mcp.tool()
+async def get_combined_component_data(ctx: Context, cmp_designator: str) -> str:
+    """
+    Get combined PCB and schematic data for a component in Altium
+    
+    Args:
+        cmp_designator (str): The designator of the component (e.g., "R1", "C5", "U3")
+    
+    Returns:
+        str: JSON object with combined component data
+    """
+    logger.info(f"Getting combined data for component: {cmp_designator}")
+    
+    # Ensure PCB data is initialized
+    pcb_initialized = await altium_bridge.component_manager.ensure_initialized(altium_bridge)
+    
+    if not pcb_initialized:
+        logger.error("PCB data could not be initialized")
+        return json.dumps({"error": "Failed to initialize PCB data"})
+    
+    # Get PCB data from cache
+    pcb_component = altium_bridge.component_manager.get_component(cmp_designator)
+    
+    if not pcb_component:
+        logger.info(f"PCB data for {cmp_designator} not found in cache")
+        return json.dumps({"error": f"PCB data for component {cmp_designator} not found"})
+    
+    # Try to get schematic data if available
+    try:
+        # Ensure schematic data is initialized
+        schem_initialized = await altium_bridge.schematic_manager.ensure_initialized(altium_bridge)
+        
+        if schem_initialized:
+            # Get schematic data from cache
+            schem_component = altium_bridge.schematic_manager.get_component(cmp_designator)
+            
+            if schem_component:
+                # Combine the data
+                combined_data = pcb_component.copy()
+                
+                # Add schematic data fields
+                for key, value in schem_component.items():
+                    if key != "designator" and key not in combined_data:
+                        combined_data[key] = value
+                
+                logger.info(f"Created combined data for {cmp_designator}")
+                return json.dumps(combined_data, indent=2)
+    except Exception as e:
+        logger.error(f"Error combining data: {e}")
+    
+    # If schematic data not available or error occurred, just return PCB data
+    logger.info(f"Returning PCB-only data for {cmp_designator}")
+    return json.dumps(pcb_component, indent=2)
 
 @mcp.tool()
 async def get_all_designators(ctx: Context) -> str:
@@ -447,9 +713,16 @@ async def get_server_status(ctx: Context) -> str:
         "script_path": altium_bridge.config.script_path,
         "altium_found": os.path.exists(altium_bridge.config.altium_exe_path),
         "script_found": os.path.exists(altium_bridge.config.script_path),
-        "component_data_loaded": altium_bridge.component_manager.is_loaded,
-        "component_data_initialized": altium_bridge.component_manager.is_initialized,
-        "component_count": len(altium_bridge.component_manager.component_data) if altium_bridge.component_manager.is_loaded else 0
+        "pcb_data": {
+            "loaded": altium_bridge.component_manager.is_loaded,
+            "initialized": altium_bridge.component_manager.is_initialized,
+            "component_count": len(altium_bridge.component_manager.component_data) if altium_bridge.component_manager.is_loaded else 0
+        },
+        "schematic_data": {
+            "loaded": altium_bridge.schematic_manager.is_loaded,
+            "initialized": altium_bridge.schematic_manager.is_initialized,
+            "component_count": len(altium_bridge.schematic_manager.schematic_data) if altium_bridge.schematic_manager.is_loaded else 0
+        }
     }
     
     return json.dumps(status, indent=2)
@@ -472,13 +745,6 @@ if __name__ == "__main__":
     # Print status
     print(f"Altium executable: {altium_bridge.config.altium_exe_path}")
     print(f"Script path: {altium_bridge.config.script_path}")
-    
-    # Try to load existing component data if available
-    # (but don't initialize from Altium yet - will do that on first request)
-    if altium_bridge.component_manager.load_data():
-        print(f"Loaded cached component data with {len(altium_bridge.component_manager.component_data)} components")
-    else:
-        print("No cached component data found. Will initialize on first request.")
     
     # Run the server
     mcp.run(transport='stdio')

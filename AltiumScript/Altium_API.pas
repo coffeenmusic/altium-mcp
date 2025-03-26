@@ -5,7 +5,7 @@
 const
     REQUEST_FILE = 'C:\AltiumMCP\request.json';
     RESPONSE_FILE = 'C:\AltiumMCP\response.json';
-
+    REPLACEALL = 1;
 var
     RequestData : TStringList;
     ResponseData : TStringList;
@@ -37,11 +37,11 @@ end;
 // Helper function to escape JSON strings
 function JSONEscapeString(const S: String): String;
 begin
-    Result := StringReplace(S, '\', '\\', rfReplaceAll);
-    Result := StringReplace(Result, '"', '\"', rfReplaceAll);
-    Result := StringReplace(Result, #13#10, '\n', rfReplaceAll);
-    Result := StringReplace(Result, #10, '\n', rfReplaceAll);
-    Result := StringReplace(Result, #9, '\t', rfReplaceAll);
+    Result := StringReplace(S, '\', '\\', REPLACEALL);
+    Result := StringReplace(Result, '"', '\"', REPLACEALL);
+    Result := StringReplace(Result, #13#10, '\n', REPLACEALL);
+    Result := StringReplace(Result, #10, '\n', REPLACEALL);
+    Result := StringReplace(Result, #9, '\t', REPLACEALL);
 end;
 
 // Function to create a JSON name-value pair
@@ -170,11 +170,11 @@ begin
 
         // Build component JSON
         OutputLines.Add('  {');
-        OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', rfReplaceAll) + '",');
-        OutputLines.Add('    "name": "' + StringReplace(Name, '"', '\"', rfReplaceAll) + '",');
-        OutputLines.Add('    "description": "' + StringReplace(Description, '"', '\"', rfReplaceAll) + '",');
-        OutputLines.Add('    "footprint": "' + StringReplace(Footprint, '"', '\"', rfReplaceAll) + '",');
-        OutputLines.Add('    "layer": "' + StringReplace(Layer, '"', '\"', rfReplaceAll) + '",');
+        OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
+        OutputLines.Add('    "name": "' + StringReplace(Name, '"', '\"', REPLACEALL) + '",');
+        OutputLines.Add('    "description": "' + StringReplace(Description, '"', '\"', REPLACEALL) + '",');
+        OutputLines.Add('    "footprint": "' + StringReplace(Footprint, '"', '\"', REPLACEALL) + '",');
+        OutputLines.Add('    "layer": "' + StringReplace(Layer, '"', '\"', REPLACEALL) + '",');
         OutputLines.Add('    "x": ' + x + ',');
         OutputLines.Add('    "y": ' + y + ',');
         OutputLines.Add('    "width": ' + width + ',');
@@ -200,7 +200,7 @@ begin
         if Pos('},', OutputLines[i]) > 0 then
         begin
             // Replace the comma with just a closing brace
-            OutputLines[i] := StringReplace(OutputLines[i], '},', '}', rfReplaceAll);
+            OutputLines[i] := StringReplace(OutputLines[i], '},', '}', REPLACEALL);
         end;
     end;
 
@@ -209,6 +209,202 @@ begin
 
     // Use a temporary file to build the JSON data
     TempFile := 'C:\AltiumMCP\temp_component_data.json';
+
+    try
+        // Save to a temporary file
+        OutputLines.SaveToFile(TempFile);
+
+        // Load back the complete JSON data
+        OutputLines.Clear;
+        OutputLines.LoadFromFile(TempFile);
+        Result := OutputLines.Text;
+
+        // Clean up the temporary file
+        if FileExists(TempFile) then
+            DeleteFile(TempFile);
+    finally
+        OutputLines.Free;
+    end;
+end;
+
+// Function to get all schematic component data
+function GetSchematicData: String;
+var
+    Project     : IProject;
+    Doc         : IDocument;
+    CurrentSch  : ISch_Document;
+    Iterator    : ISch_Iterator;
+    PIterator   : ISch_Iterator;
+    Component   : ISch_Component;
+    Parameter, NextParameter   : ISch_Parameter;
+    TempFile    : String;
+    Rect        : TCoordRect;
+    OutputLines : TStringList;
+    Designator, Sheet, ParameterName, ParameterValue : String;
+    x, y, width, height, rotation : String;
+    left, right, top, bottom : String;
+    i : Integer;
+    SchematicCount, ComponentCount : Integer;
+begin
+    Result := '';
+
+    // Retrieve the current project
+    Project := GetWorkspace.DM_FocusedProject;
+    If Project = Nil Then
+    begin
+        ShowMessage('Error: No project is currently open');
+        Exit;
+    end;
+
+    // Create output stringlist
+    OutputLines := TStringList.Create;
+    OutputLines.Add('['); // Start JSON array
+
+    // Count the number of schematic documents
+    SchematicCount := 0;
+    For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(i);
+        If Doc.DM_DocumentKind = 'SCH' Then
+            SchematicCount := SchematicCount + 1;
+    End;
+
+    // Process each schematic document
+    ComponentCount := 0;
+    For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(i);
+        If Doc.DM_DocumentKind = 'SCH' Then
+        Begin
+            // Open the schematic document
+            Client.OpenDocument('SCH', Doc.DM_FullPath);
+            CurrentSch := SchServer.GetSchDocumentByPath(Doc.DM_FullPath);
+
+            If CurrentSch <> Nil Then
+            Begin
+                // Get schematic components
+                Iterator := CurrentSch.SchIterator_Create;
+                Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+
+                Component := Iterator.FirstSchObject;
+                While Component <> Nil Do
+                Begin
+                    // Get basic component properties
+                    Designator := Component.Designator.Text;
+                    Sheet := Doc.DM_FullPath;
+
+                    // Get position, dimensions and rotation
+                    x := FloatToStr(CoordToMils(Component.Location.X));
+                    y := FloatToStr(CoordToMils(Component.Location.Y));
+
+                    Rect := Component.BoundingRectangle;
+                    left := FloatToStr(CoordToMils(Rect.Left));
+                    right := FloatToStr(CoordToMils(Rect.Right));
+                    top := FloatToStr(CoordToMils(Rect.Top));
+                    bottom := FloatToStr(CoordToMils(Rect.Bottom));
+
+                    width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
+                    height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
+
+                    If Component.Orientation = eRotate0 Then
+                        rotation := '0'
+                    Else If Component.Orientation = eRotate90 Then
+                        rotation := '90'
+                    Else If Component.Orientation = eRotate180 Then
+                        rotation := '180'
+                    Else If Component.Orientation = eRotate270 Then
+                        rotation := '270'
+                    Else
+                        rotation := '0';
+
+                    // Start component JSON
+                    OutputLines.Add('  {');
+                    OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
+                    OutputLines.Add('    "sheet": "' + StringReplace(Sheet, '\', '\\', REPLACEALL) + '",');
+                    OutputLines.Add('    "schematic_x": ' + x + ',');
+                    OutputLines.Add('    "schematic_y": ' + y + ',');
+                    OutputLines.Add('    "schematic_width": ' + width + ',');
+                    OutputLines.Add('    "schematic_height": ' + height + ',');
+                    OutputLines.Add('    "schematic_rotation": ' + rotation + ',');
+
+                    // Get parameters
+                    OutputLines.Add('    "parameters": {');
+
+                    // Create parameter iterator
+                    PIterator := Component.SchIterator_Create;
+                    PIterator.AddFilter_ObjectSet(MkSet(eParameter));
+
+                    Parameter := PIterator.FirstSchObject;
+
+                    // Check if there are any parameters
+                    if Parameter = nil then
+                        // No parameters, just close the object
+                        OutputLines.Add('    }')
+                    else
+                    begin
+                        // Process all parameters
+                        while Parameter <> nil do
+                        begin
+                            // Get this parameter's info
+                            ParameterName := Parameter.Name;
+                            ParameterValue := Parameter.Text;
+                            
+                            // Escape special characters for JSON
+                            ParameterName := StringReplace(ParameterName, '\', '\\', REPLACEALL);
+                            ParameterName := StringReplace(ParameterName, '"', '\"', REPLACEALL);
+                            
+                            ParameterValue := StringReplace(ParameterValue, '\', '\\', REPLACEALL);
+                            ParameterValue := StringReplace(ParameterValue, '"', '\"', REPLACEALL);
+                            
+                            // Get the next parameter to check if this is the last one
+                            NextParameter := PIterator.NextSchObject;
+                            
+                            // Add this parameter
+                            if NextParameter <> nil then
+                                OutputLines.Add('      "' + ParameterName + '": "' + ParameterValue + '",')
+                            else
+                                OutputLines.Add('      "' + ParameterName + '": "' + ParameterValue + '"');
+                            
+                            // Move to next parameter
+                            Parameter := NextParameter;
+                        end;
+                        
+                        // Close the parameters object
+                        OutputLines.Add('    }');
+                    end;
+
+                    Component.SchIterator_Destroy(PIterator);
+
+                    // Add comma since we don't know if it's the last component yet
+                    OutputLines.Add('  },');
+
+                    // Move to next component
+                    Component := Iterator.NextSchObject;
+                    ComponentCount := ComponentCount + 1;
+                End;
+
+                CurrentSch.SchIterator_Destroy(Iterator);
+            End;
+        End;
+    End;
+
+    // Fix the last component's closing brace (remove the trailing comma)
+    if OutputLines.Count > 1 then
+    begin
+        // Get the last line
+        i := OutputLines.Count - 1;
+        if Pos('},', OutputLines[i]) > 0 then
+        begin
+            // Replace the comma with just a closing brace
+            OutputLines[i] := StringReplace(OutputLines[i], '},', '}', REPLACEALL);
+        end;
+    end;
+
+    // Close JSON array
+    OutputLines.Add(']');
+
+    // Use a temporary file to build the JSON data
+    TempFile := 'C:\AltiumMCP\temp_schematic_data.json';
 
     try
         // Save to a temporary file
@@ -239,6 +435,11 @@ begin
     begin
         // This command doesn't require any parameters
         Result := GetAllComponentData;
+    end
+    else if CommandName = 'get_schematic_data' then
+    begin
+        // This command doesn't require any parameters
+        Result := GetSchematicData;
     end
     else if CommandName = 'some_other_command' then
     begin
