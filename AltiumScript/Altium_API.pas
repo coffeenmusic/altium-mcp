@@ -11,6 +11,58 @@ var
     ResponseData : TStringList;
     Params : TStringList;
 
+// Utility function to ensure PCB document is open and focused
+function EnsurePCBDocumentFocused: Boolean;
+var
+    I           : Integer;
+    Project     : IProject;
+    Doc         : IDocument;
+    Board       : IPCB_Board;
+    PCBFound    : Boolean;
+begin
+    Result := False;
+    PCBFound := False;
+
+    // Retrieve the current project
+    Project := GetWorkspace.DM_FocusedProject;
+    If Project = Nil Then
+    begin
+        // No project is open
+        Exit;
+    end;
+
+    // Check if a PCB document is already focused
+    Board := PCBServer.GetCurrentPCBBoard;
+    If Board <> Nil Then
+    begin
+        Result := True;
+        Exit;
+    end;
+
+    // Try to find and focus a PCB document
+    For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(I);
+        If Doc.DM_DocumentKind = 'PCB' Then
+        Begin
+            PCBFound := True;
+            // Open and focus the PCB document
+            Doc.DM_OpenAndFocusDocument;
+
+            // Verify that the PCB is now focused
+            Board := PCBServer.GetCurrentPCBBoard;
+            If Board <> Nil Then
+            begin
+                Result := True;
+                Exit;
+            end;
+        End;
+    End;
+
+    // No PCB document found or couldn't be focused
+    Result := False;
+end;
+
 // Helper function to remove characters from a string
 function RemoveChar(const S: String; C: Char): String;
 var
@@ -193,11 +245,6 @@ begin
 
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-    If Board = Nil Then
-    begin
-        ShowMessage('Error: No board is currently open');
-        Exit;
-    end;
 
     // Get board origin coordinates
     xorigin := Board.XOrigin;
@@ -332,11 +379,6 @@ begin
 
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-    If Board = Nil Then
-    begin
-        ShowMessage('Error: No board is currently open');
-        Exit;
-    end;
 
     // Get board origin coordinates
     xorigin := Board.XOrigin;
@@ -637,12 +679,7 @@ begin
 
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-    If Board = Nil Then
-    begin
-        ShowMessage('Error: No board is currently open');
-        Exit;
-    end;
-    
+
     // Create output stringlist
     OutputLines := TStringList.Create;
     OutputLines.Add('[');
@@ -718,8 +755,23 @@ var
     ParamValue: String;
     i: Integer;
     DesignatorsList: TStringList;
+    PCBAvailable: Boolean;
 begin
     Result := '';
+
+    // For PCB-related commands, ensure PCB is available first
+    if (CommandName = 'get_component_pins') or
+       (CommandName = 'get_all_component_data') or
+       (CommandName = 'get_selected_components_coordinates') then
+    begin
+        PCBAvailable := EnsurePCBDocumentFocused;
+        if not PCBAvailable then
+        begin
+            // Early exit with error
+            Result := 'ERROR: No PCB document found. Tell the user to open a PCB document in their project. Dont try any more tools until the user responds.';
+            Exit;
+        end;
+    end;
 
     // Process different commands based on command name
     if CommandName = 'get_component_pins' then
@@ -764,7 +816,7 @@ begin
             ShowMessage('Error: No designators found for get_component_pins');
             Result := '';
         end;
-        
+
         DesignatorsList.Free;
     end
     else if CommandName = 'get_all_component_data' then
@@ -822,13 +874,27 @@ begin
         Params.Add(ParamName + '=' + ParamValue);
 end;
 
-// Function to write response to file
 procedure WriteResponse(Success: Boolean; Data: String; ErrorMsg: String);
+var
+    ActualSuccess: Boolean;
+    ActualErrorMsg: String;
 begin
+    // Check if Data contains an error message
+    if (Pos('ERROR:', Data) = 1) then
+    begin
+        ActualSuccess := False;
+        ActualErrorMsg := Copy(Data, 8, Length(Data)); // Remove 'ERROR: ' prefix
+    end
+    else
+    begin
+        ActualSuccess := Success;
+        ActualErrorMsg := ErrorMsg;
+    end;
+
     ResponseData := TStringList.Create;
     ResponseData.Add('{');
 
-    if Success then
+    if ActualSuccess then
     begin
         // For JSON responses (starting with [ or {), don't wrap in additional quotes
         if (Length(Data) > 0) and ((Data[1] = '[') or (Data[1] = '{')) then
@@ -845,7 +911,7 @@ begin
     else
     begin
         ResponseData.Add('  "success": false,');
-        ResponseData.Add('  "error": "' + StringReplace(ErrorMsg, '"', '\"', REPLACEALL) + '"');
+        ResponseData.Add('  "error": "' + StringReplace(ActualErrorMsg, '"', '\"', REPLACEALL) + '"');
     end;
 
     ResponseData.Add('}');
