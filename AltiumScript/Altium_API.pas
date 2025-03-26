@@ -92,18 +92,87 @@ begin
     end;
 end;
 
-// Helper function to convert orientation to string value
-Function OrientationToStr(ARotate : TRotationBy90) : String;
-Begin
-    Result := '';
+// Helper function to get pins data for a component
+procedure GetPinsForJSON(Board: IPCB_Board, Component: IPCB_Component, OutputLines: TStringList);
+var
+    GrpIter     : IPCB_GroupIterator;
+    Pad         : IPCB_Pad;
+    xorigin, yorigin : Integer;
+    x, y, rotation    : String;
+    NetName     : String;
+    PinCount, PinsProcessed : Integer;
+begin
+    // Get board origin
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
+    
+    // Create pad iterator
+    GrpIter := Component.GroupIterator_Create;
+    GrpIter.SetState_FilterAll;
+    GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+    
+    // Count pins
+    PinCount := 0;
+    Pad := GrpIter.FirstPCBObject;
+    while Pad <> Nil do
+    begin
+        if Pad.InComponent then
+            PinCount := PinCount + 1;
+        Pad := GrpIter.NextPCBObject;
+    end;
+    
+    // Reset iterator
+    Component.GroupIterator_Destroy(GrpIter);
+    GrpIter := Component.GroupIterator_Create;
+    GrpIter.SetState_FilterAll;
+    GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+    
+    // Process each pad
+    PinsProcessed := 0; // Use a separate counter variable
+    Pad := GrpIter.FirstPCBObject;
+    while Pad <> Nil do
+    begin
+        if Pad.InComponent then
+        begin
+            // Get pad coordinates relative to board origin
+            x := FloatToStr(CoordToMils(Pad.x - xorigin));
+            y := FloatToStr(CoordToMils(Pad.y - yorigin));
+            rotation := FloatToStr(Pad.Rotation);
+            
+            // Get net name if connected
+            if Pad.Net <> Nil then
+                NetName := Pad.Net.Name
+            else
+                NetName := '';
 
-    Case ARotate Of
-        eRotate0   : Result := '0';
-        eRotate90  : Result := '90';
-        eRotate180 : Result := '180';
-        eRotate270 : Result := '270';
-    End;
-End;
+            // Add pin data to JSON
+            OutputLines.Add('        {');
+            OutputLines.Add('          "name": "' + Pad.Name + '",');             
+            OutputLines.Add('          "net": "' + NetName + '",');
+            OutputLines.Add('          "x": ' + x + ',');
+            OutputLines.Add('          "y": ' + y + ',');
+            OutputLines.Add('          "rotation": ' + rotation + ',');
+            OutputLines.Add('          "layer": "' + Layer2String(Pad.Layer) + '",');
+            OutputLines.Add('          "width": ' + FloatToStr(CoordToMils(Pad.XSizeOnLayer[Pad.Layer])) + ',');
+            OutputLines.Add('          "height": ' + FloatToStr(CoordToMils(Pad.YSizeOnLayer[Pad.Layer])) + ',');
+            OutputLines.Add('          "shape": "' + ShapeToString(Pad.ShapeOnLayer[Pad.Layer]) + '"');
+            
+            // Increment counter
+            PinsProcessed := PinsProcessed + 1;
+            
+            // Add comma if not the last pin
+            if PinsProcessed < PinCount then
+                OutputLines.Add('        },')
+            else
+                OutputLines.Add('        }');
+        end;
+        
+        Pad := GrpIter.NextPCBObject;
+    end;
+    
+    // Clean up iterator
+    Component.GroupIterator_Destroy(GrpIter);
+end;
 
 // Function to get all component data from the PCB
 function GetAllComponentData(SelectedOnly: Boolean = False): String;
@@ -554,17 +623,153 @@ begin
     end;
 end;
 
+// Function to get pin data for specified components
+function GetComponentPinsFromList(DesignatorsList: TStringList): String;
+var
+    Board       : IPCB_Board;
+    Component   : IPCB_Component;
+    TempFile    : String;
+    OutputLines : TStringList;
+    Designator  : String;
+    i           : Integer;
+begin
+    Result := '';
+
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    If Board = Nil Then
+    begin
+        ShowMessage('Error: No board is currently open');
+        Exit;
+    end;
+    
+    // Create output stringlist
+    OutputLines := TStringList.Create;
+    OutputLines.Add('[');
+
+    // Process each designator
+    for i := 0 to DesignatorsList.Count - 1 do
+    begin
+        Designator := Trim(DesignatorsList[i]);
+        
+        // Use direct function to get component by designator
+        Component := Board.GetPcbComponentByRefDes(Designator);
+        
+        if Component <> Nil then
+        begin
+            // Add component to JSON
+            OutputLines.Add('  {');
+            OutputLines.Add('    "designator": "' + Component.Name.Text + '",');
+            OutputLines.Add('    "pins": [');
+            
+            // Get pin data
+            GetPinsForJSON(Board, Component, OutputLines);
+            
+            // Close pins array
+            OutputLines.Add('    ]');
+            
+            // Close component object
+            if i < DesignatorsList.Count - 1 then
+                OutputLines.Add('  },')
+            else
+                OutputLines.Add('  }');
+        end
+        else
+        begin
+            // Component not found, add empty entry
+            OutputLines.Add('  {');
+            OutputLines.Add('    "designator": "' + Designator + '",');
+            OutputLines.Add('    "pins": []');
+            
+            // Close component object
+            if i < DesignatorsList.Count - 1 then
+                OutputLines.Add('  },')
+            else
+                OutputLines.Add('  }');
+        end;
+    end;
+
+    // Close JSON array
+    OutputLines.Add(']');
+
+    // Use a temporary file to build the JSON data
+    TempFile := 'C:\AltiumMCP\temp_pins_data.json';
+
+    try
+        // Save to a temporary file
+        OutputLines.SaveToFile(TempFile);
+
+        // Load back the complete JSON data
+        OutputLines.Clear;
+        OutputLines.LoadFromFile(TempFile);
+        Result := OutputLines.Text;
+
+        // Clean up the temporary file
+        if FileExists(TempFile) then
+            DeleteFile(TempFile);
+    finally
+        OutputLines.Free;
+    end;
+end;
+
 // Function to execute a command with parameters
 function ExecuteCommand(CommandName: String): String;
 var
     ParamValue: String;
+    i: Integer;
+    DesignatorsList: TStringList;
 begin
     Result := '';
 
     // Process different commands based on command name
-    if CommandName = 'get_all_component_data' then
+    if CommandName = 'get_component_pins' then
     begin
-        // Get all components (not just selected)
+        // For this command, we need to manually parse the designators array
+        DesignatorsList := TStringList.Create;
+        
+        // Look through all the RequestData lines to find designators
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"designators"', RequestData[i]) > 0) then
+            begin
+                // Found the designators parameter
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+                
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // This is an array element
+                    // Extract the designator value
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DesignatorsList.Add(ParamValue);
+                    
+                    i := i + 1;
+                end;
+                
+                break;
+            end;
+        end;
+        
+        if DesignatorsList.Count > 0 then
+        begin
+            Result := GetComponentPinsFromList(DesignatorsList);
+        end
+        else
+        begin
+            ShowMessage('Error: No designators found for get_component_pins');
+            Result := '';
+        end;
+        
+        DesignatorsList.Free;
+    end
+    else if CommandName = 'get_all_component_data' then
+    begin
+        // This command doesn't require any parameters
         Result := GetAllComponentData(False);
     end
     else if CommandName = 'get_schematic_data' then
@@ -576,19 +781,6 @@ begin
     begin
         // Get only selected components
         Result := GetSelectedComponentsCoordinates;
-    end
-    else if CommandName = 'some_other_command' then
-    begin
-        // Example of handling multiple parameters
-        if (Params.IndexOfName('param1') >= 0) and (Params.IndexOfName('param2') >= 0) then
-        begin
-            Result := ExecuteSomeOtherCommand(Params.Values['param1'], Params.Values['param2']);
-        end
-        else
-        begin
-            ShowMessage('Error: Missing required parameters for some_other_command');
-            Result := '';
-        end;
     end
     else
     begin
@@ -617,10 +809,13 @@ begin
     ParamName := Copy(Line, 1, NameEnd);
     ParamName := TrimJSON(ParamName);
 
-    // Extract and clean the parameter value
+    // Extract the parameter value - don't trim arrays
     ValueStart := Pos(':', Line) + 1;
     ParamValue := Copy(Line, ValueStart, Length(Line) - ValueStart + 1);
-    ParamValue := TrimJSON(ParamValue);
+
+    // Trim only if it's not an array
+    if (Pos('[', ParamValue) = 0) then
+        ParamValue := TrimJSON(ParamValue);
 
     // Add to parameters list
     if (ParamName <> '') and (ParamName <> 'command') then
@@ -635,8 +830,8 @@ begin
 
     if Success then
     begin
-        // For JSON array responses (starting with [), don't wrap in additional quotes
-        if (Length(Data) > 0) and (Data[1] = '[') then
+        // For JSON responses (starting with [ or {), don't wrap in additional quotes
+        if (Length(Data) > 0) and ((Data[1] = '[') or (Data[1] = '{')) then
         begin
             ResponseData.Add('  "success": true,');
             ResponseData.Add('  "result": ' + Data);
@@ -644,13 +839,13 @@ begin
         else
         begin
             ResponseData.Add('  "success": true,');
-            ResponseData.Add('  "result": "' + Data + '"');
+            ResponseData.Add('  "result": "' + StringReplace(Data, '"', '\"', REPLACEALL) + '"');
         end;
     end
     else
     begin
         ResponseData.Add('  "success": false,');
-        ResponseData.Add('  "error": "' + ErrorMsg + '"');
+        ResponseData.Add('  "error": "' + StringReplace(ErrorMsg, '"', '\"', REPLACEALL) + '"');
     end;
 
     ResponseData.Add('}');

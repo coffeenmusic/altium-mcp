@@ -715,6 +715,41 @@ async def get_all_designators(ctx: Context) -> str:
     return json.dumps(designators)
 
 @mcp.tool()
+async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
+    """
+    Get pin data for components in Altium
+    
+    Args:
+        cmp_designators (list): List of designators of the components (e.g., ["R1", "C5", "U3"])
+    
+    Returns:
+        str: JSON object with pin data for requested designators
+    """
+    logger.info(f"Getting pin data for components: {cmp_designators}")
+    
+    # Execute the command in Altium to get pin data
+    response = await altium_bridge.execute_command(
+        "get_component_pins",
+        {"designators": cmp_designators}  # Pass the list of designators
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting pin data: {error_msg}")
+        return json.dumps({"error": f"Failed to get pin data: {error_msg}"})
+    
+    # Get the components pins data
+    pins_data = response.get("result", [])
+    
+    if not pins_data:
+        logger.info(f"No pin data found for designators: {cmp_designators}")
+        return json.dumps({"message": "No pin data found for the specified components"})
+    
+    logger.info(f"Retrieved pin data for components")
+    return json.dumps(pins_data, indent=2)
+
+@mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
     status = {

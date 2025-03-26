@@ -30,106 +30,106 @@ Begin
     End;
 End;
 
-function GetSrcPositions(Project: IProject, SrcDes: String): TStringList;
-Var
-    I           : Integer;
-    Doc         : IDocument;
-    CurrentSch  : ISch_Document;
-    SrcData        : TStringList;
-    Cmp: ISch_Component;
-    CmpIterator, PIterator   : ISch_Iterator;
-    CmpDes: ISch_Designator;
-    CmpName, ParamName, ParamText: string;
-    Hidden: boolean;
-    Parameter: ISch_Parameter;
-    CmpX, CmpY, Px, Py, Dx, Dy: Integer;
-Begin
-    SrcData := TStringList.Create;
+- Get pads of component
+function update_dataset_for_object(Board: IPCB_Board, Dataset: TStringList, ObjID: Integer, TypeName: String): TStringList;
+var
+    Iterator       : IPCB_BoardIterator;
+    Obj            : IPCB_ObjectClass;
+    xo, yo: Integer;
+    x, y, l, r, t, b, layer, Designator, Info : String;
+    Rec: TCoordRect;
+    Shape: String;
+begin
+    xo := Board.XOrigin;
+    yo := Board.YOrigin;
 
-    For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
+    // Create the iterator that will look for Component Body objects only
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(ObjID));
+    Iterator.AddFilter_IPCB_LayerSet(MkSet(eTopLayer, eBottomLayer, eMultiLayer));
+    Iterator.AddFilter_Method(eProcessAll);
+
+    Obj := Iterator.FirstPCBObject;
+    While (Obj <> Nil) Do
     Begin
-        Doc := Project.DM_LogicalDocuments(I);
-        If Doc.DM_DocumentKind = 'SCH' Then
-        Begin
-            Client.OpenDocument('SCH',Doc.DM_FullPath); // Open Document
-            CurrentSch := SchServer.GetSchDocumentByPath(Doc.DM_FullPath);
+        layer := Layer2String(Obj.Layer);
 
-            // Look for components only
-            CmpIterator := CurrentSch.SchIterator_Create;
-            CmpIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Rec := Get_Obj_Rect(Obj);
+        l := FloatToStr(CoordToMils(Rec.Left - xo));
+        r := FloatToStr(CoordToMils(Rec.Right - xo));
+        t := FloatToStr(CoordToMils(Rec.Top - yo));
+        b := FloatToStr(CoordToMils(Rec.Bottom - yo));
 
-            Try
-                Cmp := CmpIterator.FirstSchObject;
-                While Cmp <> Nil Do
-                Begin
-                    //ReportList.Add(AComponent.Designator.Name + ' ' + AComponent.Designator.Text);
-                    CmpDes := Cmp.Designator;
-                    if (CmpDes <> nil) and (Cmp.Designator.Text = SrcDes) then
-                    begin
-                        Try
-                            SrcRot := Cmp.Orientation;
+        x := FloatToStr(CoordToMils(Rec.Left - xo) + ((CoordToMils(Rec.Right - xo)-CoordToMils(Rec.Left - xo))/2));
+        y := FloatToStr(CoordToMils(Rec.Bottom - yo) + ((CoordToMils(Rec.Top - yo)-CoordToMils(Rec.Bottom - yo))/2));
+        if Obj.ObjectID <> eComponentBodyObject then
+        begin
+            x := FloatToStr(CoordToMils(Obj.x - xo));
+            y := FloatToStr(CoordToMils(Obj.y - yo));
+        end;
 
-                            CmpX := Cmp.Location.X;
-                            CmpY := Cmp.Location.Y;
+        Designator := 'Unknown';
+        Info := '';
+        if Obj.ObjectId = eComponentObject then
+        begin
+            Designator := Obj.Name.Text;
+            Info := 'Rotation:'+FloatToStr(Obj.Rotation);
+        end
+        else if Obj.ObjectId = ePadObject then
+        begin
+            Designator := Obj.Name;
 
-                            Dx := CmpDes.Location.X;
-                            Dy := CmpDes.Location.Y;
+            Info := 'InComponent:'+BoolToStr(Obj.InComponent);
+            Shape := ShapeToString(Obj.ShapeOnLayer[Obj.Layer]);
+            if (Shape = 'Rounded Rectangle') or (Shape = 'Rounded Rectangular') then
+            begin
+                 if Obj.CornerRadius[Obj.Layer] = 0 then
+                 begin
+                     Shape := 'Rectangular';
+                 end
+                 else
+                 begin
+                     Info := Info + ';CornerRadius:' + FloatToStr(Obj.CornerRadius[Obj.Layer]);
+                 end;
+            end;
+            Info := Info + ';Shape:' + Shape;
 
-                            SrcData.Add('DESIGNATOR'+';'+IntToStr(Dx-CmpX)+';'+IntToStr(Dy-CmpY)+';'+IntToStr(CmpDes.Justification)+';'+IntToStr(CmpDes.Orientation));
+            Info := Info + ';PadWidth:' + IntToStr(CoordToMils(Obj.XSizeOnLayer[Obj.Layer]));
+            Info := Info + ';PadHeight:' + IntToStr(CoordToMils(Obj.YSizeOnLayer[Obj.Layer]));
+            Info := Info + ';Rotation:'+FloatToStr(Obj.Rotation);
+            Info := Info + ';HoleType:' + IntToStr(Obj.HoleType);
+            Info := Info + ';HoleSize:' + FloatToStr(CoordToMils(Obj.HoleSize));
+            Info := Info + ';HoleRotation:'+FloatToStr(Obj.HoleRotation);
+            if (Obj.InComponent) and (Obj.Component <> nil) then Info := Info + ';CmpDesignator:'+ Obj.Component.Name.Text;
+        end
+        else if Obj.ObjectId = eComponentBodyObject then
+        begin
+            if Obj.Component <> nil then
+            begin
+                Designator := Obj.Component.Name.Text;
+                Info := 'Rotation:'+FloatToStr(Obj.Component.Rotation);
+                layer := Layer2String(Obj.Component.Layer);
+                x := FloatToStr(CoordToMils(Obj.Component.x - xo));
+                y := FloatToStr(CoordToMils(Obj.Component.y - yo));
+            end;
+        end;
 
-                            PIterator := Cmp.SchIterator_Create;
-                            PIterator.AddFilter_ObjectSet(MkSet(eParameter));
+        Dataset.Add(TypeName+','+Designator+','+layer+','+x+','+y+','+l+','+r+','+t+','+b+','+Info);
 
-                            Parameter := PIterator.FirstSchObject;
-                            While Parameter <> Nil Do
-                            Begin
-                                if Parameter.IsHidden = False then
-                                begin
-                                    ParamName := Parameter.Name;
-                                    ParamText := Parameter.Text;
-                                    Px := Parameter.Location.X;
-                                    Py := Parameter.Location.Y;
-
-                                    SrcData.Add(ParamName+';'+IntToStr(Px-CmpX)+';'+IntToStr(Py-CmpY)+';'+IntToStr(Parameter.Justification)+';'+IntToStr(CmpDes.Orientation));
-                                end;
-
-                                Parameter := PIterator.NextSchObject;
-                            End;
-                        Finally
-                            Cmp.SchIterator_Destroy(PIterator);
-                        End;
-
-                        result := SrcData;
-                        exit;
-                    end;
-
-                    Cmp := CmpIterator.NextSchObject;
-                End;
-            Finally
-                CurrentSch.SchIterator_Destroy(CmpIterator);
-            End;
-        End;
+        Obj := Iterator.NextPCBObject;
     End;
+    Board.BoardIterator_Destroy(Iterator);
 
-    SrcData.Free;
-End;
+    result := Dataset;
+end;
 
+- Show layers: IPCB_Board.VisibleLayers
 - Go to sheet with component designator
 - Flip to layout
 - Get screenshot of either schematic or layout
 - Board.ChooseLocation(x, y, 'Test');
 - Zoom to selected objects:
 
- 
-### Get Selected Objects
-for i := 0 to Board.SelectecObjectCount - 1 do
-begin
-  if Board.SelectecObject[i].ObjectId = eComponentObject then
-  begin
-	 result := Board.SelectecObject[i];
-	 exit;
-  end;
-end;
 
  procedure Run;
 var
