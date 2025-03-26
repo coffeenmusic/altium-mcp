@@ -10,6 +10,13 @@ from tkinter import filedialog
 from pathlib import Path
 from typing import Dict, Any, Optional
 import sys
+import win32gui
+import win32ui
+import win32con
+import win32api
+from PIL import Image
+import io
+import base64
 
 # Configure logging
 logging.basicConfig(
@@ -748,6 +755,129 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     
     logger.info(f"Retrieved pin data for components")
     return json.dumps(pins_data, indent=2)
+
+@mcp.tool()
+async def get_pcb_screenshot(ctx: Context) -> str:
+    """
+    Take a screenshot of the Altium PCB window
+    
+    Returns:
+        str: JSON object with screenshot data (base64 encoded) and metadata
+    """
+    logger.info("Taking screenshot of Altium PCB window")
+    
+    try:
+        # Run the screenshot capture in a separate thread
+        import threading
+        import queue
+        from PIL import ImageGrab
+        
+        result_queue = queue.Queue()
+        
+        def capture_screenshot_thread():
+            try:
+                # Find Altium windows
+                altium_windows = []
+                
+                def collect_altium_windows(hwnd, _):
+                    if win32gui.IsWindowVisible(hwnd):
+                        title = win32gui.GetWindowText(hwnd)
+                        if "Altium" in title:
+                            altium_windows.append({
+                                "handle": hwnd,
+                                "title": title,
+                                "rect": win32gui.GetWindowRect(hwnd)
+                            })
+                    return True
+                
+                win32gui.EnumWindows(collect_altium_windows, 0)
+                
+                if not altium_windows:
+                    result_queue.put({"success": False, "error": "No Altium windows found"})
+                    return
+                
+                # Use the first Altium window
+                window = altium_windows[0]
+                hwnd = window["handle"]
+                
+                # Get window dimensions
+                left, top, right, bottom = window["rect"]
+                width = right - left
+                height = bottom - top
+                
+                if width <= 0 or height <= 0:
+                    result_queue.put({"success": False, "error": f"Invalid window dimensions: {width}x{height}"})
+                    return
+                
+                # Try to activate the window
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"Could not bring window to foreground: {e}")
+                
+                # Try different screenshot method - grab the screen region where the window is
+                try:
+                    img = ImageGrab.grab(bbox=(left, top, right, bottom))
+                    
+                    # Convert to base64
+                    buffer = io.BytesIO()
+                    img.save(buffer, format='PNG')
+                    buffer.seek(0)
+                    img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+                    
+                    # Put result in queue
+                    result_queue.put({
+                        "success": True,
+                        "width": width,
+                        "height": height,
+                        "window_title": window["title"],
+                        "image_format": "PNG",
+                        "encoding": "base64",
+                        "image_data": img_base64
+                    })
+                    
+                except Exception as e:
+                    result_queue.put({"success": False, "error": f"ImageGrab failed: {str(e)}"})
+                
+            except Exception as e:
+                import traceback
+                result_queue.put({
+                    "success": False, 
+                    "error": f"Screenshot thread error: {str(e)}",
+                    "traceback": traceback.format_exc()
+                })
+        
+        # Start the thread
+        thread = threading.Thread(target=capture_screenshot_thread)
+        thread.daemon = True
+        thread.start()
+        
+        # Wait for the thread to complete
+        thread.join(timeout=10)  # 10 second timeout
+        
+        if thread.is_alive():
+            logger.error("Screenshot thread timed out")
+            return json.dumps({"success": False, "error": "Screenshot operation timed out"})
+        
+        # Get the result from the queue
+        if result_queue.empty():
+            logger.error("Screenshot thread did not return a result")
+            return json.dumps({"success": False, "error": "Screenshot thread did not return a result"})
+        
+        result = result_queue.get()
+        
+        if not result.get("success", False):
+            error_msg = result.get("error", "Unknown error")
+            logger.error(f"Screenshot error: {error_msg}")
+            return json.dumps({"success": False, "error": error_msg})
+        
+        logger.info(f"Screenshot taken successfully, size: {result['width']}x{result['height']}")
+        return json.dumps(result)
+    
+    except Exception as e:
+        logger.error(f"Error in screenshot function: {str(e)}")
+        return json.dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
 
 @mcp.tool()
 async def get_server_status(ctx: Context) -> str:
