@@ -106,7 +106,7 @@ Begin
 End;
 
 // Function to get all component data from the PCB
-function GetAllComponentData: String;
+function GetAllComponentData(SelectedOnly: Boolean = False): String;
 var
     Board       : IPCB_Board;
     Iterator    : IPCB_BoardIterator;
@@ -118,6 +118,7 @@ var
     Designator, Name, Footprint, Layer, Description : String;
     x, y, width, height, rotation : String;
     i : Integer;
+    ComponentCount : Integer;
 begin
     Result := '';
 
@@ -143,64 +144,194 @@ begin
     Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
     Iterator.AddFilter_Method(eProcessAll);
 
-    // No need to count components since we removed progress tracking
+    // Count components (selected only if SelectedOnly is true)
+    ComponentCount := 0;
+    Component := Iterator.FirstPCBObject;
+    while Component <> Nil do
+    begin
+        if (not SelectedOnly) or (SelectedOnly and Component.Selected) then
+            ComponentCount := ComponentCount + 1;
+        Component := Iterator.NextPCBObject;
+    end;
 
-    // Iterate through all components and collect data
+    // Reset iterator
+    Board.BoardIterator_Destroy(Iterator);
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+    Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+
+    // If no components match the selection criteria, return empty array
+    if ComponentCount = 0 then
+    begin
+        OutputLines.Add(']');
+        Result := OutputLines.Text;
+        OutputLines.Free;
+        Board.BoardIterator_Destroy(Iterator);
+        Exit;
+    end;
+
+    // Iterate through components and collect data
     i := 0;
     Component := Iterator.FirstPCBObject;
     while Component <> Nil do
     begin
-        // Optional progress tracking
-        // We'll skip the ShowMessage as it could be annoying with many components
+        // Process either all components or only selected ones
+        if (not SelectedOnly) or (SelectedOnly and Component.Selected) then
+        begin
+            // Get basic component properties
+            Designator := Component.Name.Text;
+            Name := Component.Identifier;
+            Description := Component.SourceDescription;
+            Footprint := Component.Pattern;
+            Layer := Layer2String(Component.Layer);
 
-        // Get basic component properties
-        Designator := Component.Name.Text;
-        Name := Component.Identifier;
-        Description := Component.SourceDescription;
-        Footprint := Component.Pattern;
-        Layer := Layer2String(Component.Layer);
+            // Get position and dimensions
+            Rect := Component.BoundingRectangleNoNameComment;
+            x := FloatToStr(CoordToMils(Component.x - xorigin));
+            y := FloatToStr(CoordToMils(Component.y - yorigin));
+            width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
+            height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
+            rotation := FloatToStr(Component.Rotation);
 
-        // Get position and dimensions
-        Rect := Component.BoundingRectangleNoNameComment;
-        x := FloatToStr(CoordToMils(Component.x - xorigin));
-        y := FloatToStr(CoordToMils(Component.y - yorigin));
-        width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
-        height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
-        rotation := FloatToStr(Component.Rotation);
+            // Build component JSON
+            OutputLines.Add('  {');
+            OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
+            OutputLines.Add('    "name": "' + StringReplace(Name, '"', '\"', REPLACEALL) + '",');
+            OutputLines.Add('    "description": "' + StringReplace(Description, '"', '\"', REPLACEALL) + '",');
+            OutputLines.Add('    "footprint": "' + StringReplace(Footprint, '"', '\"', REPLACEALL) + '",');
+            OutputLines.Add('    "layer": "' + StringReplace(Layer, '"', '\"', REPLACEALL) + '",');
+            OutputLines.Add('    "x": ' + x + ',');
+            OutputLines.Add('    "y": ' + y + ',');
+            OutputLines.Add('    "width": ' + width + ',');
+            OutputLines.Add('    "height": ' + height + ',');
+            OutputLines.Add('    "rotation": ' + rotation);
 
-        // Build component JSON
-        OutputLines.Add('  {');
-        OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
-        OutputLines.Add('    "name": "' + StringReplace(Name, '"', '\"', REPLACEALL) + '",');
-        OutputLines.Add('    "description": "' + StringReplace(Description, '"', '\"', REPLACEALL) + '",');
-        OutputLines.Add('    "footprint": "' + StringReplace(Footprint, '"', '\"', REPLACEALL) + '",');
-        OutputLines.Add('    "layer": "' + StringReplace(Layer, '"', '\"', REPLACEALL) + '",');
-        OutputLines.Add('    "x": ' + x + ',');
-        OutputLines.Add('    "y": ' + y + ',');
-        OutputLines.Add('    "width": ' + width + ',');
-        OutputLines.Add('    "height": ' + height + ',');
-        OutputLines.Add('    "rotation": ' + rotation);
-
-        // Add comma since we don't know if it's the last component yet
-        OutputLines.Add('  },');
+            // Add comma if not the last component
+            i := i + 1;
+            if i < ComponentCount then
+                OutputLines.Add('  },')
+            else
+                OutputLines.Add('  }');
+        end;
 
         // Move to next component
         Component := Iterator.NextPCBObject;
-        i := i + 1;
     end;
 
     // Clean up the iterator
     Board.BoardIterator_Destroy(Iterator);
 
-    // Fix the last component's closing brace (remove the trailing comma)
-    if OutputLines.Count > 1 then
+    // Close JSON array
+    OutputLines.Add(']');
+
+    // Use a temporary file to build the JSON data
+    TempFile := 'C:\AltiumMCP\temp_component_data.json';
+
+    try
+        // Save to a temporary file
+        OutputLines.SaveToFile(TempFile);
+
+        // Load back the complete JSON data
+        OutputLines.Clear;
+        OutputLines.LoadFromFile(TempFile);
+        Result := OutputLines.Text;
+
+        // Clean up the temporary file
+        if FileExists(TempFile) then
+            DeleteFile(TempFile);
+    finally
+        OutputLines.Free;
+    end;
+end;
+
+// Function to get selected components with coordinates
+function GetSelectedComponentsCoordinates: String;
+var
+    Board       : IPCB_Board;
+    Component   : IPCB_Component;
+    TempFile    : String;
+    Rect        : TCoordRect;
+    xorigin, yorigin : Integer;
+    OutputLines : TStringList;
+    Designator  : String;
+    x, y, width, height, rotation : String;
+    i           : Integer;
+    SelectedCount, ComponentsProcessed : Integer;
+begin
+    Result := '';
+
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    If Board = Nil Then
     begin
-        // Get the last line
-        i := OutputLines.Count - 1;
-        if Pos('},', OutputLines[i]) > 0 then
+        ShowMessage('Error: No board is currently open');
+        Exit;
+    end;
+
+    // Get board origin coordinates
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
+
+    // Create output stringlist
+    OutputLines := TStringList.Create;
+    OutputLines.Add('['); // Start JSON array
+
+    // Count selected components that are actually component objects
+    SelectedCount := 0;
+    for i := 0 to Board.SelectecObjectCount - 1 do
+    begin
+        if Board.SelectecObject[i].ObjectId = eComponentObject then
+            SelectedCount := SelectedCount + 1;
+    end;
+
+    // If no components are selected, return empty array
+    if SelectedCount = 0 then
+    begin
+        OutputLines.Add(']');
+        Result := OutputLines.Text;
+        OutputLines.Free;
+        Exit;
+    end;
+
+    // Process each selected component
+    ComponentsProcessed := 0; // Use a separate counter variable
+    for i := 0 to Board.SelectecObjectCount - 1 do
+    begin
+        // Only process selected components
+        if Board.SelectecObject[i].ObjectId = eComponentObject then
         begin
-            // Replace the comma with just a closing brace
-            OutputLines[i] := StringReplace(OutputLines[i], '},', '}', REPLACEALL);
+            // Cast to component type
+            Component := Board.SelectecObject[i];
+            
+            // Get basic component properties
+            Designator := Component.Name.Text;
+
+            // Get position and dimensions
+            Rect := Component.BoundingRectangleNoNameComment;
+            x := FloatToStr(CoordToMils(Component.x - xorigin));
+            y := FloatToStr(CoordToMils(Component.y - yorigin));
+            width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
+            height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
+            rotation := FloatToStr(Component.Rotation);
+
+            // Build component JSON
+            OutputLines.Add('  {');
+            OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
+            OutputLines.Add('    "x": ' + x + ',');
+            OutputLines.Add('    "y": ' + y + ',');
+            OutputLines.Add('    "width": ' + width + ',');
+            OutputLines.Add('    "height": ' + height + ',');
+            OutputLines.Add('    "rotation": ' + rotation);
+
+            // Increment counter
+            ComponentsProcessed := ComponentsProcessed + 1;
+            
+            // Add comma if not the last selected component
+            if ComponentsProcessed < SelectedCount then
+                OutputLines.Add('  },')
+            else
+                OutputLines.Add('  }');
         end;
     end;
 
@@ -208,7 +339,7 @@ begin
     OutputLines.Add(']');
 
     // Use a temporary file to build the JSON data
-    TempFile := 'C:\AltiumMCP\temp_component_data.json';
+    TempFile := 'C:\AltiumMCP\temp_selected_components.json';
 
     try
         // Save to a temporary file
@@ -348,27 +479,27 @@ begin
                             // Get this parameter's info
                             ParameterName := Parameter.Name;
                             ParameterValue := Parameter.Text;
-                            
+
                             // Escape special characters for JSON
                             ParameterName := StringReplace(ParameterName, '\', '\\', REPLACEALL);
                             ParameterName := StringReplace(ParameterName, '"', '\"', REPLACEALL);
-                            
+
                             ParameterValue := StringReplace(ParameterValue, '\', '\\', REPLACEALL);
                             ParameterValue := StringReplace(ParameterValue, '"', '\"', REPLACEALL);
-                            
+
                             // Get the next parameter to check if this is the last one
                             NextParameter := PIterator.NextSchObject;
-                            
+
                             // Add this parameter
                             if NextParameter <> nil then
                                 OutputLines.Add('      "' + ParameterName + '": "' + ParameterValue + '",')
                             else
                                 OutputLines.Add('      "' + ParameterName + '": "' + ParameterValue + '"');
-                            
+
                             // Move to next parameter
                             Parameter := NextParameter;
                         end;
-                        
+
                         // Close the parameters object
                         OutputLines.Add('    }');
                     end;
@@ -433,13 +564,18 @@ begin
     // Process different commands based on command name
     if CommandName = 'get_all_component_data' then
     begin
-        // This command doesn't require any parameters
-        Result := GetAllComponentData;
+        // Get all components (not just selected)
+        Result := GetAllComponentData(False);
     end
     else if CommandName = 'get_schematic_data' then
     begin
         // This command doesn't require any parameters
         Result := GetSchematicData;
+    end
+    else if CommandName = 'get_selected_components_coordinates' then
+    begin
+        // Get only selected components
+        Result := GetSelectedComponentsCoordinates;
     end
     else if CommandName = 'some_other_command' then
     begin
@@ -604,4 +740,5 @@ begin
         ShowMessage('Error: Exception occurred during script execution');
     end;
 end;
+
 

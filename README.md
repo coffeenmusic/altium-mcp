@@ -1,4 +1,5 @@
 TODO:
+- log response time of each tool
 - Go to schematic sheet
 Function ProcessNonVariant(Project: IProject);
 Var
@@ -118,10 +119,12 @@ End;
 - Get screenshot of either schematic or layout
 - Board.ChooseLocation(x, y, 'Test');
 - Zoom to selected objects:
+
+ 
 ### Get Selected Objects
 for i := 0 to Board.SelectecObjectCount - 1 do
 begin
-  if Board.SelectecObject[i].ObjectId = eTrackObject then
+  if Board.SelectecObject[i].ObjectId = eComponentObject then
   begin
 	 result := Board.SelectecObject[i];
 	 exit;

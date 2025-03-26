@@ -679,6 +679,38 @@ async def get_combined_component_data(ctx: Context, cmp_designator: str) -> str:
     return json.dumps(pcb_component, indent=2)
 
 @mcp.tool()
+async def get_selected_components_coordinates(ctx: Context) -> str:
+    """
+    Get coordinates and positioning information for selected components in Altium layout
+    
+    Returns:
+        str: JSON array with positioning data (designator, x, y, rotation, width, height)
+    """
+    logger.info("Getting coordinates for selected components")
+    
+    # Execute the command in Altium to get selected components coordinates
+    response = await altium_bridge.execute_command(
+        "get_selected_components_coordinates",
+        {}  # No parameters needed
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting selected components coordinates: {error_msg}")
+        return json.dumps({"error": f"Failed to get selected components coordinates: {error_msg}"})
+    
+    # Get the components coordinates data
+    components_coords = response.get("result", [])
+    
+    if not components_coords:
+        logger.info("No selected components found")
+        return json.dumps({"message": "No components are currently selected in the layout"})
+    
+    logger.info(f"Retrieved positioning data for {len(components_coords)} selected components")
+    return json.dumps(components_coords, indent=2)
+
+@mcp.tool()
 async def get_all_designators(ctx: Context) -> str:
     """
     Get all component designators from the current Altium board
