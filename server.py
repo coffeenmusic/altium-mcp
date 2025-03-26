@@ -565,17 +565,17 @@ async def get_component_property_values(ctx: Context, property_name: str) -> str
     return json.dumps(property_values, indent=2)
 
 @mcp.tool()
-async def get_schematic_data(ctx: Context, cmp_designator: str) -> str:
+async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
     """
-    Get schematic data for a component in Altium
+    Get schematic data for components in Altium
     
     Args:
-        cmp_designator (str): The designator of the component (e.g., "R1", "C5", "U3")
+        cmp_designators (list): List of designators of the components (e.g., ["R1", "C5", "U3"])
     
     Returns:
-        str: JSON object with schematic component data
+        str: JSON object with schematic component data for requested designators
     """
-    logger.info(f"Getting schematic data for component: {cmp_designator}")
+    logger.info(f"Getting schematic data for components: {cmp_designators}")
     
     # Ensure data is initialized (lazy initialization on first request)
     initialized = await altium_bridge.schematic_manager.ensure_initialized(altium_bridge)
@@ -585,27 +585,43 @@ async def get_schematic_data(ctx: Context, cmp_designator: str) -> str:
         return json.dumps({"error": "Failed to initialize schematic data"})
     
     # Get schematic data from cache
-    component = altium_bridge.schematic_manager.get_component(cmp_designator)
+    components = []
+    missing_designators = []
     
-    if component:
-        logger.info(f"Found schematic data for {cmp_designator} in cache")
-        return json.dumps(component, indent=2)
-    else:
-        logger.info(f"Schematic data for {cmp_designator} not found in cache")
-        return json.dumps({"error": f"Schematic data for component {cmp_designator} not found"})
+    for designator in cmp_designators:
+        component = altium_bridge.schematic_manager.get_component(designator)
+        if component:
+            components.append(component)
+        else:
+            missing_designators.append(designator)
+    
+    if not components:
+        logger.info(f"No schematic data found for designators: {cmp_designators}")
+        return json.dumps({"error": f"No schematic data found for designators: {cmp_designators}"})
+    
+    result = {
+        "components": components,
+    }
+    
+    if missing_designators:
+        result["missing_designators"] = missing_designators
+        logger.info(f"Some designators not found in schematic data: {missing_designators}")
+    
+    logger.info(f"Found schematic data for {len(components)} components")
+    return json.dumps(result, indent=2)
 
 @mcp.tool()
-async def get_component_data(ctx: Context, cmp_designator: str) -> str:
+async def get_component_data(ctx: Context, cmp_designators: list) -> str:
     """
-    Get all data for a component in Altium
+    Get all data for components in Altium
     
     Args:
-        cmp_designator (str): The designator of the component (e.g., "R1", "C5", "U3")
+        cmp_designators (list): List of designators of the components (e.g., ["R1", "C5", "U3"])
     
     Returns:
-        str: JSON object with all component data
+        str: JSON object with all component data for requested designators
     """
-    logger.info(f"Getting data for component: {cmp_designator}")
+    logger.info(f"Getting data for components: {cmp_designators}")
     
     # Ensure data is initialized (lazy initialization on first request)
     initialized = await altium_bridge.component_manager.ensure_initialized(altium_bridge)
@@ -614,69 +630,31 @@ async def get_component_data(ctx: Context, cmp_designator: str) -> str:
         logger.error("Component data could not be initialized")
         return json.dumps({"error": "Failed to initialize component data"})
     
-    # Get component data from cache
-    component = altium_bridge.component_manager.get_component(cmp_designator)
+    # Get components data from cache
+    components = []
+    missing_designators = []
     
-    if component:
-        logger.info(f"Found component data for {cmp_designator} in cache")
-        return json.dumps(component, indent=2)
-    else:
-        logger.info(f"Component {cmp_designator} not found in cache")
-        return json.dumps({"error": f"Component {cmp_designator} not found"})
+    for designator in cmp_designators:
+        component = altium_bridge.component_manager.get_component(designator)
+        if component:
+            components.append(component)
+        else:
+            missing_designators.append(designator)
     
-@mcp.tool()
-async def get_combined_component_data(ctx: Context, cmp_designator: str) -> str:
-    """
-    Get combined PCB and schematic data for a component in Altium
+    if not components:
+        logger.info(f"No components found for designators: {cmp_designators}")
+        return json.dumps({"error": f"No components found for designators: {cmp_designators}"})
     
-    Args:
-        cmp_designator (str): The designator of the component (e.g., "R1", "C5", "U3")
+    result = {
+        "components": components,
+    }
     
-    Returns:
-        str: JSON object with combined component data
-    """
-    logger.info(f"Getting combined data for component: {cmp_designator}")
+    if missing_designators:
+        result["missing_designators"] = missing_designators
+        logger.info(f"Some designators not found: {missing_designators}")
     
-    # Ensure PCB data is initialized
-    pcb_initialized = await altium_bridge.component_manager.ensure_initialized(altium_bridge)
-    
-    if not pcb_initialized:
-        logger.error("PCB data could not be initialized")
-        return json.dumps({"error": "Failed to initialize PCB data"})
-    
-    # Get PCB data from cache
-    pcb_component = altium_bridge.component_manager.get_component(cmp_designator)
-    
-    if not pcb_component:
-        logger.info(f"PCB data for {cmp_designator} not found in cache")
-        return json.dumps({"error": f"PCB data for component {cmp_designator} not found"})
-    
-    # Try to get schematic data if available
-    try:
-        # Ensure schematic data is initialized
-        schem_initialized = await altium_bridge.schematic_manager.ensure_initialized(altium_bridge)
-        
-        if schem_initialized:
-            # Get schematic data from cache
-            schem_component = altium_bridge.schematic_manager.get_component(cmp_designator)
-            
-            if schem_component:
-                # Combine the data
-                combined_data = pcb_component.copy()
-                
-                # Add schematic data fields
-                for key, value in schem_component.items():
-                    if key != "designator" and key not in combined_data:
-                        combined_data[key] = value
-                
-                logger.info(f"Created combined data for {cmp_designator}")
-                return json.dumps(combined_data, indent=2)
-    except Exception as e:
-        logger.error(f"Error combining data: {e}")
-    
-    # If schematic data not available or error occurred, just return PCB data
-    logger.info(f"Returning PCB-only data for {cmp_designator}")
-    return json.dumps(pcb_component, indent=2)
+    logger.info(f"Found data for {len(components)} components")
+    return json.dumps(result, indent=2)
 
 @mcp.tool()
 async def get_selected_components_coordinates(ctx: Context) -> str:
