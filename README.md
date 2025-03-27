@@ -3,7 +3,16 @@
 TLDR: Use Claude to control or ask questions about your Altium project.
 This is a Model Context Protocol (MCP) server that provides an interface to interact with Altium Designer through Python. The server allows for querying and manipulation of PCB designs programmatically.
 
+Note: Having Claude place components on the PCB currently fails hard.
+
+## Example commands
+- Get me all parts on my design made by Molex
+- Give me the description and part number of U4
+- Place the selected parts on my pcb with best practices for a switching regulator. Note: It tries, but does terrible placement. Hopefully I can find a way to improve this.
+- Give me a list of all IC designators in my design
+
 ## Setup
+Currently only tested on Windows
 
 1. Ensure the AltiumMCP directory is located at `C:\AltiumMCP`
 2. The Altium script files should be located in `C:\AltiumMCP\AltiumScript\`
@@ -24,7 +33,7 @@ set Path=C:\Users\nntra\.local\bin;%Path%
 ### Claude for Desktop Integration
 
 Go to Claude > Settings > Developer > Edit Config > claude_desktop_config.json to include the following:
-
+Below is specific to Windows, TODO: find out how to run on both without a hard coded path
 ```json
 {
     "mcpServers": {
