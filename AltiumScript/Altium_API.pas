@@ -565,6 +565,82 @@ begin
     end;
 end;
 
+// Function to get all PCB rules
+function GetPCBRules: String;
+Var
+    Board         : IPCB_Board;
+    Rule          : IPCB_Rule;
+    BoardIterator : IPCB_BoardIterator;
+    TempFile      : String;
+    OutputLines   : TStringList;
+    FirstRule     : Boolean;
+begin
+    Result := '';
+
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    If Board = Nil Then Exit;
+
+    // Create output stringlist
+    OutputLines := TStringList.Create;
+    OutputLines.Add('['); // Start JSON array
+
+    // Retrieve the iterator
+    BoardIterator := Board.BoardIterator_Create;
+    BoardIterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    BoardIterator.AddFilter_LayerSet(AllLayers);
+    BoardIterator.AddFilter_Method(eProcessAll);
+
+    // Search for Rule and for each rule found
+    Rule := BoardIterator.FirstPCBObject;
+
+    // Flag to track if we've processed at least one rule
+    FirstRule := True;
+
+    While (Rule <> Nil) Do
+    Begin
+        // Add comma before each rule except the first one
+        if not FirstRule then
+            OutputLines.Add('  },')
+        else
+            FirstRule := False;
+
+        // Add rule object with descriptor
+        OutputLines.Add('  {');
+        OutputLines.Add('    "descriptor": "' + StringReplace(Rule.Descriptor, '"', '\"', REPLACEALL) + '"');
+
+        // Move to next rule
+        Rule := BoardIterator.NextPCBObject;
+    End;
+
+    // Close the last rule object and the JSON array
+    if not FirstRule then
+        OutputLines.Add('  }');
+    OutputLines.Add(']');
+
+    // Clean up the iterator
+    Board.BoardIterator_Destroy(BoardIterator);
+
+    // Use a temporary file to build the JSON data
+    TempFile := 'C:\AltiumMCP\temp_rules_data.json';
+
+    try
+        // Save to a temporary file
+        OutputLines.SaveToFile(TempFile);
+
+        // Load back the complete JSON data
+        OutputLines.Clear;
+        OutputLines.LoadFromFile(TempFile);
+        Result := OutputLines.Text;
+
+        // Clean up the temporary file
+        if FileExists(TempFile) then
+            DeleteFile(TempFile);
+    finally
+        OutputLines.Free;
+    end;
+end;
+
 // Function to get all schematic component data
 function GetSchematicData: String;
 var
@@ -931,65 +1007,78 @@ begin
         Result := GetSelectedComponentsCoordinates;
     end
     else if CommandName = 'move_components' then
-begin
-    // For this command, we need to extract the designators array and the offset values
-    DesignatorsList := TStringList.Create;
-    XOffset := 0;
-    YOffset := 0;
-    
-    // Parse parameters from the request
-    for i := 0 to RequestData.Count - 1 do
     begin
-        // Look for designators array
-        if (Pos('"designators"', RequestData[i]) > 0) then
+        // For this command, we need to extract the designators array and the offset values
+        DesignatorsList := TStringList.Create;
+        XOffset := 0;
+        YOffset := 0;
+        
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
         begin
-            // Parse the array in the next lines
-            i := i + 1; // Move to the next line (should be '[')
-            
-            while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+            // Look for designators array
+            if (Pos('"designators"', RequestData[i]) > 0) then
             begin
-                // Extract the designator value
-                ParamValue := RequestData[i];
-                ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                ParamValue := Trim(ParamValue);
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
                 
-                if (ParamValue <> '') and (ParamValue <> '[') then
-                    DesignatorsList.Add(ParamValue);
-                
-                i := i + 1;
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // Extract the designator value
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DesignatorsList.Add(ParamValue);
+                    
+                    i := i + 1;
+                end;
+            end
+            // Look for x_offset
+            else if (Pos('"x_offset"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                XOffset := MilsToCoord(StrToFloat(ParamValue));
+            end
+            // Look for y_offset
+            else if (Pos('"y_offset"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                YOffset := MilsToCoord(StrToFloat(ParamValue));
             end;
-        end
-        // Look for x_offset
-        else if (Pos('"x_offset"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            XOffset := MilsToCoord(StrToFloat(ParamValue));
-        end
-        // Look for y_offset
-        else if (Pos('"y_offset"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            YOffset := MilsToCoord(StrToFloat(ParamValue));
         end;
-    end;
-    
-    if DesignatorsList.Count > 0 then
-    begin
-        Result := MoveComponentsByDesignators(DesignatorsList, XOffset, YOffset);
-    end
-    else
-    begin
-        ShowMessage('Error: No designators found for move_components');
-        Result := '';
-    end;
+        
+        if DesignatorsList.Count > 0 then
+        begin
+            Result := MoveComponentsByDesignators(DesignatorsList, XOffset, YOffset);
+        end
+        else
+        begin
+            ShowMessage('Error: No designators found for move_components');
+            Result := '';
+        end;
 
-    DesignatorsList.Free;
-end
+        DesignatorsList.Free;
+    end
+    else if CommandName = 'get_pcb_rules' then
+    begin
+        // Make sure a PCB is available
+        PCBAvailable := EnsurePCBDocumentFocused;
+        if not PCBAvailable then
+        begin
+            Result := 'ERROR: No PCB document found or could not be focused';
+            Exit;
+        end;
+        
+        // Get all PCB rules
+        Result := GetPCBRules;
+    end
     else
     begin
         ShowMessage('Error: Unknown command: ' + CommandName);

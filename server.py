@@ -785,6 +785,38 @@ async def get_pcb_screenshot(ctx: Context) -> str:
     except Exception as e:
         logger.error(f"Error in screenshot function: {str(e)}")
         return json.dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
+    
+@mcp.tool()
+async def get_pcb_rules(ctx: Context) -> str:
+    """
+    Get all design rules from the current Altium PCB
+    
+    Returns:
+        str: JSON array of PCB design rules with their properties
+    """
+    logger.info("Getting PCB design rules")
+    
+    # Execute the command in Altium to get rule data
+    response = await altium_bridge.execute_command(
+        "get_pcb_rules",
+        {}  # No parameters needed
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting PCB rules: {error_msg}")
+        return json.dumps({"error": f"Failed to get PCB rules: {error_msg}"})
+    
+    # Get the rules data
+    rules_data = response.get("result", [])
+    
+    if not rules_data:
+        logger.info("No PCB rules found")
+        return json.dumps({"message": "No PCB rules found in the current document"})
+    
+    logger.info(f"Retrieved PCB rules data")
+    return json.dumps(rules_data, indent=2)
 
 @mcp.tool()
 async def get_server_status(ctx: Context) -> str:
