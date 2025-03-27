@@ -1,55 +1,112 @@
-TODO:
+# Altium MCP Server
+
+TLDR: Use Claude to control or ask questions about your Altium project.
+This is a Model Context Protocol (MCP) server that provides an interface to interact with Altium Designer through Python. The server allows for querying and manipulation of PCB designs programmatically.
+
+## Setup
+
+1. Ensure the AltiumMCP directory is located at `C:\AltiumMCP`
+2. The Altium script files should be located in `C:\AltiumMCP\AltiumScript\`
+3. Install uv
+
+```bash
+brew install uv
+```
+**On Windows**
+```bash
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 
+```
+and then
+```bash
+set Path=C:\Users\nntra\.local\bin;%Path%
+```
+
+### Claude for Desktop Integration
+
+Go to Claude > Settings > Developer > Edit Config > claude_desktop_config.json to include the following:
+
+```json
+{
+    "mcpServers": {
+        "altium": {
+            "command": "uv",
+            "args": [
+                "--directory",
+                "C:\\AltiumMCP",
+                "run",
+                "server.py"
+            ]
+        }
+    }
+}
+```
+
+### Using with Claude
+
+Once the config file has been set on Claude, and the addon is running on Blender, you will see a hammer icon with tools for the Blender MCP.
+
+![BlenderMCP in the sidebar](assets/hammer-icon.png)
+
+## Configuration
+
+The server will automatically try to locate your Altium Designer installation. If it cannot find it, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server.
+
+The server checks common installation paths:
+- C:\Program Files\Altium\AD19\X2.EXE
+- C:\Program Files\Altium\AD20\X2.EXE
+- C:\Program Files\Altium\AD21\X2.EXE
+- C:\Program Files\Altium\AD22\X2.EXE
+- C:\Program Files\Altium\AD23\X2.EXE
+- C:\Program Files\Altium\AD24\X2.EXE
+
+If your Altium Designer is installed in a different location, you can select it manually when prompted.
+
+## Available Tools
+
+The server provides several tools to interact with Altium Designer:
+
+### Component Information
+- `get_all_designators`: Get a list of all component designators in the current board
+- `get_all_component_property_names`: Get a list of all available component property names
+- `get_component_property_values`: Get the values of a specific property for all components
+- `get_component_data`: Get detailed data for specific components by designator
+- `get_component_pins`: Get pin information for specified components
+
+### Schematic Information
+- `get_schematic_data`: Get schematic data for specified components
+
+### Layout Operations
+- `get_selected_components_coordinates`: Get position and rotation information for currently selected components
+- `move_components`: Move specified components by X and Y offsets
+- `get_pcb_screenshot`: Take a screenshot of the Altium PCB window
+
+### Server Status
+- `get_server_status`: Check the status of the MCP server, including paths to Altium and script files
+
+## How It Works
+
+The server communicates with Altium Designer using a scripting bridge:
+
+1. It writes command requests to `C:\AltiumMCP\request.json`
+2. It launches Altium with instructions to run the `Altium_API.PrjScr` script
+3. The script processes the request and writes results to `C:\AltiumMCP\response.json`
+4. The server reads and returns the response
+
+## Running with Claude Desktop
+
+## References
+- BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
+- Claude: I vibe coded most of this with Claude 3.7
+
+## Disclaimer
+This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
+
+# TODO:
 - log response time of each tool
-- Go to schematic sheet
-Function ProcessNonVariant(Project: IProject);
-Var
-    I           : Integer;
-    Doc         : IDocument;
-    CurrentSch  : ISch_Document;
-Begin
-    Project := GetWorkspace.DM_FocusedProject;
-    If Project = Nil Then Exit;
-
-    NoPlaceList := TStringList.Create;
-
-    For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
-    Begin
-        Doc := Project.DM_LogicalDocuments(I);
-        If Doc.DM_DocumentKind = 'SCH' Then
-        Begin
-             CurrentSch := SchServer.GetSchDocumentByPath(Doc.DM_FullPath);
-             If CurrentSch <> Nil Then
-             Begin
-                  Client.OpenDocument('SCH',Doc.DM_FullPath); // Open Document
-                  Client.ShowDocument(Doc.DM_ServerDocument);
-                  FindNoPlaceSymbols(CurrentSch);
-
-                  CheckOtherSymbols(CurrentSch);
-             End;
-        End;
-    End;
-End;
-
+- Add go to schematic sheet
 - Show layers: IPCB_Board.VisibleLayers
 	+ AutoSilk.pas
 - Go to sheet with component designator
-- Flip to layout
-- Get screenshot of either schematic or layout
+- Get screenshot of schematic
 - Board.ChooseLocation(x, y, 'Test');
 - Zoom to selected objects:
-
-
- procedure Run;
-var
-    ProcessLauncher : IProcessLauncher;
-    Parameters : String;
-begin
-    Parameters := 'Apply=True|Expr=(Objectkind=''Component'') and (Name = ' + '''' + AnsiUpperCase('U3') + '''' + ')|Index=1';
-    Parameters := Parameters + '|Zoom=True';
-    Parameters := Parameters + '|Select=True';
-    Parameters := Parameters + '|Mask=True' ;
-
-    ProcessLauncher := Client;
-    ProcessLauncher.PostMessage('PCB:RunQuery', 'Clear', Length('Clear'), Client.CurrentView);
-    ProcessLauncher.PostMessage('PCB:RunQuery', Parameters, Length(Parameters), Client.CurrentView);
-end;
