@@ -757,6 +757,43 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     return json.dumps(pins_data, indent=2)
 
 @mcp.tool()
+async def move_components(ctx: Context, cmp_designators: list, x_offset: float, y_offset: float) -> str:
+    """
+    Move selected components by specified X and Y offsets in the PCB layout
+    
+    Args:
+        cmp_designators (list): List of designators of the components to move (e.g., ["R1", "C5", "U3"])
+        x_offset (float): X offset distance in mils
+        y_offset (float): Y offset distance in mils
+    
+    Returns:
+        str: JSON object with the result of the move operation
+    """
+    logger.info(f"Moving components: {cmp_designators} by X:{x_offset}, Y:{y_offset}")
+    
+    # Execute the command in Altium to move components
+    response = await altium_bridge.execute_command(
+        "move_components",
+        {
+            "designators": cmp_designators,
+            "x_offset": x_offset,
+            "y_offset": y_offset
+        }
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error moving components: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to move components: {error_msg}"})
+    
+    # Get the result data
+    result = response.get("result", {})
+    
+    logger.info(f"Components moved successfully")
+    return json.dumps({"success": True, "result": result}, indent=2)
+
+@mcp.tool()
 async def get_pcb_screenshot(ctx: Context) -> str:
     """
     Take a screenshot of the Altium PCB window

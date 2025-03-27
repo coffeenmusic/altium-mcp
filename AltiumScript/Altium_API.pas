@@ -162,7 +162,7 @@ begin
     GrpIter := Component.GroupIterator_Create;
     GrpIter.SetState_FilterAll;
     GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
-    
+
     // Count pins
     PinCount := 0;
     Pad := GrpIter.FirstPCBObject;
@@ -224,6 +224,102 @@ begin
     
     // Clean up iterator
     Component.GroupIterator_Destroy(GrpIter);
+end;
+
+// Function to move components by X and Y offsets
+function MoveComponentsByDesignators(DesignatorsList: TStringList; XOffset, YOffset: TCoord): String;
+var
+    Board       : IPCB_Board;
+    Component   : IPCB_Component;
+    OutputLines : TStringList;
+    Designator  : String;
+    i           : Integer;
+    MovedCount  : Integer;
+    MissingDesignators : TStringList;
+begin
+    Result := '';
+    MovedCount := 0;
+    
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+    
+    // Create output stringlist for the result
+    OutputLines := TStringList.Create;
+    MissingDesignators := TStringList.Create;
+    
+    try
+        // Start transaction
+        PCBServer.PreProcess;
+        
+        // Process each designator
+        for i := 0 to DesignatorsList.Count - 1 do
+        begin
+            Designator := Trim(DesignatorsList[i]);
+            
+            // Use direct function to get component by designator
+            Component := Board.GetPcbComponentByRefDes(Designator);
+            
+            if Component <> Nil then
+            begin
+                // Begin modify
+                PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                
+                // Move the component by the specified offsets
+                Component.MoveByXY(XOffset, YOffset);
+                
+                // End modify
+                PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                
+                MovedCount := MovedCount + 1;
+            end
+            else
+            begin
+                // Keep track of components that weren't found
+                MissingDesignators.Add(Designator);
+            end;
+        end;
+        
+        // End transaction
+        PCBServer.PostProcess;
+        
+        // Update PCB document
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+        
+        // Create result JSON
+        OutputLines.Add('{');
+        OutputLines.Add('  "moved_count": ' + IntToStr(MovedCount) + ',');
+        
+        // Add missing designators if any
+        if MissingDesignators.Count > 0 then
+        begin
+            OutputLines.Add('  "missing_designators": [');
+            for i := 0 to MissingDesignators.Count - 1 do
+            begin
+                if i < MissingDesignators.Count - 1 then
+                    OutputLines.Add('    "' + MissingDesignators[i] + '",')
+                else
+                    OutputLines.Add('    "' + MissingDesignators[i] + '"');
+            end;
+            OutputLines.Add('  ]');
+        end
+        else
+        begin
+            OutputLines.Add('  "missing_designators": []');
+        end;
+        
+        OutputLines.Add('}');
+        
+        // Create final result
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        MissingDesignators.Free;
+    end;
 end;
 
 // Function to get all component data from the PCB
@@ -753,7 +849,7 @@ end;
 function ExecuteCommand(CommandName: String): String;
 var
     ParamValue: String;
-    i: Integer;
+    i, XOffset, YOffset, ValueStart: Integer;
     DesignatorsList: TStringList;
     PCBAvailable: Boolean;
 begin
@@ -834,6 +930,66 @@ begin
         // Get only selected components
         Result := GetSelectedComponentsCoordinates;
     end
+    else if CommandName = 'move_components' then
+begin
+    // For this command, we need to extract the designators array and the offset values
+    DesignatorsList := TStringList.Create;
+    XOffset := 0;
+    YOffset := 0;
+    
+    // Parse parameters from the request
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        // Look for designators array
+        if (Pos('"designators"', RequestData[i]) > 0) then
+        begin
+            // Parse the array in the next lines
+            i := i + 1; // Move to the next line (should be '[')
+            
+            while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+            begin
+                // Extract the designator value
+                ParamValue := RequestData[i];
+                ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                ParamValue := Trim(ParamValue);
+                
+                if (ParamValue <> '') and (ParamValue <> '[') then
+                    DesignatorsList.Add(ParamValue);
+                
+                i := i + 1;
+            end;
+        end
+        // Look for x_offset
+        else if (Pos('"x_offset"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            XOffset := MilsToCoord(StrToFloat(ParamValue));
+        end
+        // Look for y_offset
+        else if (Pos('"y_offset"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            YOffset := MilsToCoord(StrToFloat(ParamValue));
+        end;
+    end;
+    
+    if DesignatorsList.Count > 0 then
+    begin
+        Result := MoveComponentsByDesignators(DesignatorsList, XOffset, YOffset);
+    end
+    else
+    begin
+        ShowMessage('Error: No designators found for move_components');
+        Result := '';
+    end;
+
+    DesignatorsList.Free;
+end
     else
     begin
         ShowMessage('Error: Unknown command: ' + CommandName);
