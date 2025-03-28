@@ -565,7 +565,7 @@ begin
     end;
 end;
 
-// Function to get source and destination component lists
+// Function to get source and destination component lists with pin data
 function GetLayoutDuplicatorComponents(SelectedOnly: Boolean = True): String;
 var
     Board          : IPCB_Board;
@@ -573,15 +573,23 @@ var
     SourceCmps     : TStringList;
     OutputLines    : TStringList;
     Component      : IPCB_Component;
-    i              : Integer;
+    GrpIter        : IPCB_GroupIterator;
+    Pad            : IPCB_Pad;
+    i, j           : Integer;
     SelectedSourceCount : Integer;
-    TempFile       : String;
+    PinCount       : Integer;
+    NetName        : String;
+    xorigin, yorigin : Integer;
 begin
     Result := '';
 
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
     If Board = Nil Then Exit;
+
+    // Get board origin coordinates
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
 
     // Create output stringlist
     OutputLines := TStringList.Create;
@@ -639,12 +647,76 @@ begin
             OutputLines.Add('    {');
             OutputLines.Add('      "designator": "' + JSONEscapeString(Component.Name.Text) + '",');
             OutputLines.Add('      "description": "' + JSONEscapeString(Component.SourceDescription) + '",');
-            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '"');
+            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '",');
+            OutputLines.Add('      "rotation": ' + FloatToStr(Component.Rotation) + ',');
+            OutputLines.Add('      "layer": "' + Layer2String(Component.Layer) + '",');
+
+            // Add pin data
+            OutputLines.Add('      "pins": [');
+
+            // Create pad iterator
+            GrpIter := Component.GroupIterator_Create;
+            GrpIter.SetState_FilterAll;
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+
+            // Count pins first
+            PinCount := 0;
+            Pad := GrpIter.FirstPCBObject;
+            while Pad <> Nil do
+            begin
+                if Pad.InComponent then
+                    PinCount := PinCount + 1;
+                Pad := GrpIter.NextPCBObject;
+            end;
+
+            // Reset iterator
+            Component.GroupIterator_Destroy(GrpIter);
+            GrpIter := Component.GroupIterator_Create;
+            GrpIter.SetState_FilterAll;
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+
+            // Process each pad
+            j := 0; // Counter for current pin
+            Pad := GrpIter.FirstPCBObject;
+            while Pad <> Nil do
+            begin
+                if Pad.InComponent then
+                begin
+                    // Get net name if connected
+                    if Pad.Net <> Nil then
+                        NetName := JSONEscapeString(Pad.Net.Name)
+                    else
+                        NetName := '';
+
+                    OutputLines.Add('        {');
+                    OutputLines.Add('          "name": "' + JSONEscapeString(Pad.Name) + '",');
+                    OutputLines.Add('          "net": "' + NetName + '",');
+                    OutputLines.Add('          "x": ' + FloatToStr(CoordToMils(Pad.x - xorigin)) + ',');
+                    OutputLines.Add('          "y": ' + FloatToStr(CoordToMils(Pad.y - yorigin)) + ',');
+                    OutputLines.Add('          "layer": "' + Layer2String(Pad.Layer) + '"');
+
+                    // Increment counter
+                    j := j + 1;
+
+                    // Add comma if not the last pin
+                    if j < PinCount then
+                        OutputLines.Add('        },')
+                    else
+                        OutputLines.Add('        }');
+                end;
+
+                Pad := GrpIter.NextPCBObject;
+            end;
+
+            // Clean up iterator
+            Component.GroupIterator_Destroy(GrpIter);
+
+            OutputLines.Add('      ]');
 
             if i < SourceCmps.Count - 1 then
-              OutputLines.Add('    },')
+                OutputLines.Add('    },')
             else
-              OutputLines.Add('    }');
+                OutputLines.Add('    }');
         end;
     end;
 
@@ -691,19 +763,83 @@ begin
             OutputLines.Add('    {');
             OutputLines.Add('      "designator": "' + JSONEscapeString(Component.Name.Text) + '",');
             OutputLines.Add('      "description": "' + JSONEscapeString(Component.SourceDescription) + '",');
-            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '"');
+            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '",');
+            OutputLines.Add('      "rotation": ' + FloatToStr(Component.Rotation) + ',');
+            OutputLines.Add('      "layer": "' + Layer2String(Component.Layer) + '",');
+
+            // Add pin data
+            OutputLines.Add('      "pins": [');
+
+            // Create pad iterator
+            GrpIter := Component.GroupIterator_Create;
+            GrpIter.SetState_FilterAll;
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+
+            // Count pins first
+            PinCount := 0;
+            Pad := GrpIter.FirstPCBObject;
+            while Pad <> Nil do
+            begin
+                if Pad.InComponent then
+                    PinCount := PinCount + 1;
+                Pad := GrpIter.NextPCBObject;
+            end;
+
+            // Reset iterator
+            Component.GroupIterator_Destroy(GrpIter);
+            GrpIter := Component.GroupIterator_Create;
+            GrpIter.SetState_FilterAll;
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+
+            // Process each pad
+            j := 0; // Counter for current pin
+            Pad := GrpIter.FirstPCBObject;
+            while Pad <> Nil do
+            begin
+                if Pad.InComponent then
+                begin
+                    // Get net name if connected
+                    if Pad.Net <> Nil then
+                        NetName := JSONEscapeString(Pad.Net.Name)
+                    else
+                        NetName := '';
+
+                    OutputLines.Add('        {');
+                    OutputLines.Add('          "name": "' + JSONEscapeString(Pad.Name) + '",');
+                    OutputLines.Add('          "net": "' + NetName + '",');
+                    OutputLines.Add('          "x": ' + FloatToStr(CoordToMils(Pad.x - xorigin)) + ',');
+                    OutputLines.Add('          "y": ' + FloatToStr(CoordToMils(Pad.y - yorigin)) + ',');
+                    OutputLines.Add('          "layer": "' + Layer2String(Pad.Layer) + '"');
+
+                    // Increment counter
+                    j := j + 1;
+
+                    // Add comma if not the last pin
+                    if j < PinCount then
+                        OutputLines.Add('        },')
+                    else
+                        OutputLines.Add('        }');
+                end;
+
+                Pad := GrpIter.NextPCBObject;
+            end;
+
+            // Clean up iterator
+            Component.GroupIterator_Destroy(GrpIter);
+
+            OutputLines.Add('      ]');
 
             if i < SourceCmps.Count - 1 then
-              OutputLines.Add('    },')
+                OutputLines.Add('    },')
             else
-              OutputLines.Add('    }');
+                OutputLines.Add('    }');
         end;
     end;
 
     OutputLines.Add('  ],');
 
     // Add message
-    OutputLines.Add('  "message": "Match each source and destination designator using the part descriptions and other data. Then call layout_duplicator_apply and pass the source and destination lists in matching order."');
+    OutputLines.Add('  "message": "Match each source and destination designator using the part descriptions, pin data, and other information. Then call layout_duplicator_apply and pass the source and destination lists in matching order."');
 
     OutputLines.Add('}');
 
