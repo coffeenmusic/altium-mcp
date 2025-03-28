@@ -565,6 +565,224 @@ begin
     end;
 end;
 
+// Function to get source and destination component lists
+function GetLayoutDuplicatorComponents(SelectedOnly: Boolean = True): String;
+var
+    Board          : IPCB_Board;
+    Iterator       : IPCB_BoardIterator;
+    SourceCmps     : TStringList;
+    OutputLines    : TStringList;
+    Component      : IPCB_Component;
+    i              : Integer;
+    SelectedSourceCount : Integer;
+    TempFile       : String;
+begin
+    Result := '';
+
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    If Board = Nil Then Exit;
+
+    // Create output stringlist
+    OutputLines := TStringList.Create;
+    OutputLines.Add('{');
+
+    // Get the selected components (source components)
+    SourceCmps := TStringList.Create;
+    SourceCmps.Duplicates := dupIgnore; // Avoid duplicate entries
+    SelectedSourceCount := 0;
+
+    // Get selected components as source
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+    Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
+    Iterator.AddFilter_Method(eProcessAll);
+
+    Component := Iterator.FirstPCBObject;
+    While Component <> Nil Do
+    Begin
+        If Component.Selected = True Then
+        Begin
+            SourceCmps.Add(Component.Name.Text);
+            SelectedSourceCount := SelectedSourceCount + 1;
+        End;
+
+        Component := Iterator.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iterator);
+
+    // Check if any source components were selected
+    if SelectedSourceCount = 0 then
+    begin
+        OutputLines.Clear; // Clear to start fresh
+        OutputLines.Add('{');
+        OutputLines.Add('  "success": false,');
+        OutputLines.Add('  "message": "No source components selected. Please select source components first."');
+        OutputLines.Add('}');
+
+        Result := OutputLines.Text;
+        OutputLines.Free;
+        SourceCmps.Free;
+        Exit;
+    end;
+
+    // If source components were found, continue with JSON creation
+    OutputLines.Add('  "success": true,');
+    OutputLines.Add('  "source_components": [');
+
+    // Add source components to JSON
+    for i := 0 to SourceCmps.Count - 1 do
+    begin
+        Component := Board.GetPcbComponentByRefDes(SourceCmps[i]);
+        if Component <> nil then
+        begin
+            OutputLines.Add('    {');
+            OutputLines.Add('      "designator": "' + JSONEscapeString(Component.Name.Text) + '",');
+            OutputLines.Add('      "description": "' + JSONEscapeString(Component.SourceDescription) + '",');
+            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '"');
+
+            if i < SourceCmps.Count - 1 then
+              OutputLines.Add('    },')
+            else
+              OutputLines.Add('    }');
+        end;
+    end;
+
+    OutputLines.Add('  ],');
+
+    // Reset selection for destination components
+    Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+    // Prompt user to select destination components
+    ShowMessage('Please select the destination components and then click OK.');
+
+    // Create a new list for destination components
+    SourceCmps.Clear;
+
+    // Have the user select destination components
+    Client.SendMessage('PCB:Select', 'Scope=InsideArea | ObjectKind=Component', 255, Client.CurrentView);
+
+    // Get the newly selected components (destination)
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+    Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
+    Iterator.AddFilter_Method(eProcessAll);
+
+    Component := Iterator.FirstPCBObject;
+    While Component <> Nil Do
+    Begin
+        If Component.Selected = True Then
+        Begin
+            SourceCmps.Add(Component.Name.Text);
+        End;
+
+        Component := Iterator.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iterator);
+
+    // Create destination components list
+    OutputLines.Add('  "destination_components": [');
+
+    // Add destination components to JSON
+    for i := 0 to SourceCmps.Count - 1 do
+    begin
+        Component := Board.GetPcbComponentByRefDes(SourceCmps[i]);
+        if Component <> nil then
+        begin
+            OutputLines.Add('    {');
+            OutputLines.Add('      "designator": "' + JSONEscapeString(Component.Name.Text) + '",');
+            OutputLines.Add('      "description": "' + JSONEscapeString(Component.SourceDescription) + '",');
+            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '"');
+
+            if i < SourceCmps.Count - 1 then
+              OutputLines.Add('    },')
+            else
+              OutputLines.Add('    }');
+        end;
+    end;
+
+    OutputLines.Add('  ],');
+
+    // Add message
+    OutputLines.Add('  "message": "Match each source and destination designator using the part descriptions and other data. Then call layout_duplicator_apply and pass the source and destination lists in matching order."');
+
+    OutputLines.Add('}');
+
+    // Return the JSON string directly
+    Result := OutputLines.Text;
+
+    OutputLines.Free;
+    SourceCmps.Free;
+end;
+
+// Function to apply layout duplication with provided source and destination lists
+function ApplyLayoutDuplicator(SourceList: TStringList; DestList: TStringList): String;
+var
+    Board          : IPCB_Board;
+    CmpSrc, CmpDst : IPCB_Component;
+    NameSrc, NameDst : TPCB_String;
+    i, MatchCount  : Integer;
+    OutputLines    : TStringList;
+    MovedCount     : Integer;
+begin
+    Result := '';
+    
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    If Board = Nil Then Exit;
+    
+    // Create output stringlist
+    OutputLines := TStringList.Create;
+    MovedCount := 0;
+    
+    try
+        PCBServer.PreProcess;
+        
+        for i := 0 to SourceList.Count - 1 do
+        begin
+            if i < DestList.Count then
+            begin
+                NameSrc := SourceList.Get(i);
+                CmpSrc := Board.GetPcbComponentByRefDes(NameSrc);
+                
+                NameDst := DestList.Get(i);
+                CmpDst := Board.GetPcbComponentByRefDes(NameDst);
+                
+                if (CmpSrc <> nil) and (CmpDst <> nil) then
+                begin
+                    PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    
+                    // Move Destination Components to Match Source Components
+                    CmpDst.Rotation := CmpSrc.Rotation;
+                    CmpDst.Layer_V6 := CmpSrc.Layer_V6;
+                    CmpDst.x := CmpSrc.x;
+                    CmpDst.y := CmpSrc.y;
+                    CmpDst.Selected := True;
+                    
+                    PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    
+                    MovedCount := MovedCount + 1;
+                end;
+            end;
+        end;
+        
+        PCBServer.PostProcess;
+        
+        // Update PCB document
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+        
+        // Add result to JSON
+        OutputLines.Add('{');
+        OutputLines.Add('  "success": true,');
+        OutputLines.Add('  "moved_count": ' + IntToStr(MovedCount) + ',');
+        OutputLines.Add('  "message": "Successfully duplicated layout for ' + IntToStr(MovedCount) + ' components."');
+        OutputLines.Add('}');
+        
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+    end;
+end;
+
 // Function to get all PCB rules
 function GetPCBRules: String;
 Var
@@ -928,6 +1146,7 @@ var
     i, XOffset, YOffset, ValueStart: Integer;
     DesignatorsList: TStringList;
     PCBAvailable: Boolean;
+    SourceList, DestList: TStringList;
 begin
     Result := '';
 
@@ -1065,6 +1284,83 @@ begin
         end;
 
         DesignatorsList.Free;
+    end
+    else if CommandName = 'layout_duplicator' then
+    begin
+        // Make sure a PCB is available
+        PCBAvailable := EnsurePCBDocumentFocused;
+        if not PCBAvailable then
+        begin
+            Result := 'ERROR: No PCB document found or could not be focused';
+            Exit;
+        end;
+        
+        // Get source and destination component data
+        Result := GetLayoutDuplicatorComponents(True);
+    end
+    else if CommandName = 'layout_duplicator_apply' then
+    begin
+        // For this command, we need to extract the source and destination lists
+        SourceList := TStringList.Create;
+        DestList := TStringList.Create;
+        
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for source designators array
+            if (Pos('"source_designators"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+                
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // Extract the designator value
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        SourceList.Add(ParamValue);
+                    
+                    i := i + 1;
+                end;
+            end
+            // Look for destination designators array
+            else if (Pos('"destination_designators"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+                
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // Extract the designator value
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DestList.Add(ParamValue);
+                    
+                    i := i + 1;
+                end;
+            end
+        end;
+        
+        if (SourceList.Count > 0) and (DestList.Count > 0) then
+        begin
+            Result := ApplyLayoutDuplicator(SourceList, DestList);
+        end
+        else
+        begin
+            ShowMessage('Error: Source or destination lists are empty');
+            Result := '{"success": false, "error": "Source or destination lists are empty"}';
+        end;
+
+        SourceList.Free;
+        DestList.Free;
     end
     else if CommandName = 'get_pcb_rules' then
     begin

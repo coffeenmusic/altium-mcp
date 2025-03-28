@@ -787,6 +787,83 @@ async def get_pcb_screenshot(ctx: Context) -> str:
         return json.dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
     
 @mcp.tool()
+async def layout_duplicator(ctx: Context) -> str:
+    """
+    First step of layout duplication. Selects source components and returns data to match with destination components.
+    
+    Returns:
+        str: JSON object with source and destination component data for matching
+    """
+    logger.info("Starting layout duplication - selection phase")
+    
+    # Execute the command in Altium to get component data
+    response = await altium_bridge.execute_command(
+        "layout_duplicator", 
+        {}
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error in layout duplication selection: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to start layout duplication: {error_msg}"})
+    
+    # Get the component data
+    components_data = response.get("result", {})
+    
+    if not components_data:
+        logger.info("No component data found")
+        return json.dumps({"success": False, "error": "No component data returned from Altium"})
+    
+    # Parse the result to check if no source components were selected
+    try:
+        if isinstance(components_data, str):
+            result_json = json.loads(components_data)
+            if not result_json.get("success", True):
+                logger.info(f"Source component selection issue: {result_json.get('message', 'Unknown issue')}")
+                return json.dumps(result_json)
+    except Exception as e:
+        logger.error(f"Error parsing layout duplicator result: {e}")
+    
+    logger.info(f"Retrieved layout duplicator component data")
+    return json.dumps(components_data, indent=2)
+
+@mcp.tool()
+async def layout_duplicator_apply(ctx: Context, source_designators: list, destination_designators: list) -> str:
+    """
+    Second step of layout duplication. Applies the layout of source components to destination components.
+    
+    Args:
+        source_designators (list): List of source component designators (e.g., ["R1", "C5", "U3"])
+        destination_designators (list): List of destination component designators (e.g., ["R10", "C15", "U7"])
+    
+    Returns:
+        str: JSON object with the result of the layout duplication
+    """
+    logger.info(f"Applying layout duplication from {source_designators} to {destination_designators}")
+    
+    # Execute the command in Altium to apply layout duplication
+    response = await altium_bridge.execute_command(
+        "layout_duplicator_apply",
+        {
+            "source_designators": source_designators,
+            "destination_designators": destination_designators
+        }
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error applying layout duplication: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to apply layout duplication: {error_msg}"})
+    
+    # Get the result data
+    result = response.get("result", {})
+    
+    logger.info(f"Layout duplication applied successfully")
+    return json.dumps(result, indent=2)
+    
+@mcp.tool()
 async def get_pcb_rules(ctx: Context) -> str:
     """
     Get all design rules from the current Altium PCB

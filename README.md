@@ -6,15 +6,17 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 Note: Having Claude place components on the PCB currently fails hard.
 
 ## Example commands
+- Duplicate layout for my selected PCB components. (Will prompt user to now select destination components)
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
 - Place the selected parts on my pcb with best practices for a switching regulator. Note: It tries, but does terrible placement. Hopefully I can find a way to improve this.
 - Give me a list of all IC designators in my design
+- Get me all length matching rules
 
 ## Setup
-Currently only tested on Windows
+Currently only tested on Windows & the Altium scripts have hard coded `C:\AltiumMCP` paths for now. That's probably a good TODO item.
 
-1. Ensure the AltiumMCP directory is located at `C:\AltiumMCP`
+1. Ensure the AltiumMCP directory is located at `C:\AltiumMCP\`
 2. The Altium script files should be located in `C:\AltiumMCP\AltiumScript\`
 3. Install uv
 
@@ -80,6 +82,9 @@ The server provides several tools to interact with Altium Designer:
 - `get_component_property_values`: Get the values of a specific property for all components
 - `get_component_data`: Get detailed data for specific components by designator
 - `get_component_pins`: Get pin information for specified components
+- `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
+- `layout_duplicator`: Starts layout duplication assuming you have already selected the source components on the PCB.
+- `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
 ### Schematic Information
 - `get_schematic_data`: Get schematic data for specified components
@@ -111,6 +116,7 @@ The server communicates with Altium Designer using a scripting bridge:
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
+- Add rotation to move function
 - log response time of each tool
 - Add go to schematic sheet
 - Show layers: IPCB_Board.VisibleLayers
