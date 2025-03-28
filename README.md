@@ -6,7 +6,7 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 Note: Having Claude place components on the PCB currently fails hard.
 
 ## Example commands
-- Duplicate layout for my selected PCB components. (Will prompt user to now select destination components)
+- Duplicate layout for my selected PCB components. (Will prompt user to now select destination components. Only supports component placement)
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
 - Place the selected parts on my pcb with best practices for a switching regulator. Note: It tries, but does terrible placement. Hopefully I can find a way to improve this.
@@ -54,9 +54,9 @@ Below is specific to Windows, TODO: find out how to run on both without a hard c
 
 ### Using with Claude
 
-Once the config file has been set on Claude, and the addon is running on Blender, you will see a hammer icon with tools for the Blender MCP.
+Once the config file has been set on Claude, and the addon is running on Altium, you will see a hammer icon with tools for the Altium MCP.
 
-![BlenderMCP in the sidebar](assets/hammer-icon.png)
+![AltiumMCP in the sidebar](assets/hammer-icon.png)
 
 ## Configuration
 
