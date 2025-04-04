@@ -378,6 +378,109 @@ async def get_component_property_values(ctx: Context, property_name: str) -> str
     except Exception as e:
         logger.error(f"Error processing component data: {e}")
         return json.dumps({"error": f"Failed to process component data: {str(e)}"})
+    
+@mcp.tool()
+async def get_symbol_placement_rules(ctx: Context) -> str:
+    """
+    Get schematic symbol placement rules from a local configuration file
+    
+    Returns:
+        str: JSON object with rules for placing pins on schematic symbols
+    """
+    logger.info("Getting symbol placement rules")
+    
+    # Define the rules file path in the MCP directory
+    rules_file_path = MCP_DIR / "symbol_placement_rules.txt"
+    
+    # Check if the rules file exists
+    if not rules_file_path.exists():
+        logger.info("Symbol placement rules file not found, suggesting creation")
+        
+        # Default rules content
+        default_rules = (
+            "Only place pins on the left and right side of the symbol. "
+            "Place power rail pins at the upper right, ground pins in the bottom left, "
+            "no connect pins in the bottom right, inputs on the left, outputs on the right, "
+            "and try to group other pins together by similar functionality (for example, SPI, I2C, RGMII, etc.). "
+            "Always separate groups by 100mil gaps unless there is extra spacing, then space out groups equal distance from each other. "
+        )
+        
+        # Create a helpful message for the user
+        message = {
+            "success": False,
+            "error": f"Rules file not found at: {rules_file_path}",
+            "message": f"Let the user know that they can optionally update the file {rules_file_path} with custom symbol placement rules. "
+                      f"Suggested content: {default_rules}"
+        }
+        
+        return json.dumps(message, indent=2)
+    
+    # Read the rules file if it exists
+    try:
+        with open(rules_file_path, "r") as f:
+            rules_content = f.read()
+        
+        logger.info("Successfully read symbol placement rules file")
+        
+        # Return the rules with a message about how to modify them
+        result = {
+            "success": True,
+            "message": f"Modify {rules_file_path} with custom symbol placement instructions",
+            "rules": rules_content
+        }
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error reading symbol placement rules file: {e}")
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to read rules file: {str(e)}"
+        }, indent=2)
+    
+@mcp.tool()
+async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list) -> str:
+    """
+    Before executing, run get_symbol_placement_rules first.
+    Create a new schematic symbol in the current library with the specified pins
+    Instructions: pins should be grouped together via function and only placed on 
+                  the left and right side in 100 mil increments
+    
+    Args:
+        symbol_name (str): Name of the symbol to create
+        description (str): Description of the schematic symbol
+        pins (list): List of pin data in format ["pin_number|pin_name|pin_type|pin_orientation|x|y", ...]
+                    Pin types: eElectricHiZ, eElectricInput, eElectricIO, eElectricOpenCollector,
+                               eElectricOpenEmitter, eElectricOutput, eElectricPassive, eElectricPower
+                    Pin orientations: eRotate0 (right), eRotate90 (down), eRotate180 (left), eRotate270 (up)
+                    X,Y coordinates in mils
+    
+    Returns:
+        str: JSON object with the result of the component creation
+    """
+    logger.info(f"Creating schematic symbol: {symbol_name} with {len(pins)} pins")
+    
+    # Execute the command in Altium to create a symbol with pins
+    response = await altium_bridge.execute_command(
+        "create_schematic_symbol",
+        {
+            "symbol_name": symbol_name,
+            "description": description,
+            "pins": pins
+        }
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error creating symbol: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to create symbol: {error_msg}"})
+    
+    # Get the result data
+    result = response.get("result", {})
+    
+    logger.info(f"Symbol {symbol_name} created successfully with {len(pins)} pins")
+    return json.dumps(result, indent=2)
 
 @mcp.tool()
 async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:

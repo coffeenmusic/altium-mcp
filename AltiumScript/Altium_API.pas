@@ -10,18 +10,19 @@ var
     RequestData : TStringList;
     ResponseData : TStringList;
     Params : TStringList;
+    
 
-// Utility function to ensure PCB document is open and focused
-function EnsurePCBDocumentFocused: Boolean;
+// Function to ensure a specific type of document is focused
+function EnsureDocumentFocused(DocumentKind: String): Boolean;
 var
     I           : Integer;
     Project     : IProject;
     Doc         : IDocument;
-    Board       : IPCB_Board;
-    PCBFound    : Boolean;
+    DocFound    : Boolean;
+    CurrentDoc  : IServerDocument;
 begin
     Result := False;
-    PCBFound := False;
+    DocFound := False;
 
     // Retrieve the current project
     Project := GetWorkspace.DM_FocusedProject;
@@ -31,35 +32,57 @@ begin
         Exit;
     end;
 
-    // Check if a PCB document is already focused
-    Board := PCBServer.GetCurrentPCBBoard;
-    If Board <> Nil Then
+    // Check if the correct document type is already focused
+    if DocumentKind = 'PCB' then
     begin
-        Result := True;
-        Exit;
+        if PCBServer.GetCurrentPCBBoard <> Nil then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end
+    else if DocumentKind = 'SCHLIB' then
+    begin
+        CurrentDoc := SchServer.GetCurrentSchDocument;
+        if (CurrentDoc <> Nil) and (CurrentDoc.ObjectID = eSchLib) then
+        begin
+            Result := True;
+            Exit;
+        end;
     end;
 
-    // Try to find and focus a PCB document
+    // Try to find and focus the required document type
     For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
     Begin
         Doc := Project.DM_LogicalDocuments(I);
-        If Doc.DM_DocumentKind = 'PCB' Then
+        If Doc.DM_DocumentKind = DocumentKind Then
         Begin
-            PCBFound := True;
-            // Open and focus the PCB document
+            DocFound := True;
+            // Open and focus the document
             Doc.DM_OpenAndFocusDocument;
 
-            // Verify that the PCB is now focused
-            Board := PCBServer.GetCurrentPCBBoard;
-            If Board <> Nil Then
+            // Verify that the document is now focused
+            if DocumentKind = 'PCB' then
             begin
-                Result := True;
-                Exit;
+                if PCBServer.GetCurrentPCBBoard <> Nil then
+                begin
+                    Result := True;
+                    Exit;
+                end;
+            end
+            else if DocumentKind = 'SCHLIB' then
+            begin
+                CurrentDoc := SchServer.GetCurrentSchDocument;
+                if (CurrentDoc <> Nil) and (CurrentDoc.ObjectID = eSchLib) then
+                begin
+                    Result := True;
+                    Exit;
+                end;
             end;
         End;
     End;
 
-    // No PCB document found or couldn't be focused
+    // No matching document found or couldn't be focused
     Result := False;
 end;
 
@@ -724,8 +747,6 @@ begin
 
     // Reset selection for destination components
     Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
-    // Prompt user to select destination components
-    ShowMessage('Please select the destination components and then click OK.');
 
     // Create a new list for destination components
     SourceCmps.Clear;
@@ -995,6 +1016,255 @@ begin
     end;
 end;
 
+function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList): String;
+var
+    CurrentLib       : ISch_Lib;
+    SchComponent     : ISch_Component;
+    SchPin           : ISch_Pin;
+    R                : ISch_Rectangle;
+    I, PinCount      : Integer;
+    PinData          : TStringList;
+    PinName, PinNum  : String;
+    PinType          : String;
+    PinOrient        : String;
+    PinX, PinY       : Integer;
+    PinElec          : TPinElectrical;
+    PinOrientation   : TRotationBy90;
+    MinX, MaxX, MinY, MaxY : Integer;
+    CenterX, CenterY : Integer;
+    Padding          : Integer;
+    ResultStr        : String;
+    Description      : String;
+
+    // Helper function to convert string to pin electrical type
+    function StrToPinElectricalType(ElecType: String): TPinElectrical;
+    begin
+        if ElecType = 'eElectricHiZ' then
+            Result := eElectricHiZ
+        else if ElecType = 'eElectricInput' then
+            Result := eElectricInput
+        else if ElecType = 'eElectricIO' then
+            Result := eElectricIO
+        else if ElecType = 'eElectricOpenCollector' then
+            Result := eElectricOpenCollector
+        else if ElecType = 'eElectricOpenEmitter' then
+            Result := eElectricOpenEmitter
+        else if ElecType = 'eElectricOutput' then
+            Result := eElectricOutput
+        else if ElecType = 'eElectricPassive' then
+            Result := eElectricPassive
+        else if ElecType = 'eElectricPower' then
+            Result := eElectricPower
+        else
+            Result := eElectricPassive; // Default
+    end;
+
+    // Helper function to convert string to pin orientation
+    function StrToPinOrientation(Orient: String): TRotationBy90;
+    begin
+        if Orient = 'eRotate0' then
+            Result := eRotate0
+        else if Orient = 'eRotate90' then
+            Result := eRotate90
+        else if Orient = 'eRotate180' then
+            Result := eRotate180
+        else if Orient = 'eRotate270' then
+            Result := eRotate270
+        else
+            Result := eRotate0; // Default
+    end;
+begin
+    ResultStr := '';
+
+    if SchServer = Nil Then
+    begin
+        ResultStr := 'ERROR: SchServer is nil';
+        Exit;
+    end;
+
+    CurrentLib := SchServer.GetCurrentSchDocument;
+    if CurrentLib = Nil Then
+    begin
+        ResultStr := 'ERROR: No current schematic document';
+        Exit;
+    end;
+
+    // Check if the document is a Schematic Library document
+    if CurrentLib.ObjectID <> eSchLib Then
+    begin
+        ResultStr := 'ERROR: Please open a schematic library document';
+        Exit;
+    end;
+
+    Description := 'New Component';  // Default description
+
+    // Parse the pins list for description
+    for I := 0 to PinsList.Count - 1 do
+    begin
+        if Pos('Description=', PinsList[I]) = 1 then
+        begin
+            Description := Copy(PinsList[I], 13, Length(PinsList[I]) - 12);
+            Break;
+        end;
+    end;
+
+    // Create a library component (a page of the library is created)
+    SchComponent := SchServer.SchObjectFactory(eSchComponent, eCreate_Default);
+    if SchComponent = Nil Then
+    begin
+        ResultStr := 'ERROR: Failed to create component';
+        Exit;
+    end;
+
+    // Set up parameters for the library component
+    SchComponent.CurrentPartID := 1;
+    SchComponent.DisplayMode := 0;
+
+    // Define the LibReference and component description
+    SchComponent.LibReference := SymbolName;
+    SchComponent.ComponentDescription := Description;
+    SchComponent.Designator.Text := 'U';
+
+    // First pass - collect pin data for sizing the rectangle
+    MinX := 9999; MaxX := -9999; MinY := 9999; MaxY := -9999;
+    PinCount := 0;
+
+    for I := 0 to PinsList.Count - 1 do
+    begin
+        // Skip if this is the description line
+        if Pos('Description=', PinsList[I]) = 1 then Continue;
+
+        // Parse the pin data
+        PinData := TStringList.Create;
+        PinData.Delimiter := '|';
+        PinData.DelimitedText := PinsList[I];
+
+        if PinData.Count >= 6 then
+        begin
+            // Get pin coordinates and orientation
+            PinX := StrToInt(PinData[4]);
+            PinY := StrToInt(PinData[5]);
+            PinOrient := PinData[3];
+
+            // Track overall min/max for all pins
+            MinX := Min(MinX, PinX);
+            MaxX := Max(MaxX, PinX);
+            MinY := Min(MinY, PinY);
+            MaxY := Max(MaxY, PinY);
+
+            PinCount := PinCount + 1;
+        end;
+
+        PinData.Free;
+    end;
+
+    // Set rectangle to cover all pins with padding
+    if PinCount > 0 then
+    begin
+        // Set rectangle at origin (0,0) with width and height based on pin positions
+        MinX := 0;  // Always start at 0,0
+        MinY := 0;
+
+        // Right edge should be the maximum X of all pins (typically right-side pins)
+        MaxX := MaxX;
+
+        // Top edge should be the maximum Y of all pins plus padding
+        MaxY := MaxY + 100;  // Add 100 mils to the highest pin
+    end
+    else
+    begin
+        // Default rectangle if no pins
+        MinX := 0;
+        MinY := 0;
+        MaxX := 1000;
+        MaxY := 1000;
+    end;
+
+    // Create a rectangle for the component body
+    R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
+    if R = Nil Then
+    begin
+        ResultStr := 'ERROR: Failed to create rectangle';
+        Exit;
+    end;
+
+    // Define the rectangle parameters using determined boundaries
+    R.LineWidth := eSmall;
+    R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY));
+    R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY));
+    R.AreaColor := $00B0FFFF; // Yellow (BGR format)
+    R.Color := $00FF0000;     // Blue (BGR format)
+    R.IsSolid := True;
+    R.OwnerPartId := SchComponent.CurrentPartID;
+    R.OwnerPartDisplayMode := SchComponent.DisplayMode;
+
+    // Add the rectangle to the component
+    SchComponent.AddSchObject(R);
+
+    // Second pass - add pins to the component
+    for I := 0 to PinsList.Count - 1 do
+    begin
+        // Skip if this is the description line
+        if Pos('Description=', PinsList[I]) = 1 then Continue;
+
+        // Parse the pin data
+        PinData := TStringList.Create;
+        PinData.Delimiter := '|';
+        PinData.DelimitedText := PinsList[I];
+
+        if PinData.Count >= 6 then
+        begin
+            PinNum := PinData[0];
+            PinName := PinData[1];
+            PinType := PinData[2];
+            PinOrient := PinData[3];
+            PinX := StrToInt(PinData[4]);
+            PinY := StrToInt(PinData[5]);
+
+            // Create a pin
+            SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
+            if SchPin = Nil Then
+            begin
+                PinData.Free;
+                Continue;
+            end;
+
+            // Set pin properties
+            PinElec := StrToPinElectricalType(PinType);
+            PinOrientation := StrToPinOrientation(PinOrient);
+
+            SchPin.Designator := PinNum;
+            SchPin.Name := PinName;
+            SchPin.Electrical := PinElec;
+            SchPin.Orientation := PinOrientation;
+            SchPin.Location := Point(MilsToCoord(PinX), MilsToCoord(PinY));
+
+            // Set ownership
+            SchPin.OwnerPartId := SchComponent.CurrentPartID;
+            SchPin.OwnerPartDisplayMode := SchComponent.DisplayMode;
+
+            // Add the pin to the component
+            SchComponent.AddSchObject(SchPin);
+        end;
+
+        PinData.Free;
+    end;
+
+    // Add the component to the library
+    CurrentLib.AddSchComponent(SchComponent);
+
+    // Send a system notification that a new component has been added to the library
+    SchServer.RobotManager.SendMessage(nil, c_BroadCast, SCHM_PrimitiveRegistration, SchComponent.I_ObjectAddress);
+    CurrentLib.CurrentSchComponent := SchComponent;
+
+    // Refresh library
+    CurrentLib.GraphicallyInvalidate;
+
+    // Return success
+    ResultStr := '{"success": true, "component_name": "' + SymbolName + '", "pins_count": ' + IntToStr(PinCount) + '}';
+    Result := ResultStr;
+end;
+
 // Function to get all schematic component data
 function GetSchematicData: String;
 var
@@ -1094,6 +1364,9 @@ begin
                     OutputLines.Add('    "schematic_width": ' + width + ',');
                     OutputLines.Add('    "schematic_height": ' + height + ',');
                     OutputLines.Add('    "schematic_rotation": ' + rotation + ',');
+                    //OutputLines.Add('    "library": "' + StringReplace(Component.DatabaseLibraryName, '\', '\\', REPLACEALL) + '",');
+                    //OutputLines.Add('    "library_identifier": "' + StringReplace(Component.LibraryIdentifier, '\', '\\', REPLACEALL) + '",');
+                    //OutputLines.Add('    "library_reference": "' + StringReplace(Component.LibReference, '\', '\\', REPLACEALL) + '",');
 
                     // Get parameters
                     OutputLines.Add('    "parameters": {');
@@ -1282,20 +1555,31 @@ var
     i, XOffset, YOffset, ValueStart: Integer;
     DesignatorsList: TStringList;
     PCBAvailable: Boolean;
-    SourceList, DestList: TStringList;
+    SourceList, DestList, PinsList: TStringList;
+    ComponentName: String;
 begin
     Result := '';
 
     // For PCB-related commands, ensure PCB is available first
     if (CommandName = 'get_component_pins') or
        (CommandName = 'get_all_component_data') or
-       (CommandName = 'get_selected_components_coordinates') then
+       (CommandName = 'get_selected_components_coordinates') or
+       (CommandName = 'layout_duplicator') or
+       (CommandName = 'get_pcb_rules') then
     begin
-        PCBAvailable := EnsurePCBDocumentFocused;
-        if not PCBAvailable then
+        if not EnsureDocumentFocused('PCB') then
         begin
             // Early exit with error
             Result := 'ERROR: No PCB document found. Tell the user to open a PCB document in their project. Dont try any more tools until the user responds.';
+            Exit;
+        end;
+    end
+    else if (CommandName = 'create_schematic_symbol') then
+    begin
+        if not EnsureDocumentFocused('SCHLIB') then
+        begin
+            // Early exit with error
+            Result := 'ERROR: No schematic library document found. Tell the user to open a schematic library document in their project. Dont try any more tools until the user responds.';
             Exit;
         end;
     end;
@@ -1350,6 +1634,64 @@ begin
     begin
         // This command doesn't require any parameters
         Result := GetAllComponentData(False);
+    end
+    else if CommandName = 'create_schematic_symbol' then
+    begin
+        // Look for component name
+        ComponentName := '';
+        PinsList := TStringList.Create;
+        
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for component name
+            if (Pos('"symbol_name"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ComponentName := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ComponentName := TrimJSON(ComponentName);
+            end
+            // Look for pins array
+            else if (Pos('"pins"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+                
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // Extract the pin data
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        PinsList.Add(ParamValue);
+                    
+                    i := i + 1;
+                end;
+            end
+            // Look for description
+            else if (Pos('"description"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                PinsList.Add('Description=' + ParamValue);
+            end;
+        end;
+        
+        if ComponentName <> '' then
+        begin
+            Result := CreateSchematicSymbol(ComponentName, PinsList);
+        end
+        else
+        begin
+            ShowMessage('Error: No component name provided');
+            Result := '';
+        end;
+
+        PinsList.Free;
     end
     else if CommandName = 'get_schematic_data' then
     begin
@@ -1422,15 +1764,7 @@ begin
         DesignatorsList.Free;
     end
     else if CommandName = 'layout_duplicator' then
-    begin
-        // Make sure a PCB is available
-        PCBAvailable := EnsurePCBDocumentFocused;
-        if not PCBAvailable then
-        begin
-            Result := 'ERROR: No PCB document found or could not be focused';
-            Exit;
-        end;
-        
+    begin        
         // Get source and destination component data
         Result := GetLayoutDuplicatorComponents(True);
     end
@@ -1499,15 +1833,7 @@ begin
         DestList.Free;
     end
     else if CommandName = 'get_pcb_rules' then
-    begin
-        // Make sure a PCB is available
-        PCBAvailable := EnsurePCBDocumentFocused;
-        if not PCBAvailable then
-        begin
-            Result := 'ERROR: No PCB document found or could not be focused';
-            Exit;
-        end;
-        
+    begin        
         // Get all PCB rules
         Result := GetPCBRules;
     end
@@ -1605,6 +1931,7 @@ var
     Line: String;
     ValueStart: Integer;
 begin
+    
     // Make sure the directory exists
     if not DirectoryExists('C:\AltiumMCP') then
         CreateDir('C:\AltiumMCP');

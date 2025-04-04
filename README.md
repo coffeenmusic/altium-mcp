@@ -6,6 +6,7 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 Note: Having Claude place components on the PCB currently fails hard.
 
 ## Example commands
+- Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `C:\AltiumMCP\symbol_placement_rules.txt` description as pin placement rules. Please modify for your own preferences.)
 - Duplicate layout for my selected PCB components. (Will prompt user to now select destination components. Only supports component placement)
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
@@ -20,9 +21,6 @@ Currently only tested on Windows & the Altium scripts have hard coded `C:\Altium
 2. The Altium script files should be located in `C:\AltiumMCP\AltiumScript\`
 3. Install uv
 
-```bash
-brew install uv
-```
 **On Windows**
 ```bash
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 
@@ -33,6 +31,7 @@ set Path=C:\Users\nntra\.local\bin;%Path%
 ```
 
 ### Claude for Desktop Integration
+Enable Developer Mode under Claude > Help > Enable Developer Mode
 
 Go to Claude > Settings > Developer > Edit Config > claude_desktop_config.json to include the following:
 Below is specific to Windows, TODO: find out how to run on both without a hard coded path
@@ -53,6 +52,7 @@ Below is specific to Windows, TODO: find out how to run on both without a hard c
 ```
 
 ### Using with Claude
+Restart Cluade: Right click on the Claude icon in the System Tray > Quit. Then re-open Claude desktop. 
 
 Once the config file has been set on Claude, and the addon is running on Altium, you will see a hammer icon with tools for the Altium MCP.
 
@@ -82,17 +82,19 @@ The server provides several tools to interact with Altium Designer:
 - `get_component_property_values`: Get the values of a specific property for all components
 - `get_component_data`: Get detailed data for specific components by designator
 - `get_component_pins`: Get pin information for specified components
-- `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
-- `layout_duplicator`: Starts layout duplication assuming you have already selected the source components on the PCB.
-- `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
-### Schematic Information
+### Schematic/Symbol
 - `get_schematic_data`: Get schematic data for specified components
+- `get_symbol_placement_rules`: Reads `C:\AltiumMCP\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
+- `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
 
 ### Layout Operations
+- `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
 - `get_pcb_screenshot`: Take a screenshot of the Altium PCB window
+- `layout_duplicator`: Starts layout duplication assuming you have already selected the source components on the PCB.
+- `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
 ### Server Status
 - `get_server_status`: Check the status of the MCP server, including paths to Altium and script files
@@ -111,11 +113,14 @@ The server communicates with Altium Designer using a scripting bridge:
 ## References
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
 - Claude: I vibe coded most of this with Claude 3.7
+- Claude is not familiar with DelphiScript, so many of the Altium provided example scripts were used as reference.
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
+- Add get schematic & pcb library path for footprint. 
+- Add get symbol from library
 - Add rotation to move function
 - log response time of each tool
 - Add go to schematic sheet

@@ -1,0 +1,3 @@
+Only place pins on the left and right side of the symbol. Do not combine or overlap pins. In order of most important to least: ground pins in the bottom left (analog, digital, power, any ground pins), no connect pins in the bottom right, place power rail pins at the upper right, inputs on the left, outputs on the right and for sw regulators vin on the left. Try to group other pins together by similar functionality (for example, SPI, I2C, RGMII, etc.).
+Always separate groups by 100mil gaps unless there is extra spacing, then space out groups equal distance from each other.
+Left side and Bottom denote lower values of x & y. Before generating the symbol provide an explanation for why you chose each pins position.
