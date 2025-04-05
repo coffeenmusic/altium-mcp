@@ -87,6 +87,9 @@ The server provides several tools to interact with Altium Designer:
 - `layout_duplicator`: Starts layout duplication assuming you have already selected the source components on the PCB.
 - `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
+The cool thing about layout duplication this way as opposed to with Altium's built in layout replication, is that the exact components don't have to match because the LLM can look through the descriptions and understand which components match and which don't have a match. That's something that can't really be hard coded.
+![Placement Duplicator](assets/placement_duplicator.gif)
+
 ### Server Status
 - `get_server_status`: Check the status of the MCP server, including paths to Altium and script files
 
