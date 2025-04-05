@@ -249,8 +249,8 @@ begin
     Component.GroupIterator_Destroy(GrpIter);
 end;
 
-// Function to move components by X and Y offsets
-function MoveComponentsByDesignators(DesignatorsList: TStringList; XOffset, YOffset: TCoord): String;
+// Function to move components by X and Y offsets and set rotation
+function MoveComponentsByDesignators(DesignatorsList: TStringList; XOffset, YOffset: TCoord; Rotation: TAngle): String;
 var
     Board       : IPCB_Board;
     Component   : IPCB_Component;
@@ -294,6 +294,10 @@ begin
                 
                 // Move the component by the specified offsets
                 Component.MoveByXY(XOffset, YOffset);
+                
+                // Set rotation if specified (non-zero)
+                if Rotation <> 0 then
+                    Component.Rotation := Rotation;
                 
                 // End modify
                 PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
@@ -1552,7 +1556,7 @@ end;
 function ExecuteCommand(CommandName: String): String;
 var
     ParamValue: String;
-    i, XOffset, YOffset, ValueStart: Integer;
+    i, XOffset, YOffset, Rotation, ValueStart: Integer;
     DesignatorsList: TStringList;
     PCBAvailable: Boolean;
     SourceList, DestList, PinsList: TStringList;
@@ -1709,6 +1713,7 @@ begin
         DesignatorsList := TStringList.Create;
         XOffset := 0;
         YOffset := 0;
+        Rotation := 0;  // Default rotation is 0 (no change)
         
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
@@ -1748,12 +1753,20 @@ begin
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
                 YOffset := MilsToCoord(StrToFloat(ParamValue));
+            end
+            // Look for rotation
+            else if (Pos('"rotation"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                Rotation := StrToFloat(ParamValue);
             end;
         end;
         
         if DesignatorsList.Count > 0 then
         begin
-            Result := MoveComponentsByDesignators(DesignatorsList, XOffset, YOffset);
+            Result := MoveComponentsByDesignators(DesignatorsList, XOffset, YOffset, Rotation);
         end
         else
         begin

@@ -115,7 +115,6 @@ This is a third-party integration and not made by Altium. Made by [coffeenmusic]
 # TODO:
 - Add get schematic & pcb library path for footprint. 
 - Add get symbol from library
-- Add rotation to move function
 - log response time of each tool
 - Add go to schematic sheet
 - Show layers: IPCB_Board.VisibleLayers
