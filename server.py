@@ -17,6 +17,8 @@ import win32api
 from PIL import Image
 import io
 import base64
+import glob
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -62,22 +64,38 @@ class AltiumConfig:
             self._create_default_config()
     
     def _create_default_config(self):
-        """Create a default configuration file"""
-        # Try to find Altium executable in common locations
-        altium_paths = [
-            r"C:\Program Files\Altium\AD19\X2.EXE",
-            r"C:\Program Files\Altium\AD20\X2.EXE",
-            r"C:\Program Files\Altium\AD21\X2.EXE",
-            r"C:\Program Files\Altium\AD22\X2.EXE",
-            r"C:\Program Files\Altium\AD23\X2.EXE",
-            r"C:\Program Files\Altium\AD24\X2.EXE",
-        ]
+        """Create a default configuration file with improved Altium executable discovery"""
         
-        for path in altium_paths:
-            if os.path.exists(path):
-                self.altium_exe_path = path
-                break
+        # Try to find Altium directories dynamically
+        altium_base_path = r"C:\Program Files\Altium"
+        altium_exe_path = None
         
+        if os.path.exists(altium_base_path):
+            # Find all directories that match the pattern AD*
+            ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
+            
+            if ad_dirs:
+                # Sort directories by version number (extract the number after "AD")
+                def get_version_number(dir_path):
+                    match = re.search(r"AD(\d+)", os.path.basename(dir_path))
+                    if match:
+                        return int(match.group(1))
+                    return 0
+                
+                # Sort directories by version number (highest first)
+                ad_dirs.sort(key=get_version_number, reverse=True)
+                
+                # Try each directory until we find one with X2.EXE
+                for ad_dir in ad_dirs:
+                    potential_exe = os.path.join(ad_dir, "X2.EXE")
+                    if os.path.exists(potential_exe):
+                        altium_exe_path = potential_exe
+                        break
+        
+        # Set the found path (or empty string if nothing found)
+        self.altium_exe_path = altium_exe_path if altium_exe_path else ""
+        
+        # Save the configuration
         self.save_config()
     
     def save_config(self):
@@ -96,33 +114,81 @@ class AltiumConfig:
     
     def verify_paths(self):
         """Verify that the paths in the configuration exist, prompt for input if they don't"""
-        # Only initialize tkinter root if needed
+
+        # Initialize variables
         root = None
+        paths_verified = True
         
         # Check Altium executable
         if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
-            if root is None:
-                root = tk.Tk()
-                root.withdraw()  # Hide the main window
+            paths_verified = False
             
-            print("Altium executable not found. Please select the Altium X2.EXE file...")
-            self.altium_exe_path = filedialog.askopenfilename(
-                title="Select Altium Executable",
-                filetypes=[("Executable files", "*.exe")],  # Only allow .exe files
-                initialdir="C:/Program Files/Altium"
-            )
+            # Before prompting, try an automatic discovery
+            altium_base_path = r"C:\Program Files\Altium"
+            if os.path.exists(altium_base_path):
+                logger.info(f"Attempting automatic discovery in {altium_base_path}")
+                # Find all directories that match the pattern AD*
+                ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
+                
+                if ad_dirs:
+                    # Sort directories by version number (extract the number after "AD")
+                    def get_version_number(dir_path):
+                        match = re.search(r"AD(\d+)", os.path.basename(dir_path))
+                        if match:
+                            return int(match.group(1))
+                        return 0
+                    
+                    # Sort directories by version number (highest first)
+                    ad_dirs.sort(key=get_version_number, reverse=True)
+                    
+                    # Try each directory until we find one with X2.EXE
+                    for ad_dir in ad_dirs:
+                        potential_exe = os.path.join(ad_dir, "X2.EXE")
+                        if os.path.exists(potential_exe):
+                            self.altium_exe_path = potential_exe
+                            logger.info(f"Automatically found Altium at: {self.altium_exe_path}")
+                            print(f"Automatically found Altium at: {self.altium_exe_path}")
+                            paths_verified = True
+                            break
             
-            if not self.altium_exe_path:
-                logger.error("No Altium executable selected. Some functionality may not work.")
-                print("Warning: No Altium executable selected. Automatic script execution will be disabled.")
+            # If automatic discovery failed, prompt for input
+            if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
+                if root is None:
+                    import tkinter as tk
+                    from tkinter import filedialog
+                    root = tk.Tk()
+                    root.withdraw()  # Hide the main window
+                
+                logger.info("Altium executable not found. Prompting user for selection...")
+                print(f"Altium executable not found. Searched in:")
+                print(f"  - Automatically scanned C:\\Program Files\\Altium\\AD*\\X2.EXE")
+                print(f"  - Last known path: {self.altium_exe_path}")
+                print("Please select the Altium X2.EXE file...")
+                
+                self.altium_exe_path = filedialog.askopenfilename(
+                    title="Select Altium Executable",
+                    filetypes=[("Executable files", "*.exe")],  # Only allow .exe files
+                    initialdir="C:/Program Files/Altium"
+                )
+                
+                if not self.altium_exe_path:
+                    logger.error("No Altium executable selected. Some functionality may not work.")
+                    print("Warning: No Altium executable selected. Automatic script execution will be disabled.")
+                    paths_verified = False
         
         # Check script path
         if not os.path.exists(self.script_path):
+            paths_verified = False
+            
             if root is None:
+                import tkinter as tk
+                from tkinter import filedialog
                 root = tk.Tk()
                 root.withdraw()  # Hide the main window
             
+            logger.info(f"Script file not found at {self.script_path}. Prompting user for selection...")
             print(f"Script file not found at {self.script_path}. Please select the Altium project file...")
+            
             selected_path = filedialog.askopenfilename(
                 title="Select Altium Project File",
                 filetypes=[("Altium Project files", "*.PrjScr")],  # Changed to PrjScr for script project
@@ -134,6 +200,7 @@ class AltiumConfig:
             else:
                 logger.error("No script file selected. Some functionality may not work.")
                 print("Warning: No script file selected. Please make sure to create one.")
+                paths_verified = False
         
         # Clean up tkinter root if created
         if root is not None:
@@ -142,7 +209,7 @@ class AltiumConfig:
         # Save the updated configuration
         self.save_config()
         
-        return os.path.exists(self.altium_exe_path) and os.path.exists(self.script_path)
+        return paths_verified
 
 class AltiumBridge:
     def __init__(self):

@@ -17,9 +17,8 @@ Note: Having Claude place components on the PCB currently fails hard.
 ## Setup
 Currently only tested on Windows & the Altium scripts have hard coded `C:\AltiumMCP` paths for now. That's probably a good TODO item.
 
-1. Ensure the AltiumMCP directory is located at `C:\AltiumMCP\`
-2. The Altium script files should be located in `C:\AltiumMCP\AltiumScript\`
-3. Install uv
+1. Clone the repo to `C:\` so you end up with a `C:\AltiumMCP\` directory
+2. Install uv
 
 **On Windows**
 ```bash
@@ -29,6 +28,8 @@ and then
 ```bash
 set Path=C:\Users\nntra\.local\bin;%Path%
 ```
+
+3. Open cmd in `C:\AltiumMCP\` directory and run `uv sync` to add packages from pyproject.toml file. 
 
 ### Claude for Desktop Integration
 Enable Developer Mode under Claude > Help > Enable Developer Mode
@@ -52,7 +53,7 @@ Below is specific to Windows, TODO: find out how to run on both without a hard c
 ```
 
 ### Using with Claude
-Restart Cluade: Right click on the Claude icon in the System Tray > Quit. Then re-open Claude desktop. 
+Restart Claude: Right click on the Claude icon in the System Tray > Quit. Then re-open Claude desktop. 
 
 Once the config file has been set on Claude, and the addon is running on Altium, you will see a hammer icon with tools for the Altium MCP.
 
@@ -60,17 +61,7 @@ Once the config file has been set on Claude, and the addon is running on Altium,
 
 ## Configuration
 
-The server will automatically try to locate your Altium Designer installation. If it cannot find it, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server.
-
-The server checks common installation paths:
-- C:\Program Files\Altium\AD19\X2.EXE
-- C:\Program Files\Altium\AD20\X2.EXE
-- C:\Program Files\Altium\AD21\X2.EXE
-- C:\Program Files\Altium\AD22\X2.EXE
-- C:\Program Files\Altium\AD23\X2.EXE
-- C:\Program Files\Altium\AD24\X2.EXE
-
-If your Altium Designer is installed in a different location, you can select it manually when prompted.
+When launching claude for the first time, the server will automatically try to locate your Altium Designer installation. It will search for all directories that start with `C:\Program Files\Altium\AD*` and use the one with the largets revision number. If it cannot find any, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server. Altium's DelphiScript scripting is used to create an API between the mcp server and Altium. It expects to find this script project in `C:\AltiumMCP\AltiumScript\`.
 
 ## Available Tools
 
