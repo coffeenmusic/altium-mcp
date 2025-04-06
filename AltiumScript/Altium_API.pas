@@ -592,6 +592,53 @@ begin
     end;
 end;
 
+// Function to duplicate selected objects of a specific type
+function DuplicateSelectedObjects(Board: IPCB_Board; ObjectSet: TSet): TObjectList;
+var
+    Iterator       : IPCB_BoardIterator;
+    OrigObj, NewObj : IPCB_Primitive;
+    DuplicatedObjects : TObjectList;
+begin
+    // Create object list to store duplicated objects
+    DuplicatedObjects := CreateObject(TObjectList);
+    DuplicatedObjects.OwnsObjects := False; // Don't destroy objects when list is freed
+    
+    // Create iterator for the specified object type
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(ObjectSet);
+    Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+
+    PCBServer.PreProcess;
+    
+    OrigObj := Iterator.FirstPCBObject;
+    while (OrigObj <> Nil) do
+    begin
+        if OrigObj.Selected then
+        begin
+            // Replicate the object
+            NewObj := OrigObj.Replicate;
+            
+            // Add to board
+            Board.AddPCBObject(NewObj);
+            
+            // Send board registration message
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, NewObj.I_ObjectAddress);
+            
+            // Add to our list of duplicated objects
+            DuplicatedObjects.Add(NewObj);
+        end;
+        
+        OrigObj := Iterator.NextPCBObject;
+    end;
+    
+    Board.BoardIterator_Destroy(Iterator);
+
+    PCBServer.PostProcess;
+    
+    Result := DuplicatedObjects;
+end;
+
 // Function to get source and destination component lists with pin data
 function GetLayoutDuplicatorComponents(SelectedOnly: Boolean = True): String;
 var
@@ -603,10 +650,13 @@ var
     GrpIter        : IPCB_GroupIterator;
     Pad            : IPCB_Pad;
     i, j           : Integer;
-    SelectedSourceCount : Integer;
     PinCount       : Integer;
     NetName        : String;
     xorigin, yorigin : Integer;
+    
+    // For duplicated objects
+    DuplicatedObjects : TObjectList;
+    Obj               : IPCB_Primitive;
 begin
     Result := '';
 
@@ -625,7 +675,6 @@ begin
     // Get the selected components (source components)
     SourceCmps := TStringList.Create;
     SourceCmps.Duplicates := dupIgnore; // Avoid duplicate entries
-    SelectedSourceCount := 0;
 
     // Get selected components as source
     Iterator := Board.BoardIterator_Create;
@@ -639,7 +688,6 @@ begin
         If Component.Selected = True Then
         Begin
             SourceCmps.Add(Component.Name.Text);
-            SelectedSourceCount := SelectedSourceCount + 1;
         End;
 
         Component := Iterator.NextPCBObject;
@@ -647,7 +695,7 @@ begin
     Board.BoardIterator_Destroy(Iterator);
 
     // Check if any source components were selected
-    if SelectedSourceCount = 0 then
+    if SourceCmps.Count = 0 then
     begin
         OutputLines.Clear; // Clear to start fresh
         OutputLines.Add('{');
@@ -660,7 +708,10 @@ begin
         SourceCmps.Free;
         Exit;
     end;
-
+    
+    // Duplicate all object types in one call
+    DuplicatedObjects := DuplicateSelectedObjects(Board, MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
+    
     // If source components were found, continue with JSON creation
     OutputLines.Add('  "success": true,');
     OutputLines.Add('  "source_components": [');
@@ -863,14 +914,23 @@ begin
 
     OutputLines.Add('  ],');
 
+    // Now select all duplicated objects so they'll move with destination components
+    for i := 0 to DuplicatedObjects.Count - 1 do
+    begin
+        Obj := DuplicatedObjects[i];
+        if Obj <> nil then
+            Obj.Selected := True;
+    end;
+
     // Add message
-    OutputLines.Add('  "message": "Match each source and destination designator using the part descriptions, pin data, and other information. Then call layout_duplicator_apply and pass the source and destination lists in matching order."');
+    OutputLines.Add('  "message": "Successfully duplicated objects. Match each source and destination designator using the part descriptions, pin data, and other information. Then call layout_duplicator_apply and pass the source and destination lists in matching order."');
 
     OutputLines.Add('}');
 
     // Return the JSON string directly
     Result := OutputLines.Text;
 
+    // Clean up
     OutputLines.Free;
     SourceCmps.Free;
 end;

@@ -7,7 +7,7 @@ Note: Having Claude place components on the PCB currently fails hard.
 
 ## Example commands
 - Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `C:\AltiumMCP\symbol_placement_rules.txt` description as pin placement rules. Please modify for your own preferences.)
-- Duplicate layout for my selected PCB components. (Will prompt user to now select destination components. Only supports component placement)
+- Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region)
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
 - Place the selected parts on my pcb with best practices for a switching regulator. Note: It tries, but does terrible placement. Hopefully I can find a way to improve this.
@@ -108,6 +108,7 @@ The server communicates with Altium Designer using a scripting bridge:
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
 - Claude: I vibe coded most of this with Claude 3.7
 - Claude is not familiar with DelphiScript, so many of the Altium provided example scripts were used as reference.
+- Used CopyDesignatorsToMechLayerPair script by Petar Perisin and Randy Clemmons for reference on how to .Replicate objects (used in layout duplicator)
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
