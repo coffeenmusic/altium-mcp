@@ -33,7 +33,7 @@ begin
     end;
 
     // Check if the correct document type is already focused
-    if DocumentKind = 'PCB' and (PCBServer <> Nil) then
+    if (DocumentKind = 'PCB') and (PCBServer <> Nil) then
     begin
         if PCBServer.GetCurrentPCBBoard <> Nil then
         begin
@@ -97,6 +97,8 @@ begin
       Result := Result + S[I];
 end;
 
+// JSON utility functions for Altium MCP Bridge
+
 function TrimJSON(InputStr: String): String;
 begin
   // Remove quotes and commas
@@ -106,8 +108,6 @@ begin
   // Trim whitespace
   Result := Trim(Result);
 end;
-
-// JSON helper functions for Altium scripts
 
 // Helper function to escape JSON strings
 function JSONEscapeString(const S: String): String;
@@ -120,50 +120,257 @@ begin
 end;
 
 // Function to create a JSON name-value pair
-function JSONPair(const Name, Value: String; IsString: Boolean): String;
+function JSONPairStr(const Name, Value: String; IsString: Boolean): String;
 begin
     if IsString then
-        Result := '"' + Name + '": "' + JSONEscapeString(Value) + '"'
+        Result := '"' + JSONEscapeString(Name) + '": "' + JSONEscapeString(Value) + '"'
     else
-        Result := '"' + Name + '": ' + Value;
+        Result := '"' + JSONEscapeString(Name) + '": ' + Value;
 end;
 
 // Function to build a JSON object from a list of pairs
-function JSONObject(const Pairs: TStringList): String;
+function BuildJSONObject(Pairs: TStringList; IndentLevel: Integer = 0): String;
 var
     i: Integer;
+    Output: TStringList;
+    Indent, ChildIndent: String;
 begin
-    Result := '{';
-    for i := 0 to Pairs.Count - 1 do
-    begin
-        Result := Result + Pairs[i];
-        if i < Pairs.Count - 1 then
-            Result := Result + ', ';
+    // Create indent strings based on level
+    Indent := StringOfChar(' ', IndentLevel * 2);
+    ChildIndent := StringOfChar(' ', (IndentLevel + 1) * 2);
+    
+    Output := TStringList.Create;
+    try
+        Output.Add(Indent + '{');
+        
+        for i := 0 to Pairs.Count - 1 do
+        begin
+            if i < Pairs.Count - 1 then
+                Output.Add(ChildIndent + Pairs[i] + ',')
+            else
+                Output.Add(ChildIndent + Pairs[i]);
+        end;
+        
+        Output.Add(Indent + '}');
+        
+        Result := Output.Text;
+    finally
+        Output.Free;
     end;
-    Result := Result + '}';
 end;
 
-// Function to create a basic JSON object with key-value pairs
-function CreateJSONObject(const Names, Values: TStringList; AreStrings: TStringList): String;
+// Function to build a JSON array from a list of items
+function BuildJSONArray(Items: TStringList; ArrayName: String = ''; IndentLevel: Integer = 0): String;
 var
     i: Integer;
-    Pairs: TStringList;
+    Output: TStringList;
+    Indent, ChildIndent: String;
 begin
-    Pairs := TStringList.Create;
+    // Create indent strings based on level
+    Indent := StringOfChar(' ', IndentLevel * 2);
+    ChildIndent := StringOfChar(' ', (IndentLevel + 1) * 2);
+    
+    Output := TStringList.Create;
     try
-        for i := 0 to Names.Count - 1 do
+        if ArrayName <> '' then
+            Output.Add(Indent + '"' + JSONEscapeString(ArrayName) + '": [')
+        else
+            Output.Add(Indent + '[');
+        
+        for i := 0 to Items.Count - 1 do
         begin
-            if i < Values.Count then
-            begin
-                if i < AreStrings.Count then
-                    Pairs.Add(JSONPair(Names[i], Values[i], StrToBool(AreStrings[i])))
-                else
-                    Pairs.Add(JSONPair(Names[i], Values[i], True)); // Default to string
+            if i < Items.Count - 1 then
+                Output.Add(ChildIndent + Items[i] + ',')
+            else
+                Output.Add(ChildIndent + Items[i]);
+        end;
+        
+        Output.Add(Indent + ']');
+        
+        Result := Output.Text;
+    finally
+        Output.Free;
+    end;
+end;
+
+// Function to write JSON to a file and return as string
+function WriteJSONToFile(JSON: TStringList; FileName: String = ''): String;
+var
+    TempFile: String;
+begin
+    // Use provided filename or generate temp filename
+    if FileName = '' then
+        TempFile := 'C:\AltiumMCP\temp_json_output.json'
+    else
+        TempFile := FileName;
+    
+    try
+        // Save to file
+        JSON.SaveToFile(TempFile);
+        
+        // Load back the complete JSON data
+        JSON.Clear;
+        JSON.LoadFromFile(TempFile);
+        Result := JSON.Text;
+        
+        // Clean up temporary file if auto-generated
+        if (FileName = '') and FileExists(TempFile) then
+            DeleteFile(TempFile);
+    except
+        Result := '{"error": "Failed to write JSON to file"}';
+    end;
+end;
+
+// Helper function to add a simple property to a JSON object
+procedure AddJSONProperty(List: TStringList; Name: String; Value: String; IsString: Boolean = True);
+begin
+    List.Add(JSONPairStr(Name, Value, IsString));
+end;
+
+// Helper to add a numeric property
+procedure AddJSONNumber(List: TStringList; Name: String; Value: Double);
+begin
+    List.Add(JSONPairStr(Name, FloatToStr(Value), False));
+end;
+
+// Helper to add an integer property
+procedure AddJSONInteger(List: TStringList; Name: String; Value: Integer);
+begin
+    List.Add(JSONPairStr(Name, IntToStr(Value), False));
+end;
+
+// Helper to add a boolean property
+procedure AddJSONBoolean(List: TStringList; Name: String; Value: Boolean);
+begin
+    if Value then
+        List.Add(JSONPairStr(Name, 'true', False))
+    else
+        List.Add(JSONPairStr(Name, 'false', False));
+end;
+
+function ComponentToJSON(Component: IPCB_Component, Board: IPCB_Board, IncludePins: Boolean = False): String;
+var
+    ComponentProps: TStringList;
+    PinsArray: TStringList;
+    PinProps: TStringList;
+    GrpIter: IPCB_GroupIterator;
+    Pad: IPCB_Pad;
+    xorigin, yorigin: Integer;
+    Rect: TCoordRect;
+    NetName: String;
+    PinCount, PinsProcessed: Integer;
+    OutputLines: TStringList;
+begin
+    // Get board origin coordinates
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
+    
+    // Create props list for component
+    ComponentProps := TStringList.Create;
+    
+    try
+        // Get component bounds
+        Rect := Component.BoundingRectangleNoNameComment;
+        
+        // Add component properties
+        AddJSONProperty(ComponentProps, 'designator', Component.Name.Text);
+        AddJSONProperty(ComponentProps, 'name', Component.Identifier);
+        AddJSONProperty(ComponentProps, 'description', Component.SourceDescription);
+        AddJSONProperty(ComponentProps, 'footprint', Component.Pattern);
+        AddJSONProperty(ComponentProps, 'layer', Layer2String(Component.Layer));
+        AddJSONNumber(ComponentProps, 'x', CoordToMils(Component.x - xorigin));
+        AddJSONNumber(ComponentProps, 'y', CoordToMils(Component.y - yorigin));
+        AddJSONNumber(ComponentProps, 'width', CoordToMils(Rect.Right - Rect.Left));
+        AddJSONNumber(ComponentProps, 'height', CoordToMils(Rect.Bottom - Rect.Top));
+        AddJSONNumber(ComponentProps, 'rotation', Component.Rotation);
+        
+        // Add pins array if requested
+        if IncludePins then
+        begin
+            // Create array for pins
+            PinsArray := TStringList.Create;
+            
+            try
+                // Create pad iterator
+                GrpIter := Component.GroupIterator_Create;
+                GrpIter.SetState_FilterAll;
+                GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                
+                // Count pins
+                PinCount := 0;
+                Pad := GrpIter.FirstPCBObject;
+                while (Pad <> Nil) do
+                begin
+                    if Pad.InComponent then
+                        PinCount := PinCount + 1;
+                    Pad := GrpIter.NextPCBObject;
+                end;
+                
+                // Reset iterator
+                Component.GroupIterator_Destroy(GrpIter);
+                GrpIter := Component.GroupIterator_Create;
+                GrpIter.SetState_FilterAll;
+                GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                
+                // Process each pad
+                PinsProcessed := 0;
+                Pad := GrpIter.FirstPCBObject;
+                while (Pad <> Nil) do
+                begin
+                    if Pad.InComponent then
+                    begin
+                        // Get net name if connected
+                        if (Pad.Net <> Nil) then
+                            NetName := Pad.Net.Name
+                        else
+                            NetName := '';
+                            
+                        // Create pin properties
+                        PinProps := TStringList.Create;
+                        try
+                            AddJSONProperty(PinProps, 'name', Pad.Name);
+                            AddJSONProperty(PinProps, 'net', NetName);
+                            AddJSONNumber(PinProps, 'x', CoordToMils(Pad.x - xorigin));
+                            AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
+                            AddJSONNumber(PinProps, 'rotation', Pad.Rotation);
+                            AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
+                            AddJSONNumber(PinProps, 'width', CoordToMils(Pad.XSizeOnLayer[Pad.Layer]));
+                            AddJSONNumber(PinProps, 'height', CoordToMils(Pad.YSizeOnLayer[Pad.Layer]));
+                            AddJSONProperty(PinProps, 'shape', ShapeToString(Pad.ShapeOnLayer[Pad.Layer]));
+                            
+                            // Add to pins array
+                            PinsArray.Add(BuildJSONObject(PinProps, 3));
+                            
+                            // Increment counter
+                            PinsProcessed := PinsProcessed + 1;
+                        finally
+                            PinProps.Free;
+                        end;
+                    end;
+                    
+                    Pad := GrpIter.NextPCBObject;
+                end;
+                
+                // Clean up iterator
+                Component.GroupIterator_Destroy(GrpIter);
+                
+                // Add pins array to component
+                ComponentProps.Add(BuildJSONArray(PinsArray, 'pins', 1));
+            finally
+                PinsArray.Free;
             end;
         end;
-        Result := JSONObject(Pairs);
+        
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ComponentProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
     finally
-        Pairs.Free;
+        ComponentProps.Free;
     end;
 end;
 
@@ -290,28 +497,27 @@ end;
 // Function to move components by X and Y offsets and set rotation
 function MoveComponentsByDesignators(DesignatorsList: TStringList; XOffset, YOffset: TCoord; Rotation: TAngle): String;
 var
-    Board       : IPCB_Board;
-    Component   : IPCB_Component;
-    OutputLines : TStringList;
-    Designator  : String;
-    i           : Integer;
-    MovedCount  : Integer;
-    MissingDesignators : TStringList;
+    Board          : IPCB_Board;
+    Component      : IPCB_Component;
+    ResultProps    : TStringList;
+    MissingArray   : TStringList;
+    Designator     : String;
+    i              : Integer;
+    MovedCount     : Integer;
+    OutputLines    : TStringList;
 begin
-    Result := '';
-    MovedCount := 0;
-    
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-    if Board = nil then
+    if (Board = nil) then
     begin
         Result := 'ERROR: No PCB document is currently active';
         Exit;
     end;
     
-    // Create output stringlist for the result
-    OutputLines := TStringList.Create;
-    MissingDesignators := TStringList.Create;
+    // Create output properties
+    ResultProps := TStringList.Create;
+    MissingArray := TStringList.Create;
+    MovedCount := 0;
     
     try
         // Start transaction
@@ -325,7 +531,7 @@ begin
             // Use direct function to get component by designator
             Component := Board.GetPcbComponentByRefDes(Designator);
             
-            if Component <> Nil then
+            if (Component <> Nil) then
             begin
                 // Begin modify
                 PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
@@ -334,7 +540,7 @@ begin
                 Component.MoveByXY(XOffset, YOffset);
                 
                 // Set rotation if specified (non-zero)
-                if Rotation <> 0 then
+                if (Rotation <> 0) then
                     Component.Rotation := Rotation;
                 
                 // End modify
@@ -344,8 +550,8 @@ begin
             end
             else
             begin
-                // Keep track of components that weren't found
-                MissingDesignators.Add(Designator);
+                // Add to missing designators list
+                MissingArray.Add('"' + JSONEscapeString(Designator) + '"');
             end;
         end;
         
@@ -356,34 +562,25 @@ begin
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
         
         // Create result JSON
-        OutputLines.Add('{');
-        OutputLines.Add('  "moved_count": ' + IntToStr(MovedCount) + ',');
+        AddJSONInteger(ResultProps, 'moved_count', MovedCount);
         
-        // Add missing designators if any
-        if MissingDesignators.Count > 0 then
-        begin
-            OutputLines.Add('  "missing_designators": [');
-            for i := 0 to MissingDesignators.Count - 1 do
-            begin
-                if i < MissingDesignators.Count - 1 then
-                    OutputLines.Add('    "' + MissingDesignators[i] + '",')
-                else
-                    OutputLines.Add('    "' + MissingDesignators[i] + '"');
-            end;
-            OutputLines.Add('  ]');
-        end
+        // Add missing designators array
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'missing_designators'))
         else
-        begin
-            OutputLines.Add('  "missing_designators": []');
+            ResultProps.Add('"missing_designators": []');
+        
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
         end;
-        
-        OutputLines.Add('}');
-        
-        // Create final result
-        Result := OutputLines.Text;
     finally
-        OutputLines.Free;
-        MissingDesignators.Free;
+        ResultProps.Free;
+        MissingArray.Free;
     end;
 end;
 
@@ -393,239 +590,157 @@ var
     Board       : IPCB_Board;
     Iterator    : IPCB_BoardIterator;
     Component   : IPCB_Component;
-    TempFile    : String;
+    ComponentsArray : TStringList;
+    ComponentProps : TStringList;
     Rect        : TCoordRect;
     xorigin, yorigin : Integer;
-    OutputLines : TStringList;
-    Designator, Name, Footprint, Layer, Description : String;
-    x, y, width, height, rotation : String;
-    i : Integer;
+    i           : Integer;
     ComponentCount : Integer;
+    OutputLines : TStringList;
 begin
-    Result := '';
-
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-
+    if (Board = nil) then
+    begin
+        Result := '[]';
+        Exit;
+    end;
+    
     // Get board origin coordinates
     xorigin := Board.XOrigin;
     yorigin := Board.YOrigin;
 
-    // Create output stringlist
-    OutputLines := TStringList.Create;
-    OutputLines.Add('['); // Start JSON array
+    // Create array for components
+    ComponentsArray := TStringList.Create;
+    
+    try
+        // Create an iterator to find all components
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
 
-    // Create an iterator to find all components
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
-    Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
-
-    // Count components (selected only if SelectedOnly is true)
-    ComponentCount := 0;
-    Component := Iterator.FirstPCBObject;
-    while Component <> Nil do
-    begin
-        if (not SelectedOnly) or (SelectedOnly and Component.Selected) then
-            ComponentCount := ComponentCount + 1;
-        Component := Iterator.NextPCBObject;
-    end;
-
-    // Reset iterator
-    Board.BoardIterator_Destroy(Iterator);
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
-    Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
-
-    // If no components match the selection criteria, return empty array
-    if ComponentCount = 0 then
-    begin
-        OutputLines.Add(']');
-        Result := OutputLines.Text;
-        OutputLines.Free;
-        Board.BoardIterator_Destroy(Iterator);
-        Exit;
-    end;
-
-    // Iterate through components and collect data
-    i := 0;
-    Component := Iterator.FirstPCBObject;
-    while Component <> Nil do
-    begin
-        // Process either all components or only selected ones
-        if (not SelectedOnly) or (SelectedOnly and Component.Selected) then
+        // Process each component
+        Component := Iterator.FirstPCBObject;
+        while (Component <> Nil) do
         begin
-            // Get basic component properties
-            Designator := Component.Name.Text;
-            Name := Component.Identifier;
-            Description := Component.SourceDescription;
-            Footprint := Component.Pattern;
-            Layer := Layer2String(Component.Layer);
-
-            // Get position and dimensions
-            Rect := Component.BoundingRectangleNoNameComment;
-            x := FloatToStr(CoordToMils(Component.x - xorigin));
-            y := FloatToStr(CoordToMils(Component.y - yorigin));
-            width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
-            height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
-            rotation := FloatToStr(Component.Rotation);
-
-            // Build component JSON
-            OutputLines.Add('  {');
-            OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
-            OutputLines.Add('    "name": "' + StringReplace(Name, '"', '\"', REPLACEALL) + '",');
-            OutputLines.Add('    "description": "' + StringReplace(Description, '"', '\"', REPLACEALL) + '",');
-            OutputLines.Add('    "footprint": "' + StringReplace(Footprint, '"', '\"', REPLACEALL) + '",');
-            OutputLines.Add('    "layer": "' + StringReplace(Layer, '"', '\"', REPLACEALL) + '",');
-            OutputLines.Add('    "x": ' + x + ',');
-            OutputLines.Add('    "y": ' + y + ',');
-            OutputLines.Add('    "width": ' + width + ',');
-            OutputLines.Add('    "height": ' + height + ',');
-            OutputLines.Add('    "rotation": ' + rotation);
-
-            // Add comma if not the last component
-            i := i + 1;
-            if i < ComponentCount then
-                OutputLines.Add('  },')
-            else
-                OutputLines.Add('  }');
+            // Process either all components or only selected ones
+            if ((not SelectedOnly) or (SelectedOnly and Component.Selected)) then
+            begin
+                // Create component properties
+                ComponentProps := TStringList.Create;
+                try
+                    // Get bounds
+                    Rect := Component.BoundingRectangleNoNameComment;
+                    
+                    // Add properties
+                    AddJSONProperty(ComponentProps, 'designator', Component.Name.Text);
+                    AddJSONProperty(ComponentProps, 'name', Component.Identifier);
+                    AddJSONProperty(ComponentProps, 'description', Component.SourceDescription);
+                    AddJSONProperty(ComponentProps, 'footprint', Component.Pattern);
+                    AddJSONProperty(ComponentProps, 'layer', Layer2String(Component.Layer));
+                    AddJSONNumber(ComponentProps, 'x', CoordToMils(Component.x - xorigin));
+                    AddJSONNumber(ComponentProps, 'y', CoordToMils(Component.y - yorigin));
+                    AddJSONNumber(ComponentProps, 'width', CoordToMils(Rect.Right - Rect.Left));
+                    AddJSONNumber(ComponentProps, 'height', CoordToMils(Rect.Bottom - Rect.Top));
+                    AddJSONNumber(ComponentProps, 'rotation', Component.Rotation);
+                    
+                    // Add to components array
+                    ComponentsArray.Add(BuildJSONObject(ComponentProps, 1));
+                finally
+                    ComponentProps.Free;
+                end;
+            end;
+            
+            // Move to next component
+            Component := Iterator.NextPCBObject;
         end;
 
-        // Move to next component
-        Component := Iterator.NextPCBObject;
-    end;
-
-    // Clean up the iterator
-    Board.BoardIterator_Destroy(Iterator);
-
-    // Close JSON array
-    OutputLines.Add(']');
-
-    // Use a temporary file to build the JSON data
-    TempFile := 'C:\AltiumMCP\temp_component_data.json';
-
-    try
-        // Save to a temporary file
-        OutputLines.SaveToFile(TempFile);
-
-        // Load back the complete JSON data
-        OutputLines.Clear;
-        OutputLines.LoadFromFile(TempFile);
-        Result := OutputLines.Text;
-
-        // Clean up the temporary file
-        if FileExists(TempFile) then
-            DeleteFile(TempFile);
+        // Clean up the iterator
+        Board.BoardIterator_Destroy(Iterator);
+        
+        // Build the final JSON array
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONArray(ComponentsArray);
+            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_component_data.json');
+        finally
+            OutputLines.Free;
+        end;
     finally
-        OutputLines.Free;
+        ComponentsArray.Free;
     end;
 end;
 
-// Function to get selected components with coordinates
+// Example refactored function using the new JSON utilities
 function GetSelectedComponentsCoordinates: String;
 var
     Board       : IPCB_Board;
     Component   : IPCB_Component;
-    TempFile    : String;
     Rect        : TCoordRect;
     xorigin, yorigin : Integer;
+    ComponentsArray : TStringList;
+    ComponentProps : TStringList;
     OutputLines : TStringList;
-    Designator  : String;
-    x, y, width, height, rotation : String;
-    i           : Integer;
-    SelectedCount, ComponentsProcessed : Integer;
+    i : Integer;
 begin
     Result := '';
 
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
+    if Board = nil then Exit;
 
     // Get board origin coordinates
     xorigin := Board.XOrigin;
     yorigin := Board.YOrigin;
 
-    // Create output stringlist
+    // Create output and components array
     OutputLines := TStringList.Create;
-    OutputLines.Add('['); // Start JSON array
-
-    // Count selected components that are actually component objects
-    SelectedCount := 0;
-    for i := 0 to Board.SelectecObjectCount - 1 do
-    begin
-        if Board.SelectecObject[i].ObjectId = eComponentObject then
-            SelectedCount := SelectedCount + 1;
-    end;
-
-    // If no components are selected, return empty array
-    if SelectedCount = 0 then
-    begin
-        OutputLines.Add(']');
-        Result := OutputLines.Text;
-        OutputLines.Free;
-        Exit;
-    end;
-
-    // Process each selected component
-    ComponentsProcessed := 0; // Use a separate counter variable
-    for i := 0 to Board.SelectecObjectCount - 1 do
-    begin
-        // Only process selected components
-        if Board.SelectecObject[i].ObjectId = eComponentObject then
-        begin
-            // Cast to component type
-            Component := Board.SelectecObject[i];
-            
-            // Get basic component properties
-            Designator := Component.Name.Text;
-
-            // Get position and dimensions
-            Rect := Component.BoundingRectangleNoNameComment;
-            x := FloatToStr(CoordToMils(Component.x - xorigin));
-            y := FloatToStr(CoordToMils(Component.y - yorigin));
-            width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
-            height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
-            rotation := FloatToStr(Component.Rotation);
-
-            // Build component JSON
-            OutputLines.Add('  {');
-            OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
-            OutputLines.Add('    "x": ' + x + ',');
-            OutputLines.Add('    "y": ' + y + ',');
-            OutputLines.Add('    "width": ' + width + ',');
-            OutputLines.Add('    "height": ' + height + ',');
-            OutputLines.Add('    "rotation": ' + rotation);
-
-            // Increment counter
-            ComponentsProcessed := ComponentsProcessed + 1;
-            
-            // Add comma if not the last selected component
-            if ComponentsProcessed < SelectedCount then
-                OutputLines.Add('  },')
-            else
-                OutputLines.Add('  }');
-        end;
-    end;
-
-    // Close JSON array
-    OutputLines.Add(']');
-
-    // Use a temporary file to build the JSON data
-    TempFile := 'C:\AltiumMCP\temp_selected_components.json';
-
+    ComponentsArray := TStringList.Create;
+    
     try
-        // Save to a temporary file
-        OutputLines.SaveToFile(TempFile);
-
-        // Load back the complete JSON data
-        OutputLines.Clear;
-        OutputLines.LoadFromFile(TempFile);
-        Result := OutputLines.Text;
-
-        // Clean up the temporary file
-        if FileExists(TempFile) then
-            DeleteFile(TempFile);
+        // Process each selected component
+        for i := 0 to Board.SelectecObjectCount - 1 do
+        begin
+            // Only process selected components
+            if Board.SelectecObject[i].ObjectId = eComponentObject then
+            begin
+                // Cast to component type
+                Component := Board.SelectecObject[i];
+                
+                // Get component bounds
+                Rect := Component.BoundingRectangleNoNameComment;
+                
+                // Create component properties
+                ComponentProps := TStringList.Create;
+                try
+                    // Add component properties
+                    AddJSONProperty(ComponentProps, 'designator', Component.Name.Text);
+                    AddJSONNumber(ComponentProps, 'x', CoordToMils(Component.x - xorigin));
+                    AddJSONNumber(ComponentProps, 'y', CoordToMils(Component.y - yorigin));
+                    AddJSONNumber(ComponentProps, 'width', CoordToMils(Rect.Right - Rect.Left));
+                    AddJSONNumber(ComponentProps, 'height', CoordToMils(Rect.Bottom - Rect.Top));
+                    AddJSONNumber(ComponentProps, 'rotation', Component.Rotation);
+                    
+                    // Add component JSON to array
+                    ComponentsArray.Add(BuildJSONObject(ComponentProps, 1));
+                finally
+                    ComponentProps.Free;
+                end;
+            end;
+        end;
+        
+        // If components found, build array
+        if ComponentsArray.Count > 0 then
+            Result := BuildJSONArray(ComponentsArray)
+        else
+            Result := '[]';
+            
+        // For consistency with existing code, write to file and read back
+        OutputLines.Text := Result;
+        Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_selected_components.json');
     finally
+        ComponentsArray.Free;
         OutputLines.Free;
     end;
 end;
@@ -683,294 +798,276 @@ var
     Board          : IPCB_Board;
     Iterator       : IPCB_BoardIterator;
     SourceCmps     : TStringList;
-    OutputLines    : TStringList;
+    ResultProps    : TStringList;
+    SourceArray    : TStringList;
+    DestArray      : TStringList;
     Component      : IPCB_Component;
+    CompProps      : TStringList;
+    PinsArray      : TStringList;
     GrpIter        : IPCB_GroupIterator;
     Pad            : IPCB_Pad;
     i, j           : Integer;
     PinCount       : Integer;
     NetName        : String;
     xorigin, yorigin : Integer;
+    PinProps       : TStringList;
+    OutputLines    : TStringList;
     
     // For duplicated objects
     DuplicatedObjects : TObjectList;
     Obj               : IPCB_Primitive;
 begin
-    Result := '';
-
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-    If Board = Nil Then Exit;
+    if (Board = Nil) then
+    begin
+        Result := '{"success": false, "message": "No PCB document is currently active"}';
+        Exit;
+    end;
 
     // Get board origin coordinates
     xorigin := Board.XOrigin;
     yorigin := Board.YOrigin;
 
-    // Create output stringlist
-    OutputLines := TStringList.Create;
-    OutputLines.Add('{');
-
-    // Get the selected components (source components)
+    // Create result properties
+    ResultProps := TStringList.Create;
     SourceCmps := TStringList.Create;
-    SourceCmps.Duplicates := dupIgnore; // Avoid duplicate entries
+    SourceArray := TStringList.Create;
+    
+    try
+        // Get selected components as source
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
+        Iterator.AddFilter_Method(eProcessAll);
 
-    // Get selected components as source
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
-    Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
-    Iterator.AddFilter_Method(eProcessAll);
+        Component := Iterator.FirstPCBObject;
+        while (Component <> Nil) do
+        begin
+            if (Component.Selected = True) then
+                SourceCmps.Add(Component.Name.Text);
 
-    Component := Iterator.FirstPCBObject;
-    While Component <> Nil Do
-    Begin
-        If Component.Selected = True Then
-        Begin
-            SourceCmps.Add(Component.Name.Text);
-        End;
+            Component := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
 
-        Component := Iterator.NextPCBObject;
-    End;
-    Board.BoardIterator_Destroy(Iterator);
+        // Check if any source components were selected
+        if (SourceCmps.Count = 0) then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'message', 'No source components selected. Please select source components first.');
+            
+            OutputLines := TStringList.Create;
+            try
+                OutputLines.Text := BuildJSONObject(ResultProps);
+                Result := OutputLines.Text;
+            finally
+                OutputLines.Free;
+            end;
+            
+            Exit;
+        end;
+        
+        // Duplicate all object types in one call
+        DuplicatedObjects := DuplicateSelectedObjects(Board, MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
+        
+        // Add source components to JSON
+        for i := 0 to SourceCmps.Count - 1 do
+        begin
+            Component := Board.GetPcbComponentByRefDes(SourceCmps[i]);
+            if (Component <> nil) then
+            begin
+                // Create component properties
+                CompProps := TStringList.Create;
+                PinsArray := TStringList.Create;
+                
+                try
+                    // Add component properties
+                    AddJSONProperty(CompProps, 'designator', Component.Name.Text);
+                    AddJSONProperty(CompProps, 'description', Component.SourceDescription);
+                    AddJSONProperty(CompProps, 'footprint', Component.Pattern);
+                    AddJSONNumber(CompProps, 'rotation', Component.Rotation);
+                    AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                    
+                    // Add pin data
+                    // Create pad iterator
+                    GrpIter := Component.GroupIterator_Create;
+                    GrpIter.SetState_FilterAll;
+                    GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
 
-    // Check if any source components were selected
-    if SourceCmps.Count = 0 then
-    begin
-        OutputLines.Clear; // Clear to start fresh
-        OutputLines.Add('{');
-        OutputLines.Add('  "success": false,');
-        OutputLines.Add('  "message": "No source components selected. Please select source components first."');
-        OutputLines.Add('}');
+                    // Process each pad
+                    Pad := GrpIter.FirstPCBObject;
+                    while (Pad <> Nil) do
+                    begin
+                        if Pad.InComponent then
+                        begin
+                            // Get net name if connected
+                            if (Pad.Net <> Nil) then
+                                NetName := JSONEscapeString(Pad.Net.Name)
+                            else
+                                NetName := '';
 
-        Result := OutputLines.Text;
-        OutputLines.Free;
+                            // Create pin properties
+                            PinProps := TStringList.Create;
+                            try
+                                AddJSONProperty(PinProps, 'name', Pad.Name);
+                                AddJSONProperty(PinProps, 'net', NetName);
+                                AddJSONNumber(PinProps, 'x', CoordToMils(Pad.x - xorigin));
+                                AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
+                                AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
+                                
+                                // Add to pins array
+                                PinsArray.Add(BuildJSONObject(PinProps, 3));
+                            finally
+                                PinProps.Free;
+                            end;
+                        end;
+                        
+                        Pad := GrpIter.NextPCBObject;
+                    end;
+
+                    // Clean up iterator
+                    Component.GroupIterator_Destroy(GrpIter);
+                    
+                    // Add pins array to component
+                    CompProps.Add(BuildJSONArray(PinsArray, 'pins', 1));
+                    
+                    // Add to source array
+                    SourceArray.Add(BuildJSONObject(CompProps, 2));
+                finally
+                    CompProps.Free;
+                    PinsArray.Free;
+                end;
+            end;
+        end;
+
+        // Reset selection for destination components
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        
+        // Have the user select destination components
+        Client.SendMessage('PCB:Select', 'Scope=InsideArea | ObjectKind=Component', 255, Client.CurrentView);
+        
+        // Get the newly selected components (destination)
+        SourceCmps.Clear();
+        DestArray := TStringList.Create();
+        
+        try
+            // Get newly selected components
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
+            Iterator.AddFilter_Method(eProcessAll);
+
+            Component := Iterator.FirstPCBObject;
+            while (Component <> Nil) do
+            begin
+                if (Component.Selected = True) then
+                    SourceCmps.Add(Component.Name.Text);
+
+                Component := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+            
+            // Add destination components to JSON
+            for i := 0 to SourceCmps.Count - 1 do
+            begin
+                Component := Board.GetPcbComponentByRefDes(SourceCmps[i]);
+                if (Component <> nil) then
+                begin
+                    // Create component properties
+                    CompProps := TStringList.Create;
+                    PinsArray := TStringList.Create;
+                    
+                    try
+                        // Add component properties
+                        AddJSONProperty(CompProps, 'designator', Component.Name.Text);
+                        AddJSONProperty(CompProps, 'description', Component.SourceDescription);
+                        AddJSONProperty(CompProps, 'footprint', Component.Pattern);
+                        AddJSONNumber(CompProps, 'rotation', Component.Rotation);
+                        AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                        
+                        // Add pin data
+                        // Create pad iterator
+                        GrpIter := Component.GroupIterator_Create;
+                        GrpIter.SetState_FilterAll;
+                        GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+
+                        // Process each pad
+                        Pad := GrpIter.FirstPCBObject;
+                        while (Pad <> Nil) do
+                        begin
+                            if Pad.InComponent then
+                            begin
+                                // Get net name if connected
+                                if (Pad.Net <> Nil) then
+                                    NetName := JSONEscapeString(Pad.Net.Name)
+                                else
+                                    NetName := '';
+
+                                // Create pin properties
+                                PinProps := TStringList.Create;
+                                try
+                                    AddJSONProperty(PinProps, 'name', Pad.Name);
+                                    AddJSONProperty(PinProps, 'net', NetName);
+                                    AddJSONNumber(PinProps, 'x', CoordToMils(Pad.x - xorigin));
+                                    AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
+                                    AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
+                                    
+                                    // Add to pins array
+                                    PinsArray.Add(BuildJSONObject(PinProps, 3));
+                                finally
+                                    PinProps.Free;
+                                end;
+                            end;
+                            
+                            Pad := GrpIter.NextPCBObject;
+                        end;
+
+                        // Clean up iterator
+                        Component.GroupIterator_Destroy(GrpIter);
+                        
+                        // Add pins array to component
+                        CompProps.Add(BuildJSONArray(PinsArray, 'pins', 1));
+                        
+                        // Add to destination array
+                        DestArray.Add(BuildJSONObject(CompProps, 2));
+                    finally
+                        CompProps.Free;
+                        PinsArray.Free;
+                    end;
+                end;
+            end;
+            
+            // Now select all duplicated objects
+            for i := 0 to DuplicatedObjects.Count - 1 do
+            begin
+                Obj := DuplicatedObjects[i];
+                if (Obj <> nil) then
+                    Obj.Selected := True;
+            end;
+            
+            // Add all arrays to result
+            AddJSONBoolean(ResultProps, 'success', True);
+            ResultProps.Add(BuildJSONArray(SourceArray, 'source_components'));
+            ResultProps.Add(BuildJSONArray(DestArray, 'destination_components'));
+            AddJSONProperty(ResultProps, 'message', 'Successfully duplicated objects. Match each source and destination designator using the part descriptions, pin data, and other information. Then call layout_duplicator_apply and pass the source and destination lists in matching order.');
+            
+            // Build final JSON
+            OutputLines := TStringList.Create;
+            try
+                OutputLines.Text := BuildJSONObject(ResultProps);
+                Result := OutputLines.Text;
+            finally
+                OutputLines.Free;
+            end;
+        finally
+            DestArray.Free;
+        end;
+    finally
+        ResultProps.Free;
         SourceCmps.Free;
-        Exit;
+        SourceArray.Free;
     end;
-    
-    // Duplicate all object types in one call
-    DuplicatedObjects := DuplicateSelectedObjects(Board, MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
-    
-    // If source components were found, continue with JSON creation
-    OutputLines.Add('  "success": true,');
-    OutputLines.Add('  "source_components": [');
-
-    // Add source components to JSON
-    for i := 0 to SourceCmps.Count - 1 do
-    begin
-        Component := Board.GetPcbComponentByRefDes(SourceCmps[i]);
-        if Component <> nil then
-        begin
-            OutputLines.Add('    {');
-            OutputLines.Add('      "designator": "' + JSONEscapeString(Component.Name.Text) + '",');
-            OutputLines.Add('      "description": "' + JSONEscapeString(Component.SourceDescription) + '",');
-            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '",');
-            OutputLines.Add('      "rotation": ' + FloatToStr(Component.Rotation) + ',');
-            OutputLines.Add('      "layer": "' + Layer2String(Component.Layer) + '",');
-
-            // Add pin data
-            OutputLines.Add('      "pins": [');
-
-            // Create pad iterator
-            GrpIter := Component.GroupIterator_Create;
-            GrpIter.SetState_FilterAll;
-            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
-
-            // Count pins first
-            PinCount := 0;
-            Pad := GrpIter.FirstPCBObject;
-            while Pad <> Nil do
-            begin
-                if Pad.InComponent then
-                    PinCount := PinCount + 1;
-                Pad := GrpIter.NextPCBObject;
-            end;
-
-            // Reset iterator
-            Component.GroupIterator_Destroy(GrpIter);
-            GrpIter := Component.GroupIterator_Create;
-            GrpIter.SetState_FilterAll;
-            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
-
-            // Process each pad
-            j := 0; // Counter for current pin
-            Pad := GrpIter.FirstPCBObject;
-            while Pad <> Nil do
-            begin
-                if Pad.InComponent then
-                begin
-                    // Get net name if connected
-                    if Pad.Net <> Nil then
-                        NetName := JSONEscapeString(Pad.Net.Name)
-                    else
-                        NetName := '';
-
-                    OutputLines.Add('        {');
-                    OutputLines.Add('          "name": "' + JSONEscapeString(Pad.Name) + '",');
-                    OutputLines.Add('          "net": "' + NetName + '",');
-                    OutputLines.Add('          "x": ' + FloatToStr(CoordToMils(Pad.x - xorigin)) + ',');
-                    OutputLines.Add('          "y": ' + FloatToStr(CoordToMils(Pad.y - yorigin)) + ',');
-                    OutputLines.Add('          "layer": "' + Layer2String(Pad.Layer) + '"');
-
-                    // Increment counter
-                    j := j + 1;
-
-                    // Add comma if not the last pin
-                    if j < PinCount then
-                        OutputLines.Add('        },')
-                    else
-                        OutputLines.Add('        }');
-                end;
-
-                Pad := GrpIter.NextPCBObject;
-            end;
-
-            // Clean up iterator
-            Component.GroupIterator_Destroy(GrpIter);
-
-            OutputLines.Add('      ]');
-
-            if i < SourceCmps.Count - 1 then
-                OutputLines.Add('    },')
-            else
-                OutputLines.Add('    }');
-        end;
-    end;
-
-    OutputLines.Add('  ],');
-
-    // Reset selection for destination components
-    Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
-
-    // Create a new list for destination components
-    SourceCmps.Clear;
-
-    // Have the user select destination components
-    Client.SendMessage('PCB:Select', 'Scope=InsideArea | ObjectKind=Component', 255, Client.CurrentView);
-
-    // Get the newly selected components (destination)
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
-    Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
-    Iterator.AddFilter_Method(eProcessAll);
-
-    Component := Iterator.FirstPCBObject;
-    While Component <> Nil Do
-    Begin
-        If Component.Selected = True Then
-        Begin
-            SourceCmps.Add(Component.Name.Text);
-        End;
-
-        Component := Iterator.NextPCBObject;
-    End;
-    Board.BoardIterator_Destroy(Iterator);
-
-    // Create destination components list
-    OutputLines.Add('  "destination_components": [');
-
-    // Add destination components to JSON
-    for i := 0 to SourceCmps.Count - 1 do
-    begin
-        Component := Board.GetPcbComponentByRefDes(SourceCmps[i]);
-        if Component <> nil then
-        begin
-            OutputLines.Add('    {');
-            OutputLines.Add('      "designator": "' + JSONEscapeString(Component.Name.Text) + '",');
-            OutputLines.Add('      "description": "' + JSONEscapeString(Component.SourceDescription) + '",');
-            OutputLines.Add('      "footprint": "' + JSONEscapeString(Component.Pattern) + '",');
-            OutputLines.Add('      "rotation": ' + FloatToStr(Component.Rotation) + ',');
-            OutputLines.Add('      "layer": "' + Layer2String(Component.Layer) + '",');
-
-            // Add pin data
-            OutputLines.Add('      "pins": [');
-
-            // Create pad iterator
-            GrpIter := Component.GroupIterator_Create;
-            GrpIter.SetState_FilterAll;
-            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
-
-            // Count pins first
-            PinCount := 0;
-            Pad := GrpIter.FirstPCBObject;
-            while Pad <> Nil do
-            begin
-                if Pad.InComponent then
-                    PinCount := PinCount + 1;
-                Pad := GrpIter.NextPCBObject;
-            end;
-
-            // Reset iterator
-            Component.GroupIterator_Destroy(GrpIter);
-            GrpIter := Component.GroupIterator_Create;
-            GrpIter.SetState_FilterAll;
-            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
-
-            // Process each pad
-            j := 0; // Counter for current pin
-            Pad := GrpIter.FirstPCBObject;
-            while Pad <> Nil do
-            begin
-                if Pad.InComponent then
-                begin
-                    // Get net name if connected
-                    if Pad.Net <> Nil then
-                        NetName := JSONEscapeString(Pad.Net.Name)
-                    else
-                        NetName := '';
-
-                    OutputLines.Add('        {');
-                    OutputLines.Add('          "name": "' + JSONEscapeString(Pad.Name) + '",');
-                    OutputLines.Add('          "net": "' + NetName + '",');
-                    OutputLines.Add('          "x": ' + FloatToStr(CoordToMils(Pad.x - xorigin)) + ',');
-                    OutputLines.Add('          "y": ' + FloatToStr(CoordToMils(Pad.y - yorigin)) + ',');
-                    OutputLines.Add('          "layer": "' + Layer2String(Pad.Layer) + '"');
-
-                    // Increment counter
-                    j := j + 1;
-
-                    // Add comma if not the last pin
-                    if j < PinCount then
-                        OutputLines.Add('        },')
-                    else
-                        OutputLines.Add('        }');
-                end;
-
-                Pad := GrpIter.NextPCBObject;
-            end;
-
-            // Clean up iterator
-            Component.GroupIterator_Destroy(GrpIter);
-
-            OutputLines.Add('      ]');
-
-            if i < SourceCmps.Count - 1 then
-                OutputLines.Add('    },')
-            else
-                OutputLines.Add('    }');
-        end;
-    end;
-
-    OutputLines.Add('  ],');
-
-    // Now select all duplicated objects so they'll move with destination components
-    for i := 0 to DuplicatedObjects.Count - 1 do
-    begin
-        Obj := DuplicatedObjects[i];
-        if Obj <> nil then
-            Obj.Selected := True;
-    end;
-
-    // Add message
-    OutputLines.Add('  "message": "Successfully duplicated objects. Match each source and destination designator using the part descriptions, pin data, and other information. Then call layout_duplicator_apply and pass the source and destination lists in matching order."');
-
-    OutputLines.Add('}');
-
-    // Return the JSON string directly
-    Result := OutputLines.Text;
-
-    // Clean up
-    OutputLines.Free;
-    SourceCmps.Free;
 end;
 
 // Function to apply layout duplication with provided source and destination lists
@@ -979,18 +1076,21 @@ var
     Board          : IPCB_Board;
     CmpSrc, CmpDst : IPCB_Component;
     NameSrc, NameDst : TPCB_String;
-    i, MatchCount  : Integer;
-    OutputLines    : TStringList;
+    i              : Integer;
+    ResultProps    : TStringList;
     MovedCount     : Integer;
+    OutputLines    : TStringList;
 begin
-    Result := '';
-    
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-    If Board = Nil Then Exit;
+    if (Board = Nil) then
+    begin
+        Result := '{"success": false, "error": "No PCB document is currently active"}';
+        Exit;
+    end;
     
-    // Create output stringlist
-    OutputLines := TStringList.Create;
+    // Create result properties
+    ResultProps := TStringList.Create;
     MovedCount := 0;
     
     try
@@ -998,7 +1098,7 @@ begin
         
         for i := 0 to SourceList.Count - 1 do
         begin
-            if i < DestList.Count then
+            if (i < DestList.Count) then
             begin
                 NameSrc := SourceList.Get(i);
                 CmpSrc := Board.GetPcbComponentByRefDes(NameSrc);
@@ -1006,7 +1106,7 @@ begin
                 NameDst := DestList.Get(i);
                 CmpDst := Board.GetPcbComponentByRefDes(NameDst);
                 
-                if (CmpSrc <> nil) and (CmpDst <> nil) then
+                if ((CmpSrc <> nil) and (CmpDst <> nil)) then
                 begin
                     PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
                     
@@ -1029,16 +1129,21 @@ begin
         // Update PCB document
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
         
-        // Add result to JSON
-        OutputLines.Add('{');
-        OutputLines.Add('  "success": true,');
-        OutputLines.Add('  "moved_count": ' + IntToStr(MovedCount) + ',');
-        OutputLines.Add('  "message": "Successfully duplicated layout for ' + IntToStr(MovedCount) + ' components."');
-        OutputLines.Add('}');
+        // Create result JSON
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'moved_count', MovedCount);
+        AddJSONProperty(ResultProps, 'message', 'Successfully duplicated layout for ' + IntToStr(MovedCount) + ' components.');
         
-        Result := OutputLines.Text;
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
     finally
-        OutputLines.Free;
+        ResultProps.Free;
     end;
 end;
 
@@ -1048,73 +1153,61 @@ Var
     Board         : IPCB_Board;
     Rule          : IPCB_Rule;
     BoardIterator : IPCB_BoardIterator;
-    TempFile      : String;
+    RulesArray    : TStringList;
+    RuleProps     : TStringList;
     OutputLines   : TStringList;
-    FirstRule     : Boolean;
 begin
-    Result := '';
-
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-    If Board = Nil Then Exit;
+    if (Board = Nil) then
+    begin
+        Result := '[]';
+        Exit;
+    end;
 
-    // Create output stringlist
-    OutputLines := TStringList.Create;
-    OutputLines.Add('['); // Start JSON array
-
-    // Retrieve the iterator
-    BoardIterator := Board.BoardIterator_Create;
-    BoardIterator.AddFilter_ObjectSet(MkSet(eRuleObject));
-    BoardIterator.AddFilter_LayerSet(AllLayers);
-    BoardIterator.AddFilter_Method(eProcessAll);
-
-    // Search for Rule and for each rule found
-    Rule := BoardIterator.FirstPCBObject;
-
-    // Flag to track if we've processed at least one rule
-    FirstRule := True;
-
-    While (Rule <> Nil) Do
-    Begin
-        // Add comma before each rule except the first one
-        if not FirstRule then
-            OutputLines.Add('  },')
-        else
-            FirstRule := False;
-
-        // Add rule object with descriptor
-        OutputLines.Add('  {');
-        OutputLines.Add('    "descriptor": "' + StringReplace(Rule.Descriptor, '"', '\"', REPLACEALL) + '"');
-
-        // Move to next rule
-        Rule := BoardIterator.NextPCBObject;
-    End;
-
-    // Close the last rule object and the JSON array
-    if not FirstRule then
-        OutputLines.Add('  }');
-    OutputLines.Add(']');
-
-    // Clean up the iterator
-    Board.BoardIterator_Destroy(BoardIterator);
-
-    // Use a temporary file to build the JSON data
-    TempFile := 'C:\AltiumMCP\temp_rules_data.json';
-
+    // Create array for rules
+    RulesArray := TStringList.Create;
+    
     try
-        // Save to a temporary file
-        OutputLines.SaveToFile(TempFile);
+        // Retrieve the iterator
+        BoardIterator := Board.BoardIterator_Create;
+        BoardIterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+        BoardIterator.AddFilter_LayerSet(AllLayers);
+        BoardIterator.AddFilter_Method(eProcessAll);
 
-        // Load back the complete JSON data
-        OutputLines.Clear;
-        OutputLines.LoadFromFile(TempFile);
-        Result := OutputLines.Text;
+        // Process each rule
+        Rule := BoardIterator.FirstPCBObject;
+        while (Rule <> Nil) do
+        begin
+            // Create rule properties
+            RuleProps := TStringList.Create;
+            try
+                // Add rule descriptor
+                AddJSONProperty(RuleProps, 'descriptor', Rule.Descriptor);
+                
+                // Add to rules array
+                RulesArray.Add(BuildJSONObject(RuleProps, 1));
+            finally
+                RuleProps.Free;
+            end;
+            
+            // Move to next rule
+            Rule := BoardIterator.NextPCBObject;
+        end;
 
-        // Clean up the temporary file
-        if FileExists(TempFile) then
-            DeleteFile(TempFile);
+        // Clean up the iterator
+        Board.BoardIterator_Destroy(BoardIterator);
+        
+        // Build the final JSON array
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONArray(RulesArray);
+            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_rules_data.json');
+        finally
+            OutputLines.Free;
+        end;
     finally
-        OutputLines.Free;
+        RulesArray.Free;
     end;
 end;
 
@@ -1135,17 +1228,15 @@ var
     MinX, MaxX, MinY, MaxY : Integer;
     CenterX, CenterY : Integer;
     Padding          : Integer;
-    ResultStr        : String;
+    ResultProps      : TStringList;
     Description      : String;
+    OutputLines      : TStringList;
 begin
-    ResultStr := '';
-
+    // Check if we have a schematic library document
     CurrentLib := SchServer.GetCurrentSchDocument;
-
-    // Check if the document is a Schematic Library document
-    if CurrentLib.ObjectID <> eSchLib Then
+    if (CurrentLib.ObjectID <> eSchLib) Then
     begin
-        ResultStr := 'ERROR: Please open a schematic library document';
+        Result := 'ERROR: Please open a schematic library document';
         Exit;
     end;
 
@@ -1154,7 +1245,7 @@ begin
     // Parse the pins list for description
     for I := 0 to PinsList.Count - 1 do
     begin
-        if Pos('Description=', PinsList[I]) = 1 then
+        if (Pos('Description=', PinsList[I]) = 1) then
         begin
             Description := Copy(PinsList[I], 13, Length(PinsList[I]) - 12);
             Break;
@@ -1163,9 +1254,9 @@ begin
 
     // Create a library component (a page of the library is created)
     SchComponent := SchServer.SchObjectFactory(eSchComponent, eCreate_Default);
-    if SchComponent = Nil Then
+    if (SchComponent = Nil) Then
     begin
-        ResultStr := 'ERROR: Failed to create component';
+        Result := 'ERROR: Failed to create component';
         Exit;
     end;
 
@@ -1185,34 +1276,36 @@ begin
     for I := 0 to PinsList.Count - 1 do
     begin
         // Skip if this is the description line
-        if Pos('Description=', PinsList[I]) = 1 then Continue;
+        if (Pos('Description=', PinsList[I]) = 1) then Continue;
 
         // Parse the pin data
         PinData := TStringList.Create;
-        PinData.Delimiter := '|';
-        PinData.DelimitedText := PinsList[I];
+        try
+            PinData.Delimiter := '|';
+            PinData.DelimitedText := PinsList[I];
 
-        if PinData.Count >= 6 then
-        begin
-            // Get pin coordinates and orientation
-            PinX := StrToInt(PinData[4]);
-            PinY := StrToInt(PinData[5]);
-            PinOrient := PinData[3];
+            if (PinData.Count >= 6) then
+            begin
+                // Get pin coordinates and orientation
+                PinX := StrToInt(PinData[4]);
+                PinY := StrToInt(PinData[5]);
+                PinOrient := PinData[3];
 
-            // Track overall min/max for all pins
-            MinX := Min(MinX, PinX);
-            MaxX := Max(MaxX, PinX);
-            MinY := Min(MinY, PinY);
-            MaxY := Max(MaxY, PinY);
+                // Track overall min/max for all pins
+                MinX := Min(MinX, PinX);
+                MaxX := Max(MaxX, PinX);
+                MinY := Min(MinY, PinY);
+                MaxY := Max(MaxY, PinY);
 
-            PinCount := PinCount + 1;
+                PinCount := PinCount + 1;
+            end;
+        finally
+            PinData.Free;
         end;
-
-        PinData.Free;
     end;
 
     // Set rectangle to cover all pins with padding
-    if PinCount > 0 then
+    if (PinCount > 0) then
     begin
         // Set rectangle at origin (0,0) with width and height based on pin positions
         MinX := 0;  // Always start at 0,0
@@ -1235,9 +1328,9 @@ begin
 
     // Create a rectangle for the component body
     R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
-    if R = Nil Then
+    if (R = Nil) Then
     begin
-        ResultStr := 'ERROR: Failed to create rectangle';
+        Result := 'ERROR: Failed to create rectangle';
         Exit;
     end;
 
@@ -1258,49 +1351,48 @@ begin
     for I := 0 to PinsList.Count - 1 do
     begin
         // Skip if this is the description line
-        if Pos('Description=', PinsList[I]) = 1 then Continue;
+        if (Pos('Description=', PinsList[I]) = 1) then Continue;
 
         // Parse the pin data
         PinData := TStringList.Create;
-        PinData.Delimiter := '|';
-        PinData.DelimitedText := PinsList[I];
+        try
+            PinData.Delimiter := '|';
+            PinData.DelimitedText := PinsList[I];
 
-        if PinData.Count >= 6 then
-        begin
-            PinNum := PinData[0];
-            PinName := PinData[1];
-            PinType := PinData[2];
-            PinOrient := PinData[3];
-            PinX := StrToInt(PinData[4]);
-            PinY := StrToInt(PinData[5]);
-
-            // Create a pin
-            SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
-            if SchPin = Nil Then
+            if (PinData.Count >= 6) then
             begin
-                PinData.Free;
-                Continue;
+                PinNum := PinData[0];
+                PinName := PinData[1];
+                PinType := PinData[2];
+                PinOrient := PinData[3];
+                PinX := StrToInt(PinData[4]);
+                PinY := StrToInt(PinData[5]);
+
+                // Create a pin
+                SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
+                if (SchPin = Nil) Then
+                    Continue;
+
+                // Set pin properties
+                PinElec := StrToPinElectricalType(PinType);
+                PinOrientation := StrToPinOrientation(PinOrient);
+
+                SchPin.Designator := PinNum;
+                SchPin.Name := PinName;
+                SchPin.Electrical := PinElec;
+                SchPin.Orientation := PinOrientation;
+                SchPin.Location := Point(MilsToCoord(PinX), MilsToCoord(PinY));
+
+                // Set ownership
+                SchPin.OwnerPartId := SchComponent.CurrentPartID;
+                SchPin.OwnerPartDisplayMode := SchComponent.DisplayMode;
+
+                // Add the pin to the component
+                SchComponent.AddSchObject(SchPin);
             end;
-
-            // Set pin properties
-            PinElec := StrToPinElectricalType(PinType);
-            PinOrientation := StrToPinOrientation(PinOrient);
-
-            SchPin.Designator := PinNum;
-            SchPin.Name := PinName;
-            SchPin.Electrical := PinElec;
-            SchPin.Orientation := PinOrientation;
-            SchPin.Location := Point(MilsToCoord(PinX), MilsToCoord(PinY));
-
-            // Set ownership
-            SchPin.OwnerPartId := SchComponent.CurrentPartID;
-            SchPin.OwnerPartDisplayMode := SchComponent.DisplayMode;
-
-            // Add the pin to the component
-            SchComponent.AddSchObject(SchPin);
+        finally
+            PinData.Free;
         end;
-
-        PinData.Free;
     end;
 
     // Add the component to the library
@@ -1313,9 +1405,24 @@ begin
     // Refresh library
     CurrentLib.GraphicallyInvalidate;
 
-    // Return success
-    ResultStr := '{"success": true, "component_name": "' + SymbolName + '", "pins_count": ' + IntToStr(PinCount) + '}';
-    Result := ResultStr;
+    // Create result JSON
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'component_name', SymbolName);
+        AddJSONInteger(ResultProps, 'pins_count', PinCount);
+        
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
 end;
 
 // Function to get all schematic component data
@@ -1327,9 +1434,11 @@ var
     Iterator    : ISch_Iterator;
     PIterator   : ISch_Iterator;
     Component   : ISch_Component;
-    Parameter, NextParameter   : ISch_Parameter;
-    TempFile    : String;
+    Parameter, NextParameter : ISch_Parameter;
     Rect        : TCoordRect;
+    ComponentsArray : TStringList;
+    CompProps   : TStringList;
+    ParamsProps : TStringList;
     OutputLines : TStringList;
     Designator, Sheet, ParameterName, ParameterValue : String;
     x, y, width, height, rotation : String;
@@ -1341,263 +1450,297 @@ begin
 
     // Retrieve the current project
     Project := GetWorkspace.DM_FocusedProject;
-    If Project = Nil Then
+    If (Project = Nil) Then
     begin
         ShowMessage('Error: No project is currently open');
         Exit;
     end;
 
-    // Create output stringlist
-    OutputLines := TStringList.Create;
-    OutputLines.Add('['); // Start JSON array
-
-    // Count the number of schematic documents
-    SchematicCount := 0;
-    For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
-    Begin
-        Doc := Project.DM_LogicalDocuments(i);
-        If Doc.DM_DocumentKind = 'SCH' Then
-            SchematicCount := SchematicCount + 1;
-    End;
-
-    // Process each schematic document
-    ComponentCount := 0;
-    For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
-    Begin
-        Doc := Project.DM_LogicalDocuments(i);
-        If Doc.DM_DocumentKind = 'SCH' Then
+    // Create array for components
+    ComponentsArray := TStringList.Create;
+    
+    try
+        // Count the number of schematic documents
+        SchematicCount := 0;
+        For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
         Begin
-            // Open the schematic document
-            Client.OpenDocument('SCH', Doc.DM_FullPath);
-            CurrentSch := SchServer.GetSchDocumentByPath(Doc.DM_FullPath);
+            Doc := Project.DM_LogicalDocuments(i);
+            If Doc.DM_DocumentKind = 'SCH' Then
+                SchematicCount := SchematicCount + 1;
+        End;
 
-            If CurrentSch <> Nil Then
+        // Process each schematic document
+        ComponentCount := 0;
+        For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(i);
+            If Doc.DM_DocumentKind = 'SCH' Then
             Begin
-                // Get schematic components
-                Iterator := CurrentSch.SchIterator_Create;
-                Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+                // Open the schematic document
+                Client.OpenDocument('SCH', Doc.DM_FullPath);
+                CurrentSch := SchServer.GetSchDocumentByPath(Doc.DM_FullPath);
 
-                Component := Iterator.FirstSchObject;
-                While Component <> Nil Do
+                If (CurrentSch <> Nil) Then
                 Begin
-                    // Get basic component properties
-                    Designator := Component.Designator.Text;
-                    Sheet := Doc.DM_FullPath;
+                    // Get schematic components
+                    Iterator := CurrentSch.SchIterator_Create;
+                    Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
 
-                    // Get position, dimensions and rotation
-                    x := FloatToStr(CoordToMils(Component.Location.X));
-                    y := FloatToStr(CoordToMils(Component.Location.Y));
+                    Component := Iterator.FirstSchObject;
+                    While (Component <> Nil) Do
+                    Begin
+                        // Create component properties
+                        CompProps := TStringList.Create;
+                        
+                        try
+                            // Get basic component properties
+                            Designator := Component.Designator.Text;
+                            Sheet := Doc.DM_FullPath;
 
-                    Rect := Component.BoundingRectangle;
-                    left := FloatToStr(CoordToMils(Rect.Left));
-                    right := FloatToStr(CoordToMils(Rect.Right));
-                    top := FloatToStr(CoordToMils(Rect.Top));
-                    bottom := FloatToStr(CoordToMils(Rect.Bottom));
+                            // Get position, dimensions and rotation
+                            x := FloatToStr(CoordToMils(Component.Location.X));
+                            y := FloatToStr(CoordToMils(Component.Location.Y));
 
-                    width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
-                    height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
+                            Rect := Component.BoundingRectangle;
+                            left := FloatToStr(CoordToMils(Rect.Left));
+                            right := FloatToStr(CoordToMils(Rect.Right));
+                            top := FloatToStr(CoordToMils(Rect.Top));
+                            bottom := FloatToStr(CoordToMils(Rect.Bottom));
 
-                    If Component.Orientation = eRotate0 Then
-                        rotation := '0'
-                    Else If Component.Orientation = eRotate90 Then
-                        rotation := '90'
-                    Else If Component.Orientation = eRotate180 Then
-                        rotation := '180'
-                    Else If Component.Orientation = eRotate270 Then
-                        rotation := '270'
-                    Else
-                        rotation := '0';
+                            width := FloatToStr(CoordToMils(Rect.Right - Rect.Left));
+                            height := FloatToStr(CoordToMils(Rect.Bottom - Rect.Top));
 
-                    // Start component JSON
-                    OutputLines.Add('  {');
-                    OutputLines.Add('    "designator": "' + StringReplace(Designator, '"', '\"', REPLACEALL) + '",');
-                    OutputLines.Add('    "sheet": "' + StringReplace(Sheet, '\', '\\', REPLACEALL) + '",');
-                    OutputLines.Add('    "schematic_x": ' + x + ',');
-                    OutputLines.Add('    "schematic_y": ' + y + ',');
-                    OutputLines.Add('    "schematic_width": ' + width + ',');
-                    OutputLines.Add('    "schematic_height": ' + height + ',');
-                    OutputLines.Add('    "schematic_rotation": ' + rotation + ',');
-                    //OutputLines.Add('    "library": "' + StringReplace(Component.DatabaseLibraryName, '\', '\\', REPLACEALL) + '",');
-                    //OutputLines.Add('    "library_identifier": "' + StringReplace(Component.LibraryIdentifier, '\', '\\', REPLACEALL) + '",');
-                    //OutputLines.Add('    "library_reference": "' + StringReplace(Component.LibReference, '\', '\\', REPLACEALL) + '",');
+                            If Component.Orientation = eRotate0 Then
+                                rotation := '0'
+                            Else If Component.Orientation = eRotate90 Then
+                                rotation := '90'
+                            Else If Component.Orientation = eRotate180 Then
+                                rotation := '180'
+                            Else If Component.Orientation = eRotate270 Then
+                                rotation := '270'
+                            Else
+                                rotation := '0';
 
-                    // Get parameters
-                    OutputLines.Add('    "parameters": {');
+                            // Add component properties
+                            AddJSONProperty(CompProps, 'designator', Designator);
+                            AddJSONProperty(CompProps, 'sheet', Sheet);
+                            AddJSONNumber(CompProps, 'schematic_x', StrToFloat(x));
+                            AddJSONNumber(CompProps, 'schematic_y', StrToFloat(y));
+                            AddJSONNumber(CompProps, 'schematic_width', StrToFloat(width));
+                            AddJSONNumber(CompProps, 'schematic_height', StrToFloat(height));
+                            AddJSONNumber(CompProps, 'schematic_rotation', StrToFloat(rotation));
+                            
+                            // Get parameters
+                            ParamsProps := TStringList.Create;
+                            try
+                                // Create parameter iterator
+                                PIterator := Component.SchIterator_Create;
+                                PIterator.AddFilter_ObjectSet(MkSet(eParameter));
 
-                    // Create parameter iterator
-                    PIterator := Component.SchIterator_Create;
-                    PIterator.AddFilter_ObjectSet(MkSet(eParameter));
+                                Parameter := PIterator.FirstSchObject;
+                                
+                                // Process all parameters
+                                while (Parameter <> nil) do
+                                begin
+                                    // Get this parameter's info
+                                    ParameterName := Parameter.Name;
+                                    ParameterValue := Parameter.Text;
 
-                    Parameter := PIterator.FirstSchObject;
+                                    // Add parameter to the list
+                                    AddJSONProperty(ParamsProps, ParameterName, ParameterValue);
+                                    
+                                    // Move to next parameter
+                                    Parameter := PIterator.NextSchObject;
+                                end;
 
-                    // Check if there are any parameters
-                    if Parameter = nil then
-                        // No parameters, just close the object
-                        OutputLines.Add('    }')
-                    else
-                    begin
-                        // Process all parameters
-                        while Parameter <> nil do
-                        begin
-                            // Get this parameter's info
-                            ParameterName := Parameter.Name;
-                            ParameterValue := Parameter.Text;
-
-                            // Escape special characters for JSON
-                            ParameterName := StringReplace(ParameterName, '\', '\\', REPLACEALL);
-                            ParameterName := StringReplace(ParameterName, '"', '\"', REPLACEALL);
-
-                            ParameterValue := StringReplace(ParameterValue, '\', '\\', REPLACEALL);
-                            ParameterValue := StringReplace(ParameterValue, '"', '\"', REPLACEALL);
-
-                            // Get the next parameter to check if this is the last one
-                            NextParameter := PIterator.NextSchObject;
-
-                            // Add this parameter
-                            if NextParameter <> nil then
-                                OutputLines.Add('      "' + ParameterName + '": "' + ParameterValue + '",')
-                            else
-                                OutputLines.Add('      "' + ParameterName + '": "' + ParameterValue + '"');
-
-                            // Move to next parameter
-                            Parameter := NextParameter;
+                                Component.SchIterator_Destroy(PIterator);
+                                
+                                // Add parameters to component
+                                CompProps.Add(BuildJSONObject(ParamsProps, 2));
+                                
+                                // Add to components array
+                                ComponentsArray.Add(BuildJSONObject(CompProps, 1));
+                                ComponentCount := ComponentCount + 1;
+                            finally
+                                ParamsProps.Free;
+                            end;
+                        finally
+                            CompProps.Free;
                         end;
 
-                        // Close the parameters object
-                        OutputLines.Add('    }');
-                    end;
+                        // Move to next component
+                        Component := Iterator.NextSchObject;
+                    End;
 
-                    Component.SchIterator_Destroy(PIterator);
-
-                    // Add comma since we don't know if it's the last component yet
-                    OutputLines.Add('  },');
-
-                    // Move to next component
-                    Component := Iterator.NextSchObject;
-                    ComponentCount := ComponentCount + 1;
+                    CurrentSch.SchIterator_Destroy(Iterator);
                 End;
-
-                CurrentSch.SchIterator_Destroy(Iterator);
             End;
         End;
-    End;
-
-    // Fix the last component's closing brace (remove the trailing comma)
-    if OutputLines.Count > 1 then
-    begin
-        // Get the last line
-        i := OutputLines.Count - 1;
-        if Pos('},', OutputLines[i]) > 0 then
-        begin
-            // Replace the comma with just a closing brace
-            OutputLines[i] := StringReplace(OutputLines[i], '},', '}', REPLACEALL);
+        
+        // Build the final JSON array
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONArray(ComponentsArray);
+            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_schematic_data.json');
+        finally
+            OutputLines.Free;
         end;
-    end;
-
-    // Close JSON array
-    OutputLines.Add(']');
-
-    // Use a temporary file to build the JSON data
-    TempFile := 'C:\AltiumMCP\temp_schematic_data.json';
-
-    try
-        // Save to a temporary file
-        OutputLines.SaveToFile(TempFile);
-
-        // Load back the complete JSON data
-        OutputLines.Clear;
-        OutputLines.LoadFromFile(TempFile);
-        Result := OutputLines.Text;
-
-        // Clean up the temporary file
-        if FileExists(TempFile) then
-            DeleteFile(TempFile);
     finally
-        OutputLines.Free;
+        ComponentsArray.Free;
     end;
 end;
 
 // Function to get pin data for specified components
 function GetComponentPinsFromList(DesignatorsList: TStringList): String;
 var
-    Board       : IPCB_Board;
-    Component   : IPCB_Component;
-    TempFile    : String;
-    OutputLines : TStringList;
-    Designator  : String;
-    i           : Integer;
+    Board           : IPCB_Board;
+    Component       : IPCB_Component;
+    ComponentsArray : TStringList;
+    CompProps       : TStringList;
+    PinsArray       : TStringList;
+    GrpIter         : IPCB_GroupIterator;
+    Pad             : IPCB_Pad;
+    NetName         : String;
+    xorigin, yorigin : Integer;
+    PinProps        : TStringList;
+    PinCount, PinsProcessed : Integer;
+    Designator      : String;
+    i               : Integer;
+    OutputLines     : TStringList;
 begin
-    Result := '';
-
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
-
-    // Create output stringlist
-    OutputLines := TStringList.Create;
-    OutputLines.Add('[');
-
-    // Process each designator
-    for i := 0 to DesignatorsList.Count - 1 do
+    if (Board = nil) then
     begin
-        Designator := Trim(DesignatorsList[i]);
-        
-        // Use direct function to get component by designator
-        Component := Board.GetPcbComponentByRefDes(Designator);
-        
-        if Component <> Nil then
-        begin
-            // Add component to JSON
-            OutputLines.Add('  {');
-            OutputLines.Add('    "designator": "' + Component.Name.Text + '",');
-            OutputLines.Add('    "pins": [');
-            
-            // Get pin data
-            GetPinsForJSON(Board, Component, OutputLines);
-            
-            // Close pins array
-            OutputLines.Add('    ]');
-            
-            // Close component object
-            if i < DesignatorsList.Count - 1 then
-                OutputLines.Add('  },')
-            else
-                OutputLines.Add('  }');
-        end
-        else
-        begin
-            // Component not found, add empty entry
-            OutputLines.Add('  {');
-            OutputLines.Add('    "designator": "' + Designator + '",');
-            OutputLines.Add('    "pins": []');
-            
-            // Close component object
-            if i < DesignatorsList.Count - 1 then
-                OutputLines.Add('  },')
-            else
-                OutputLines.Add('  }');
-        end;
+        Result := '[]';
+        Exit;
     end;
+    
+    // Get board origin coordinates
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
 
-    // Close JSON array
-    OutputLines.Add(']');
-
-    // Use a temporary file to build the JSON data
-    TempFile := 'C:\AltiumMCP\temp_pins_data.json';
-
+    // Create array for components
+    ComponentsArray := TStringList.Create;
+    
     try
-        // Save to a temporary file
-        OutputLines.SaveToFile(TempFile);
-
-        // Load back the complete JSON data
-        OutputLines.Clear;
-        OutputLines.LoadFromFile(TempFile);
-        Result := OutputLines.Text;
-
-        // Clean up the temporary file
-        if FileExists(TempFile) then
-            DeleteFile(TempFile);
+        // Process each designator
+        for i := 0 to DesignatorsList.Count - 1 do
+        begin
+            Designator := Trim(DesignatorsList[i]);
+            
+            // Use direct function to get component by designator
+            Component := Board.GetPcbComponentByRefDes(Designator);
+            
+            if (Component <> Nil) then
+            begin
+                // Create component properties
+                CompProps := TStringList.Create;
+                PinsArray := TStringList.Create;
+                
+                try
+                    // Add designator to component
+                    AddJSONProperty(CompProps, 'designator', Component.Name.Text);
+                    
+                    // Create pad iterator
+                    GrpIter := Component.GroupIterator_Create;
+                    GrpIter.SetState_FilterAll;
+                    GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                    
+                    // Count pins
+                    PinCount := 0;
+                    Pad := GrpIter.FirstPCBObject;
+                    while (Pad <> Nil) do
+                    begin
+                        if Pad.InComponent then
+                            PinCount := PinCount + 1;
+                        Pad := GrpIter.NextPCBObject;
+                    end;
+                    
+                    // Reset iterator
+                    Component.GroupIterator_Destroy(GrpIter);
+                    GrpIter := Component.GroupIterator_Create;
+                    GrpIter.SetState_FilterAll;
+                    GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                    
+                    // Process each pad
+                    PinsProcessed := 0;
+                    Pad := GrpIter.FirstPCBObject;
+                    while (Pad <> Nil) do
+                    begin
+                        if Pad.InComponent then
+                        begin
+                            // Get net name if connected
+                            if (Pad.Net <> Nil) then
+                                NetName := Pad.Net.Name
+                            else
+                                NetName := '';
+                                
+                            // Create pin properties
+                            PinProps := TStringList.Create;
+                            try
+                                AddJSONProperty(PinProps, 'name', Pad.Name);
+                                AddJSONProperty(PinProps, 'net', NetName);
+                                AddJSONNumber(PinProps, 'x', CoordToMils(Pad.x - xorigin));
+                                AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
+                                AddJSONNumber(PinProps, 'rotation', Pad.Rotation);
+                                AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
+                                AddJSONNumber(PinProps, 'width', CoordToMils(Pad.XSizeOnLayer[Pad.Layer]));
+                                AddJSONNumber(PinProps, 'height', CoordToMils(Pad.YSizeOnLayer[Pad.Layer]));
+                                AddJSONProperty(PinProps, 'shape', ShapeToString(Pad.ShapeOnLayer[Pad.Layer]));
+                                
+                                // Add to pins array
+                                PinsArray.Add(BuildJSONObject(PinProps, 3));
+                                
+                                // Increment counter
+                                PinsProcessed := PinsProcessed + 1;
+                            finally
+                                PinProps.Free;
+                            end;
+                        end;
+                        
+                        Pad := GrpIter.NextPCBObject;
+                    end;
+                    
+                    // Clean up iterator
+                    Component.GroupIterator_Destroy(GrpIter);
+                    
+                    // Add pins array to component
+                    CompProps.Add(BuildJSONArray(PinsArray, 'pins', 1));
+                    
+                    // Add to components array
+                    ComponentsArray.Add(BuildJSONObject(CompProps, 1));
+                finally
+                    CompProps.Free;
+                    PinsArray.Free;
+                end;
+            end
+            else
+            begin
+                // Component not found, add empty component
+                CompProps := TStringList.Create;
+                try
+                    AddJSONProperty(CompProps, 'designator', Designator);
+                    CompProps.Add('"pins": []');
+                    
+                    // Add to components array
+                    ComponentsArray.Add(BuildJSONObject(CompProps, 1));
+                finally
+                    CompProps.Free;
+                end;
+            end;
+        end;
+        
+        // Build the final JSON array
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONArray(ComponentsArray);
+            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_pins_data.json');
+        finally
+            OutputLines.Free;
+        end;
     finally
-        OutputLines.Free;
+        ComponentsArray.Free;
     end;
 end;
 
@@ -1943,6 +2086,7 @@ procedure WriteResponse(Success: Boolean; Data: String; ErrorMsg: String);
 var
     ActualSuccess: Boolean;
     ActualErrorMsg: String;
+    ResultProps: TStringList;
 begin
     // Check if Data contains an error message
     if (Pos('ERROR:', Data) = 1) then
@@ -1956,32 +2100,34 @@ begin
         ActualErrorMsg := ErrorMsg;
     end;
 
+    // Create response props
+    ResultProps := TStringList.Create;
     ResponseData := TStringList.Create;
-    ResponseData.Add('{');
-
-    if ActualSuccess then
-    begin
-        // For JSON responses (starting with [ or {), don't wrap in additional quotes
-        if (Length(Data) > 0) and ((Data[1] = '[') or (Data[1] = '{')) then
+    
+    try
+        // Add properties
+        AddJSONBoolean(ResultProps, 'success', ActualSuccess);
+        
+        if ActualSuccess then
         begin
-            ResponseData.Add('  "success": true,');
-            ResponseData.Add('  "result": ' + Data);
+            // For JSON responses (starting with [ or {), don't wrap in additional quotes
+            if (Length(Data) > 0) and ((Data[1] = '[') or (Data[1] = '{')) then
+                ResultProps.Add(JSONPairStr('result', Data, False))
+            else
+                AddJSONProperty(ResultProps, 'result', Data);
         end
         else
         begin
-            ResponseData.Add('  "success": true,');
-            ResponseData.Add('  "result": "' + StringReplace(Data, '"', '\"', REPLACEALL) + '"');
+            AddJSONProperty(ResultProps, 'error', ActualErrorMsg);
         end;
-    end
-    else
-    begin
-        ResponseData.Add('  "success": false,');
-        ResponseData.Add('  "error": "' + StringReplace(ActualErrorMsg, '"', '\"', REPLACEALL) + '"');
+        
+        // Build response
+        ResponseData.Text := BuildJSONObject(ResultProps);
+        ResponseData.SaveToFile(RESPONSE_FILE);
+    finally
+        ResultProps.Free;
+        ResponseData.Free;
     end;
-
-    ResponseData.Add('}');
-    ResponseData.SaveToFile(RESPONSE_FILE);
-    ResponseData.Free;
 end;
 
 // Main procedure to run the bridge
