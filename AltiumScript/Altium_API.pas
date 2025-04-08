@@ -33,7 +33,7 @@ begin
     end;
 
     // Check if the correct document type is already focused
-    if DocumentKind = 'PCB' then
+    if DocumentKind = 'PCB' and (PCBServer <> Nil) then
     begin
         if PCBServer.GetCurrentPCBBoard <> Nil then
         begin
@@ -41,7 +41,7 @@ begin
             Exit;
         end;
     end
-    else if DocumentKind = 'SCHLIB' then
+    else if (DocumentKind = 'SCHLIB') and (SchServer <> Nil) then
     begin
         CurrentDoc := SchServer.GetCurrentSchDocument;
         if (CurrentDoc <> Nil) and (CurrentDoc.ObjectID = eSchLib) then
@@ -247,6 +247,44 @@ begin
     
     // Clean up iterator
     Component.GroupIterator_Destroy(GrpIter);
+end;
+
+// Helper function to convert string to pin electrical type
+function StrToPinElectricalType(ElecType: String): TPinElectrical;
+begin
+    if ElecType = 'eElectricHiZ' then
+        Result := eElectricHiZ
+    else if ElecType = 'eElectricInput' then
+        Result := eElectricInput
+    else if ElecType = 'eElectricIO' then
+        Result := eElectricIO
+    else if ElecType = 'eElectricOpenCollector' then
+        Result := eElectricOpenCollector
+    else if ElecType = 'eElectricOpenEmitter' then
+        Result := eElectricOpenEmitter
+    else if ElecType = 'eElectricOutput' then
+        Result := eElectricOutput
+    else if ElecType = 'eElectricPassive' then
+        Result := eElectricPassive
+    else if ElecType = 'eElectricPower' then
+        Result := eElectricPower
+    else
+        Result := eElectricPassive; // Default
+end;
+
+// Helper function to convert string to pin orientation
+function StrToPinOrientation(Orient: String): TRotationBy90;
+begin
+    if Orient = 'eRotate0' then
+        Result := eRotate0
+    else if Orient = 'eRotate90' then
+        Result := eRotate90
+    else if Orient = 'eRotate180' then
+        Result := eRotate180
+    else if Orient = 'eRotate270' then
+        Result := eRotate270
+    else
+        Result := eRotate0; // Default
 end;
 
 // Function to move components by X and Y offsets and set rotation
@@ -1099,59 +1137,10 @@ var
     Padding          : Integer;
     ResultStr        : String;
     Description      : String;
-
-    // Helper function to convert string to pin electrical type
-    function StrToPinElectricalType(ElecType: String): TPinElectrical;
-    begin
-        if ElecType = 'eElectricHiZ' then
-            Result := eElectricHiZ
-        else if ElecType = 'eElectricInput' then
-            Result := eElectricInput
-        else if ElecType = 'eElectricIO' then
-            Result := eElectricIO
-        else if ElecType = 'eElectricOpenCollector' then
-            Result := eElectricOpenCollector
-        else if ElecType = 'eElectricOpenEmitter' then
-            Result := eElectricOpenEmitter
-        else if ElecType = 'eElectricOutput' then
-            Result := eElectricOutput
-        else if ElecType = 'eElectricPassive' then
-            Result := eElectricPassive
-        else if ElecType = 'eElectricPower' then
-            Result := eElectricPower
-        else
-            Result := eElectricPassive; // Default
-    end;
-
-    // Helper function to convert string to pin orientation
-    function StrToPinOrientation(Orient: String): TRotationBy90;
-    begin
-        if Orient = 'eRotate0' then
-            Result := eRotate0
-        else if Orient = 'eRotate90' then
-            Result := eRotate90
-        else if Orient = 'eRotate180' then
-            Result := eRotate180
-        else if Orient = 'eRotate270' then
-            Result := eRotate270
-        else
-            Result := eRotate0; // Default
-    end;
 begin
     ResultStr := '';
 
-    if SchServer = Nil Then
-    begin
-        ResultStr := 'ERROR: SchServer is nil';
-        Exit;
-    end;
-
     CurrentLib := SchServer.GetCurrentSchDocument;
-    if CurrentLib = Nil Then
-    begin
-        ResultStr := 'ERROR: No current schematic document';
-        Exit;
-    end;
 
     // Check if the document is a Schematic Library document
     if CurrentLib.ObjectID <> eSchLib Then
