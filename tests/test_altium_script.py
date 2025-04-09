@@ -55,7 +55,7 @@ class AltiumScriptTest(unittest.TestCase):
         MCP_DIR.mkdir(exist_ok=True)
         
         # Check if Altium is running
-        vprint("IMPORTANT: Ensure Altium is running and a project is open.", VERBOSITY_NORMAL)
+        vprint("IMPORTANT: Ensure Altium is running and a project with schematic and layout is open.", VERBOSITY_NORMAL)
         vprint("           The test will wait for you to prepare Altium.", VERBOSITY_NORMAL)
         vprint("           When ready, press Enter to continue...", VERBOSITY_NORMAL)
         input()
@@ -426,11 +426,6 @@ class AltiumScriptTest(unittest.TestCase):
         """Test the get_schematic_data command."""
         vprint("\n--- RUNNING TEST: get_schematic_data ---\n", VERBOSITY_DETAILED)
         
-        # This test requires a schematic project to be open in Altium
-        vprint("\nMAKE SURE A SCHEMATIC IS OPEN IN ALTIUM", VERBOSITY_NORMAL)
-        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
-        input()
-        
         # Execute the command
         response = self.execute_command("get_schematic_data")
         
@@ -473,7 +468,7 @@ class AltiumScriptTest(unittest.TestCase):
         vprint("\n--- RUNNING TEST: create_schematic_symbol ---\n", VERBOSITY_DETAILED)
         
         # This test requires a schematic library document to be open in Altium
-        vprint("\nMAKE SURE A SCHEMATIC LIBRARY DOCUMENT IS OPEN IN ALTIUM", VERBOSITY_NORMAL)
+        vprint("\nMAKE SURE A SCHEMATIC LIBRARY DOCUMENT IS OPEN AND FOCUSED IN ALTIUM", VERBOSITY_NORMAL)
         vprint("Press Enter to continue...", VERBOSITY_NORMAL)
         input()
         
@@ -722,10 +717,6 @@ class AltiumScriptTest(unittest.TestCase):
     def test_07_get_pcb_rules(self):
         """Test the get_pcb_rules command."""
         vprint("\n--- RUNNING TEST: get_pcb_rules ---\n", VERBOSITY_DETAILED)
-        
-        # This test requires a PCB document to be open in Altium
-        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
-        input()
         
         # Execute the command
         response = self.execute_command("get_pcb_rules")
