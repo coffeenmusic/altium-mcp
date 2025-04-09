@@ -13,6 +13,7 @@ import time
 import unittest
 import subprocess
 from pathlib import Path
+import argparse
 
 # Try to import psutil for better process management
 try:
@@ -30,6 +31,16 @@ MCP_DIR = Path("C:/AltiumMCP")
 REQUEST_FILE = MCP_DIR / "request.json"
 RESPONSE_FILE = MCP_DIR / "response.json"
 TIMEOUT = 120  # seconds
+VERBOSITY_NORMAL = 0   # Show only major test events and results
+VERBOSITY_DETAILED = 1  # Show commands and brief responses
+VERBOSITY_DEBUG = 2    # Show everything
+
+verbosity_level = VERBOSITY_NORMAL
+
+def vprint(message, level=VERBOSITY_NORMAL):
+    """Print message only if verbosity level is high enough."""
+    if verbosity_level >= level:
+        print(message)
 
 class AltiumScriptTest(unittest.TestCase):
     """Test cases for validating the Altium script functionality."""
@@ -41,9 +52,9 @@ class AltiumScriptTest(unittest.TestCase):
         MCP_DIR.mkdir(exist_ok=True)
         
         # Check if Altium is running
-        print("IMPORTANT: Ensure Altium is running and a project is open.")
-        print("           The test will wait for you to prepare Altium.")
-        print("           When ready, press Enter to continue...")
+        vprint("IMPORTANT: Ensure Altium is running and a project is open.", VERBOSITY_NORMAL)
+        vprint("           The test will wait for you to prepare Altium.", VERBOSITY_NORMAL)
+        vprint("           When ready, press Enter to continue...", VERBOSITY_NORMAL)
         input()
     
     def setUp(self):
@@ -59,19 +70,19 @@ class AltiumScriptTest(unittest.TestCase):
             # Check if the process is still running
             if self.current_process.poll() is None:
                 try:
-                    print(f"Terminating process {self.current_process.pid}")
+                    vprint(f"Terminating process {self.current_process.pid}", VERBOSITY_DETAILED)
                     self.current_process.terminate()
                     # Wait a bit for the process to terminate
                     self.current_process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    print(f"Process {self.current_process.pid} did not terminate in time, killing it")
+                    vprint(f"Process {self.current_process.pid} did not terminate in time, killing it", VERBOSITY_DETAILED)
                     self.current_process.kill()
             self.current_process = None
     
     @classmethod
     def tearDownClass(cls):
         """Clean up the test environment after all tests have completed."""
-        print("Test suite completed. Cleaning up resources...")
+        vprint("Test suite completed. Cleaning up resources...", VERBOSITY_NORMAL)
         
         # Make sure all subprocess are terminated
         if HAVE_PSUTIL:
@@ -81,23 +92,23 @@ class AltiumScriptTest(unittest.TestCase):
                 
                 for child in children:
                     try:
-                        print(f"Terminating child process: {child.pid}")
+                        vprint(f"Terminating child process: {child.pid}", VERBOSITY_DETAILED)
                         child.terminate()
                     except psutil.NoSuchProcess:
                         pass
             except Exception as e:
-                print(f"Error cleaning up processes: {e}")
+                vprint(f"Error cleaning up processes: {e}", VERBOSITY_NORMAL)
         else:
-            print("psutil not available. Some processes might still be running.")
+            vprint("psutil not available. Some processes might still be running.", VERBOSITY_NORMAL)
             
             # Try to clean up using subprocess directly
             if hasattr(cls, 'current_process') and cls.current_process is not None:
                 try:
                     if cls.current_process.poll() is None:
-                        print(f"Terminating process {cls.current_process.pid}")
+                        vprint(f"Terminating process {cls.current_process.pid}", VERBOSITY_DETAILED)
                         cls.current_process.terminate()
                 except Exception as e:
-                    print(f"Error terminating process: {e}")
+                    vprint(f"Error terminating process: {e}", VERBOSITY_NORMAL)
     
     def execute_command(self, command, params=None):
         """
@@ -127,11 +138,11 @@ class AltiumScriptTest(unittest.TestCase):
         with open(REQUEST_FILE, 'w') as f:
             json.dump(request_data, f, indent=2)
         
-        print(f"Sent command: {command}")
-        print(f"Request data: {json.dumps(request_data, indent=2)}")
+        vprint(f"Sent command: {command}", VERBOSITY_DETAILED)
+        vprint(f"Request data: {json.dumps(request_data, indent=2)}", VERBOSITY_DEBUG)
         
         # Run the Altium script using the same approach as in server.py
-        print("Running Altium script...")
+        vprint("Running Altium script...", VERBOSITY_DETAILED)
         
         # Get the Altium executable and script paths
         # You might need to adjust these paths based on your configuration
@@ -147,13 +158,13 @@ class AltiumScriptTest(unittest.TestCase):
         
         # Format the command to run the script in Altium
         run_command = f'"{altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
-        print(f"Executing: {run_command}")
+        vprint(f"Executing: {run_command}", VERBOSITY_DEBUG)
         
         try:
             # Start the process
             import subprocess
             process = subprocess.Popen(run_command, shell=True)
-            print(f"Launched Altium with script, process ID: {process.pid}")
+            vprint(f"Launched Altium with script, process ID: {process.pid}", VERBOSITY_DETAILED)
             
             # Store the process so we can check its status later
             self.current_process = process
@@ -161,7 +172,7 @@ class AltiumScriptTest(unittest.TestCase):
             self.fail(f"Error launching Altium: {e}")
         
         # Wait for the response file with timeout
-        print("Waiting for response file to appear...")
+        vprint("Waiting for response file to appear...", VERBOSITY_DETAILED)
         start_time = time.time()
         while not RESPONSE_FILE.exists() and time.time() - start_time < TIMEOUT:
             time.sleep(0.5)
@@ -173,18 +184,19 @@ class AltiumScriptTest(unittest.TestCase):
         with open(RESPONSE_FILE, 'r') as f:
             response_text = f.read()
         
-        print(f"Response received: {response_text[:200]}...")
+        vprint(f"Response received: {response_text[:200]}...", VERBOSITY_DETAILED)
         
         try:
             response = json.loads(response_text)
             
             # Print full response for examination
-            print("\nFull response:")
-            print(json.dumps(response, indent=2))
+            vprint("\nFull response:", VERBOSITY_DEBUG)
+            vprint(json.dumps(response, indent=2), VERBOSITY_DEBUG)
             
             # Wait for user input before continuing
-            print("\nExamine the response and press Enter to continue...")
-            input()
+            if verbosity_level >= VERBOSITY_DEBUG:
+                vprint("\nExamine the response and press Enter to continue...", VERBOSITY_DEBUG)
+                input()
             
             return response
         except json.JSONDecodeError as e:
@@ -335,35 +347,17 @@ class AltiumScriptTest(unittest.TestCase):
             print(f"FAILURE: {message}")
     
     def test_get_all_component_data(self):
-        """Test the get_all_component_data command."""
-        print("\n--- RUNNING TEST: get_all_component_data ---\n")
+        vprint("\n--- RUNNING TEST: get_all_component_data ---\n", VERBOSITY_DEBUG)
         
         # Execute the command
         response = self.execute_command("get_all_component_data")
         
-        # Validate the response using our custom validation function
-        is_valid = self.validate_component_data_response(response)
-        
-        # Continue with standard assertions if you want
-        self.assertTrue(response.get("success", False), 
-                      f"Command failed: {response.get('error', 'Unknown error')}")
-        
-        # Validate the result structure
-        result = response.get("result", [])
-        self.assertIsInstance(result, list, "Result should be a list")
-        
-        if len(result) > 0:
-            # Check if at least one component has expected fields
-            component = result[0]
-            expected_fields = ["designator", "name", "description", "footprint", 
-                              "layer", "x", "y", "width", "height", "rotation"]
-            
-            for field in expected_fields:
-                self.assertIn(field, component, f"Component missing field: {field}")
+        # Validate using our comprehensive function and convert to unittest assertion
+        self.assertTrue(self.validate_component_data_response(response), "Component data validation failed. Check validation_failures.log for details.")
     
     def test_get_component_pins(self):
         """Test the get_component_pins command."""
-        print("\n--- RUNNING TEST: get_component_pins ---\n")
+        vprint("\n--- RUNNING TEST: get_component_pins ---\n", VERBOSITY_DEBUG)
         
         # First, get all component designators
         all_components = self.execute_command("get_all_component_data")
@@ -408,7 +402,7 @@ class AltiumScriptTest(unittest.TestCase):
     
     def test_get_selected_components_coordinates(self):
         """Test the get_selected_components_coordinates command."""
-        print("\n--- RUNNING TEST: get_selected_components_coordinates ---\n")
+        vprint("\n--- RUNNING TEST: get_selected_components_coordinates ---\n", VERBOSITY_DEBUG)
         
         # This test requires user interaction to select components in Altium
         print("\nPLEASE SELECT AT LEAST ONE COMPONENT IN ALTIUM")
@@ -439,7 +433,7 @@ class AltiumScriptTest(unittest.TestCase):
     
     def test_move_components(self):
         """Test the move_components command."""
-        print("\n--- RUNNING TEST: move_components ---\n")
+        vprint("\n--- RUNNING TEST: move_components ---\n", VERBOSITY_DEBUG)
         
         # First, get all component designators
         all_components = self.execute_command("get_all_component_data")
@@ -520,4 +514,11 @@ class AltiumScriptTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    parser = argparse.ArgumentParser(description='Altium Script Integration Tests')
+    parser.add_argument('-v', '--verbose', action='count', default=0, 
+                        help='Increase verbosity level (use -v for detailed output, -vv for debug output)')
+    
+    args = parser.parse_args()
+    verbosity_level = args.verbose
+    
+    unittest.main(argv=['first-arg-is-ignored'])  # Override argv to ignore our args
