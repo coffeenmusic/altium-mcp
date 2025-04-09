@@ -465,7 +465,7 @@ class AltiumScriptTest(unittest.TestCase):
     
     def test_get_selected_components_coordinates(self):
         """Test the get_selected_components_coordinates command."""
-        vprint("\n--- RUNNING TEST: get_selected_components_coordinates ---\n", VERBOSITY_NORMAL)
+        vprint("\n--- RUNNING TEST: get_selected_components_coordinates ---\n", VERBOSITY_DEBUG)
         
         # This test requires user interaction to select components in Altium
         vprint("\nPLEASE SELECT AT LEAST ONE COMPONENT IN ALTIUM", VERBOSITY_NORMAL)
@@ -493,7 +493,7 @@ class AltiumScriptTest(unittest.TestCase):
                 expected_fields = ["designator", "x", "y", "width", "height", "rotation"]
                 for field in expected_fields:
                     self.assertIn(field, component, f"Selected component missing field: {field}")
-                vprint(f"Found {len(result)} selected components", VERBOSITY_NORMAL)
+                vprint(f"Found {len(result)} selected components", VERBOSITY_DEBUG)
             else:
                 vprint("No components were selected in Altium", VERBOSITY_NORMAL)
                 self.skipTest("No components were selected, skipping test")
@@ -502,19 +502,24 @@ class AltiumScriptTest(unittest.TestCase):
         
         vprint("\nSUCCESS: test_get_selected_components_coordinates completed\n", VERBOSITY_NORMAL)
         
-        return response  # Return for convenience
+        # Don't return anything - we've already stored the response in type(self).selected_components_response
 
     def test_move_components(self):
         """Test the move_components command."""
-        vprint("\n--- RUNNING TEST: move_components ---\n", VERBOSITY_NORMAL)
+        vprint("\n--- RUNNING TEST: move_components ---\n", VERBOSITY_DEBUG)
         
         # Check if we have selected components from the previous test
         if not hasattr(type(self), 'selected_components_response') or not type(self).selected_components_response:
             # If not, run the selection test to get components
             vprint("No selected components found. Running selection test first...", VERBOSITY_NORMAL)
-            response = self.test_get_selected_components_coordinates()
-        else:
-            response = type(self).selected_components_response
+            self.test_get_selected_components_coordinates()  # Just run the test, don't capture its return value
+            
+            # Now check if the test populated the class variable
+            if not hasattr(type(self), 'selected_components_response') or not type(self).selected_components_response:
+                self.skipTest("Could not get selected components, skipping move test")
+        
+        # Use the stored response
+        response = type(self).selected_components_response
         
         # Verify we have selected components to work with
         result = response.get("result", [])
@@ -537,9 +542,9 @@ class AltiumScriptTest(unittest.TestCase):
                 }
         
         # Execute the move_components command (move components by 100 mils in X and Y)
-        # IMPORTANT: changed from cmp_designators to designators to match Altium script expectations
+        # IMPORTANT: using "designators" to match Altium script expectations
         move_params = {
-            "designators": designators,  # This is the key change - parameter name must match what the script expects
+            "designators": designators,
             "x_offset": 100,
             "y_offset": 100,
             "rotation": 0
