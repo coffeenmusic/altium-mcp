@@ -1348,7 +1348,7 @@ begin
                                 Component.SchIterator_Destroy(PIterator);
                                 
                                 // Add parameters to component
-                                CompProps.Add(BuildJSONObject(ParamsProps, 2));
+                                CompProps.Add('"parameters": ' + BuildJSONObject(ParamsProps, 2));
                                 
                                 // Add to components array
                                 ComponentsArray.Add(BuildJSONObject(CompProps, 1));

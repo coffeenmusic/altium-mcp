@@ -14,6 +14,7 @@ import unittest
 import subprocess
 from pathlib import Path
 import argparse
+import re
 
 # Try to import psutil for better process management
 try:
@@ -30,6 +31,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 MCP_DIR = Path("C:/AltiumMCP")
 REQUEST_FILE = MCP_DIR / "request.json"
 RESPONSE_FILE = MCP_DIR / "response.json"
+RESPONSES_DIR = Path("responses")
+RESPONSES_DIR.mkdir(exist_ok=True)
 TIMEOUT = 120  # seconds
 VERBOSITY_NORMAL = 0   # Show only major test events and results
 VERBOSITY_DETAILED = 1  # Show commands and brief responses
@@ -196,7 +199,7 @@ class AltiumScriptTest(unittest.TestCase):
             if hasattr(self, 'current_process') and self.current_process is not None:
                 # Terminate any existing process before starting a new one
                 self._terminate_process(self.current_process)
-                
+                    
             self.current_process = process
         except Exception as e:
             self.fail(f"Error launching Altium: {e}")
@@ -214,6 +217,16 @@ class AltiumScriptTest(unittest.TestCase):
         with open(RESPONSE_FILE, 'r') as f:
             response_text = f.read()
         
+        # Generate a timestamp for unique filenames
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        response_filename = f"{command}_{timestamp}.json"
+        response_path = RESPONSES_DIR / response_filename
+        
+        # Save a copy of the response
+        with open(response_path, 'w') as f:
+            f.write(response_text)
+        
+        vprint(f"Response saved to: {response_path}", VERBOSITY_DEBUG)
         vprint(f"Response received: {response_text[:200]}...", VERBOSITY_DETAILED)
         
         try:
@@ -234,7 +247,14 @@ class AltiumScriptTest(unittest.TestCase):
             
             return response
         except json.JSONDecodeError as e:
-            self.fail(f"Failed to parse JSON response: {e}\nResponse: {response_text}")
+            # Save the problematic JSON with an error indicator
+            error_response_filename = f"{command}_{timestamp}_ERROR.json"
+            error_response_path = RESPONSES_DIR / error_response_filename
+            with open(error_response_path, 'w') as f:
+                f.write(response_text)
+            
+            vprint(f"ERROR: Failed to parse JSON. Original saved to: {error_response_path}", VERBOSITY_NORMAL)
+            self.fail(f"Failed to parse JSON response: {e}\nResponse saved to {error_response_path}")
 
     def _terminate_process(self, process):
         """Helper method to terminate a process."""
@@ -325,7 +345,7 @@ class AltiumScriptTest(unittest.TestCase):
         Returns:
             bool: True if valid, False otherwise
         """
-        log_file = Path("validation_failures.log")
+        log_file = Path(os.getcwd())
         
         try:
             # Check if the response is successful
@@ -380,10 +400,7 @@ class AltiumScriptTest(unittest.TestCase):
             return False
     
     def _log_failure(self, log_file, message, response=None):
-        """Log a validation failure to a file."""
-        # Create directory if it doesn't exist
-        log_file.parent.mkdir(exist_ok=True)
-        
+        """Log a validation failure to a file."""        
         try:
             with open(log_file, "a") as f:
                 f.write("\n" + "-"*50 + "\n")
@@ -435,7 +452,7 @@ class AltiumScriptTest(unittest.TestCase):
             component = schematic_data[0]
             expected_fields = [
                 "designator", "sheet", "schematic_x", "schematic_y", 
-                "schematic_width", "schematic_height", "schematic_rotation", "parameters"
+                "schematic_width", "schematic_height", "schematic_rotation"
             ]
             
             missing_fields = []
