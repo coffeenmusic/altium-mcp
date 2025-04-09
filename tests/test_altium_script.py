@@ -65,18 +65,45 @@ class AltiumScriptTest(unittest.TestCase):
     
     def tearDown(self):
         """Clean up after each test."""
+        import signal
+        import os
+        
         # Check if we have a process that needs to be terminated
         if hasattr(self, 'current_process') and self.current_process is not None:
             # Check if the process is still running
-            if self.current_process.poll() is None:
-                try:
+            try:
+                if self.current_process.poll() is None:
                     vprint(f"Terminating process {self.current_process.pid}", VERBOSITY_DETAILED)
-                    self.current_process.terminate()
-                    # Wait a bit for the process to terminate
-                    self.current_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    vprint(f"Process {self.current_process.pid} did not terminate in time, killing it", VERBOSITY_DETAILED)
-                    self.current_process.kill()
+                    
+                    # First try graceful termination
+                    try:
+                        self.current_process.terminate()
+                        # Wait for termination
+                        try:
+                            self.current_process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            vprint(f"Process {self.current_process.pid} did not terminate gracefully, killing it", VERBOSITY_DETAILED)
+                            
+                            # If terminate didn't work, use SIGKILL (force kill)
+                            try:
+                                if os.name == 'nt':  # Windows
+                                    self.current_process.kill()
+                                else:  # Unix/Linux/Mac
+                                    os.kill(self.current_process.pid, signal.SIGKILL)
+                                
+                                # Wait a short time to verify the process is dead
+                                try:
+                                    self.current_process.wait(timeout=2)
+                                except subprocess.TimeoutExpired:
+                                    vprint(f"WARNING: Process {self.current_process.pid} could not be killed!", VERBOSITY_NORMAL)
+                            except Exception as e:
+                                vprint(f"Error during force kill: {e}", VERBOSITY_DETAILED)
+                    except Exception as e:
+                        vprint(f"Error during termination: {e}", VERBOSITY_DETAILED)
+            except Exception as e:
+                vprint(f"Error checking process status: {e}", VERBOSITY_DETAILED)
+            
+            # Explicitly set to None to clear the reference
             self.current_process = None
     
     @classmethod
@@ -145,7 +172,6 @@ class AltiumScriptTest(unittest.TestCase):
         vprint("Running Altium script...", VERBOSITY_DETAILED)
         
         # Get the Altium executable and script paths
-        # You might need to adjust these paths based on your configuration
         altium_exe_path = self.get_altium_exe_path()
         script_path = self.get_script_path()
         
@@ -167,6 +193,10 @@ class AltiumScriptTest(unittest.TestCase):
             vprint(f"Launched Altium with script, process ID: {process.pid}", VERBOSITY_DETAILED)
             
             # Store the process so we can check its status later
+            if hasattr(self, 'current_process') and self.current_process is not None:
+                # Terminate any existing process before starting a new one
+                self._terminate_process(self.current_process)
+                
             self.current_process = process
         except Exception as e:
             self.fail(f"Error launching Altium: {e}")
@@ -198,9 +228,40 @@ class AltiumScriptTest(unittest.TestCase):
                 vprint("\nExamine the response and press Enter to continue...", VERBOSITY_DEBUG)
                 input()
             
+            # After getting the response, terminate the process
+            self._terminate_process(self.current_process)
+            self.current_process = None
+            
             return response
         except json.JSONDecodeError as e:
             self.fail(f"Failed to parse JSON response: {e}\nResponse: {response_text}")
+
+    def _terminate_process(self, process):
+        """Helper method to terminate a process."""
+        import signal
+        import os
+        
+        if process is None:
+            return
+        
+        try:
+            if process.poll() is None:
+                # First try graceful termination
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # If terminate didn't work, use force kill
+                    if os.name == 'nt':  # Windows
+                        process.kill()
+                    else:  # Unix/Linux/Mac
+                        os.kill(process.pid, signal.SIGKILL)
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        vprint(f"WARNING: Process {process.pid} could not be killed!", VERBOSITY_NORMAL)
+        except Exception as e:
+            vprint(f"Error terminating process: {e}", VERBOSITY_DETAILED)
     
     def get_altium_exe_path(self):
         """Get the path to the Altium executable."""
@@ -312,8 +373,6 @@ class AltiumScriptTest(unittest.TestCase):
                 self._log_failure(log_file, f"Component has non-numeric values for fields: {', '.join(invalid_numeric)}", response)
                 return False
             
-            # If we got here, the response is valid
-            print("SUCCESS: get_all_component_data response validation passed")
             return True
             
         except Exception as e:
@@ -355,6 +414,8 @@ class AltiumScriptTest(unittest.TestCase):
         # Validate using our comprehensive function and convert to unittest assertion
         self.assertTrue(self.validate_component_data_response(response), "Component data validation failed. Check validation_failures.log for details.")
     
+        vprint("\nSUCCESS: test_get_component_pins completed\n", VERBOSITY_NORMAL)
+
     def test_get_component_pins(self):
         """Test the get_component_pins command."""
         vprint("\n--- RUNNING TEST: get_component_pins ---\n", VERBOSITY_DEBUG)
@@ -399,22 +460,28 @@ class AltiumScriptTest(unittest.TestCase):
                 expected_pin_fields = ["name", "net", "x", "y"]
                 for field in expected_pin_fields:
                     self.assertIn(field, pin, f"Pin missing field: {field}")
+
+        print("\nSUCCESS: test_get_component_pins completed\n")
     
     def test_get_selected_components_coordinates(self):
         """Test the get_selected_components_coordinates command."""
-        vprint("\n--- RUNNING TEST: get_selected_components_coordinates ---\n", VERBOSITY_DEBUG)
+        vprint("\n--- RUNNING TEST: get_selected_components_coordinates ---\n", VERBOSITY_NORMAL)
         
         # This test requires user interaction to select components in Altium
-        print("\nPLEASE SELECT AT LEAST ONE COMPONENT IN ALTIUM")
-        print("Press Enter when components are selected...")
+        vprint("\nPLEASE SELECT AT LEAST ONE COMPONENT IN ALTIUM", VERBOSITY_NORMAL)
+        vprint("Press Enter when components are selected...", VERBOSITY_NORMAL)
         input()
         
         # Execute the command
         response = self.execute_command("get_selected_components_coordinates")
         
+        # Store the response for later use in test_move_components
+        # We'll use a class variable to share this data between test methods
+        type(self).selected_components_response = response
+        
         # Verify the response
         self.assertTrue(response.get("success", False), 
-                       f"Command failed: {response.get('error', 'Unknown error')}")
+                    f"Command failed: {response.get('error', 'Unknown error')}")
         
         # Validate the result structure
         result = response.get("result", [])
@@ -426,35 +493,43 @@ class AltiumScriptTest(unittest.TestCase):
                 expected_fields = ["designator", "x", "y", "width", "height", "rotation"]
                 for field in expected_fields:
                     self.assertIn(field, component, f"Selected component missing field: {field}")
+                vprint(f"Found {len(result)} selected components", VERBOSITY_NORMAL)
             else:
-                print("No components were selected in Altium")
+                vprint("No components were selected in Altium", VERBOSITY_NORMAL)
+                self.skipTest("No components were selected, skipping test")
         else:
             self.fail(f"Unexpected response format: {result}")
-    
+        
+        vprint("\nSUCCESS: test_get_selected_components_coordinates completed\n", VERBOSITY_NORMAL)
+        
+        return response  # Return for convenience
+
     def test_move_components(self):
         """Test the move_components command."""
-        vprint("\n--- RUNNING TEST: move_components ---\n", VERBOSITY_DEBUG)
+        vprint("\n--- RUNNING TEST: move_components ---\n", VERBOSITY_NORMAL)
         
-        # First, get all component designators
-        all_components = self.execute_command("get_all_component_data")
+        # Check if we have selected components from the previous test
+        if not hasattr(type(self), 'selected_components_response') or not type(self).selected_components_response:
+            # If not, run the selection test to get components
+            vprint("No selected components found. Running selection test first...", VERBOSITY_NORMAL)
+            response = self.test_get_selected_components_coordinates()
+        else:
+            response = type(self).selected_components_response
         
-        # Verify the response
-        self.assertTrue(all_components.get("success", False), 
-                       f"Failed to get component data: {all_components.get('error', 'Unknown error')}")
+        # Verify we have selected components to work with
+        result = response.get("result", [])
+        if not result or not isinstance(result, list) or len(result) == 0:
+            self.skipTest("No components selected, skipping move test")
         
-        result = all_components.get("result", [])
-        if not result:
-            self.skipTest("No components found in the board, skipping move test")
-        
-        # Get designators for a few components (max 3)
-        designators = [comp["designator"] for comp in result[:3] if "designator" in comp]
+        # Get designators from the selected components
+        designators = [comp["designator"] for comp in result if "designator" in comp]
         
         if not designators:
-            self.skipTest("No valid designators found in the board, skipping move test")
+            self.skipTest("No valid designators found in selected components, skipping move test")
         
         # Record original positions before move
         original_positions = {}
-        for comp in result[:3]:
+        for comp in result:
             if "designator" in comp and comp["designator"] in designators:
                 original_positions[comp["designator"]] = {
                     "x": comp.get("x", 0),
@@ -462,22 +537,28 @@ class AltiumScriptTest(unittest.TestCase):
                 }
         
         # Execute the move_components command (move components by 100 mils in X and Y)
+        # IMPORTANT: changed from cmp_designators to designators to match Altium script expectations
         move_params = {
-            "cmp_designators": designators,
+            "designators": designators,  # This is the key change - parameter name must match what the script expects
             "x_offset": 100,
             "y_offset": 100,
             "rotation": 0
         }
         
-        response = self.execute_command("move_components", move_params)
+        move_response = self.execute_command("move_components", move_params)
         
         # Verify the response
-        self.assertTrue(response.get("success", False), 
-                       f"Command failed: {response.get('error', 'Unknown error')}")
+        self.assertTrue(move_response.get("success", False), 
+                    f"Command failed: {move_response.get('error', 'Unknown error')}")
+        
+        # Get the new positions of the components
+        vprint("\nPLEASE VERIFY COMPONENTS MOVED IN ALTIUM", VERBOSITY_NORMAL)
+        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
+        input()
         
         # Get components again to verify they moved
-        all_components_after = self.execute_command("get_all_component_data")
-        result_after = all_components_after.get("result", [])
+        components_after = self.execute_command("get_selected_components_coordinates")
+        result_after = components_after.get("result", [])
         
         # Create a dict of components after move
         moved_positions = {}
@@ -501,16 +582,20 @@ class AltiumScriptTest(unittest.TestCase):
                 
                 self.assertLess(x_diff, 1, f"Component {designator} did not move as expected in X direction")
                 self.assertLess(y_diff, 1, f"Component {designator} did not move as expected in Y direction")
+                vprint(f"Component {designator} moved successfully", VERBOSITY_DETAILED)
         
         # Move components back to original positions
         move_back_params = {
-            "cmp_designators": designators,
+            "designators": designators,  # Also changed here
             "x_offset": -100,
             "y_offset": -100,
             "rotation": 0
         }
         
+        vprint("Moving components back to original positions...", VERBOSITY_NORMAL)
         self.execute_command("move_components", move_back_params)
+        
+        vprint("\nSUCCESS: test_move_components completed\n", VERBOSITY_NORMAL)
 
 
 if __name__ == "__main__":
