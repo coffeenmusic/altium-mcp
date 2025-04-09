@@ -404,9 +404,109 @@ class AltiumScriptTest(unittest.TestCase):
         except Exception as e:
             print(f"Error writing to log file: {e}")
             print(f"FAILURE: {message}")
+
+    def test_01_get_schematic_data(self):
+        """Test the get_schematic_data command."""
+        vprint("\n--- RUNNING TEST: get_schematic_data ---\n", VERBOSITY_DETAILED)
+        
+        # This test requires a schematic project to be open in Altium
+        vprint("\nMAKE SURE A SCHEMATIC IS OPEN IN ALTIUM", VERBOSITY_NORMAL)
+        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
+        input()
+        
+        # Execute the command
+        response = self.execute_command("get_schematic_data")
+        
+        # Verify the response
+        self.assertTrue(response.get("success", False), 
+                    f"Command failed: {response.get('error', 'Unknown error')}")
+        
+        # Validate the result structure
+        schematic_data = response.get("result", [])
+        self.assertIsInstance(schematic_data, list, "Result should be a list")
+        
+        # Check if we got any components
+        if len(schematic_data) == 0:
+            vprint("WARNING: No schematic components found. This is unusual.", VERBOSITY_NORMAL)
+        else:
+            vprint(f"Found {len(schematic_data)} schematic components", VERBOSITY_DETAILED)
+            
+            # Check the structure of the first component
+            component = schematic_data[0]
+            expected_fields = [
+                "designator", "sheet", "schematic_x", "schematic_y", 
+                "schematic_width", "schematic_height", "schematic_rotation", "parameters"
+            ]
+            
+            missing_fields = []
+            for field in expected_fields:
+                if field not in component:
+                    missing_fields.append(field)
+            
+            if missing_fields:
+                self.fail(f"Schematic component missing required fields: {', '.join(missing_fields)}")
+                
+            # Check the parameters object
+            self.assertIsInstance(component["parameters"], dict, "Parameters should be a dictionary")
+        
+        vprint("\nSUCCESS: test_get_schematic_data completed\n", VERBOSITY_NORMAL)
+
+    def test_02_create_schematic_symbol(self):
+        """Test the create_schematic_symbol command."""
+        vprint("\n--- RUNNING TEST: create_schematic_symbol ---\n", VERBOSITY_DETAILED)
+        
+        # This test requires a schematic library document to be open in Altium
+        vprint("\nMAKE SURE A SCHEMATIC LIBRARY DOCUMENT IS OPEN IN ALTIUM", VERBOSITY_NORMAL)
+        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
+        input()
+        
+        # Define test symbol data
+        symbol_name = "TEST_SYMBOL_" + time.strftime("%Y%m%d%H%M%S")  # Unique name
+        
+        # Define pins for the test symbol
+        pins = [
+            "1|VCC|eElectricPower|eRotate90|0|1000",     # Power pin at top
+            "2|GND|eElectricPower|eRotate90|0|900",      # Power pin at bottom
+            "3|IN1|eElectricInput|eRotate180|100|300",   # Input pin on left
+            "4|IN2|eElectricInput|eRotate180|100|500",   # Input pin on left
+            "5|OUT|eElectricOutput|eRotate0|800|400"     # Output pin on right
+        ]
+        
+        # Create test symbol parameters
+        params = {
+            "symbol_name": symbol_name,
+            "description": "Test Symbol created by automated test",
+            "pins": pins
+        }
+        
+        # Execute the command
+        response = self.execute_command("create_schematic_symbol", params)
+        
+        # Verify the response
+        self.assertTrue(response.get("success", False), 
+                       f"Command failed: {response.get('error', 'Unknown error')}")
+        
+        # Validate the result
+        result = response.get("result", {})
+        self.assertIn("component_name", result, "Result missing 'component_name' field")
+        self.assertIn("pins_count", result, "Result missing 'pins_count' field")
+        
+        # Check if component name matches what we sent
+        self.assertEqual(result.get("component_name"), symbol_name, 
+                        "Component name in response doesn't match what we sent")
+        
+        # Check if pin count matches expected
+        self.assertEqual(result.get("pins_count"), len(pins), 
+                        "Pin count in response doesn't match expected")
+        
+        vprint("\nPLEASE VERIFY THE SYMBOL WAS CREATED IN YOUR LIBRARY", VERBOSITY_NORMAL)
+        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
+        input()
+        
+        vprint("\nSUCCESS: test_create_schematic_symbol completed\n", VERBOSITY_NORMAL)
     
-    def test_get_all_component_data(self):
-        vprint("\n--- RUNNING TEST: get_all_component_data ---\n", VERBOSITY_DEBUG)
+    def test_03_get_all_component_data(self):
+        vprint("\n--- RUNNING TEST: get_all_component_data ---\n", VERBOSITY_DETAILED)
         
         # Execute the command
         response = self.execute_command("get_all_component_data")
@@ -416,9 +516,9 @@ class AltiumScriptTest(unittest.TestCase):
     
         vprint("\nSUCCESS: test_get_component_pins completed\n", VERBOSITY_NORMAL)
 
-    def test_get_component_pins(self):
+    def test_04_get_component_pins(self):
         """Test the get_component_pins command."""
-        vprint("\n--- RUNNING TEST: get_component_pins ---\n", VERBOSITY_DEBUG)
+        vprint("\n--- RUNNING TEST: get_component_pins ---\n", VERBOSITY_DETAILED)
         
         # First, get all component designators
         all_components = self.execute_command("get_all_component_data")
@@ -463,12 +563,12 @@ class AltiumScriptTest(unittest.TestCase):
 
         print("\nSUCCESS: test_get_component_pins completed\n")
     
-    def test_get_selected_components_coordinates(self):
+    def test_05_get_selected_components_coordinates(self):
         """Test the get_selected_components_coordinates command."""
-        vprint("\n--- RUNNING TEST: get_selected_components_coordinates ---\n", VERBOSITY_DEBUG)
+        vprint("\n--- RUNNING TEST: get_selected_components_coordinates ---\n", VERBOSITY_DETAILED)
         
         # This test requires user interaction to select components in Altium
-        vprint("\nPLEASE SELECT AT LEAST ONE COMPONENT IN ALTIUM", VERBOSITY_NORMAL)
+        vprint("\nPLEASE SELECT AT LEAST ONE COMPONENT IN LAYOUT", VERBOSITY_NORMAL)
         vprint("Press Enter when components are selected...", VERBOSITY_NORMAL)
         input()
         
@@ -504,9 +604,9 @@ class AltiumScriptTest(unittest.TestCase):
         
         # Don't return anything - we've already stored the response in type(self).selected_components_response
 
-    def test_move_components(self):
+    def test_06_move_components(self):
         """Test the move_components command."""
-        vprint("\n--- RUNNING TEST: move_components ---\n", VERBOSITY_DEBUG)
+        vprint("\n--- RUNNING TEST: move_components ---\n", VERBOSITY_DETAILED)
         
         # Check if we have selected components from the previous test
         if not hasattr(type(self), 'selected_components_response') or not type(self).selected_components_response:
@@ -602,12 +702,11 @@ class AltiumScriptTest(unittest.TestCase):
         
         vprint("\nSUCCESS: test_move_components completed\n", VERBOSITY_NORMAL)
 
-    def test_get_pcb_rules(self):
+    def test_07_get_pcb_rules(self):
         """Test the get_pcb_rules command."""
-        vprint("\n--- RUNNING TEST: get_pcb_rules ---\n", VERBOSITY_DEBUG)
+        vprint("\n--- RUNNING TEST: get_pcb_rules ---\n", VERBOSITY_DETAILED)
         
         # This test requires a PCB document to be open in Altium
-        vprint("\nMAKE SURE A PCB DOCUMENT IS OPEN IN ALTIUM", VERBOSITY_NORMAL)
         vprint("Press Enter to continue...", VERBOSITY_NORMAL)
         input()
         
@@ -640,107 +739,6 @@ class AltiumScriptTest(unittest.TestCase):
                     vprint(f"... and {len(rules_data) - 5} more rules", VERBOSITY_DETAILED)
         
         vprint("\nSUCCESS: test_get_pcb_rules completed\n", VERBOSITY_NORMAL)
-
-    def test_get_schematic_data(self):
-        """Test the get_schematic_data command."""
-        vprint("\n--- RUNNING TEST: get_schematic_data ---\n", VERBOSITY_DEBUG)
-        
-        # This test requires a schematic project to be open in Altium
-        vprint("\nMAKE SURE A SCHEMATIC PROJECT IS OPEN IN ALTIUM", VERBOSITY_NORMAL)
-        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
-        input()
-        
-        # Execute the command
-        response = self.execute_command("get_schematic_data")
-        
-        # Verify the response
-        self.assertTrue(response.get("success", False), 
-                       f"Command failed: {response.get('error', 'Unknown error')}")
-        
-        # Validate the result structure
-        schematic_data = response.get("result", [])
-        self.assertIsInstance(schematic_data, list, "Result should be a list")
-        
-        # Check if we got any components
-        if len(schematic_data) == 0:
-            vprint("WARNING: No schematic components found. This is unusual.", VERBOSITY_NORMAL)
-        else:
-            vprint(f"Found {len(schematic_data)} schematic components", VERBOSITY_DETAILED)
-            
-            # Check the structure of the first component
-            component = schematic_data[0]
-            expected_fields = [
-                "designator", "sheet", "schematic_x", "schematic_y", 
-                "schematic_width", "schematic_height", "schematic_rotation", "parameters"
-            ]
-            
-            missing_fields = []
-            for field in expected_fields:
-                if field not in component:
-                    missing_fields.append(field)
-            
-            if missing_fields:
-                self.fail(f"Schematic component missing required fields: {', '.join(missing_fields)}")
-                
-            # Check the parameters object
-            self.assertIsInstance(component["parameters"], dict, "Parameters should be a dictionary")
-        
-        vprint("\nSUCCESS: test_get_schematic_data completed\n", VERBOSITY_NORMAL)
-
-    def test_create_schematic_symbol(self):
-        """Test the create_schematic_symbol command."""
-        vprint("\n--- RUNNING TEST: create_schematic_symbol ---\n", VERBOSITY_DEBUG)
-        
-        # This test requires a schematic library document to be open in Altium
-        vprint("\nMAKE SURE A SCHEMATIC LIBRARY DOCUMENT IS OPEN IN ALTIUM", VERBOSITY_NORMAL)
-        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
-        input()
-        
-        # Define test symbol data
-        symbol_name = "TEST_SYMBOL_" + time.strftime("%Y%m%d%H%M%S")  # Unique name
-        
-        # Define pins for the test symbol
-        pins = [
-            "1|VCC|eElectricPower|eRotate90|0|1000",     # Power pin at top
-            "2|GND|eElectricPower|eRotate90|0|900",      # Power pin at bottom
-            "3|IN1|eElectricInput|eRotate180|100|300",   # Input pin on left
-            "4|IN2|eElectricInput|eRotate180|100|500",   # Input pin on left
-            "5|OUT|eElectricOutput|eRotate0|800|400"     # Output pin on right
-        ]
-        
-        # Create test symbol parameters
-        params = {
-            "symbol_name": symbol_name,
-            "description": "Test Symbol created by automated test",
-            "pins": pins
-        }
-        
-        # Execute the command
-        response = self.execute_command("create_schematic_symbol", params)
-        
-        # Verify the response
-        self.assertTrue(response.get("success", False), 
-                       f"Command failed: {response.get('error', 'Unknown error')}")
-        
-        # Validate the result
-        result = response.get("result", {})
-        self.assertIn("component_name", result, "Result missing 'component_name' field")
-        self.assertIn("pins_count", result, "Result missing 'pins_count' field")
-        
-        # Check if component name matches what we sent
-        self.assertEqual(result.get("component_name"), symbol_name, 
-                        "Component name in response doesn't match what we sent")
-        
-        # Check if pin count matches expected
-        self.assertEqual(result.get("pins_count"), len(pins), 
-                        "Pin count in response doesn't match expected")
-        
-        vprint(f"Successfully created symbol '{symbol_name}' with {len(pins)} pins", VERBOSITY_NORMAL)
-        vprint("\nPLEASE VERIFY THE SYMBOL WAS CREATED IN YOUR LIBRARY", VERBOSITY_NORMAL)
-        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
-        input()
-        
-        vprint("\nSUCCESS: test_create_schematic_symbol completed\n", VERBOSITY_NORMAL)
 
 
 if __name__ == "__main__":
