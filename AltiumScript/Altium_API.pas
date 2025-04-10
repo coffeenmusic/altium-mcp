@@ -918,6 +918,14 @@ var
     StackSize      : Integer;
     PointInfo      : String;
     Net            : IPCB_Net;
+    
+    // For polygon processing
+    PolyIterator   : IPCB_BoardIterator;
+    Polygon        : IPCB_Primitive;
+    PadRect        : TCoordRect;
+    PolyRect       : TCoordRect;
+    Overlapping    : Boolean;
+    PolygonCount   : Integer;
 begin
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
@@ -930,6 +938,7 @@ begin
     // Create result properties
     ResultProps := TStringList.Create;
     MovedCount := 0;
+    PolygonCount := 0;
 
     // Create list to track processed nets to avoid infinite loops
     ProcessedNets := TStringList.Create;
@@ -938,7 +947,7 @@ begin
     TraceStack := TStringList.Create;
 
     // Set a small tolerance for connection checking (1 mil)
-    Tolerance := MilsToCoord(1);
+    Tolerance := MilsToCoord(0.01);
 
     try
         PCBServer.PreProcess;
@@ -957,20 +966,20 @@ begin
                 begin
                     // Begin modify component
                     CmpDst.BeginModify;
-
+                    
                     // Move Destination Components to Match Source Components
                     CmpDst.Rotation := CmpSrc.Rotation;
                     CmpDst.Layer_V6 := CmpSrc.Layer_V6;
                     CmpDst.x := CmpSrc.x;
                     CmpDst.y := CmpSrc.y;
                     CmpDst.Selected := True;
-
+                    
                     // End modify component
                     CmpDst.EndModify;
-
+                    
                     // Graphically invalidate the component
                     Board.ViewManager_GraphicallyInvalidatePrimitive(CmpDst);
-
+                    
                     // Register component with the board
                     Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, CmpDst.I_ObjectAddress);
 
@@ -1025,13 +1034,13 @@ begin
                                         ConnectedPrim.BeginModify;
                                         ConnectedPrim.Net := Net;
                                         ConnectedPrim.EndModify;
-
+                                        
                                         // Graphically invalidate this primitive
                                         Board.ViewManager_GraphicallyInvalidatePrimitive(ConnectedPrim);
-
+                                        
                                         // Register primitive with the board
                                         Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
-
+                                        
                                         // Force net connectivity recalculation
                                         if ConnectedPrim.InNet then
                                         begin
@@ -1073,7 +1082,85 @@ begin
 
                                 Board.SpatialIterator_Destroy(SIter);
                             end;
-
+                            
+                            // Process polygons, regions, and fills overlapping with this pad
+                            // Get pad's bounding rectangle
+                            PadRect := Pad.BoundingRectangle;
+                            
+                            // Create iterator for polygons, regions, and fills
+                            PolyIterator := Board.BoardIterator_Create;
+                            PolyIterator.AddFilter_ObjectSet(MkSet(ePolyObject, eRegionObject, eFillObject));
+                            PolyIterator.AddFilter_LayerSet(AllLayers);
+                            PolyIterator.AddFilter_Method(eProcessAll);
+                            
+                            // Process each selected polygon, region, or fill
+                            Polygon := PolyIterator.FirstPCBObject;
+                            while Polygon <> nil do
+                            begin
+                                if Polygon.Selected and ((Polygon.Net = nil) or (Polygon.Net.Name <> Net.Name)) and (Polygon.Layer = Pad.Layer) then
+                                begin
+                                    // Get polygon's bounding rectangle
+                                    PolyRect := Polygon.BoundingRectangle;
+                                    
+                                    // Check if rectangles overlap
+                                    Overlapping := False;
+                                    if (PadRect.Left <= PolyRect.Right + Tolerance) and
+                                       (PadRect.Right >= PolyRect.Left - Tolerance) and
+                                       (PadRect.Bottom <= PolyRect.Top + Tolerance) and
+                                       (PadRect.Top >= PolyRect.Bottom - Tolerance) then
+                                    begin
+                                        // For polygon, use PointInPolygon
+                                        if Polygon.ObjectId = ePolyObject then
+                                        begin
+                                            // Check if pad center is inside polygon
+                                            X := (PadRect.Left + PadRect.Right) div 2;
+                                            Y := (PadRect.Bottom + PadRect.Top) div 2;
+                                            
+                                            if Polygon.PointInPolygon(X, Y) then
+                                                Overlapping := True
+                                            else
+                                            begin
+                                                // Check pad corners
+                                                if Polygon.PointInPolygon(PadRect.Left, PadRect.Bottom) or
+                                                   Polygon.PointInPolygon(PadRect.Left, PadRect.Top) or
+                                                   Polygon.PointInPolygon(PadRect.Right, PadRect.Bottom) or
+                                                   Polygon.PointInPolygon(PadRect.Right, PadRect.Top) then
+                                                    Overlapping := True;
+                                            end;
+                                        end
+                                        // For regions and fills, use distance checking
+                                        else if Board.PrimPrimDistance(Pad, Polygon) <= Tolerance then
+                                            Overlapping := True;
+                                            
+                                        if Overlapping then
+                                        begin
+                                            // Assign this pad's net to the polygon
+                                            Polygon.BeginModify;
+                                            Polygon.Net := Net;
+                                            Polygon.EndModify;
+                                            
+                                            // Graphically invalidate
+                                            Board.ViewManager_GraphicallyInvalidatePrimitive(Polygon);
+                                            
+                                            // Register with board
+                                            Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Polygon.I_ObjectAddress);
+                                            
+                                            // Invalidate net connectivity
+                                            if Polygon.InNet then
+                                            begin
+                                                Polygon.Net.ConnectivelyInValidate;
+                                            end;
+                                            
+                                            Inc(PolygonCount);
+                                        end;
+                                    end;
+                                end;
+                                
+                                Polygon := PolyIterator.NextPCBObject;
+                            end;
+                            
+                            Board.BoardIterator_Destroy(PolyIterator);
+                            
                             // Invalidate the net as a whole after processing all its primitives
                             Net.ConnectivelyInValidate;
                         end;
@@ -1082,13 +1169,14 @@ begin
                     end;
 
                     CmpDst.GroupIterator_Destroy(PadIterator);
+                    
                     MovedCount := MovedCount + 1;
                 end;
             end;
         end;
 
         PCBServer.PostProcess;
-
+        
         // Force redraw of the view
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
 
@@ -1096,14 +1184,16 @@ begin
         ResetParameters;
         AddStringParameter('Action', 'RebuildConnectivity');
         RunProcess('PCB:UpdateConnectivity');
-
+        
         // Run full update
         Board.ViewManager_FullUpdate;
-        
+
         // Create result JSON
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONInteger(ResultProps, 'moved_count', MovedCount);
-        AddJSONProperty(ResultProps, 'message', 'Successfully duplicated layout and applied nets for ' + IntToStr(MovedCount) + ' components.');
+        AddJSONInteger(ResultProps, 'polygon_count', PolygonCount);
+        AddJSONProperty(ResultProps, 'message', 'Successfully duplicated layout and applied nets for ' + IntToStr(MovedCount) + 
+                        ' components and ' + IntToStr(PolygonCount) + ' polygons/regions/fills.');
 
         // Build final JSON
         OutputLines := TStringList.Create;
