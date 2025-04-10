@@ -109,6 +109,8 @@ The server communicates with Altium Designer using a scripting bridge:
 - Claude: I vibe coded most of this with Claude 3.7
 - Claude is not familiar with DelphiScript, so many of the Altium provided example scripts were used as reference.
 - Used CopyDesignatorsToMechLayerPair script by Petar Perisin and Randy Clemmons for reference on how to .Replicate objects (used in layout duplicator)
+- Petar Perisin's Select Bad Connections Script: For understanding how to walk pcb primitives (track, arc, via, etc) connected to a pad
+- Matija Markovic and Petar Perisin Distribute Script: For understanding how to properly let the GUI know when I've updated tracks' nets
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)

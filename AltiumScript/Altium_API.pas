@@ -584,6 +584,8 @@ begin
     Board.BoardIterator_Destroy(Iterator);
 
     PCBServer.PostProcess;
+
+    Board.ViewManager_FullUpdate();  
     
     Result := DuplicatedObjects;
 end;
@@ -953,7 +955,8 @@ begin
 
                 if ((CmpSrc <> nil) and (CmpDst <> nil)) then
                 begin
-                    PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    // Begin modify component
+                    CmpDst.BeginModify;
 
                     // Move Destination Components to Match Source Components
                     CmpDst.Rotation := CmpSrc.Rotation;
@@ -961,6 +964,15 @@ begin
                     CmpDst.x := CmpSrc.x;
                     CmpDst.y := CmpSrc.y;
                     CmpDst.Selected := True;
+
+                    // End modify component
+                    CmpDst.EndModify;
+
+                    // Graphically invalidate the component
+                    Board.ViewManager_GraphicallyInvalidatePrimitive(CmpDst);
+
+                    // Register component with the board
+                    Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, CmpDst.I_ObjectAddress);
 
                     // Clear the processed nets list for this component
                     ProcessedNets.Clear;
@@ -1009,10 +1021,22 @@ begin
                                     // Only process selected primitives that need net assignment
                                     if ConnectedPrim.Selected and ((ConnectedPrim.Net = nil) or (ConnectedPrim.Net.Name <> Net.Name)) then
                                     begin
-                                        // Apply the net to this primitive
-                                        PCBServer.SendMessageToRobots(ConnectedPrim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                        // Apply the net to this primitive - using BeginModify/EndModify exactly like Distribute script
+                                        ConnectedPrim.BeginModify;
                                         ConnectedPrim.Net := Net;
-                                        PCBServer.SendMessageToRobots(ConnectedPrim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                                        ConnectedPrim.EndModify;
+
+                                        // Graphically invalidate this primitive
+                                        Board.ViewManager_GraphicallyInvalidatePrimitive(ConnectedPrim);
+
+                                        // Register primitive with the board
+                                        Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
+
+                                        // Force net connectivity recalculation
+                                        if ConnectedPrim.InNet then
+                                        begin
+                                            ConnectedPrim.Net.ConnectivelyInValidate;
+                                        end;
 
                                         // Add new points to trace based on primitive type
                                         if ConnectedPrim.ObjectId = eTrackObject then
@@ -1049,14 +1073,15 @@ begin
 
                                 Board.SpatialIterator_Destroy(SIter);
                             end;
+
+                            // Invalidate the net as a whole after processing all its primitives
+                            Net.ConnectivelyInValidate;
                         end;
 
                         Pad := PadIterator.NextPCBObject;
                     end;
 
                     CmpDst.GroupIterator_Destroy(PadIterator);
-                    PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-
                     MovedCount := MovedCount + 1;
                 end;
             end;
@@ -1064,9 +1089,17 @@ begin
 
         PCBServer.PostProcess;
 
-        // Update PCB document
+        // Force redraw of the view
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
 
+        // Update connectivity
+        ResetParameters;
+        AddStringParameter('Action', 'RebuildConnectivity');
+        RunProcess('PCB:UpdateConnectivity');
+
+        // Run full update
+        Board.ViewManager_FullUpdate;
+        
         // Create result JSON
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONInteger(ResultProps, 'moved_count', MovedCount);
