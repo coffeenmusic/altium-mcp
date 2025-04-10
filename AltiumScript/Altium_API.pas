@@ -895,6 +895,15 @@ begin
     end;
 end;
 
+// Function to check if two points are within tolerance
+function CheckWithTolerance(X1, Y1, X2, Y2 : TCoord) : Boolean;
+begin
+    if (Abs(X1 - X2) <= Tolerance) and (Abs(Y1 - Y2) <= Tolerance) then
+        Result := True
+    else
+        Result := False;
+end;
+
 // Function to apply layout duplication with provided source and destination lists
 function ApplyLayoutDuplicator(SourceList: TStringList; DestList: TStringList): String;
 var
@@ -918,7 +927,7 @@ var
     StackSize      : Integer;
     PointInfo      : String;
     Net            : IPCB_Net;
-    
+
     // For polygon processing
     PolyIterator   : IPCB_BoardIterator;
     Polygon        : IPCB_Primitive;
@@ -940,14 +949,15 @@ begin
     MovedCount := 0;
     PolygonCount := 0;
 
-    // Create list to track processed nets to avoid infinite loops
+    // Create list to track processed nets and points to avoid infinite loops
     ProcessedNets := TStringList.Create;
+    ProcessedNets.Duplicates := dupIgnore;  // Ignore duplicate entries
 
     // Create stack for tracking points to process
     TraceStack := TStringList.Create;
 
     // Set a small tolerance for connection checking (1 mil)
-    Tolerance := MilsToCoord(0.01);
+    Tolerance := MilsToCoord(1);
 
     try
         PCBServer.PreProcess;
@@ -966,20 +976,20 @@ begin
                 begin
                     // Begin modify component
                     CmpDst.BeginModify;
-                    
+
                     // Move Destination Components to Match Source Components
                     CmpDst.Rotation := CmpSrc.Rotation;
                     CmpDst.Layer_V6 := CmpSrc.Layer_V6;
                     CmpDst.x := CmpSrc.x;
                     CmpDst.y := CmpSrc.y;
                     CmpDst.Selected := True;
-                    
+
                     // End modify component
                     CmpDst.EndModify;
-                    
+
                     // Graphically invalidate the component
                     Board.ViewManager_GraphicallyInvalidatePrimitive(CmpDst);
-                    
+
                     // Register component with the board
                     Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, CmpDst.I_ObjectAddress);
 
@@ -1015,66 +1025,124 @@ begin
                                 PointInfo := TraceStack[StackSize - 1];
                                 TraceStack.Delete(StackSize - 1);
 
+                                // Skip if we've already processed this point
+                                if ProcessedNets.IndexOf(PointInfo) >= 0 then
+                                    Continue;
+
+                                // Mark this point as processed
+                                ProcessedNets.Add(PointInfo);
+
                                 // Extract X,Y from the point info
                                 X := StrToInt(Copy(PointInfo, 1, Pos(',', PointInfo) - 1));
                                 Y := StrToInt(Copy(PointInfo, Pos(',', PointInfo) + 1, Length(PointInfo)));
 
-                                // Find all primitives at this point
+                                // Find all objects connected to this point for thorough checking
                                 SIter := Board.SpatialIterator_Create;
                                 SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject));
                                 SIter.AddFilter_Area(X - Tolerance, Y - Tolerance, X + Tolerance, Y + Tolerance);
 
+                                // Perform a first pass to find all connected objects
                                 ConnectedPrim := SIter.FirstPCBObject;
                                 while ConnectedPrim <> nil do
                                 begin
-                                    // Only process selected primitives that need net assignment
-                                    if ConnectedPrim.Selected and ((ConnectedPrim.Net = nil) or (ConnectedPrim.Net.Name <> Net.Name)) then
+                                    // Process all selected primitives at this junction point
+                                    if ConnectedPrim.Selected then
                                     begin
-                                        // Apply the net to this primitive - using BeginModify/EndModify exactly like Distribute script
-                                        ConnectedPrim.BeginModify;
-                                        ConnectedPrim.Net := Net;
-                                        ConnectedPrim.EndModify;
-                                        
-                                        // Graphically invalidate this primitive
-                                        Board.ViewManager_GraphicallyInvalidatePrimitive(ConnectedPrim);
-                                        
-                                        // Register primitive with the board
-                                        Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
-                                        
-                                        // Force net connectivity recalculation
-                                        if ConnectedPrim.InNet then
-                                        begin
-                                            ConnectedPrim.Net.ConnectivelyInValidate;
-                                        end;
-
-                                        // Add new points to trace based on primitive type
+                                        // Check endpoints more precisely
                                         if ConnectedPrim.ObjectId = eTrackObject then
                                         begin
-                                            // If we're at X1,Y1, add X2,Y2 to stack
-                                            if (Abs(ConnectedPrim.x1 - X) <= Tolerance) and (Abs(ConnectedPrim.y1 - Y) <= Tolerance) then
+                                            // Precise check with both endpoints
+                                            if CheckWithTolerance(ConnectedPrim.x1, ConnectedPrim.y1, X, Y) or
+                                               CheckWithTolerance(ConnectedPrim.x2, ConnectedPrim.y2, X, Y) then
                                             begin
-                                                TraceStack.Add(IntToStr(ConnectedPrim.x2) + ',' + IntToStr(ConnectedPrim.y2));
-                                            end
-                                            // If we're at X2,Y2, add X1,Y1 to stack
-                                            else if (Abs(ConnectedPrim.x2 - X) <= Tolerance) and (Abs(ConnectedPrim.y2 - Y) <= Tolerance) then
-                                            begin
-                                                TraceStack.Add(IntToStr(ConnectedPrim.x1) + ',' + IntToStr(ConnectedPrim.y1));
+                                                // Apply the correct net to this primitive
+                                                ConnectedPrim.BeginModify;
+                                                ConnectedPrim.Net := Net;
+                                                ConnectedPrim.EndModify;
+
+                                                // Graphically invalidate this primitive
+                                                Board.ViewManager_GraphicallyInvalidatePrimitive(ConnectedPrim);
+
+                                                // Register primitive with the board
+                                                Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
+
+                                                // Force net connectivity recalculation
+                                                if ConnectedPrim.InNet then
+                                                begin
+                                                    ConnectedPrim.Net.ConnectivelyInValidate;
+                                                end;
+
+                                                // Add other endpoint to stack if not the current point
+                                                if CheckWithTolerance(ConnectedPrim.x1, ConnectedPrim.y1, X, Y) then
+                                                begin
+                                                    // Add x2,y2 to the stack
+                                                    TraceStack.Add(IntToStr(ConnectedPrim.x2) + ',' + IntToStr(ConnectedPrim.y2));
+                                                end
+                                                else
+                                                begin
+                                                    // Add x1,y1 to the stack
+                                                    TraceStack.Add(IntToStr(ConnectedPrim.x1) + ',' + IntToStr(ConnectedPrim.y1));
+                                                end;
                                             end;
                                         end
                                         else if ConnectedPrim.ObjectId = eArcObject then
                                         begin
-                                            // If we're at StartX,StartY, add EndX,EndY to stack
-                                            if (Abs(ConnectedPrim.StartX - X) <= Tolerance) and (Abs(ConnectedPrim.StartY - Y) <= Tolerance) then
+                                            // Precise check with both endpoints
+                                            if CheckWithTolerance(ConnectedPrim.StartX, ConnectedPrim.StartY, X, Y) or
+                                               CheckWithTolerance(ConnectedPrim.EndX, ConnectedPrim.EndY, X, Y) then
                                             begin
-                                                TraceStack.Add(IntToStr(ConnectedPrim.EndX) + ',' + IntToStr(ConnectedPrim.EndY));
-                                            end
-                                            // If we're at EndX,EndY, add StartX,StartY to stack
-                                            else if (Abs(ConnectedPrim.EndX - X) <= Tolerance) and (Abs(ConnectedPrim.EndY - Y) <= Tolerance) then
+                                                // Apply the correct net to this primitive
+                                                ConnectedPrim.BeginModify;
+                                                ConnectedPrim.Net := Net;
+                                                ConnectedPrim.EndModify;
+
+                                                // Graphically invalidate this primitive
+                                                Board.ViewManager_GraphicallyInvalidatePrimitive(ConnectedPrim);
+
+                                                // Register primitive with the board
+                                                Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
+
+                                                // Force net connectivity recalculation
+                                                if ConnectedPrim.InNet then
+                                                begin
+                                                    ConnectedPrim.Net.ConnectivelyInValidate;
+                                                end;
+
+                                                // Add other endpoint to stack if not the current point
+                                                if CheckWithTolerance(ConnectedPrim.StartX, ConnectedPrim.StartY, X, Y) then
+                                                begin
+                                                    // Add EndX,EndY to the stack
+                                                    TraceStack.Add(IntToStr(ConnectedPrim.EndX) + ',' + IntToStr(ConnectedPrim.EndY));
+                                                end
+                                                else
+                                                begin
+                                                    // Add StartX,StartY to the stack
+                                                    TraceStack.Add(IntToStr(ConnectedPrim.StartX) + ',' + IntToStr(ConnectedPrim.StartY));
+                                                end;
+                                            end;
+                                        end
+                                        else if ConnectedPrim.ObjectId = eViaObject then
+                                        begin
+                                            // Vias only have a single point, so just check if it's at our current point
+                                            if CheckWithTolerance(ConnectedPrim.x, ConnectedPrim.y, X, Y) then
                                             begin
-                                                TraceStack.Add(IntToStr(ConnectedPrim.StartX) + ',' + IntToStr(ConnectedPrim.StartY));
+                                                ConnectedPrim.BeginModify;
+                                                ConnectedPrim.Net := Net;
+                                                ConnectedPrim.EndModify;
+
+                                                // Graphically invalidate this primitive
+                                                Board.ViewManager_GraphicallyInvalidatePrimitive(ConnectedPrim);
+
+                                                // Register primitive with the board
+                                                Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
+
+                                                // Force net connectivity recalculation
+                                                if ConnectedPrim.InNet then
+                                                begin
+                                                    ConnectedPrim.Net.ConnectivelyInValidate;
+                                                end;
                                             end;
                                         end;
-                                        // Vias don't need additional points as they're processed at their single coordinate
                                     end;
 
                                     ConnectedPrim := SIter.NextPCBObject;
@@ -1082,17 +1150,17 @@ begin
 
                                 Board.SpatialIterator_Destroy(SIter);
                             end;
-                            
+
                             // Process polygons, regions, and fills overlapping with this pad
                             // Get pad's bounding rectangle
                             PadRect := Pad.BoundingRectangle;
-                            
+
                             // Create iterator for polygons, regions, and fills
                             PolyIterator := Board.BoardIterator_Create;
                             PolyIterator.AddFilter_ObjectSet(MkSet(ePolyObject, eRegionObject, eFillObject));
                             PolyIterator.AddFilter_LayerSet(AllLayers);
                             PolyIterator.AddFilter_Method(eProcessAll);
-                            
+
                             // Process each selected polygon, region, or fill
                             Polygon := PolyIterator.FirstPCBObject;
                             while Polygon <> nil do
@@ -1101,7 +1169,7 @@ begin
                                 begin
                                     // Get polygon's bounding rectangle
                                     PolyRect := Polygon.BoundingRectangle;
-                                    
+
                                     // Check if rectangles overlap
                                     Overlapping := False;
                                     if (PadRect.Left <= PolyRect.Right + Tolerance) and
@@ -1115,7 +1183,7 @@ begin
                                             // Check if pad center is inside polygon
                                             X := (PadRect.Left + PadRect.Right) div 2;
                                             Y := (PadRect.Bottom + PadRect.Top) div 2;
-                                            
+
                                             if Polygon.PointInPolygon(X, Y) then
                                                 Overlapping := True
                                             else
@@ -1131,36 +1199,36 @@ begin
                                         // For regions and fills, use distance checking
                                         else if Board.PrimPrimDistance(Pad, Polygon) <= Tolerance then
                                             Overlapping := True;
-                                            
+
                                         if Overlapping then
                                         begin
                                             // Assign this pad's net to the polygon
                                             Polygon.BeginModify;
                                             Polygon.Net := Net;
                                             Polygon.EndModify;
-                                            
+
                                             // Graphically invalidate
                                             Board.ViewManager_GraphicallyInvalidatePrimitive(Polygon);
-                                            
+
                                             // Register with board
                                             Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Polygon.I_ObjectAddress);
-                                            
+
                                             // Invalidate net connectivity
                                             if Polygon.InNet then
                                             begin
                                                 Polygon.Net.ConnectivelyInValidate;
                                             end;
-                                            
+
                                             Inc(PolygonCount);
                                         end;
                                     end;
                                 end;
-                                
+
                                 Polygon := PolyIterator.NextPCBObject;
                             end;
-                            
+
                             Board.BoardIterator_Destroy(PolyIterator);
-                            
+
                             // Invalidate the net as a whole after processing all its primitives
                             Net.ConnectivelyInValidate;
                         end;
@@ -1169,14 +1237,14 @@ begin
                     end;
 
                     CmpDst.GroupIterator_Destroy(PadIterator);
-                    
+
                     MovedCount := MovedCount + 1;
                 end;
             end;
         end;
 
         PCBServer.PostProcess;
-        
+
         // Force redraw of the view
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
 
@@ -1184,7 +1252,7 @@ begin
         ResetParameters;
         AddStringParameter('Action', 'RebuildConnectivity');
         RunProcess('PCB:UpdateConnectivity');
-        
+
         // Run full update
         Board.ViewManager_FullUpdate;
 
@@ -1192,7 +1260,7 @@ begin
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONInteger(ResultProps, 'moved_count', MovedCount);
         AddJSONInteger(ResultProps, 'polygon_count', PolygonCount);
-        AddJSONProperty(ResultProps, 'message', 'Successfully duplicated layout and applied nets for ' + IntToStr(MovedCount) + 
+        AddJSONProperty(ResultProps, 'message', 'Successfully duplicated layout and applied nets for ' + IntToStr(MovedCount) +
                         ' components and ' + IntToStr(PolygonCount) + ' polygons/regions/fills.');
 
         // Build final JSON
