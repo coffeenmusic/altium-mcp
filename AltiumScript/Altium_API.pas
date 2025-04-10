@@ -543,6 +543,7 @@ var
     Iterator       : IPCB_BoardIterator;
     OrigObj, NewObj : IPCB_Primitive;
     DuplicatedObjects : TObjectList;
+    temp: String;
 begin
     // Create object list to store duplicated objects
     DuplicatedObjects := CreateObject(TObjectList);
@@ -562,13 +563,16 @@ begin
         if OrigObj.Selected then
         begin
             // Replicate the object
+            NewObj := PCBServer.PCBObjectFactory(OrigObj.ObjectId, eNoDimension, eCreate_Default);
             NewObj := OrigObj.Replicate;
-            
+
             // Add to board
+            PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
             Board.AddPCBObject(NewObj);
-            
+            PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
             // Send board registration message
-            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, NewObj.I_ObjectAddress);
+            //PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, NewObj.I_ObjectAddress);
             
             // Add to our list of duplicated objects
             DuplicatedObjects.Add(NewObj);
@@ -663,6 +667,33 @@ begin
         // Duplicate all object types in one call
         DuplicatedObjects := DuplicateSelectedObjects(Board, MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
         
+        // Deselect all original objects to avoid duplicating them again
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+
+        PCBServer.PreProcess;
+        Obj := Iterator.FirstPCBObject;
+        while (Obj <> Nil) do
+        begin
+            // Only deselect objects that are not in our duplicated list
+            if Obj.Selected and (DuplicatedObjects.IndexOf(Obj) < 0) then
+                Obj.Selected := False;
+            
+            Obj := Iterator.NextPCBObject;
+        end;
+        PCBServer.PostProcess;
+        Board.BoardIterator_Destroy(Iterator);
+
+        // Select only the duplicated objects
+        for i := 0 to DuplicatedObjects.Count - 1 do
+        begin
+            Obj := DuplicatedObjects[i];
+            if (Obj <> nil) then
+                Obj.Selected := True;
+        end;
+
         // Add source components to JSON
         for i := 0 to SourceCmps.Count - 1 do
         begin
@@ -872,6 +903,19 @@ var
     ResultProps    : TStringList;
     MovedCount     : Integer;
     OutputLines    : TStringList;
+    PadIterator    : IPCB_GroupIterator;
+    Pad            : IPCB_Pad;
+    ProcessedNets  : TStringList;
+    Tolerance      : TCoord;
+
+    // For net tracing
+    SIter          : IPCB_SpatialIterator;
+    ConnectedPrim  : IPCB_Primitive;
+    TraceStack     : TStringList;
+    X, Y, NextX, NextY : TCoord;
+    StackSize      : Integer;
+    PointInfo      : String;
+    Net            : IPCB_Net;
 begin
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
@@ -880,52 +924,154 @@ begin
         Result := '{"success": false, "error": "No PCB document is currently active"}';
         Exit;
     end;
-    
+
     // Create result properties
     ResultProps := TStringList.Create;
     MovedCount := 0;
-    
+
+    // Create list to track processed nets to avoid infinite loops
+    ProcessedNets := TStringList.Create;
+
+    // Create stack for tracking points to process
+    TraceStack := TStringList.Create;
+
+    // Set a small tolerance for connection checking (1 mil)
+    Tolerance := MilsToCoord(1);
+
     try
         PCBServer.PreProcess;
-        
+
         for i := 0 to SourceList.Count - 1 do
         begin
             if (i < DestList.Count) then
             begin
                 NameSrc := SourceList.Get(i);
                 CmpSrc := Board.GetPcbComponentByRefDes(NameSrc);
-                
+
                 NameDst := DestList.Get(i);
                 CmpDst := Board.GetPcbComponentByRefDes(NameDst);
-                
+
                 if ((CmpSrc <> nil) and (CmpDst <> nil)) then
                 begin
                     PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-                    
+
                     // Move Destination Components to Match Source Components
                     CmpDst.Rotation := CmpSrc.Rotation;
                     CmpDst.Layer_V6 := CmpSrc.Layer_V6;
                     CmpDst.x := CmpSrc.x;
                     CmpDst.y := CmpSrc.y;
                     CmpDst.Selected := True;
-                    
+
+                    // Clear the processed nets list for this component
+                    ProcessedNets.Clear;
+
+                    // Process all pads in the destination component
+                    PadIterator := CmpDst.GroupIterator_Create;
+                    PadIterator.AddFilter_ObjectSet(MkSet(ePadObject));
+
+                    Pad := PadIterator.FirstPCBObject;
+                    while Pad <> nil do
+                    begin
+                        // Skip if pad has no net or we've already processed this net
+                        if (Pad.Net <> nil) and (ProcessedNets.IndexOf(Pad.Net.Name) < 0) then
+                        begin
+                            Net := Pad.Net;
+
+                            // Add to processed nets
+                            ProcessedNets.Add(Net.Name);
+
+                            // Clear the stack
+                            TraceStack.Clear;
+
+                            // Add initial pad position to stack
+                            TraceStack.Add(IntToStr(Pad.x) + ',' + IntToStr(Pad.y));
+
+                            // Process until stack is empty
+                            while TraceStack.Count > 0 do
+                            begin
+                                // Pop a point from the stack
+                                StackSize := TraceStack.Count;
+                                PointInfo := TraceStack[StackSize - 1];
+                                TraceStack.Delete(StackSize - 1);
+
+                                // Extract X,Y from the point info
+                                X := StrToInt(Copy(PointInfo, 1, Pos(',', PointInfo) - 1));
+                                Y := StrToInt(Copy(PointInfo, Pos(',', PointInfo) + 1, Length(PointInfo)));
+
+                                // Find all primitives at this point
+                                SIter := Board.SpatialIterator_Create;
+                                SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject));
+                                SIter.AddFilter_Area(X - Tolerance, Y - Tolerance, X + Tolerance, Y + Tolerance);
+
+                                ConnectedPrim := SIter.FirstPCBObject;
+                                while ConnectedPrim <> nil do
+                                begin
+                                    // Only process selected primitives that need net assignment
+                                    if ConnectedPrim.Selected and ((ConnectedPrim.Net = nil) or (ConnectedPrim.Net.Name <> Net.Name)) then
+                                    begin
+                                        // Apply the net to this primitive
+                                        PCBServer.SendMessageToRobots(ConnectedPrim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                        ConnectedPrim.Net := Net;
+                                        PCBServer.SendMessageToRobots(ConnectedPrim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                                        // Add new points to trace based on primitive type
+                                        if ConnectedPrim.ObjectId = eTrackObject then
+                                        begin
+                                            // If we're at X1,Y1, add X2,Y2 to stack
+                                            if (Abs(ConnectedPrim.x1 - X) <= Tolerance) and (Abs(ConnectedPrim.y1 - Y) <= Tolerance) then
+                                            begin
+                                                TraceStack.Add(IntToStr(ConnectedPrim.x2) + ',' + IntToStr(ConnectedPrim.y2));
+                                            end
+                                            // If we're at X2,Y2, add X1,Y1 to stack
+                                            else if (Abs(ConnectedPrim.x2 - X) <= Tolerance) and (Abs(ConnectedPrim.y2 - Y) <= Tolerance) then
+                                            begin
+                                                TraceStack.Add(IntToStr(ConnectedPrim.x1) + ',' + IntToStr(ConnectedPrim.y1));
+                                            end;
+                                        end
+                                        else if ConnectedPrim.ObjectId = eArcObject then
+                                        begin
+                                            // If we're at StartX,StartY, add EndX,EndY to stack
+                                            if (Abs(ConnectedPrim.StartX - X) <= Tolerance) and (Abs(ConnectedPrim.StartY - Y) <= Tolerance) then
+                                            begin
+                                                TraceStack.Add(IntToStr(ConnectedPrim.EndX) + ',' + IntToStr(ConnectedPrim.EndY));
+                                            end
+                                            // If we're at EndX,EndY, add StartX,StartY to stack
+                                            else if (Abs(ConnectedPrim.EndX - X) <= Tolerance) and (Abs(ConnectedPrim.EndY - Y) <= Tolerance) then
+                                            begin
+                                                TraceStack.Add(IntToStr(ConnectedPrim.StartX) + ',' + IntToStr(ConnectedPrim.StartY));
+                                            end;
+                                        end;
+                                        // Vias don't need additional points as they're processed at their single coordinate
+                                    end;
+
+                                    ConnectedPrim := SIter.NextPCBObject;
+                                end;
+
+                                Board.SpatialIterator_Destroy(SIter);
+                            end;
+                        end;
+
+                        Pad := PadIterator.NextPCBObject;
+                    end;
+
+                    CmpDst.GroupIterator_Destroy(PadIterator);
                     PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-                    
+
                     MovedCount := MovedCount + 1;
                 end;
             end;
         end;
-        
+
         PCBServer.PostProcess;
-        
+
         // Update PCB document
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
-        
+
         // Create result JSON
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONInteger(ResultProps, 'moved_count', MovedCount);
-        AddJSONProperty(ResultProps, 'message', 'Successfully duplicated layout for ' + IntToStr(MovedCount) + ' components.');
-        
+        AddJSONProperty(ResultProps, 'message', 'Successfully duplicated layout and applied nets for ' + IntToStr(MovedCount) + ' components.');
+
         // Build final JSON
         OutputLines := TStringList.Create;
         try
@@ -935,6 +1081,8 @@ begin
             OutputLines.Free;
         end;
     finally
+        TraceStack.Free;
+        ProcessedNets.Free;
         ResultProps.Free;
     end;
 end;

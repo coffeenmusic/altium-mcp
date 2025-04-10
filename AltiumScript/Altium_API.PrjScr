@@ -66,6 +66,12 @@ DItemRevisionGUID=
 GenerateClassCluster=0
 DocumentUniqueId=
 
+[Generic_ScriptingSystemBreakpoints]
+ModuleName1=C:\AltiumMCP\AltiumScript\Altium_API.pas
+Line1=566
+Condition1=
+Enabled1=True
+
 [OutputGroup1]
 Name=Netlist Outputs
 Description=
