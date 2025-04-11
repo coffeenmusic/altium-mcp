@@ -80,6 +80,7 @@ The server provides several tools to interact with Altium Designer:
 - `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
 
 ### Layout Operations
+- `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
@@ -111,6 +112,7 @@ The server communicates with Altium Designer using a scripting bridge:
 - Used CopyDesignatorsToMechLayerPair script by Petar Perisin and Randy Clemmons for reference on how to .Replicate objects (used in layout duplicator)
 - Petar Perisin's Select Bad Connections Script: For understanding how to walk pcb primitives (track, arc, via, etc) connected to a pad
 - Matija Markovic and Petar Perisin Distribute Script: For understanding how to properly let the GUI know when I've updated tracks' nets
+- Petar Perisin's Layer Panel Script: Used as reference for getting layers and changing layer visibility
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)

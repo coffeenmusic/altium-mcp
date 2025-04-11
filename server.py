@@ -616,6 +616,39 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
     except Exception as e:
         logger.error(f"Error processing schematic data: {e}")
         return json.dumps({"error": f"Failed to process schematic data: {str(e)}"})
+    
+@mcp.tool()
+async def get_pcb_layers(ctx: Context) -> str:
+    """
+    Get detailed information about all layers in the current Altium PCB
+    
+    Returns:
+        str: JSON object with detailed layer information including copper layers, 
+             mechanical layers, and special layers with their properties
+    """
+    logger.info("Getting detailed PCB layer information")
+    
+    # Execute the command in Altium to get all layers data
+    response = await altium_bridge.execute_command(
+        "get_pcb_layers",
+        {}  # No parameters needed
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting PCB layers: {error_msg}")
+        return json.dumps({"error": f"Failed to get PCB layers: {error_msg}"})
+    
+    # Get the layers data
+    layers_data = response.get("result", [])
+    
+    if not layers_data:
+        logger.info("No PCB layers found")
+        return json.dumps({"message": "No PCB layers found in the current document"})
+    
+    logger.info(f"Retrieved PCB layers data")
+    return json.dumps(layers_data, indent=2)
 
 @mcp.tool()
 async def get_component_data(ctx: Context, cmp_designators: list) -> str:
