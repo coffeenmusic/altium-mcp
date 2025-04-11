@@ -616,6 +616,74 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
     except Exception as e:
         logger.error(f"Error processing schematic data: {e}")
         return json.dumps({"error": f"Failed to process schematic data: {str(e)}"})
+    
+@mcp.tool()
+async def get_pcb_layers(ctx: Context) -> str:
+    """
+    Get detailed information about all layers in the current Altium PCB
+    
+    Returns:
+        str: JSON object with detailed layer information including copper layers, 
+             mechanical layers, and special layers with their properties
+    """
+    logger.info("Getting detailed PCB layer information")
+    
+    # Execute the command in Altium to get all layers data
+    response = await altium_bridge.execute_command(
+        "get_pcb_layers",
+        {}  # No parameters needed
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting PCB layers: {error_msg}")
+        return json.dumps({"error": f"Failed to get PCB layers: {error_msg}"})
+    
+    # Get the layers data
+    layers_data = response.get("result", [])
+    
+    if not layers_data:
+        logger.info("No PCB layers found")
+        return json.dumps({"message": "No PCB layers found in the current document"})
+    
+    logger.info(f"Retrieved PCB layers data")
+    return json.dumps(layers_data, indent=2)
+
+@mcp.tool()
+async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: bool) -> str:
+    """
+    Set visibility for specified PCB layers
+    
+    Args:
+        layer_names (list): List of layer names to modify (e.g., ["Top Layer", "Bottom Layer", "Mechanical 1"])
+        visible (bool): Whether to show (True) or hide (False) the specified layers
+        
+    Returns:
+        str: JSON object with the result of the operation
+    """
+    logger.info(f"Setting layers visibility: {layer_names} to {visible}")
+    
+    # Execute the command in Altium to set layer visibility
+    response = await altium_bridge.execute_command(
+        "set_pcb_layer_visibility",
+        {
+            "layer_names": layer_names,
+            "visible": visible
+        }
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error setting layer visibility: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to set layer visibility: {error_msg}"})
+    
+    # Get the result data
+    result = response.get("result", {})
+    
+    logger.info(f"Layer visibility set successfully")
+    return json.dumps(result, indent=2)
 
 @mcp.tool()
 async def get_component_data(ctx: Context, cmp_designators: list) -> str:
@@ -837,20 +905,36 @@ async def move_components(ctx: Context, cmp_designators: list, x_offset: float, 
     return json.dumps({"success": True, "result": result}, indent=2)
 
 @mcp.tool()
-async def get_pcb_screenshot(ctx: Context) -> str:
+async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
     """
-    Take a screenshot of the Altium PCB window
+    Take a screenshot of the Altium window
+    
+    Args:
+        view_type (str): Type of view to capture - 'pcb' or 'sch'
     
     Returns:
         str: JSON object with screenshot data (base64 encoded) and metadata
     """
-    logger.info("Taking screenshot of Altium PCB window")
+    logger.info(f"Taking screenshot of Altium {view_type} window")
     
     try:
+        # First, execute the Altium command to ensure the right document type is focused
+        response = await altium_bridge.execute_command(
+            "take_view_screenshot", 
+            {"view_type": view_type.lower()}
+        )
+        
+        # Check for success
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            logger.error(f"Error focusing {view_type} document: {error_msg}")
+            return json.dumps({"success": False, "error": f"Failed to focus the correct document type: {error_msg}"})
+        
         # Run the screenshot capture in a separate thread
         import threading
         import queue
-        from PIL import ImageGrab
+        import datetime
+        from PIL import Image
         
         result_queue = queue.Queue()
         
@@ -858,25 +942,44 @@ async def get_pcb_screenshot(ctx: Context) -> str:
             try:
                 # Find Altium windows
                 altium_windows = []
+                altium_fallback_windows = []
                 
                 def collect_altium_windows(hwnd, _):
                     if win32gui.IsWindowVisible(hwnd):
                         title = win32gui.GetWindowText(hwnd)
-                        if "Altium" in title:
+                        
+                        # First, look for windows with Altium and .PrjPcb in the title
+                        if "Altium" in title and ".PrjPcb" in title:
                             altium_windows.append({
                                 "handle": hwnd,
                                 "title": title,
+                                "class_name": win32gui.GetClassName(hwnd),
+                                "rect": win32gui.GetWindowRect(hwnd)
+                            })
+                        # Collect any window with Altium in the title as fallback
+                        elif "Altium" in title:
+                            altium_fallback_windows.append({
+                                "handle": hwnd,
+                                "title": title,
+                                "class_name": win32gui.GetClassName(hwnd),
                                 "rect": win32gui.GetWindowRect(hwnd)
                             })
                     return True
                 
                 win32gui.EnumWindows(collect_altium_windows, 0)
                 
+                # If no specific Altium .PrjPcb windows found, use the fallback
+                if not altium_windows and altium_fallback_windows:
+                    altium_windows = altium_fallback_windows
+                
                 if not altium_windows:
-                    result_queue.put({"success": False, "error": "No Altium windows found"})
+                    result_queue.put({
+                        "success": False, 
+                        "error": f"No Altium windows found for {view_type} view"
+                    })
                     return
                 
-                # Use the first Altium window
+                # Use the first matching window
                 window = altium_windows[0]
                 hwnd = window["handle"]
                 
@@ -896,9 +999,39 @@ async def get_pcb_screenshot(ctx: Context) -> str:
                 except Exception as e:
                     logger.warning(f"Could not bring window to foreground: {e}")
                 
-                # Try different screenshot method - grab the screen region where the window is
+                # Take screenshot using GDI functions instead of ImageGrab
                 try:
-                    img = ImageGrab.grab(bbox=(left, top, right, bottom))
+                    # Get device context
+                    hwndDC = win32gui.GetWindowDC(hwnd)
+                    mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+                    saveDC = mfcDC.CreateCompatibleDC()
+                    
+                    # Create a bitmap object
+                    saveBitMap = win32ui.CreateBitmap()
+                    saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+                    saveDC.SelectObject(saveBitMap)
+                    
+                    # Copy the screen into the bitmap
+                    saveDC.BitBlt((0, 0), (width, height), mfcDC, (0, 0), win32con.SRCCOPY)
+                    
+                    # Convert the bitmap to an Image
+                    bmpinfo = saveBitMap.GetInfo()
+                    bmpstr = saveBitMap.GetBitmapBits(True)
+                    img = Image.frombuffer(
+                        'RGB',
+                        (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
+                        bmpstr, 'raw', 'BGRX', 0, 1)
+                    
+                    # Save a local copy of the screenshot for debugging
+                    debug_filename = f"C:/AltiumMCP/screenshot_{view_type}.png"
+                    img.save(debug_filename)
+                    logger.info(f"Saved debug screenshot to {debug_filename}")
+                    
+                    # Clean up GDI resources
+                    win32gui.DeleteObject(saveBitMap.GetHandle())
+                    saveDC.DeleteDC()
+                    mfcDC.DeleteDC()
+                    win32gui.ReleaseDC(hwnd, hwndDC)
                     
                     # Convert to base64
                     buffer = io.BytesIO()
@@ -912,13 +1045,23 @@ async def get_pcb_screenshot(ctx: Context) -> str:
                         "width": width,
                         "height": height,
                         "window_title": window["title"],
+                        "window_class": window["class_name"],
+                        "view_type": view_type,
                         "image_format": "PNG",
                         "encoding": "base64",
+                        "debug_file": debug_filename,
                         "image_data": img_base64
                     })
                     
                 except Exception as e:
-                    result_queue.put({"success": False, "error": f"ImageGrab failed: {str(e)}"})
+                    import traceback
+                    trace = traceback.format_exc()
+                    logger.error(f"GDI screenshot error: {e}\n{trace}")
+                    result_queue.put({
+                        "success": False, 
+                        "error": f"GDI screenshot failed: {str(e)}",
+                        "traceback": trace
+                    })
                 
             except Exception as e:
                 import traceback
@@ -951,6 +1094,7 @@ async def get_pcb_screenshot(ctx: Context) -> str:
             error_msg = result.get("error", "Unknown error")
             logger.error(f"Screenshot error: {error_msg}")
             return json.dumps({"success": False, "error": error_msg})
+        
         logger.info(f"Screenshot taken successfully, size: {result['width']}x{result['height']}")
         return json.dumps(result)
     

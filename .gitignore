@@ -10,6 +10,7 @@ wheels/
 *.egg-info
 *.log
 *.json
+*.png
 
 # Virtual environments
 .venv

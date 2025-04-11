@@ -80,15 +80,19 @@ The server provides several tools to interact with Altium Designer:
 - `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
 
 ### Layout Operations
+- `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
+- `set_pcb_layer_visibility`: Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
-- `get_pcb_screenshot`: Take a screenshot of the Altium PCB window
 - `layout_duplicator`: Starts layout duplication assuming you have already selected the source components on the PCB.
 - `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
 The cool thing about layout duplication this way as opposed to with Altium's built in layout replication, is that the exact components don't have to match because the LLM can look through the descriptions and understand which components match and which don't have a match. That's something that can't really be hard coded.
 ![Placement Duplicator](assets/placement_duplicator.gif)
+
+### Both
+- `get_screenshot`: Take a screenshot of the Altium PCB window or Schematic Window that is the current view. It should auto focus either of these if it is open but a different document type is focused. Note: Claude is not very good at analyzing images like circuits or layout screenshots. ChatGPT is very good at it, but they haven't released MCP yet, so this functionality will be more useful in the future.
 
 ### Server Status
 - `get_server_status`: Check the status of the MCP server, including paths to Altium and script files
@@ -112,6 +116,7 @@ The server communicates with Altium Designer using a scripting bridge:
 - Petar Perisin's Select Bad Connections Script: For understanding how to walk pcb primitives (track, arc, via, etc) connected to a pad
 - Matija Markovic and Petar Perisin Distribute Script: For understanding how to properly let the GUI know when I've updated tracks' nets
 - Petar Perisin's Room from Poly: Used as reference to detect poly to pad overlap since I couldn't get more tradition methods to work.
+- Petar Perisin's Layer Panel Script: Used as reference for getting layers and changing layer visibility
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
@@ -127,3 +132,10 @@ This is a third-party integration and not made by Altium. Made by [coffeenmusic]
 - Get screenshot of schematic
 - Board.ChooseLocation(x, y, 'Test');
 - Zoom to selected objects:
+
+TODO Tests:
+Need to add the following test units
+- `get_pcb_layers` 
+- `set_pcb_layer_visibility`
+- `layout_duplicator`
+- `get_pcb_screenshot`

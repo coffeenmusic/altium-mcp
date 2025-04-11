@@ -12,7 +12,8 @@ var
     Params : TStringList;
     
 
-// Function to ensure a specific type of document is focused
+// Modify the EnsureDocumentFocused function to handle all document types
+// and return more detailed information
 function EnsureDocumentFocused(DocumentKind: String): Boolean;
 var
     I           : Integer;
@@ -20,10 +21,34 @@ var
     Doc         : IDocument;
     DocFound    : Boolean;
     CurrentDoc  : IServerDocument;
+    LogMessage  : String;
 begin
     Result := False;
     DocFound := False;
-
+    LogMessage := 'Attempting to focus ' + DocumentKind + ' document';
+    
+    // Log the current focused document first
+    if DocumentKind = 'PCB' then
+    begin
+        if PCBServer <> nil then
+            LogMessage := LogMessage + '. Current PCB: ' + BoolToStr(PCBServer.GetCurrentPCBBoard <> nil, True);
+    end
+    else if DocumentKind = 'SCH' then
+    begin
+        if SchServer <> nil then
+            LogMessage := LogMessage + '. Current SCH: ' + BoolToStr(SchServer.GetCurrentSchDocument <> nil, True);
+    end
+    else if DocumentKind = 'SCHLIB' then
+    begin
+        if SchServer <> nil then
+        begin
+            CurrentDoc := SchServer.GetCurrentSchDocument;
+            LogMessage := LogMessage + '. Current SCHLIB: ' + BoolToStr((CurrentDoc <> nil) and (CurrentDoc.ObjectID = eSchLib), True);
+        end;
+    end;
+    
+    // ShowMessage(LogMessage); // For debugging
+    
     // Retrieve the current project
     Project := GetWorkspace.DM_FocusedProject;
     If Project = Nil Then
@@ -41,10 +66,19 @@ begin
             Exit;
         end;
     end
+    else if (DocumentKind = 'SCH') and (SchServer <> Nil) then
+    begin
+        CurrentDoc := SchServer.GetCurrentSchDocument;
+        if CurrentDoc <> Nil then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end
     else if (DocumentKind = 'SCHLIB') and (SchServer <> Nil) then
     begin
         CurrentDoc := SchServer.GetCurrentSchDocument;
-        if (CurrentDoc <> Nil) and (CurrentDoc.ObjectID = eSchLib) then
+        if (CurrentDoc <> Nil) and (CurrentDoc.ObjectId = eSchLib) then
         begin
             Result := True;
             Exit;
@@ -58,8 +92,10 @@ begin
         If Doc.DM_DocumentKind = DocumentKind Then
         Begin
             DocFound := True;
-            // Open and focus the document
+            // Try to open and focus the document
             Doc.DM_OpenAndFocusDocument;
+            // Give it a moment to focus
+            Sleep(500);
 
             // Verify that the document is now focused
             if DocumentKind = 'PCB' then
@@ -67,6 +103,17 @@ begin
                 if PCBServer.GetCurrentPCBBoard <> Nil then
                 begin
                     Result := True;
+                    // ShowMessage('Successfully focused PCB document');
+                    Exit;
+                end;
+            end
+            else if DocumentKind = 'SCH' then
+            begin
+                CurrentDoc := SchServer.GetCurrentSchDocument;
+                if (CurrentDoc <> Nil) then
+                begin
+                    Result := True;
+                    // ShowMessage('Successfully focused SCH document');
                     Exit;
                 end;
             end
@@ -76,6 +123,7 @@ begin
                 if (CurrentDoc <> Nil) and (CurrentDoc.ObjectID = eSchLib) then
                 begin
                     Result := True;
+                    // ShowMessage('Successfully focused SCHLIB document');
                     Exit;
                 end;
             end;
@@ -83,6 +131,15 @@ begin
     End;
 
     // No matching document found or couldn't be focused
+    if not DocFound then
+    begin
+        ShowMessage('Error: No ' + DocumentKind + ' document found in the project.');
+    end
+    else
+    begin
+        ShowMessage('Error: Found ' + DocumentKind + ' document but could not focus it.');
+    end;
+    
     Result := False;
 end;
 
@@ -284,6 +341,614 @@ begin
         Result := eRotate270
     else
         Result := eRotate0; // Default
+end;
+
+// Add a screenshot function that supports both PCB and SCH views
+function TakeViewScreenshot(ViewType: String): String;
+var
+    Board          : IPCB_Board;
+    SchDoc         : ISch_Document;
+    ResultProps    : TStringList;
+    OutputLines    : TStringList;
+    ClassName      : String;
+    DocType        : String;
+    WindowFound    : Boolean;
+    
+    // For screenshot thread
+    ThreadStarted  : Boolean;
+    ScreenshotResult : String;
+begin
+    // Default result
+    Result := '{"success": false, "error": "Failed to initialize screenshot capture"}';
+    
+    // Determine what type of document we need to focus
+    if LowerCase(ViewType) = 'pcb' then
+    begin
+        DocType := 'PCB';
+        ClassName := 'View_Graphical';
+    end
+    else if LowerCase(ViewType) = 'sch' then
+    begin
+        DocType := 'SCH';
+        ClassName := 'SchView';
+    end
+    else
+    begin
+        Result := '{"success": false, "error": "Invalid view type: ' + ViewType + '. Must be ''pcb'' or ''sch''"}';
+        Exit;
+    end;
+    
+    // Ensure the correct document type is focused
+    WindowFound := EnsureDocumentFocused(DocType);
+    
+    if not WindowFound then
+    begin
+        Result := '{"success": false, "error": "Could not focus a ' + DocType + ' document. Please open one first."}';
+        Exit;
+    end;
+    
+    // Give the UI time to update
+    Sleep(500);
+    
+    // Build the command to call the external screenshot utility
+    // This part depends on how your C# server calls Altium for screenshots
+    
+    // Create result JSON
+    ResultProps := TStringList.Create;
+    try
+        // Add successful result properties
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'view_type', ViewType);
+        AddJSONProperty(ResultProps, 'class_filter', ClassName);
+        AddJSONBoolean(ResultProps, 'window_found', WindowFound);
+        
+        // Add signal to the server that it can now capture the screenshot
+        AddJSONBoolean(ResultProps, 'ready_for_capture', True);
+        
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
+// Function to get all layer information from the PCB
+function GetPCBLayers: String;
+var
+    Board           : IPCB_Board;
+    TheLayerStack   : IPCB_LayerStack_V7;
+    LayerObj        : IPCB_LayerObject;
+    MechLayer       : IPCB_MechanicalLayer;
+    AllLayersArray  : TStringList;
+    CopperArray     : TStringList;
+    MechArray       : TStringList;
+    OtherArray      : TStringList;
+    LayerProps      : TStringList;
+    i               : Integer;
+    OutputLines     : TStringList;
+begin
+    Result := '';
+
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := '[]';
+        Exit;
+    end;
+    
+    // Get the layer stack
+    TheLayerStack := Board.LayerStack_V7;
+    if (TheLayerStack = nil) then
+    begin
+        Result := '[]';
+        Exit;
+    end;
+
+    // Create arrays for different layer categories
+    AllLayersArray := TStringList.Create;
+    CopperArray := TStringList.Create;
+    MechArray := TStringList.Create;
+    OtherArray := TStringList.Create;
+    
+    try
+        // Process copper (electrical) layers
+        LayerObj := TheLayerStack.FirstLayer;
+        while (LayerObj <> nil) do
+        begin
+            // Create layer properties
+            LayerProps := TStringList.Create;
+            try
+                // Add properties
+                AddJSONProperty(LayerProps, 'name', LayerObj.Name);
+                AddJSONProperty(LayerProps, 'layer_id', IntToStr(LayerObj.V6_LayerID));
+                AddJSONProperty(LayerProps, 'layer_type', 'copper');
+
+                if LayerSet.SignalLayers.Contains(LayerObj.V6_LayerID) then
+                    AddJSONProperty(LayerProps, 'is_signal', 'true', False)
+                else
+                    AddJSONProperty(LayerProps, 'is_signal', 'false', False);
+
+                if not LayerSet.SignalLayers.Contains(LayerObj.V6_LayerID) then
+                    AddJSONProperty(LayerProps, 'is_plane', 'true', False)
+                else
+                    AddJSONProperty(LayerProps, 'is_plane', 'false', False);
+
+                AddJSONBoolean(LayerProps, 'is_displayed', LayerObj.IsDisplayed[Board]);
+                AddJSONBoolean(LayerProps, 'is_enabled', True);
+                AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[LayerObj.LayerID]));
+                
+                // Add to copper array
+                CopperArray.Add(BuildJSONObject(LayerProps, 1));
+            finally
+                LayerProps.Free;
+            end;
+            
+            LayerObj := TheLayerStack.NextLayer(LayerObj);
+        end;
+        
+        // Process mechanical layers
+        for i := 1 to 32 do
+        begin
+            MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(i)];
+            
+            if MechLayer.MechanicalLayerEnabled then
+            begin
+                // Create layer properties
+                LayerProps := TStringList.Create;
+                try
+                    // Add properties
+                    AddJSONProperty(LayerProps, 'name', MechLayer.Name);
+                    AddJSONProperty(LayerProps, 'layer_id', IntToStr(MechLayer.V6_LayerID));
+                    AddJSONProperty(LayerProps, 'layer_type', 'mechanical');
+                    AddJSONProperty(LayerProps, 'mechanical_number', IntToStr(i));
+                    AddJSONBoolean(LayerProps, 'is_displayed', MechLayer.IsDisplayed[Board]);
+                    AddJSONBoolean(LayerProps, 'is_enabled', MechLayer.MechanicalLayerEnabled);
+                    AddJSONBoolean(LayerProps, 'link_to_sheet', MechLayer.LinkToSheet);
+                    AddJSONBoolean(LayerProps, 'is_paired', Board.MechanicalPairs.LayerUsed(ILayer.MechanicalLayer(i)));
+                    AddJSONProperty(LayerProps, 'color', ColorToString(PCBServer.SystemOptions.LayerColors[MechLayer.V6_LayerID]));
+                    
+                    // If layer is paired, add the pair information
+                    if Board.MechanicalPairs.LayerUsed(ILayer.MechanicalLayer(i)) then
+                    begin
+                        // Could add pair info here if Altium API provides it
+                    end;
+                    
+                    // Add to mechanical array
+                    MechArray.Add(BuildJSONObject(LayerProps, 1));
+                finally
+                    LayerProps.Free;
+                end;
+            end;
+        end;
+        
+        // Process other special layers
+        // Top Overlay
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Top Overlay');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Top Overlay')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'overlay');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Top Overlay')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Top Overlay')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Bottom Overlay
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Bottom Overlay');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Bottom Overlay')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'overlay');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Bottom Overlay')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Bottom Overlay')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Top Solder Mask
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Top Solder Mask');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Top Solder Mask')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'solder_mask');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Top Solder Mask')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Top Solder Mask')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Bottom Solder Mask
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Bottom Solder Mask');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Bottom Solder Mask')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'solder_mask');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Bottom Solder Mask')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Bottom Solder Mask')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Top Paste
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Top Paste');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Top Paste')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'paste');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Top Paste')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Top Paste')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Bottom Paste
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Bottom Paste');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Bottom Paste')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'paste');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Bottom Paste')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Bottom Paste')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Drill Guide
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Drill Guide');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Drill Guide')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'drill');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Drill Guide')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Drill Guide')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Drill Drawing
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Drill Drawing');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Drill Drawing')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'drill');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Drill Drawing')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Drill Drawing')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Multi Layer
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Multi Layer');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Multi Layer')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'multi');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Multi Layer')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Multi Layer')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Keep Out Layer
+        LayerProps := TStringList.Create;
+        try
+            AddJSONProperty(LayerProps, 'name', 'Keep Out Layer');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Keep Out Layer')));
+            AddJSONProperty(LayerProps, 'layer_type', 'special');
+            AddJSONProperty(LayerProps, 'special_type', 'keepout');
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Keep Out Layer')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Keep Out Layer')]));
+            OtherArray.Add(BuildJSONObject(LayerProps, 1));
+        finally
+            LayerProps.Free;
+        end;
+        
+        // Add additional info for the complete layer response
+        LayerProps := TStringList.Create;
+        try
+            // Add summary information
+            AddJSONInteger(LayerProps, 'copper_layers_count', TheLayerStack.LayersInStackCount);
+            AddJSONInteger(LayerProps, 'signal_layers_count', TheLayerStack.SignalLayerCount);
+            AddJSONInteger(LayerProps, 'internal_planes_count', TheLayerStack.LayersInStackCount - TheLayerStack.SignalLayerCount);
+            
+            // Get the number of enabled mechanical layers
+            i := 0;
+            for i := 1 to 32 do
+                if TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(i)].MechanicalLayerEnabled then
+                    i := i + 1;
+            AddJSONInteger(LayerProps, 'mechanical_layers_count', i);
+            
+            // Add the layer arrays
+            LayerProps.Add(BuildJSONArray(CopperArray, 'copper_layers'));
+            LayerProps.Add(BuildJSONArray(MechArray, 'mechanical_layers'));
+            LayerProps.Add(BuildJSONArray(OtherArray, 'special_layers'));
+            
+            // Build the final JSON
+            OutputLines := TStringList.Create;
+            try
+                OutputLines.Text := BuildJSONObject(LayerProps);
+                Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_layers_data.json');
+            finally
+                OutputLines.Free;
+            end;
+        finally
+            LayerProps.Free;
+        end;
+    finally
+        AllLayersArray.Free;
+        CopperArray.Free;
+        MechArray.Free;
+        OtherArray.Free;
+    end;
+end;
+
+// Function to set layer visibility (only specified layers visible)
+// Function to set layer visibility with two modes:
+// - visible=true: Show only specified layers, hide all others
+// - visible=false: Hide specified layers, leave others unchanged
+function SetPCBLayerVisibility(LayerNamesList: TStringList; Visible: Boolean): String;
+var
+    Board          : IPCB_Board;
+    TheLayerStack  : IPCB_LayerStack_V7;
+    LayerObj       : IPCB_LayerObject;
+    MechLayer      : IPCB_MechanicalLayer;
+    ResultProps    : TStringList;
+    OutputLines    : TStringList;
+    i, j           : Integer;
+    LayerName      : String;
+    LayerID        : TLayer;
+    FoundCount     : Integer;
+    NotFoundList   : TStringList;
+    FoundLayers    : TStringList;
+begin
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := '{"success": false, "error": "No PCB document is currently active"}';
+        Exit;
+    end;
+    
+    // Get the layer stack
+    TheLayerStack := Board.LayerStack_V7;
+    if (TheLayerStack = nil) then
+    begin
+        Result := '{"success": false, "error": "Failed to retrieve layer stack"}';
+        Exit;
+    end;
+    
+    // Create lists for tracking results
+    ResultProps := TStringList.Create;
+    NotFoundList := TStringList.Create;
+    FoundLayers := TStringList.Create;
+    FoundCount := 0;
+    
+    try
+        // First phase: identify all specified layers
+        for i := 0 to LayerNamesList.Count - 1 do
+        begin
+            LayerName := LayerNamesList[i];
+            
+            // Try to find the layer by name
+            // First check special layers (since they have specific names)
+            if (LayerName = 'Top Overlay') or 
+               (LayerName = 'Bottom Overlay') or
+               (LayerName = 'Top Solder Mask') or
+               (LayerName = 'Bottom Solder Mask') or
+               (LayerName = 'Top Paste') or
+               (LayerName = 'Bottom Paste') or
+               (LayerName = 'Drill Guide') or
+               (LayerName = 'Drill Drawing') or
+               (LayerName = 'Multi Layer') or
+               (LayerName = 'Keep Out Layer') then
+            begin
+                // Get layer ID from name
+                LayerID := String2Layer(LayerName);
+                if (LayerID <> eNoLayer) then
+                begin
+                    FoundLayers.Add(IntToStr(LayerID));
+                    FoundCount := FoundCount + 1;
+                end
+                else
+                    NotFoundList.Add('"' + JSONEscapeString(LayerName) + '"');
+                
+                continue;
+            end;
+            
+            // Check copper layers
+            LayerObj := TheLayerStack.FirstLayer;
+            j := 1;
+            
+            while (LayerObj <> nil) do
+            begin
+                if (LayerObj.Name = LayerName) then
+                begin
+                    FoundLayers.Add(IntToStr(LayerObj.V6_LayerID));
+                    FoundCount := FoundCount + 1;
+                    break;
+                end;
+                
+                Inc(j);
+                LayerObj := TheLayerStack.NextLayer(LayerObj);
+            end;
+            
+            // If we found the layer in copper layers, continue to next layer name
+            if (LayerObj <> nil) then
+                continue;
+            
+            // Check mechanical layers (they can have custom names)
+            for j := 1 to 32 do
+            begin
+                MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(j)];
+                
+                if MechLayer.MechanicalLayerEnabled and (MechLayer.Name = LayerName) then
+                begin
+                    FoundLayers.Add(IntToStr(MechLayer.V6_LayerID));
+                    FoundCount := FoundCount + 1;
+                    break;
+                end;
+            end;
+            
+            // If we've checked all layer types and didn't find a match, add to not found list
+            if j > 32 then
+                NotFoundList.Add('"' + JSONEscapeString(LayerName) + '"');
+        end;
+        
+        // Second phase: set visibility for all layers based on mode
+        if Visible then
+        begin
+            // Visibility mode: show only specified layers, hide all others
+            
+            // For copper layers
+            LayerObj := TheLayerStack.FirstLayer;
+            while (LayerObj <> nil) do
+            begin
+                // Check if this layer is in our found list
+                if (FoundLayers.IndexOf(IntToStr(LayerObj.V6_LayerID)) >= 0) then
+                    LayerObj.IsDisplayed[Board] := True
+                else
+                    LayerObj.IsDisplayed[Board] := False;
+                
+                LayerObj := TheLayerStack.NextLayer(LayerObj);
+            end;
+            
+            // For mechanical layers
+            for j := 1 to 32 do
+            begin
+                MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(j)];
+                
+                if MechLayer.MechanicalLayerEnabled then
+                begin
+                    if (FoundLayers.IndexOf(IntToStr(MechLayer.V6_LayerID)) >= 0) then
+                        MechLayer.IsDisplayed[Board] := True
+                    else
+                        MechLayer.IsDisplayed[Board] := False;
+                end;
+            end;
+            
+            // For special layers
+            for j := 1 to 10 do
+            begin
+                case j of
+                    1: LayerID := String2Layer('Top Overlay');
+                    2: LayerID := String2Layer('Bottom Overlay');
+                    3: LayerID := String2Layer('Top Solder Mask');
+                    4: LayerID := String2Layer('Bottom Solder Mask');
+                    5: LayerID := String2Layer('Top Paste');
+                    6: LayerID := String2Layer('Bottom Paste');
+                    7: LayerID := String2Layer('Drill Guide');
+                    8: LayerID := String2Layer('Drill Drawing');
+                    9: LayerID := String2Layer('Multi Layer');
+                    10: LayerID := String2Layer('Keep Out Layer');
+                end;
+                
+                if (FoundLayers.IndexOf(IntToStr(LayerID)) >= 0) then
+                    Board.LayerIsDisplayed[LayerID] := True
+                else
+                    Board.LayerIsDisplayed[LayerID] := False;
+            end;
+        end
+        else
+        begin
+            // Hide mode: only hide specified layers, leave others unchanged
+            
+            // For copper layers
+            LayerObj := TheLayerStack.FirstLayer;
+            while (LayerObj <> nil) do
+            begin
+                // Check if this layer is in our found list
+                if (FoundLayers.IndexOf(IntToStr(LayerObj.V6_LayerID)) >= 0) then
+                    LayerObj.IsDisplayed[Board] := False;
+                
+                LayerObj := TheLayerStack.NextLayer(LayerObj);
+            end;
+            
+            // For mechanical layers
+            for j := 1 to 32 do
+            begin
+                MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(j)];
+                
+                if MechLayer.MechanicalLayerEnabled then
+                begin
+                    if (FoundLayers.IndexOf(IntToStr(MechLayer.V6_LayerID)) >= 0) then
+                        MechLayer.IsDisplayed[Board] := False;
+                end;
+            end;
+            
+            // For special layers
+            for j := 1 to 10 do
+            begin
+                case j of
+                    1: LayerID := String2Layer('Top Overlay');
+                    2: LayerID := String2Layer('Bottom Overlay');
+                    3: LayerID := String2Layer('Top Solder Mask');
+                    4: LayerID := String2Layer('Bottom Solder Mask');
+                    5: LayerID := String2Layer('Top Paste');
+                    6: LayerID := String2Layer('Bottom Paste');
+                    7: LayerID := String2Layer('Drill Guide');
+                    8: LayerID := String2Layer('Drill Drawing');
+                    9: LayerID := String2Layer('Multi Layer');
+                    10: LayerID := String2Layer('Keep Out Layer');
+                end;
+                
+                if (FoundLayers.IndexOf(IntToStr(LayerID)) >= 0) then
+                    Board.LayerIsDisplayed[LayerID] := False;
+            end;
+        end;
+        
+        // Update the display
+        Board.ViewManager_FullUpdate;
+        Board.ViewManager_UpdateLayerTabs;
+        
+        // Create result JSON
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'updated_count', FoundCount);
+        
+        // Add missing layers array
+        if (NotFoundList.Count > 0) then
+            ResultProps.Add(BuildJSONArray(NotFoundList, 'not_found_layers'))
+        else
+            ResultProps.Add('"not_found_layers": []');
+        
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        NotFoundList.Free;
+        FoundLayers.Free;
+    end;
 end;
 
 // Function to move components by X and Y offsets and set rotation
@@ -1881,9 +2546,9 @@ var
     ParamValue: String;
     i, XOffset, YOffset, Rotation, ValueStart: Integer;
     DesignatorsList: TStringList;
-    PCBAvailable: Boolean;
+    PCBAvailable, Visible: Boolean;
     SourceList, DestList, PinsList: TStringList;
-    ComponentName: String;
+    ComponentName, ViewType: String; 
 begin
     Result := '';
 
@@ -1892,6 +2557,8 @@ begin
        (CommandName = 'get_all_component_data') or
        (CommandName = 'get_selected_components_coordinates') or
        (CommandName = 'layout_duplicator') or
+       (CommandName = 'get_pcb_layers') or
+       (CommandName = 'set_pcb_layer_visibility') or
        (CommandName = 'get_pcb_rules') then
     begin
         if not EnsureDocumentFocused('PCB') then
@@ -1962,6 +2629,28 @@ begin
         // This command doesn't require any parameters
         Result := GetAllComponentData(False);
     end
+    // In your ExecuteCommand function, add a case for the screenshot command:
+    else if CommandName = 'take_view_screenshot' then
+    begin
+        // Extract the view type parameter
+        ViewType := 'pcb';  // Default to PCB
+        
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for view_type parameter
+            if (Pos('"view_type"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                ViewType := ParamValue;
+                Break;
+            end;
+        end;
+        
+        Result := TakeViewScreenshot(ViewType);
+    end
     else if CommandName = 'create_schematic_symbol' then
     begin
         // Look for component name
@@ -1991,7 +2680,7 @@ begin
                     ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
                     ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
                     ParamValue := Trim(ParamValue);
-                    
+
                     if (ParamValue <> '') and (ParamValue <> '[') then
                         PinsList.Add(ParamValue);
                     
@@ -2024,6 +2713,77 @@ begin
     begin
         // This command doesn't require any parameters
         Result := GetSchematicData;
+    end
+    else if CommandName = 'get_pcb_layers' then
+    begin
+        // Make sure we have a PCB document
+        if not EnsureDocumentFocused('PCB') then
+        begin
+            Result := 'ERROR: No PCB document found. Open a PCB document first.';
+            Exit;
+        end;
+        
+        // Get PCB layers data
+        Result := GetPCBLayers;
+    end
+    else if CommandName = 'set_pcb_layer_visibility' then
+    begin
+        // Make sure we have a PCB document
+        if not EnsureDocumentFocused('PCB') then
+        begin
+            Result := 'ERROR: No PCB document found. Open a PCB document first.';
+            Exit;
+        end;
+
+        // Create a stringlist for layer names and extract the visible parameter
+        SourceList := TStringList.Create;
+        Visible := False;
+        
+        try
+            // Parse parameters from the request
+            for i := 0 to RequestData.Count - 1 do
+            begin
+                // Look for layer_names array
+                if (Pos('"layer_names"', RequestData[i]) > 0) then
+                begin
+                    // Parse the array in the next lines
+                    i := i + 1; // Move to the next line (should be '[')
+                    
+                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                    begin
+                        // Extract the layer name
+                        ParamValue := RequestData[i];
+                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                        ParamValue := Trim(ParamValue);
+                        
+                        if (ParamValue <> '') and (ParamValue <> '[') then
+                            SourceList.Add(ParamValue);
+                        
+                        i := i + 1;
+                    end;
+                end
+                // Look for visible parameter
+                else if (Pos('"visible"', RequestData[i]) > 0) then
+                begin
+                    ValueStart := Pos(':', RequestData[i]) + 1;
+                    ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                    ParamValue := TrimJSON(ParamValue);
+                    Visible := (ParamValue = 'true');
+                end;
+            end;
+            
+            if SourceList.Count > 0 then
+            begin
+                Result := SetPCBLayerVisibility(SourceList, Visible);
+            end
+            else
+            begin
+                Result := '{"success": false, "error": "No layer names provided"}';
+            end;
+        finally
+            SourceList.Free;
+        end;
     end
     else if CommandName = 'get_selected_components_coordinates' then
     begin
