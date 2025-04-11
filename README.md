@@ -81,6 +81,7 @@ The server provides several tools to interact with Altium Designer:
 
 ### Layout Operations
 - `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
+- `set_pcb_layer_visibility`: Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
@@ -128,3 +129,9 @@ This is a third-party integration and not made by Altium. Made by [coffeenmusic]
 - Get screenshot of schematic
 - Board.ChooseLocation(x, y, 'Test');
 - Zoom to selected objects:
+
+TODO Tests:
+Need to add the following test units
+- `get_pcb_layers` 
+- `set_pcb_layer_visibility`
+- `layout_duplicator`
