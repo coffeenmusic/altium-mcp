@@ -576,6 +576,195 @@ begin
     end;
 end;
 
+// Function to set layer visibility (only specified layers visible)
+function SetPCBLayerVisibility(LayerNamesList: TStringList; Visible: Boolean): String;
+var
+    Board          : IPCB_Board;
+    TheLayerStack  : IPCB_LayerStack_V7;
+    LayerObj       : IPCB_LayerObject;
+    MechLayer      : IPCB_MechanicalLayer;
+    ResultProps    : TStringList;
+    OutputLines    : TStringList;
+    i, j           : Integer;
+    LayerName      : String;
+    LayerID        : TLayer;
+    FoundCount     : Integer;
+    NotFoundList   : TStringList;
+    FoundLayers    : TStringList;
+begin
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := '{"success": false, "error": "No PCB document is currently active"}';
+        Exit;
+    end;
+    
+    // Get the layer stack
+    TheLayerStack := Board.LayerStack_V7;
+    if (TheLayerStack = nil) then
+    begin
+        Result := '{"success": false, "error": "Failed to retrieve layer stack"}';
+        Exit;
+    end;
+    
+    // Create lists for tracking results
+    ResultProps := TStringList.Create;
+    NotFoundList := TStringList.Create;
+    FoundLayers := TStringList.Create;
+    FoundCount := 0;
+    
+    try
+        // First phase: identify all specified layers
+        for i := 0 to LayerNamesList.Count - 1 do
+        begin
+            LayerName := LayerNamesList[i];
+            
+            // Try to find the layer by name
+            // First check special layers (since they have specific names)
+            if (LayerName = 'Top Overlay') or 
+               (LayerName = 'Bottom Overlay') or
+               (LayerName = 'Top Solder Mask') or
+               (LayerName = 'Bottom Solder Mask') or
+               (LayerName = 'Top Paste') or
+               (LayerName = 'Bottom Paste') or
+               (LayerName = 'Drill Guide') or
+               (LayerName = 'Drill Drawing') or
+               (LayerName = 'Multi Layer') or
+               (LayerName = 'Keep Out Layer') then
+            begin
+                // Get layer ID from name
+                LayerID := String2Layer(LayerName);
+                if (LayerID <> eNoLayer) then
+                begin
+                    FoundLayers.Add(IntToStr(LayerID));
+                    FoundCount := FoundCount + 1;
+                end
+                else
+                    NotFoundList.Add('"' + JSONEscapeString(LayerName) + '"');
+                
+                continue;
+            end;
+            
+            // Check copper layers
+            LayerObj := TheLayerStack.FirstLayer;
+            j := 1;
+            
+            while (LayerObj <> nil) do
+            begin
+                if (LayerObj.Name = LayerName) then
+                begin
+                    FoundLayers.Add(IntToStr(LayerObj.V6_LayerID));
+                    FoundCount := FoundCount + 1;
+                    break;
+                end;
+                
+                Inc(j);
+                LayerObj := TheLayerStack.NextLayer(LayerObj);
+            end;
+            
+            // If we found the layer in copper layers, continue to next layer name
+            if (LayerObj <> nil) then
+                continue;
+            
+            // Check mechanical layers (they can have custom names)
+            for j := 1 to 32 do
+            begin
+                MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(j)];
+                
+                if MechLayer.MechanicalLayerEnabled and (MechLayer.Name = LayerName) then
+                begin
+                    FoundLayers.Add(IntToStr(MechLayer.V6_LayerID));
+                    FoundCount := FoundCount + 1;
+                    break;
+                end;
+            end;
+            
+            // If we've checked all layer types and didn't find a match, add to not found list
+            if j > 32 then
+                NotFoundList.Add('"' + JSONEscapeString(LayerName) + '"');
+        end;
+        
+        // Second phase: set visibility for all layers
+        
+        // For copper layers: turn all off, then turn specified ones on
+        LayerObj := TheLayerStack.FirstLayer;
+        while (LayerObj <> nil) do
+        begin
+            // Check if this layer is in our found list
+            if (FoundLayers.IndexOf(IntToStr(LayerObj.V6_LayerID)) >= 0) then
+                LayerObj.IsDisplayed[Board] := Visible
+            else
+                LayerObj.IsDisplayed[Board] := False;
+            
+            LayerObj := TheLayerStack.NextLayer(LayerObj);
+        end;
+        
+        // For mechanical layers: turn all off, then turn specified ones on
+        for j := 1 to 32 do
+        begin
+            MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(j)];
+            
+            if MechLayer.MechanicalLayerEnabled then
+            begin
+                if (FoundLayers.IndexOf(IntToStr(MechLayer.V6_LayerID)) >= 0) then
+                    MechLayer.IsDisplayed[Board] := Visible
+                else
+                    MechLayer.IsDisplayed[Board] := False;
+            end;
+        end;
+        
+        // For special layers: turn all off, then turn specified ones on
+        for j := 1 to 10 do // Process the 10 special layers
+        begin
+            case j of
+                1: LayerID := String2Layer('Top Overlay');
+                2: LayerID := String2Layer('Bottom Overlay');
+                3: LayerID := String2Layer('Top Solder Mask');
+                4: LayerID := String2Layer('Bottom Solder Mask');
+                5: LayerID := String2Layer('Top Paste');
+                6: LayerID := String2Layer('Bottom Paste');
+                7: LayerID := String2Layer('Drill Guide');
+                8: LayerID := String2Layer('Drill Drawing');
+                9: LayerID := String2Layer('Multi Layer');
+                10: LayerID := String2Layer('Keep Out Layer');
+            end;
+            
+            if (FoundLayers.IndexOf(IntToStr(LayerID)) >= 0) then
+                Board.LayerIsDisplayed[LayerID] := Visible
+            else
+                Board.LayerIsDisplayed[LayerID] := False;
+        end;
+        
+        // Update the display
+        Board.ViewManager_FullUpdate;
+        Board.ViewManager_UpdateLayerTabs;
+        
+        // Create result JSON
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'updated_count', FoundCount);
+        
+        // Add missing layers array
+        if (NotFoundList.Count > 0) then
+            ResultProps.Add(BuildJSONArray(NotFoundList, 'not_found_layers'))
+        else
+            ResultProps.Add('"not_found_layers": []');
+        
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        NotFoundList.Free;
+        FoundLayers.Free;
+    end;
+end;
+
 // Function to move components by X and Y offsets and set rotation
 function MoveComponentsByDesignators(DesignatorsList: TStringList; XOffset, YOffset: TCoord; Rotation: TAngle): String;
 var
@@ -2103,9 +2292,9 @@ var
     ParamValue: String;
     i, XOffset, YOffset, Rotation, ValueStart: Integer;
     DesignatorsList: TStringList;
-    PCBAvailable: Boolean;
+    PCBAvailable, Visible: Boolean;
     SourceList, DestList, PinsList: TStringList;
-    ComponentName: String;
+    ComponentName: String; 
 begin
     Result := '';
 
@@ -2115,6 +2304,7 @@ begin
        (CommandName = 'get_selected_components_coordinates') or
        (CommandName = 'layout_duplicator') or
        (CommandName = 'get_pcb_layers') or
+       (CommandName = 'set_pcb_layer_visibility') or
        (CommandName = 'get_pcb_rules') then
     begin
         if not EnsureDocumentFocused('PCB') then
@@ -2259,6 +2449,65 @@ begin
         
         // Get PCB layers data
         Result := GetPCBLayers;
+    end
+    else if CommandName = 'set_pcb_layer_visibility' then
+    begin
+        // Make sure we have a PCB document
+        if not EnsureDocumentFocused('PCB') then
+        begin
+            Result := 'ERROR: No PCB document found. Open a PCB document first.';
+            Exit;
+        end;
+
+        // Create a stringlist for layer names and extract the visible parameter
+        SourceList := TStringList.Create;
+        Visible := False;
+        
+        try
+            // Parse parameters from the request
+            for i := 0 to RequestData.Count - 1 do
+            begin
+                // Look for layer_names array
+                if (Pos('"layer_names"', RequestData[i]) > 0) then
+                begin
+                    // Parse the array in the next lines
+                    i := i + 1; // Move to the next line (should be '[')
+                    
+                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                    begin
+                        // Extract the layer name
+                        ParamValue := RequestData[i];
+                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                        ParamValue := Trim(ParamValue);
+                        
+                        if (ParamValue <> '') and (ParamValue <> '[') then
+                            SourceList.Add(ParamValue);
+                        
+                        i := i + 1;
+                    end;
+                end
+                // Look for visible parameter
+                else if (Pos('"visible"', RequestData[i]) > 0) then
+                begin
+                    ValueStart := Pos(':', RequestData[i]) + 1;
+                    ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                    ParamValue := TrimJSON(ParamValue);
+                    Visible := (ParamValue = 'true');
+                end;
+            end;
+            
+            if SourceList.Count > 0 then
+            begin
+                Result := SetPCBLayerVisibility(SourceList, Visible);
+            end
+            else
+            begin
+                Result := '{"success": false, "error": "No layer names provided"}';
+            end;
+        finally
+            SourceList.Free;
+        end;
     end
     else if CommandName = 'get_selected_components_coordinates' then
     begin

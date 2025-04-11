@@ -651,6 +651,41 @@ async def get_pcb_layers(ctx: Context) -> str:
     return json.dumps(layers_data, indent=2)
 
 @mcp.tool()
+async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: bool) -> str:
+    """
+    Set visibility for specified PCB layers
+    
+    Args:
+        layer_names (list): List of layer names to modify (e.g., ["Top Layer", "Bottom Layer", "Mechanical 1"])
+        visible (bool): Whether to show (True) or hide (False) the specified layers
+        
+    Returns:
+        str: JSON object with the result of the operation
+    """
+    logger.info(f"Setting layers visibility: {layer_names} to {visible}")
+    
+    # Execute the command in Altium to set layer visibility
+    response = await altium_bridge.execute_command(
+        "set_pcb_layer_visibility",
+        {
+            "layer_names": layer_names,
+            "visible": visible
+        }
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error setting layer visibility: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to set layer visibility: {error_msg}"})
+    
+    # Get the result data
+    result = response.get("result", {})
+    
+    logger.info(f"Layer visibility set successfully")
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
 async def get_component_data(ctx: Context, cmp_designators: list) -> str:
     """
     Get all data for components in Altium
