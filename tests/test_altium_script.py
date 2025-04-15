@@ -399,9 +399,15 @@ class AltiumScriptTest(unittest.TestCase):
             self._log_failure(log_file, f"Exception during validation: {str(e)}", response)
             return False
     
-    def _log_failure(self, log_file, message, response=None):
+    def _log_failure(self, log_file_path, message, response=None):
         """Log a validation failure to a file."""        
         try:
+            # Create a proper log file path in a user-writable location
+            logs_dir = Path.home() / "Documents" / "AltiumMCP_logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            
+            log_file = logs_dir / "validation_failures.log"
+            
             with open(log_file, "a") as f:
                 f.write("\n" + "-"*50 + "\n")
                 f.write(f"VALIDATION FAILURE: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -422,48 +428,7 @@ class AltiumScriptTest(unittest.TestCase):
             print(f"Error writing to log file: {e}")
             print(f"FAILURE: {message}")
 
-    def test_01_get_schematic_data(self):
-        """Test the get_schematic_data command."""
-        vprint("\n--- RUNNING TEST: get_schematic_data ---\n", VERBOSITY_DETAILED)
-        
-        # Execute the command
-        response = self.execute_command("get_schematic_data")
-        
-        # Verify the response
-        self.assertTrue(response.get("success", False), 
-                    f"Command failed: {response.get('error', 'Unknown error')}")
-        
-        # Validate the result structure
-        schematic_data = response.get("result", [])
-        self.assertIsInstance(schematic_data, list, "Result should be a list")
-        
-        # Check if we got any components
-        if len(schematic_data) == 0:
-            vprint("WARNING: No schematic components found. This is unusual.", VERBOSITY_NORMAL)
-        else:
-            vprint(f"Found {len(schematic_data)} schematic components", VERBOSITY_DETAILED)
-            
-            # Check the structure of the first component
-            component = schematic_data[0]
-            expected_fields = [
-                "designator", "sheet", "schematic_x", "schematic_y", 
-                "schematic_width", "schematic_height", "schematic_rotation"
-            ]
-            
-            missing_fields = []
-            for field in expected_fields:
-                if field not in component:
-                    missing_fields.append(field)
-            
-            if missing_fields:
-                self.fail(f"Schematic component missing required fields: {', '.join(missing_fields)}")
-                
-            # Check the parameters object
-            self.assertIsInstance(component["parameters"], dict, "Parameters should be a dictionary")
-        
-        vprint("\nSUCCESS: test_get_schematic_data completed\n", VERBOSITY_NORMAL)
-
-    def test_02_create_schematic_symbol(self):
+    def test_01_create_schematic_symbol(self):
         """Test the create_schematic_symbol command."""
         vprint("\n--- RUNNING TEST: create_schematic_symbol ---\n", VERBOSITY_DETAILED)
         
@@ -516,6 +481,52 @@ class AltiumScriptTest(unittest.TestCase):
         input()
         
         vprint("\nSUCCESS: test_create_schematic_symbol completed\n", VERBOSITY_NORMAL)
+
+    def test_02_get_schematic_data(self):
+        """Test the get_schematic_data command."""
+        vprint("\n--- RUNNING TEST: get_schematic_data ---\n", VERBOSITY_DETAILED)
+
+        # This test requires a schematic library document to be open in Altium
+        vprint("\nMAKE SURE A SCHEMATIC DOCUMENT IS OPEN AND FOCUSED IN ALTIUM", VERBOSITY_NORMAL)
+        vprint("Press Enter to continue...", VERBOSITY_NORMAL)
+        input()
+        
+        # Execute the command
+        response = self.execute_command("get_schematic_data")
+        
+        # Verify the response
+        self.assertTrue(response.get("success", False), 
+                    f"Command failed: {response.get('error', 'Unknown error')}")
+        
+        # Validate the result structure
+        schematic_data = response.get("result", [])
+        self.assertIsInstance(schematic_data, list, "Result should be a list")
+        
+        # Check if we got any components
+        if len(schematic_data) == 0:
+            vprint("WARNING: No schematic components found. This is unusual.", VERBOSITY_NORMAL)
+        else:
+            vprint(f"Found {len(schematic_data)} schematic components", VERBOSITY_DETAILED)
+            
+            # Check the structure of the first component
+            component = schematic_data[0]
+            expected_fields = [
+                "designator", "sheet", "schematic_x", "schematic_y", 
+                "schematic_width", "schematic_height", "schematic_rotation"
+            ]
+            
+            missing_fields = []
+            for field in expected_fields:
+                if field not in component:
+                    missing_fields.append(field)
+            
+            if missing_fields:
+                self.fail(f"Schematic component missing required fields: {', '.join(missing_fields)}")
+                
+            # Check the parameters object
+            self.assertIsInstance(component["parameters"], dict, "Parameters should be a dictionary")
+        
+        vprint("\nSUCCESS: test_get_schematic_data completed\n", VERBOSITY_NORMAL)
     
     def test_03_get_all_component_data(self):
         vprint("\n--- RUNNING TEST: get_all_component_data ---\n", VERBOSITY_DETAILED)

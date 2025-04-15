@@ -110,7 +110,6 @@ The server communicates with Altium Designer using a scripting bridge:
 
 ## References
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
-- Claude: I vibe coded most of this with Claude 3.7
 - Claude is not familiar with DelphiScript, so many of the Altium provided example scripts were used as reference.
 - Used CopyDesignatorsToMechLayerPair script by Petar Perisin and Randy Clemmons for reference on how to .Replicate objects (used in layout duplicator)
 - Petar Perisin's Select Bad Connections Script: For understanding how to walk pcb primitives (track, arc, via, etc) connected to a pad
@@ -126,12 +125,12 @@ This is a third-party integration and not made by Altium. Made by [coffeenmusic]
 - Add get symbol from library
 - log response time of each tool
 - Add go to schematic sheet
-- Show layers: IPCB_Board.VisibleLayers
-	+ AutoSilk.pas
 - Go to sheet with component designator
-- Get screenshot of schematic
 - Board.ChooseLocation(x, y, 'Test');
 - Zoom to selected objects:
+- Change Schematic Selection Filter: SelectionFilter.pas
+- Place schematic objects (place component from library): PlaceSchObjects.pas
+- How can I read through components from libraries in Components panel?
 
 TODO Tests:
 Need to add the following test units
