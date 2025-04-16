@@ -1,62 +1,54 @@
-Function RuleKindToString (ARuleKind : TRuleKind) : String;
-Begin
-    Result := '';
+// Function to get all unique net names from the current PCB document
+function GetAllNets: String;
+var
+    Board       : IPCB_Board;
+    Net         : IPCB_Net;
+    Iterator    : IPCB_BoardIterator;
+    NetsArray   : TStringList; 
+    OutputLines : TStringList;
+begin
+    // Initialize empty array result in case no board is found
+    Result := '[]';
+    
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    if Board = nil then Exit;
 
-    Case ARuleKind Of
-        eRule_Clearance                : Result := 'Clearance';
-        eRule_ParallelSegment          : Result := 'ParallelSegment';
-        eRule_MaxMinWidth              : Result := 'Width';
-        eRule_MaxMinLength             : Result := 'Length';
-        eRule_MatchedLengths           : Result := 'MatchedLengths';
-        eRule_DaisyChainStubLength     : Result := 'StubLength';
-        eRule_PowerPlaneConnectStyle   : Result := 'PlaneConnect';
-        eRule_RoutingTopology          : Result := 'RoutingTopology';
-        eRule_RoutingPriority          : Result := 'RoutingPriority';
-        eRule_RoutingLayers            : Result := 'RoutingLayers';
-        eRule_RoutingCornerStyle       : Result := 'RoutingCorners';
-        eRule_RoutingViaStyle          : Result := 'RoutingVias';
-        eRule_PowerPlaneClearance      : Result := 'PlaneClearance';
-        eRule_SolderMaskExpansion      : Result := 'SolderMaskExpansion';
-        eRule_PasteMaskExpansion       : Result := 'PasteMaskExpansion';
-        eRule_ShortCircuit             : Result := 'ShortCircuit';
-        eRule_BrokenNets               : Result := 'UnRoutedNet';
-        eRule_ViasUnderSMD             : Result := 'ViasUnderSMD';
-        eRule_MaximumViaCount          : Result := 'MaximumViaCount';
-        eRule_MinimumAnnularRing       : Result := 'MinimumAnnularRing';
-        eRule_PolygonConnectStyle      : Result := 'PolygonConnect';
-        eRule_AcuteAngle               : Result := 'AcuteAngle';
-        eRule_ConfinementConstraint    : Result := 'RoomDefinition';
-        eRule_SMDToCorner              : Result := 'SMDToCorner';
-        eRule_ComponentClearance       : Result := 'ComponentClearance';
-        eRule_ComponentRotations       : Result := 'ComponentOrientations';
-        eRule_PermittedLayers          : Result := 'PermittedLayers';
-        eRule_NetsToIgnore             : Result := 'NetsToIgnore';
-        eRule_SignalStimulus           : Result := 'SignalStimulus';
-        eRule_Overshoot_FallingEdge    : Result := 'OvershootFalling';
-        eRule_Overshoot_RisingEdge     : Result := 'OvershootRising';
-        eRule_Undershoot_FallingEdge   : Result := 'UndershootFalling';
-        eRule_Undershoot_RisingEdge    : Result := 'UndershootRising';
-        eRule_MaxMinImpedance          : Result := 'MaxMinImpedance';
-        eRule_SignalTopValue           : Result := 'SignalTopValue';
-        eRule_SignalBaseValue          : Result := 'SignalBaseValue';
-        eRule_FlightTime_RisingEdge    : Result := 'FlightTimeRising';
-        eRule_FlightTime_FallingEdge   : Result := 'FlightTimeFalling';
-        eRule_LayerStack               : Result := 'LayerStack';
-        eRule_MaxSlope_RisingEdge      : Result := 'SlopeRising';
-        eRule_MaxSlope_FallingEdge     : Result := 'SlopeFalling';
-        eRule_SupplyNets               : Result := 'SupplyNets';
-        eRule_MaxMinHoleSize           : Result := 'HoleSize';
-        eRule_TestPointStyle           : Result := 'Testpoint';
-        eRule_TestPointUsage           : Result := 'TestPointUsage';
-        eRule_UnconnectedPin           : Result := 'UnConnectedPin';
-        eRule_SMDToPlane               : Result := 'SMDToPlane';
-        eRule_SMDNeckDown              : Result := 'SMDNeckDown';
-        eRule_LayerPair                : Result := 'LayerPairs';
-        eRule_FanoutControl            : Result := 'FanoutControl';
-        eRule_MaxMinHeight             : Result := 'Height';
-        eRule_DifferentialPairsRouting : Result := 'DiffPairsRouting';
-    End;
-End;
+    // Create array for storing unique nets
+    NetsArray := TStringList.Create;
+    // Set Duplicates property to prevent duplicate net names
+    NetsArray.Duplicates := dupIgnore;
+    NetsArray.Sorted := True;
+    
+    try
+        // Create the iterator that will look for Net objects only
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+
+        // Search for Net objects and get their Net Name values
+        Net := Iterator.FirstPCBObject;
+        while (Net <> nil) do
+        begin
+            // Add each net name to the list, duplicates will be ignored
+            NetsArray.Add('"' + JSONEscapeString(Net.Name) + '"');
+            Net := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        
+        // Build the final JSON array
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONArray(NetsArray);
+            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_nets_data.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        NetsArray.Free;
+    end;
+end;
 
 // Function to get all layer information from the PCB
 function GetPCBLayers: String;

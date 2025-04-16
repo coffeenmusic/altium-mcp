@@ -866,6 +866,28 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     return json.dumps(pins_data, indent=2)
 
 @mcp.tool()
+async def get_all_nets(ctx: Context) -> str:
+    """
+    Return every unique net name in the active PCB document.
+
+    Returns
+    -------
+    str :
+        A JSON array of net names, e.g. ["GND", "VCC33", "USB_D+", ...]
+    """
+    logger.info("Getting all nets")
+
+    response = await altium_bridge.execute_command("get_all_nets", {})
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting nets: {error_msg}")
+        return json.dumps({"error": f"Failed to get nets: {error_msg}"})
+
+    # Result is already a JSON‑serialisable Python list
+    return json.dumps(response.get("result", []), indent=2)
+
+@mcp.tool()
 async def move_components(ctx: Context, cmp_designators: list, x_offset: float, y_offset: float, rotation: float = 0) -> str:
     """
     Move selected components by specified X and Y offsets in the PCB layout

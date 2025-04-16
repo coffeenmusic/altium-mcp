@@ -80,6 +80,7 @@ The server provides several tools to interact with Altium Designer:
 - `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
 
 ### Layout Operations
+- `get_all_nets`: Returns a list of unique nets from the pcb
 - `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
 - `set_pcb_layer_visibility`: Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
@@ -121,6 +122,7 @@ The server communicates with Altium Designer using a scripting bridge:
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
+- Create net class: `PCB/PCB Class Generator/`
 - Show/Hide Panels: `DXP/ReportPCBViews.pas`
 - Create rules: `PCB/CreateRules.pas`
 - Run DRC: IPCB_Board.RunBatchDesignRuleCheck( 

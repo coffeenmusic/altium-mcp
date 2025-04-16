@@ -30,6 +30,10 @@ begin
        (CommandName = 'layout_duplicator') or
        (CommandName = 'get_pcb_layers') or
        (CommandName = 'set_pcb_layer_visibility') or
+       (CommandName = 'move_components') or
+       (CommandName = 'layout_duplicator_apply') or
+       (CommandName = 'get_all_nets') or
+       (CommandName = 'get_all_components') or
        (CommandName = 'get_pcb_rules') then
     begin
         if not EnsureDocumentFocused('PCB') then
@@ -95,12 +99,14 @@ begin
 
         DesignatorsList.Free;
     end
+    else if CommandName = 'get_all_nets' then
+    begin
+        Result := GetAllNets;
+    end
     else if CommandName = 'get_all_component_data' then
     begin
-        // This command doesn't require any parameters
         Result := GetAllComponentData(False);
     end
-    // In your ExecuteCommand function, add a case for the screenshot command:
     else if CommandName = 'take_view_screenshot' then
     begin
         // Extract the view type parameter
