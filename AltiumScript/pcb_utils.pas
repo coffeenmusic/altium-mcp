@@ -1,3 +1,63 @@
+Function RuleKindToString (ARuleKind : TRuleKind) : String;
+Begin
+    Result := '';
+
+    Case ARuleKind Of
+        eRule_Clearance                : Result := 'Clearance';
+        eRule_ParallelSegment          : Result := 'ParallelSegment';
+        eRule_MaxMinWidth              : Result := 'Width';
+        eRule_MaxMinLength             : Result := 'Length';
+        eRule_MatchedLengths           : Result := 'MatchedLengths';
+        eRule_DaisyChainStubLength     : Result := 'StubLength';
+        eRule_PowerPlaneConnectStyle   : Result := 'PlaneConnect';
+        eRule_RoutingTopology          : Result := 'RoutingTopology';
+        eRule_RoutingPriority          : Result := 'RoutingPriority';
+        eRule_RoutingLayers            : Result := 'RoutingLayers';
+        eRule_RoutingCornerStyle       : Result := 'RoutingCorners';
+        eRule_RoutingViaStyle          : Result := 'RoutingVias';
+        eRule_PowerPlaneClearance      : Result := 'PlaneClearance';
+        eRule_SolderMaskExpansion      : Result := 'SolderMaskExpansion';
+        eRule_PasteMaskExpansion       : Result := 'PasteMaskExpansion';
+        eRule_ShortCircuit             : Result := 'ShortCircuit';
+        eRule_BrokenNets               : Result := 'UnRoutedNet';
+        eRule_ViasUnderSMD             : Result := 'ViasUnderSMD';
+        eRule_MaximumViaCount          : Result := 'MaximumViaCount';
+        eRule_MinimumAnnularRing       : Result := 'MinimumAnnularRing';
+        eRule_PolygonConnectStyle      : Result := 'PolygonConnect';
+        eRule_AcuteAngle               : Result := 'AcuteAngle';
+        eRule_ConfinementConstraint    : Result := 'RoomDefinition';
+        eRule_SMDToCorner              : Result := 'SMDToCorner';
+        eRule_ComponentClearance       : Result := 'ComponentClearance';
+        eRule_ComponentRotations       : Result := 'ComponentOrientations';
+        eRule_PermittedLayers          : Result := 'PermittedLayers';
+        eRule_NetsToIgnore             : Result := 'NetsToIgnore';
+        eRule_SignalStimulus           : Result := 'SignalStimulus';
+        eRule_Overshoot_FallingEdge    : Result := 'OvershootFalling';
+        eRule_Overshoot_RisingEdge     : Result := 'OvershootRising';
+        eRule_Undershoot_FallingEdge   : Result := 'UndershootFalling';
+        eRule_Undershoot_RisingEdge    : Result := 'UndershootRising';
+        eRule_MaxMinImpedance          : Result := 'MaxMinImpedance';
+        eRule_SignalTopValue           : Result := 'SignalTopValue';
+        eRule_SignalBaseValue          : Result := 'SignalBaseValue';
+        eRule_FlightTime_RisingEdge    : Result := 'FlightTimeRising';
+        eRule_FlightTime_FallingEdge   : Result := 'FlightTimeFalling';
+        eRule_LayerStack               : Result := 'LayerStack';
+        eRule_MaxSlope_RisingEdge      : Result := 'SlopeRising';
+        eRule_MaxSlope_FallingEdge     : Result := 'SlopeFalling';
+        eRule_SupplyNets               : Result := 'SupplyNets';
+        eRule_MaxMinHoleSize           : Result := 'HoleSize';
+        eRule_TestPointStyle           : Result := 'Testpoint';
+        eRule_TestPointUsage           : Result := 'TestPointUsage';
+        eRule_UnconnectedPin           : Result := 'UnConnectedPin';
+        eRule_SMDToPlane               : Result := 'SMDToPlane';
+        eRule_SMDNeckDown              : Result := 'SMDNeckDown';
+        eRule_LayerPair                : Result := 'LayerPairs';
+        eRule_FanoutControl            : Result := 'FanoutControl';
+        eRule_MaxMinHeight             : Result := 'Height';
+        eRule_DifferentialPairsRouting : Result := 'DiffPairsRouting';
+    End;
+End;
+
 // Function to get all layer information from the PCB
 function GetPCBLayers: String;
 var
@@ -568,7 +628,10 @@ begin
             try
                 // Add rule descriptor
                 AddJSONProperty(RuleProps, 'descriptor', Rule.Descriptor);
-                
+                AddJSONProperty(RuleProps, 'rule_kind', Rule.GetState_ShortDescriptorString);
+                AddJSONProperty(RuleProps, 'filter1', Rule.Scope1Expression);
+                AddJSONProperty(RuleProps, 'filter2', Rule.Scope2Expression);
+
                 // Add to rules array
                 RulesArray.Add(BuildJSONObject(RuleProps, 1));
             finally

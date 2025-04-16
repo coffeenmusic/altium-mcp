@@ -121,6 +121,10 @@ The server communicates with Altium Designer using a scripting bridge:
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
+- Show/Hide Panels: `DXP/ReportPCBViews.pas`
+- Create rules: `PCB/CreateRules.pas`
+- Run DRC: IPCB_Board.RunBatchDesignRuleCheck( 
+- Move cursor to position: IPCB_Board.XCursor, IPCB_Board.YCursor 
 - Add get schematic & pcb library path for footprint. 
 - Add get symbol from library
 - log response time of each tool
