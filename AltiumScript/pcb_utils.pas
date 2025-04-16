@@ -50,6 +50,99 @@ begin
     end;
 end;
 
+// Function to create a net class and add nets to it
+function CreateNetClass(ClassName: String; NetNames: TStringList): String;
+var
+    Board       : IPCB_Board;
+    ClassExists : Boolean;
+    NetClass    : IPCB_ObjectClass;
+    ClassIterator : IPCB_BoardIterator;
+    i           : Integer;
+    ResultProps : TStringList;
+    AddedCount  : Integer;
+    OutputLines : TStringList;
+begin
+    // Initialize result
+    ResultProps := TStringList.Create;
+    AddedCount := 0;
+    ClassExists := False;
+    
+    try
+        // Retrieve the current board
+        Board := PCBServer.GetCurrentPCBBoard;
+        if (Board = nil) then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'No PCB document is currently active');
+            
+            OutputLines := TStringList.Create;
+            try
+                OutputLines.Text := BuildJSONObject(ResultProps);
+                Result := OutputLines.Text;
+            finally
+                OutputLines.Free;
+            end;
+            Exit;
+        end;
+        
+        // Search for existing class with the same name
+        ClassIterator := Board.BoardIterator_Create;
+        ClassIterator.SetState_FilterAll;
+        ClassIterator.AddFilter_ObjectSet(MkSet(eClassObject));
+        
+        NetClass := ClassIterator.FirstPCBObject;
+        while (NetClass <> nil) do
+        begin
+            if (NetClass.MemberKind = eClassMemberKind_Net) and (NetClass.Name = ClassName) then
+            begin
+                ClassExists := True;
+                Break;
+            end;
+            NetClass := ClassIterator.NextPCBObject;
+        end;
+        
+        // If class doesn't exist, create it
+        if not ClassExists then
+        begin
+            PCBServer.PreProcess;
+            NetClass := PCBServer.PCBClassFactoryByClassMember(eClassMemberKind_Net);
+            NetClass.SuperClass := False;
+            NetClass.Name := ClassName;
+            Board.AddPCBObject(NetClass);
+            PCBServer.PostProcess;
+        end;
+        
+        // Add nets to the class
+        PCBServer.PreProcess;
+        for i := 0 to NetNames.Count - 1 do
+        begin
+            // Add each net to the class
+            if NetClass.AddMemberByName(NetNames[i]) then
+                AddedCount := AddedCount + 1;
+        end;
+        PCBServer.PostProcess;
+        
+        // Clean up iterator
+        Board.BoardIterator_Destroy(ClassIterator);
+        
+        // Build result JSON
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'class_name', ClassName);
+        AddJSONBoolean(ResultProps, 'class_created', not ClassExists);
+        AddJSONInteger(ResultProps, 'nets_added', AddedCount);
+        
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
 // Function to get all layer information from the PCB
 function GetPCBLayers: String;
 var

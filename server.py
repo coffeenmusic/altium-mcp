@@ -888,6 +888,41 @@ async def get_all_nets(ctx: Context) -> str:
     return json.dumps(response.get("result", []), indent=2)
 
 @mcp.tool()
+async def create_net_class(ctx: Context, class_name: str, net_names: list) -> str:
+    """
+    Create a new net class and add specified nets to it
+    
+    Args:
+        class_name (str): Name of the net class to create or modify
+        net_names (list): List of net names to add to the class
+    
+    Returns:
+        str: JSON object with the result of the operation
+    """
+    logger.info(f"Creating net class '{class_name}' with {len(net_names)} nets")
+    
+    # Execute the command in Altium to create the net class
+    response = await altium_bridge.execute_command(
+        "create_net_class",
+        {
+            "class_name": class_name,
+            "net_names": net_names
+        }
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error creating net class: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to create net class: {error_msg}"})
+    
+    # Get the result data
+    result = response.get("result", {})
+    
+    logger.info(f"Net class '{class_name}' created/modified successfully")
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
 async def move_components(ctx: Context, cmp_designators: list, x_offset: float, y_offset: float, rotation: float = 0) -> str:
     """
     Move selected components by specified X and Y offsets in the PCB layout

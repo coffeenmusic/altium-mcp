@@ -33,6 +33,7 @@ begin
        (CommandName = 'move_components') or
        (CommandName = 'layout_duplicator_apply') or
        (CommandName = 'get_all_nets') or
+       (CommandName = 'create_net_class') or
        (CommandName = 'get_all_components') or
        (CommandName = 'get_pcb_rules') then
     begin
@@ -102,6 +103,60 @@ begin
     else if CommandName = 'get_all_nets' then
     begin
         Result := GetAllNets;
+    end
+    else if CommandName = 'create_net_class' then
+    begin
+        // For this command, we need to extract the class name and net names list
+        ComponentName := '';
+        SourceList := TStringList.Create;
+        
+        try
+            // Parse parameters from the request
+            for i := 0 to RequestData.Count - 1 do
+            begin
+                // Look for class_name
+                if (Pos('"class_name"', RequestData[i]) > 0) then
+                begin
+                    ValueStart := Pos(':', RequestData[i]) + 1;
+                    ComponentName := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                    ComponentName := TrimJSON(ComponentName);
+                end
+                // Look for net_names array
+                else if (Pos('"net_names"', RequestData[i]) > 0) then
+                begin
+                    // Parse the array in the next lines
+                    i := i + 1; // Move to the next line (should be '[')
+                    
+                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                    begin
+                        // Extract the net name
+                        ParamValue := RequestData[i];
+                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                        ParamValue := Trim(ParamValue);
+                        
+                        if (ParamValue <> '') and (ParamValue <> '[') then
+                            SourceList.Add(ParamValue);
+                        
+                        i := i + 1;
+                    end;
+                end
+            end;
+            
+            if (ComponentName <> '') and (SourceList.Count > 0) then
+            begin
+                Result := CreateNetClass(ComponentName, SourceList);
+            end
+            else
+            begin
+                if ComponentName = '' then
+                    Result := '{"success": false, "error": "No class name provided"}'
+                else
+                    Result := '{"success": false, "error": "No net names provided"}';
+            end;
+        finally
+            SourceList.Free;
+        end;
     end
     else if CommandName = 'get_all_component_data' then
     begin
