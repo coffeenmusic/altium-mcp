@@ -262,22 +262,10 @@ begin
     end;
 
     // Set rectangle to cover all pins with padding
-    if (PinCount > 0) then
-    begin
-        // Set rectangle at origin (0,0) with width and height based on pin positions
-        MinX := 0;  // Always start at 0,0
-        MinY := 0;
-
-        // Right edge should be the maximum X of all pins (typically right-side pins)
-        MaxX := MaxX;
-
-        // Top edge should be the maximum Y of all pins plus padding
-        MaxY := MaxY + 100;  // Add 100 mils to the highest pin
-    end
-    else
+    if (PinCount = 0) then
     begin
         // Default rectangle if no pins
-        MinX := 0;
+        MinX := 300;
         MinY := 0;
         MaxX := 1000;
         MaxY := 1000;
@@ -293,8 +281,8 @@ begin
 
     // Define the rectangle parameters using determined boundaries
     R.LineWidth := eSmall;
-    R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY));
-    R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY));
+    R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY - 100));
+    R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY + 100));
     R.AreaColor := $00B0FFFF; // Yellow (BGR format)
     R.Color := $00FF0000;     // Blue (BGR format)
     R.IsSolid := True;
