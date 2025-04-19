@@ -44,7 +44,8 @@ begin
             Exit;
         end;
     end
-    else if (CommandName = 'create_schematic_symbol') then
+    else if (CommandName = 'create_schematic_symbol') or
+            (CommandName = 'get_library_symbol_reference') then
     begin
         if not EnsureDocumentFocused('SCHLIB') then
         begin
@@ -182,6 +183,10 @@ begin
         end;
         
         Result := TakeViewScreenshot(ViewType);
+    end
+    else if CommandName = 'get_library_symbol_reference' then
+    begin        
+        Result := GetLibrarySymbolReference;
     end
     else if CommandName = 'create_schematic_symbol' then
     begin

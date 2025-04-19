@@ -36,6 +36,138 @@ begin
         Result := eRotate0; // Default
 end;
 
+// Function to get current schematic library component data
+function GetLibrarySymbolReference: String;
+var
+    CurrentLib       : ISch_Lib;
+    SchComponent     : ISch_Component;
+    PinIterator      : ISch_Iterator;
+    Pin              : ISch_Pin;
+    ComponentProps   : TStringList;
+    PinsArray        : TStringList;
+    PinProps         : TStringList;
+    OutputLines      : TStringList;
+    PinName, PinNum  : String;
+    PinType          : String;
+    PinOrient        : String;
+    PinX, PinY       : Integer;
+begin
+    Result := '';
+    
+    // Check if we have a schematic library document
+    CurrentLib := SchServer.GetCurrentSchDocument;
+    if (CurrentLib.ObjectID <> eSchLib) Then
+    begin
+        Result := 'ERROR: Please open a schematic library document';
+        Exit;
+    end;
+    
+    // Get the currently focused component from the library
+    SchComponent := CurrentLib.CurrentSchComponent;
+    if SchComponent = Nil Then
+    begin
+        Result := 'ERROR: No component is currently selected in the library';
+        Exit;
+    end;
+    
+    // Create component properties
+    ComponentProps := TStringList.Create;
+    
+    try
+        // Add basic component properties
+        AddJSONProperty(ComponentProps, 'library_name', ExtractFileName(CurrentLib.DocumentName));
+        AddJSONProperty(ComponentProps, 'component_name', SchComponent.LibReference);
+        AddJSONProperty(ComponentProps, 'description', SchComponent.ComponentDescription);
+        AddJSONProperty(ComponentProps, 'designator', SchComponent.Designator.Text);
+        
+        // Create an array for pins
+        PinsArray := TStringList.Create;
+        
+        try
+            // Create pin iterator
+            PinIterator := SchComponent.SchIterator_Create;
+            PinIterator.AddFilter_ObjectSet(MkSet(ePin));
+            
+            Pin := PinIterator.FirstSchObject;
+            
+            // Process all pins
+            while (Pin <> nil) do
+            begin
+                // Create pin properties
+                PinProps := TStringList.Create;
+                
+                try
+                    // Get pin properties
+                    PinNum := Pin.Designator;
+                    PinName := Pin.Name;
+                    
+                    // Convert electrical type to string
+                    case Pin.Electrical of
+                        eElectricHiZ: PinType := 'eElectricHiZ';
+                        eElectricInput: PinType := 'eElectricInput';
+                        eElectricIO: PinType := 'eElectricIO';
+                        eElectricOpenCollector: PinType := 'eElectricOpenCollector';
+                        eElectricOpenEmitter: PinType := 'eElectricOpenEmitter';
+                        eElectricOutput: PinType := 'eElectricOutput';
+                        eElectricPassive: PinType := 'eElectricPassive';
+                        eElectricPower: PinType := 'eElectricPower';
+                        else PinType := 'eElectricPassive';
+                    end;
+                    
+                    // Convert orientation to string
+                    case Pin.Orientation of
+                        eRotate0: PinOrient := 'eRotate0';
+                        eRotate90: PinOrient := 'eRotate90';
+                        eRotate180: PinOrient := 'eRotate180';
+                        eRotate270: PinOrient := 'eRotate270';
+                        else PinOrient := 'eRotate0';
+                    end;
+                    
+                    // Get coordinates
+                    PinX := CoordToMils(Pin.Location.X);
+                    PinY := CoordToMils(Pin.Location.Y);
+                    
+                    // Add pin properties
+                    AddJSONProperty(PinProps, 'pin_number', PinNum);
+                    AddJSONProperty(PinProps, 'pin_name', PinName);
+                    AddJSONProperty(PinProps, 'pin_type', PinType);
+                    AddJSONProperty(PinProps, 'pin_orientation', PinOrient);
+                    AddJSONNumber(PinProps, 'x', PinX);
+                    AddJSONNumber(PinProps, 'y', PinY);
+                    
+                    // Add this pin to the pins array
+                    PinsArray.Add(BuildJSONObject(PinProps, 1));
+                    
+                    // Move to next pin
+                    Pin := PinIterator.NextSchObject;
+                finally
+                    PinProps.Free;
+                end;
+            end;
+            
+            SchComponent.SchIterator_Destroy(PinIterator);
+            
+            // Add pins array to component - pass empty string as the array name
+            // because we're adding it directly to the ComponentProps
+            ComponentProps.Add('"pins": ' + BuildJSONArray(PinsArray));
+            
+            // Build final JSON
+            OutputLines := TStringList.Create;
+            
+            try
+                OutputLines.Text := BuildJSONObject(ComponentProps);
+                Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_symbol_reference.json');
+            finally
+                OutputLines.Free;
+            end;
+        finally
+            PinsArray.Free;
+        end;
+    finally
+        ComponentProps.Free;
+    end;
+end;
+
 function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList): String;
 var
     CurrentLib       : ISch_Lib;

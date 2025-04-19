@@ -76,8 +76,9 @@ The server provides several tools to interact with Altium Designer:
 
 ### Schematic/Symbol
 - `get_schematic_data`: Get schematic data for specified components
-- `get_symbol_placement_rules`: Reads `C:\AltiumMCP\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
 - `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
+- `get_symbol_placement_rules`: Create symbol's helper tool that reads `C:\AltiumMCP\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
+- `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 
 ### Layout Operations
 - `get_all_nets`: Returns a list of unique nets from the pcb
@@ -123,6 +124,7 @@ The server communicates with Altium Designer using a scripting bridge:
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
+- Create a separate function w/ a case statement that decides which document to focus
 - Show/Hide Panels: `DXP/ReportPCBViews.pas`
 - Create rules: `PCB/CreateRules.pas`
 - Run DRC: IPCB_Board.RunBatchDesignRuleCheck( 

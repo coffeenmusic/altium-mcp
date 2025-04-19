@@ -504,7 +504,40 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
             "success": False,
             "error": f"Failed to read rules file: {str(e)}"
         }, indent=2)
+
+@mcp.tool()
+async def get_library_symbol_reference(ctx: Context) -> str:
+    """
+    Get the currently open symbol from a schematic library to use as reference for creating a new symbol.
+    This tool should be used before creating a new symbol to understand the structure of existing symbols.
     
+    Returns:
+        str: JSON object with the reference symbol data including pins, their types, positions, and orientations
+    """
+    logger.info("Getting library symbol reference data")
+    
+    # Execute the command in Altium to get symbol reference data
+    response = await altium_bridge.execute_command(
+        "get_library_symbol_reference", 
+        {}
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting symbol reference: {error_msg}")
+        return json.dumps({"error": f"Failed to get symbol reference: {error_msg}"})
+    
+    # Get the symbol reference data
+    symbol_data = response.get("result", {})
+    
+    if not symbol_data:
+        logger.info("No symbol reference data found")
+        return json.dumps({"error": "No symbol reference data found or no symbol is currently selected in the library"})
+    
+    logger.info(f"Retrieved symbol reference data")
+    return json.dumps(symbol_data, indent=2)
+
 @mcp.tool()
 async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list) -> str:
     """
