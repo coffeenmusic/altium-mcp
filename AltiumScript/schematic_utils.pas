@@ -218,7 +218,7 @@ begin
     end;
 
     // Set up parameters for the library component
-    SchComponent.CurrentPartID := 1;
+    SchComponent.CurrentPartID := 1; // Is this automatically generated if not manually assigned? What if two IDs overlap?
     SchComponent.DisplayMode := 0;
 
     // Define the LibReference and component description
@@ -291,6 +291,12 @@ begin
 
     // Add the rectangle to the component
     SchComponent.AddSchObject(R);
+
+    // TODO: Define Designator Name as U?, J?, etc
+    SchComponent.Designator.Name := 'U?';
+
+    // Move designator to top left
+    SchComponent.Designator.Location := Point(MilsToCoord(MinX), MilsToCoord(MaxY + 100)); // Autoposition is another option: ISch_Component.Designator.Autoposition
 
     // Second pass - add pins to the component
     for I := 0 to PinsList.Count - 1 do
