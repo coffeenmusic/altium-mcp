@@ -86,7 +86,7 @@ The server provides several tools to interact with Altium Designer:
 - `get_all_nets`: Returns a list of unique nets from the pcb
 - `create_net_class`: Create a net class from a list of nets
 - `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
-- `set_pcb_layer_visibility`: Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
+- `set_pcb_layer_visibility` ([Watch on YouTube](https://youtu.be/XaWs5A6-h30)): Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
@@ -110,8 +110,6 @@ The server communicates with Altium Designer using a scripting bridge:
 2. It launches Altium with instructions to run the `Altium_API.PrjScr` script
 3. The script processes the request and writes results to `C:\AltiumMCP\response.json`
 4. The server reads and returns the response
-
-## Running with Claude Desktop
 
 ## References
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
