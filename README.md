@@ -74,7 +74,7 @@ The server provides several tools to interact with Altium Designer:
 - `get_component_data`: Get detailed data for specific components by designator
 - `get_component_pins`: Get pin information for specified components
 
-### Schematic/Symbol ([Watch on YouTube](https://youtu.be/MMP7ZfmbCMI))
+### Schematic/Symbol ([YouTube](https://youtu.be/MMP7ZfmbCMI))
 - `get_schematic_data`: Get schematic data for specified components
 - `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `C:\AltiumMCP\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
@@ -84,9 +84,9 @@ The server provides several tools to interact with Altium Designer:
 
 ### Layout Operations
 - `get_all_nets`: Returns a list of unique nets from the pcb
-- `create_net_class`: Create a net class from a list of nets
+- `create_net_class` ([YouTube](https://youtu.be/89booqRbnzQ)): Create a net class from a list of nets
 - `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
-- `set_pcb_layer_visibility` ([Watch on YouTube](https://youtu.be/XaWs5A6-h30)): Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
+- `set_pcb_layer_visibility` ([YouTube](https://youtu.be/XaWs5A6-h30)): Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
