@@ -79,6 +79,7 @@ The server provides several tools to interact with Altium Designer:
 - `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `C:\AltiumMCP\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
+
 ![Symbol Creator](assets/symbol_creator.gif)
 
 ### Layout Operations
