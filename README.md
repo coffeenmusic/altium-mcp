@@ -74,7 +74,7 @@ The server provides several tools to interact with Altium Designer:
 - `get_component_data`: Get detailed data for specific components by designator
 - `get_component_pins`: Get pin information for specified components
 
-### Schematic/Symbol
+### Schematic/Symbol ([Watch on YouTube](https://youtu.be/MMP7ZfmbCMI))
 - `get_schematic_data`: Get schematic data for specified components
 - `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `C:\AltiumMCP\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
