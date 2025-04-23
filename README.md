@@ -74,9 +74,9 @@ The server provides several tools to interact with Altium Designer:
 - `get_component_data`: Get detailed data for specific components by designator
 - `get_component_pins`: Get pin information for specified components
 
-### Schematic/Symbol ([YouTube](https://youtu.be/MMP7ZfmbCMI))
+### Schematic/Symbol
 - `get_schematic_data`: Get schematic data for specified components
-- `create_schematic_symbol`: Passes pin list with pin type & coordinates to Altium script
+- `create_schematic_symbol` ([YouTube](https://youtu.be/MMP7ZfmbCMI)): Passes pin list with pin type & coordinates to Altium script
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `C:\AltiumMCP\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 
@@ -90,7 +90,7 @@ The server provides several tools to interact with Altium Designer:
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
-- `layout_duplicator`: Starts layout duplication assuming you have already selected the source components on the PCB.
+- `layout_duplicator` ([YouTube](https://youtu.be/HD-A_8iVV70)): Starts layout duplication assuming you have already selected the source components on the PCB.
 - `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
 The cool thing about layout duplication this way as opposed to with Altium's built in layout replication, is that the exact components don't have to match because the LLM can look through the descriptions and understand which components match and which don't have a match. That's something that can't really be hard coded.
