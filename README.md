@@ -113,7 +113,6 @@ The server communicates with Altium Designer using a scripting bridge:
 
 ## References
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
-- Claude is not familiar with DelphiScript, so many of the Altium provided example scripts were used as reference.
 - Used CopyDesignatorsToMechLayerPair script by Petar Perisin and Randy Clemmons for reference on how to .Replicate objects (used in layout duplicator)
 - Petar Perisin's Select Bad Connections Script: For understanding how to walk pcb primitives (track, arc, via, etc) connected to a pad
 - Matija Markovic and Petar Perisin Distribute Script: For understanding how to properly let the GUI know when I've updated tracks' nets
