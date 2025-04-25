@@ -1,6 +1,6 @@
 // Modify the EnsureDocumentFocused function to handle all document types
 // and return more detailed information
-function EnsureDocumentFocused(DocumentKind: String): Boolean;
+function EnsureDocumentFocused(Dummy: String): Boolean;
 var
     I           : Integer;
     Project     : IProject;
@@ -11,6 +11,35 @@ var
 begin
     Result := False;
     DocFound := False;
+
+    // For PCB-related commands, ensure PCB is available first
+    if (CommandName = 'create_net_class')                    or
+       (CommandName = 'get_all_component_data')              or
+       (CommandName = 'get_all_components')                  or
+       (CommandName = 'get_all_nets')                        or
+       (CommandName = 'get_component_pins')                  or
+       (CommandName = 'get_pcb_layers')                      or
+       (CommandName = 'get_pcb_rules')                       or
+       (CommandName = 'get_selected_components_coordinates') or
+       (CommandName = 'layout_duplicator')                   or
+       (CommandName = 'layout_duplicator_apply')             or
+       (CommandName = 'move_components')                     or
+       (CommandName = 'set_pcb_layer_visibility')            or
+       (CommandName = 'take_view_screenshot')                then
+    begin
+        DocumentKind := 'PCB';
+    end
+    else if (CommandName = 'create_schematic_symbol')        or
+            (CommandName = 'get_library_symbol_reference')   then
+    begin
+        DocumentKind := 'SCHLIB';
+    end
+    else if (CommandName = 'get_schematic_data')             then
+    begin
+        DocumentKind := 'SCH';
+    end;
+    // Default to user argument if command not recognized
+    
     LogMessage := 'Attempting to focus ' + DocumentKind + ' document';
     
     // Log the current focused document first

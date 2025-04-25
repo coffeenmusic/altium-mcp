@@ -123,6 +123,8 @@ The server communicates with Altium Designer using a scripting bridge:
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
+- Add OutJob generation capability
+- Get Layer Stack: `Scripts - Outputs/LayerStackExporter/`
 - Create a separate function w/ a case statement that decides which document to focus
 - Show/Hide Panels: `DXP/ReportPCBViews.pas`
 - Create rules: `PCB/CreateRules.pas`

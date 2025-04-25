@@ -23,37 +23,7 @@ var
 begin
     Result := '';
 
-    // For PCB-related commands, ensure PCB is available first
-    if (CommandName = 'get_component_pins') or
-       (CommandName = 'get_all_component_data') or
-       (CommandName = 'get_selected_components_coordinates') or
-       (CommandName = 'layout_duplicator') or
-       (CommandName = 'get_pcb_layers') or
-       (CommandName = 'set_pcb_layer_visibility') or
-       (CommandName = 'move_components') or
-       (CommandName = 'layout_duplicator_apply') or
-       (CommandName = 'get_all_nets') or
-       (CommandName = 'create_net_class') or
-       (CommandName = 'get_all_components') or
-       (CommandName = 'get_pcb_rules') then
-    begin
-        if not EnsureDocumentFocused('PCB') then
-        begin
-            // Early exit with error
-            Result := 'ERROR: No PCB document found. Tell the user to open a PCB document in their project. Dont try any more tools until the user responds.';
-            Exit;
-        end;
-    end
-    else if (CommandName = 'create_schematic_symbol') or
-            (CommandName = 'get_library_symbol_reference') then
-    begin
-        if not EnsureDocumentFocused('SCHLIB') then
-        begin
-            // Early exit with error
-            Result := 'ERROR: No schematic library document found. Tell the user to open a schematic library document in their project. Dont try any more tools until the user responds.';
-            Exit;
-        end;
-    end;
+    EnsureDocumentFocused('Dummy');
 
     // Process different commands based on command name
     if CommandName = 'get_component_pins' then
@@ -252,26 +222,11 @@ begin
         Result := GetSchematicData;
     end
     else if CommandName = 'get_pcb_layers' then
-    begin
-        // Make sure we have a PCB document
-        if not EnsureDocumentFocused('PCB') then
-        begin
-            Result := 'ERROR: No PCB document found. Open a PCB document first.';
-            Exit;
-        end;
-        
-        // Get PCB layers data
-        Result := GetPCBLayers;
+    begin        
+        Result := GetPCBLayers; // Get PCB layers data
     end
     else if CommandName = 'set_pcb_layer_visibility' then
     begin
-        // Make sure we have a PCB document
-        if not EnsureDocumentFocused('PCB') then
-        begin
-            Result := 'ERROR: No PCB document found. Open a PCB document first.';
-            Exit;
-        end;
-
         // Create a stringlist for layer names and extract the visible parameter
         SourceList := TStringList.Create;
         Visible := False;
