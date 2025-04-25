@@ -1,12 +1,13 @@
 // Modify the EnsureDocumentFocused function to handle all document types
 // and return more detailed information
-function EnsureDocumentFocused(Dummy: String): Boolean;
+function EnsureDocumentFocused(CommandName: String): Boolean;
 var
     I           : Integer;
     Project     : IProject;
     Doc         : IDocument;
     DocFound    : Boolean;
     CurrentDoc  : IServerDocument;
+    DocumentKind: String;
     LogMessage  : String;
 begin
     Result := False;

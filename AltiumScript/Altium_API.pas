@@ -11,26 +11,15 @@ var
     ResponseData : TStringList;
     Params : TStringList;
 
-// Function to execute a command with parameters
-function ExecuteCommand(CommandName: String): String;
+// Extract the component pins logic
+function ExecuteGetComponentPins(RequestData: TStringList): String;
 var
     ParamValue: String;
-    i, XOffset, YOffset, Rotation, ValueStart: Integer;
+    i: Integer;
     DesignatorsList: TStringList;
-    PCBAvailable, Visible: Boolean;
-    SourceList, DestList, PinsList: TStringList;
-    ComponentName, ViewType: String; 
 begin
-    Result := '';
-
-    EnsureDocumentFocused('Dummy');
-
-    // Process different commands based on command name
-    if CommandName = 'get_component_pins' then
-    begin
-        // For this command, we need to manually parse the designators array
-        DesignatorsList := TStringList.Create;
-        
+    DesignatorsList := TStringList.Create;
+    try
         // Look through all the RequestData lines to find designators
         for i := 0 to RequestData.Count - 1 do
         begin
@@ -68,102 +57,111 @@ begin
             ShowMessage('Error: No designators found for get_component_pins');
             Result := '';
         end;
-
+    finally
         DesignatorsList.Free;
-    end
-    else if CommandName = 'get_all_nets' then
-    begin
-        Result := GetAllNets;
-    end
-    else if CommandName = 'create_net_class' then
-    begin
-        // For this command, we need to extract the class name and net names list
-        ComponentName := '';
-        SourceList := TStringList.Create;
-        
-        try
-            // Parse parameters from the request
-            for i := 0 to RequestData.Count - 1 do
-            begin
-                // Look for class_name
-                if (Pos('"class_name"', RequestData[i]) > 0) then
-                begin
-                    ValueStart := Pos(':', RequestData[i]) + 1;
-                    ComponentName := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                    ComponentName := TrimJSON(ComponentName);
-                end
-                // Look for net_names array
-                else if (Pos('"net_names"', RequestData[i]) > 0) then
-                begin
-                    // Parse the array in the next lines
-                    i := i + 1; // Move to the next line (should be '[')
-                    
-                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                    begin
-                        // Extract the net name
-                        ParamValue := RequestData[i];
-                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                        ParamValue := Trim(ParamValue);
-                        
-                        if (ParamValue <> '') and (ParamValue <> '[') then
-                            SourceList.Add(ParamValue);
-                        
-                        i := i + 1;
-                    end;
-                end
-            end;
-            
-            if (ComponentName <> '') and (SourceList.Count > 0) then
-            begin
-                Result := CreateNetClass(ComponentName, SourceList);
-            end
-            else
-            begin
-                if ComponentName = '' then
-                    Result := '{"success": false, "error": "No class name provided"}'
-                else
-                    Result := '{"success": false, "error": "No net names provided"}';
-            end;
-        finally
-            SourceList.Free;
-        end;
-    end
-    else if CommandName = 'get_all_component_data' then
-    begin
-        Result := GetAllComponentData(False);
-    end
-    else if CommandName = 'take_view_screenshot' then
-    begin
-        // Extract the view type parameter
-        ViewType := 'pcb';  // Default to PCB
-        
+    end;
+end;
+
+// Extract the create net class logic
+function ExecuteCreateNetClass(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    ComponentName: String;
+    SourceList: TStringList;
+begin
+    ComponentName := '';
+    SourceList := TStringList.Create;
+    
+    try
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
         begin
-            // Look for view_type parameter
-            if (Pos('"view_type"', RequestData[i]) > 0) then
+            // Look for class_name
+            if (Pos('"class_name"', RequestData[i]) > 0) then
             begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
-                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                ParamValue := TrimJSON(ParamValue);
-                ViewType := ParamValue;
-                Break;
+                ComponentName := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ComponentName := TrimJSON(ComponentName);
+            end
+            // Look for net_names array
+            else if (Pos('"net_names"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+                
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // Extract the net name
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        SourceList.Add(ParamValue);
+                    
+                    i := i + 1;
+                end;
             end;
         end;
         
-        Result := TakeViewScreenshot(ViewType);
-    end
-    else if CommandName = 'get_library_symbol_reference' then
-    begin        
-        Result := GetLibrarySymbolReference;
-    end
-    else if CommandName = 'create_schematic_symbol' then
+        if (ComponentName <> '') and (SourceList.Count > 0) then
+        begin
+            Result := CreateNetClass(ComponentName, SourceList);
+        end
+        else
+        begin
+            if ComponentName = '' then
+                Result := '{"success": false, "error": "No class name provided"}'
+            else
+                Result := '{"success": false, "error": "No net names provided"}';
+        end;
+    finally
+        SourceList.Free;
+    end;
+end;
+
+// Extract the take view screenshot logic
+function ExecuteTakeViewScreenshot(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    ViewType: String;
+begin
+    // Extract the view type parameter
+    ViewType := 'pcb';  // Default to PCB
+    
+    // Parse parameters from the request
+    for i := 0 to RequestData.Count - 1 do
     begin
-        // Look for component name
-        ComponentName := '';
-        PinsList := TStringList.Create;
-        
+        // Look for view_type parameter
+        if (Pos('"view_type"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            ViewType := ParamValue;
+            Break;
+        end;
+    end;
+    
+    Result := TakeViewScreenshot(ViewType);
+end;
+
+// Extract the create schematic symbol logic
+function ExecuteCreateSchematicSymbol(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    ComponentName: String;
+    PinsList: TStringList;
+begin
+    // Look for component name
+    ComponentName := '';
+    PinsList := TStringList.Create;
+    
+    try
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
         begin
@@ -213,83 +211,86 @@ begin
             ShowMessage('Error: No component name provided');
             Result := '';
         end;
-
+    finally
         PinsList.Free;
-    end
-    else if CommandName = 'get_schematic_data' then
-    begin
-        // This command doesn't require any parameters
-        Result := GetSchematicData;
-    end
-    else if CommandName = 'get_pcb_layers' then
-    begin        
-        Result := GetPCBLayers; // Get PCB layers data
-    end
-    else if CommandName = 'set_pcb_layer_visibility' then
-    begin
-        // Create a stringlist for layer names and extract the visible parameter
-        SourceList := TStringList.Create;
-        Visible := False;
-        
-        try
-            // Parse parameters from the request
-            for i := 0 to RequestData.Count - 1 do
+    end;
+end;
+
+// Extract the set PCB layer visibility logic
+function ExecuteSetPCBLayerVisibility(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    SourceList: TStringList;
+    Visible: Boolean;
+begin
+    // Create a stringlist for layer names and extract the visible parameter
+    SourceList := TStringList.Create;
+    Visible := False;
+    
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for layer_names array
+            if (Pos('"layer_names"', RequestData[i]) > 0) then
             begin
-                // Look for layer_names array
-                if (Pos('"layer_names"', RequestData[i]) > 0) then
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+                
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
                 begin
-                    // Parse the array in the next lines
-                    i := i + 1; // Move to the next line (should be '[')
+                    // Extract the layer name
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
                     
-                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                    begin
-                        // Extract the layer name
-                        ParamValue := RequestData[i];
-                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                        ParamValue := Trim(ParamValue);
-                        
-                        if (ParamValue <> '') and (ParamValue <> '[') then
-                            SourceList.Add(ParamValue);
-                        
-                        i := i + 1;
-                    end;
-                end
-                // Look for visible parameter
-                else if (Pos('"visible"', RequestData[i]) > 0) then
-                begin
-                    ValueStart := Pos(':', RequestData[i]) + 1;
-                    ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                    ParamValue := TrimJSON(ParamValue);
-                    Visible := (ParamValue = 'true');
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        SourceList.Add(ParamValue);
+                    
+                    i := i + 1;
                 end;
-            end;
-            
-            if SourceList.Count > 0 then
-            begin
-                Result := SetPCBLayerVisibility(SourceList, Visible);
             end
-            else
+            // Look for visible parameter
+            else if (Pos('"visible"', RequestData[i]) > 0) then
             begin
-                Result := '{"success": false, "error": "No layer names provided"}';
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                Visible := (ParamValue = 'true');
             end;
-        finally
-            SourceList.Free;
         end;
-    end
-    else if CommandName = 'get_selected_components_coordinates' then
-    begin
-        // Get only selected components
-        Result := GetSelectedComponentsCoordinates;
-    end
-    else if CommandName = 'move_components' then
-    begin
-        // For this command, we need to extract the designators array and the offset values
-        DesignatorsList := TStringList.Create;
-        XOffset := 0;
-        YOffset := 0;
-        Rotation := 0;  // Default rotation is 0 (no change)
         
+        if SourceList.Count > 0 then
+        begin
+            Result := SetPCBLayerVisibility(SourceList, Visible);
+        end
+        else
+        begin
+            Result := '{"success": false, "error": "No layer names provided"}';
+        end;
+    finally
+        SourceList.Free;
+    end;
+end;
+
+// Extract the move components logic
+function ExecuteMoveComponents(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    DesignatorsList: TStringList;
+    XOffset, YOffset: Integer;
+    Rotation: Float;
+begin
+    // For this command, we need to extract the designators array and the offset values
+    DesignatorsList := TStringList.Create;
+    XOffset := 0;
+    YOffset := 0;
+    Rotation := 0;  // Default rotation is 0 (no change)
+    
+    try
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
         begin
@@ -348,20 +349,23 @@ begin
             ShowMessage('Error: No designators found for move_components');
             Result := '';
         end;
-
+    finally
         DesignatorsList.Free;
-    end
-    else if CommandName = 'layout_duplicator' then
-    begin        
-        // Get source and destination component data
-        Result := GetLayoutDuplicatorComponents(True);
-    end
-    else if CommandName = 'layout_duplicator_apply' then
-    begin
-        // For this command, we need to extract the source and destination lists
-        SourceList := TStringList.Create;
-        DestList := TStringList.Create;
-        
+    end;
+end;
+
+// Extract the layout duplicator apply logic
+function ExecuteLayoutDuplicatorApply(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    SourceList, DestList: TStringList;
+begin
+    // For this command, we need to extract the source and destination lists
+    SourceList := TStringList.Create;
+    DestList := TStringList.Create;
+    
+    try
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
         begin
@@ -416,19 +420,52 @@ begin
             ShowMessage('Error: Source or destination lists are empty');
             Result := '{"success": false, "error": "Source or destination lists are empty"}';
         end;
-
+    finally
         SourceList.Free;
         DestList.Free;
-    end
-    else if CommandName = 'get_pcb_rules' then
-    begin        
-        // Get all PCB rules
-        Result := GetPCBRules;
-    end
+    end;
+end;
+
+// Function to execute a command with parameters
+function ExecuteCommand(CommandName: String): String;
+begin
+    Result := '';
+    EnsureDocumentFocused(CommandName);
+    
+    // Direct command execution based on the command name
+    case CommandName of
+        'get_component_pins':
+            Result := ExecuteGetComponentPins(RequestData);            
+        'get_all_nets':
+            Result := GetAllNets();            
+        'create_net_class':
+            Result := ExecuteCreateNetClass(RequestData);            
+        'get_all_component_data':
+            Result := GetAllComponentData(False);            
+        'take_view_screenshot':
+            Result := ExecuteTakeViewScreenshot(RequestData);            
+        'get_library_symbol_reference':
+            Result := GetLibrarySymbolReference();            
+        'create_schematic_symbol':
+            Result := ExecuteCreateSchematicSymbol(RequestData);            
+        'get_schematic_data':
+            Result := GetSchematicData();            
+        'get_pcb_layers':
+            Result := GetPCBLayers();            
+        'set_pcb_layer_visibility':
+            Result := ExecuteSetPCBLayerVisibility(RequestData);            
+        'get_selected_components_coordinates':
+            Result := GetSelectedComponentsCoordinates();            
+        'move_components':
+            Result := ExecuteMoveComponents(RequestData);            
+        'layout_duplicator':
+            Result := GetLayoutDuplicatorComponents(True);            
+        'layout_duplicator_apply':
+            Result := ExecuteLayoutDuplicatorApply(RequestData);            
+        'get_pcb_rules':
+            Result := GetPCBRules();
     else
-    begin
         ShowMessage('Error: Unknown command: ' + CommandName);
-        Result := '';
     end;
 end;
 
