@@ -714,14 +714,6 @@ begin
 
                     CmpDst.GroupIterator_Destroy(PadIterator);
 
-                    // Invalidate all collected nets
-                    for j := 0 to NetsToInvalidate.Count - 1 do
-                    begin
-                        Net := Board.FindNet(NetsToInvalidate[j]);
-                        if Net <> nil then
-                            Net.ConnectivelyInValidate;
-                    end;
-
                     MovedCount := MovedCount + 1;
                 end;
             end;
