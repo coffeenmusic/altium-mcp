@@ -6,8 +6,11 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 Note: Having Claude place components on the PCB currently fails hard.
 
 ## Example commands
+- Run all output jobs
+- Create a symbol for the part in the attached datasheet and use the currently open symbol as a reference example.
 - Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `C:\AltiumMCP\symbol_placement_rules.txt` description as pin placement rules. Please modify for your own preferences.)
 - Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region)
+- Show all my inner layers. Show the top and bottom layer. Turn off solder paste.
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
 - Place the selected parts on my pcb with best practices for a switching regulator. Note: It tries, but does terrible placement. Hopefully I can find a way to improve this.
@@ -66,6 +69,10 @@ When launching claude for the first time, the server will automatically try to l
 ## Available Tools
 
 The server provides several tools to interact with Altium Designer:
+
+### Output Jobs
+- `get_output_job_containers`: Using currently open .OutJob file, reads all available output containers
+- `run_output_jobs`: Pass a list of output job container names from the currently open .OutJob to run any number of them. `.OutJob` must be the currently focused document.
 
 ### Component Information
 - `get_all_designators`: Get a list of all component designators in the current board

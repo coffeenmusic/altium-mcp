@@ -426,6 +426,80 @@ begin
     end;
 end;
 
+// Function to execute get output job containers
+function ExecuteGetOutputJobContainers(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    OutJobPath: String;
+begin
+    OutJobPath := '';
+    
+    // Parse parameters from the request
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"outjob_path"', RequestData[i]) > 0) then
+        begin
+            // Found the outjob_path parameter
+            ParamValue := Copy(RequestData[i], Pos(':', RequestData[i]) + 1, Length(RequestData[i]));
+            ParamValue := TrimJSON(ParamValue);
+            OutJobPath := ParamValue;
+            break;
+        end;
+    end;
+    
+    // Call the appropriate function
+    Result := GetOutputJobContainers();
+end;
+
+// Function to execute run output jobs
+function ExecuteRunOutputJobs(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    ContainersList: TStringList;
+begin
+    ContainersList := TStringList.Create;
+    
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"container_names"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+                
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // Extract the container name
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        ContainersList.Add(ParamValue);
+                    
+                    i := i + 1;
+                end;
+            end;
+        end;
+        
+        if ContainersList.Count > 0 then
+        begin
+            Result := RunOutputJobs(ContainersList);
+        end
+        else
+        begin
+            ShowMessage('Error: No container names specified');
+            Result := '{"success": false, "error": "No container names specified"}';
+        end;
+    finally
+        ContainersList.Free;
+    end;
+end;
+
 // Function to execute a command with parameters
 function ExecuteCommand(CommandName: String): String;
 begin
@@ -464,6 +538,10 @@ begin
             Result := ExecuteLayoutDuplicatorApply(RequestData);            
         'get_pcb_rules':
             Result := GetPCBRules();
+        'get_output_job_containers':
+            Result := ExecuteGetOutputJobContainers(RequestData);
+        'run_output_jobs':
+            Result := ExecuteRunOutputJobs(RequestData);
     else
         ShowMessage('Error: Unknown command: ' + CommandName);
     end;

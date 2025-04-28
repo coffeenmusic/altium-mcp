@@ -1302,6 +1302,79 @@ async def get_pcb_rules(ctx: Context) -> str:
     return json.dumps(rules_data, indent=2)
 
 @mcp.tool()
+async def get_output_job_containers(ctx: Context) -> str:
+    """
+    Get all available output job containers from a specified OutJob file
+    
+    Args:
+        outjob_path (str): Path to the OutJob file (optional, will use first open OutJob if not provided)
+    
+    Returns:
+        str: JSON array with all output job containers and their properties
+    """
+    logger.info("Getting output job containers from the first open OutJob")
+    
+    # Execute the command in Altium to get output job containers
+    response = await altium_bridge.execute_command(
+        "get_output_job_containers", 
+        {}  # No parameters needed - will use first open OutJob
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting output job containers: {error_msg}")
+        return json.dumps({"error": f"Failed to get output job containers: {error_msg}"})
+    
+    # Get the containers data
+    containers_data = response.get("result", [])
+    
+    if not containers_data:
+        logger.info("No output job containers found")
+        return json.dumps({"message": "No output job containers found"})
+    
+    logger.info(f"Retrieved output job containers data")
+    return containers_data  # Already in JSON format
+
+@mcp.tool()
+async def run_output_jobs(ctx: Context, container_names: list) -> str:
+    """
+    Run specified output job containers
+    
+    Args:
+        container_names (list): List of container names to run
+    
+    Returns:
+        str: JSON object with results of running the output jobs
+    """
+    logger.info(f"Running output jobs")
+    logger.info(f"Containers to run: {container_names}")
+    
+    # Execute the command in Altium to run output jobs
+    response = await altium_bridge.execute_command(
+        "run_output_jobs", 
+        {"container_names": container_names}
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error running output jobs: {error_msg}")
+        return json.dumps({"error": f"Failed to run output jobs: {error_msg}"})
+    
+    # Get the result data
+    result_data = response.get("result", {})
+    
+    logger.info(f"Output jobs execution completed")
+    
+    # If result_data is a string, it's already in JSON format
+    if isinstance(result_data, str):
+        return result_data
+    
+    # Otherwise, convert to JSON
+    return json.dumps(result_data, indent=2)
+
+@mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
     status = {
