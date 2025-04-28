@@ -125,6 +125,7 @@ The server communicates with Altium Designer using a scripting bridge:
 - Matija Markovic and Petar Perisin Distribute Script: For understanding how to properly let the GUI know when I've updated tracks' nets
 - Petar Perisin's Room from Poly: Used as reference to detect poly to pad overlap since I couldn't get more tradition methods to work.
 - Petar Perisin's Layer Panel Script: Used as reference for getting layers and changing layer visibility
+- Jeff Collins has an XIA_Release_Manager.pas script that taught me the art of the Output Job. See his post on the Altium Forums: https://forum.live.altium.com/#/posts/189423
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
