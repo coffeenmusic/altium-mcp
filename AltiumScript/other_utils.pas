@@ -253,18 +253,6 @@ begin
         Exit;
     end;
     
-    // Ensure the correct document type is focused
-    WindowFound := EnsureDocumentFocused(DocType);
-    
-    if not WindowFound then
-    begin
-        Result := '{"success": false, "error": "Could not focus a ' + DocType + ' document. Please open one first."}';
-        Exit;
-    end;
-    
-    // Give the UI time to update
-    Sleep(500);
-    
     // Build the command to call the external screenshot utility
     // This part depends on how your C# server calls Altium for screenshots
     
