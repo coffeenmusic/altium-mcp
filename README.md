@@ -64,7 +64,7 @@ Once the config file has been set on Claude, and the addon is running on Altium,
 
 ## Configuration
 
-When launching claude for the first time, the server will automatically try to locate your Altium Designer installation. It will search for all directories that start with `C:\Program Files\Altium\AD*` and use the one with the largets revision number. If it cannot find any, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server. Altium's DelphiScript scripting is used to create an API between the mcp server and Altium. It expects to find this script project in `C:\AltiumMCP\AltiumScript\`.
+When launching claude for the first time, the server will automatically try to locate your Altium Designer installation. It will search for all directories that start with `C:\Program Files\Altium\AD*` and use the one with the largest revision number. If it cannot find any, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server. Altium's DelphiScript scripting is used to create an API between the mcp server and Altium. It expects to find this script project in `C:\AltiumMCP\AltiumScript\`.
 
 ## Available Tools
 
