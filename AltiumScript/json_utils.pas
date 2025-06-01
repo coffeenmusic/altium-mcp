@@ -142,7 +142,7 @@ end;
 // Helper to add a numeric property
 procedure AddJSONNumber(List: TStringList; Name: String; Value: Double);
 begin
-    List.Add(JSONPairStr(Name, FloatToStr(Value), False));
+    List.Add(JSONPairStr(Name, StringReplace(FloatToStr(Value), ',', '.', REPLACEALL), False));
 end;
 
 // Helper to add an integer property
