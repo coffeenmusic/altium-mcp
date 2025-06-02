@@ -1302,6 +1302,39 @@ async def get_pcb_rules(ctx: Context) -> str:
     return json.dumps(rules_data, indent=2)
 
 @mcp.tool()
+async def get_pcb_layer_stackup(ctx: Context) -> str:
+    """
+    Get the detailed layer stackup information from the current Altium PCB including
+    copper thickness, dielectric materials, constants, and heights
+    
+    Returns:
+        str: JSON object with detailed layer stackup information
+    """
+    logger.info("Getting PCB layer stackup information")
+    
+    # Execute the command in Altium to get layer stackup data
+    response = await altium_bridge.execute_command(
+        "get_pcb_layer_stackup",
+        {}  # No parameters needed
+    )
+    
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting PCB layer stackup: {error_msg}")
+        return json.dumps({"error": f"Failed to get PCB layer stackup: {error_msg}"})
+    
+    # Get the stackup data
+    stackup_data = response.get("result", {})
+    
+    if not stackup_data:
+        logger.info("No PCB layer stackup found")
+        return json.dumps({"message": "No PCB layer stackup found in the current document"})
+    
+    logger.info(f"Retrieved PCB layer stackup data")
+    return json.dumps(stackup_data, indent=2)
+
+@mcp.tool()
 async def get_output_job_containers(ctx: Context) -> str:
     """
     Get all available output job containers from a specified OutJob file

@@ -93,6 +93,7 @@ The server provides several tools to interact with Altium Designer:
 - `get_all_nets`: Returns a list of unique nets from the pcb
 - `create_net_class` ([YouTube](https://youtu.be/89booqRbnzQ)): Create a net class from a list of nets
 - `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
+- `get_pcb_layer_stackup`: Gets stackup info like dielectric, layer thickness, etc.
 - `set_pcb_layer_visibility` ([YouTube](https://youtu.be/XaWs5A6-h30)): Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
@@ -131,9 +132,9 @@ The server communicates with Altium Designer using a scripting bridge:
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
 
 # TODO:
-- Add OutJob generation capability
-- Get Layer Stack: `Scripts - Outputs/LayerStackExporter/`
-- Create a separate function w/ a case statement that decides which document to focus
+- Change selection filter:
+  - `scripts-libraries\Scripts - PCB\FilterObjects\`
+  - `scripts-libraries\Scripts - SCH\SelectionFilter\`
 - Show/Hide Panels: `DXP/ReportPCBViews.pas`
 - Create rules: `PCB/CreateRules.pas`
 - Run DRC: IPCB_Board.RunBatchDesignRuleCheck( 

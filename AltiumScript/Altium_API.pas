@@ -527,7 +527,9 @@ begin
         'get_pcb_layers':
             Result := GetPCBLayers();            
         'set_pcb_layer_visibility':
-            Result := ExecuteSetPCBLayerVisibility(RequestData);            
+            Result := ExecuteSetPCBLayerVisibility(RequestData);   
+        'get_pcb_layer_stackup':
+            Result := GetPCBLayerStackup();         
         'get_selected_components_coordinates':
             Result := GetSelectedComponentsCoordinates();            
         'move_components':

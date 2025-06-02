@@ -44,6 +44,7 @@ var
 begin
     Result := False;
     DocFound := False;
+    DocumentKind := 'PCB'; // Default
 
     // For PCB-related commands, ensure PCB is available first
     if (CommandName = 'create_net_class')                    or
@@ -58,6 +59,7 @@ begin
        (CommandName = 'layout_duplicator_apply')             or
        (CommandName = 'move_components')                     or
        (CommandName = 'set_pcb_layer_visibility')            or
+       (CommandName = 'get_pcb_layer_stackup')               or
        (CommandName = 'take_view_screenshot')                then
     begin
         DocumentKind := 'PCB';

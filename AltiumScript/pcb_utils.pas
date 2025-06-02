@@ -143,6 +143,121 @@ begin
     end;
 end;
 
+// Function to get detailed layer stackup information
+function GetPCBLayerStackup: String;
+var
+    Board           : IPCB_Board;
+    LayerIterator   : IPCB_LayerObjectIterator;
+    LayerObject     : IPCB_LayerObject;
+    StackupArray    : TStringList;
+    LayerProps      : TStringList;
+    OutputLines     : TStringList;
+    TotalThickness  : Double;
+    LayerCount      : Integer;
+begin
+    Result := '';
+
+    // Retrieve the current board
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := '{"error": "No PCB document is currently active"}';
+        Exit;
+    end;
+
+    // Create arrays for stackup data
+    StackupArray := TStringList.Create;
+    TotalThickness := 0;
+    LayerCount := 0;
+    
+    try
+        // Get the electrical layer iterator
+        LayerIterator := Board.ElectricalLayerIterator;
+        
+        // Process each electrical layer
+        while LayerIterator.Next do
+        begin
+            LayerObject := LayerIterator.LayerObject;
+            
+            // Create layer properties
+            LayerProps := TStringList.Create;
+            try
+                // Basic layer information
+                AddJSONProperty(LayerProps, 'layer_name', LayerObject.Name);
+                AddJSONProperty(LayerProps, 'layer_id', Layer2String(LayerObject.LayerID));
+                AddJSONProperty(LayerProps, 'material_type', 'Copper');
+                AddJSONNumber(LayerProps, 'copper_thickness_mils', LayerObject.CopperThickness / 10000);
+                AddJSONNumber(LayerProps, 'copper_thickness_um', LayerObject.CopperThickness / 254);
+                
+                // Add copper thickness to total
+                TotalThickness := TotalThickness + (LayerObject.CopperThickness / 10000);
+                
+                // Dielectric information (if present)
+                if LayerObject.Dielectric.DielectricType <> eNoDielectric then
+                begin
+                    case LayerObject.Dielectric.DielectricType of
+                        eCore: AddJSONProperty(LayerProps, 'dielectric_type', 'Core');
+                        ePrePreg: AddJSONProperty(LayerProps, 'dielectric_type', 'PrePreg');
+                        eSurfaceMaterial: AddJSONProperty(LayerProps, 'dielectric_type', 'Surface Material');
+                    else
+                        AddJSONProperty(LayerProps, 'dielectric_type', 'Unknown');
+                    end;
+                    
+                    AddJSONProperty(LayerProps, 'dielectric_material', LayerObject.Dielectric.DielectricMaterial);
+                    AddJSONNumber(LayerProps, 'dielectric_height_mils', LayerObject.Dielectric.DielectricHeight / 10000);
+                    AddJSONNumber(LayerProps, 'dielectric_height_um', LayerObject.Dielectric.DielectricHeight / 254);
+                    AddJSONNumber(LayerProps, 'dielectric_constant', LayerObject.Dielectric.DielectricConstant);
+                    
+                    // Add dielectric thickness to total
+                    TotalThickness := TotalThickness + (LayerObject.Dielectric.DielectricHeight / 10000);
+                end
+                else
+                begin
+                    AddJSONProperty(LayerProps, 'dielectric_type', 'No Dielectric');
+                    AddJSONProperty(LayerProps, 'dielectric_material', '');
+                    AddJSONNumber(LayerProps, 'dielectric_height_mils', 0);
+                    AddJSONNumber(LayerProps, 'dielectric_height_um', 0);
+                    AddJSONNumber(LayerProps, 'dielectric_constant', 0);
+                end;
+                
+                // Add layer order
+                AddJSONInteger(LayerProps, 'layer_order', LayerCount + 1);
+                
+                // Add to stackup array
+                StackupArray.Add(BuildJSONObject(LayerProps, 1));
+                LayerCount := LayerCount + 1;
+            finally
+                LayerProps.Free;
+            end;
+        end;
+        
+        // Create final stackup object with summary
+        LayerProps := TStringList.Create;
+        try
+            AddJSONInteger(LayerProps, 'total_layers', LayerCount);
+            AddJSONNumber(LayerProps, 'total_thickness_mils', TotalThickness);
+            AddJSONNumber(LayerProps, 'total_thickness_mm', TotalThickness * 0.0254);
+            AddJSONProperty(LayerProps, 'board_name', ExtractFileName(Board.FileName));
+            
+            // Add the layers array
+            LayerProps.Add(BuildJSONArray(StackupArray, 'layers'));
+            
+            // Build the final JSON
+            OutputLines := TStringList.Create;
+            try
+                OutputLines.Text := BuildJSONObject(LayerProps);
+                Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_stackup_data.json');
+            finally
+                OutputLines.Free;
+            end;
+        finally
+            LayerProps.Free;
+        end;
+    finally
+        StackupArray.Free;
+    end;
+end;
+
 // Function to get all layer information from the PCB
 function GetPCBLayers: String;
 var
