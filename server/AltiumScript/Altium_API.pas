@@ -3,13 +3,72 @@
 // It reads commands from a request JSON file, executes them, and writes results to a response JSON file
 
 const
-    REQUEST_FILE = 'C:\AltiumMCP\request.json';
-    RESPONSE_FILE = 'C:\AltiumMCP\response.json';
+	constScriptProjectName = 'Altium_API'; // Define the script project name
     REPLACEALL = 1;
 var
     RequestData : TStringList;
     ResponseData : TStringList;
     Params : TStringList;
+	REQUEST_FILE : String;
+    RESPONSE_FILE : String;
+	
+
+{..............................................................................}
+{ Get path of this script project.                                             }
+{ Get prj path from Jeff Collins and William Kitchen's stripped down version   }
+{..............................................................................}
+function ScriptProjectPath(Workspace: IWorkspace) : String;
+var
+  Project   : IProject;
+  scriptsPath : TDynamicString;
+  projectCount : Integer;
+  i      : Integer;
+begin
+  if (Workspace = nil) then begin result:=''; exit; end;
+  { Get a count of the number of currently opened projects.  The script project
+    from which this script runs must be one of these. }
+  projectCount := Workspace.DM_ProjectCount();
+  { Loop over all the open projects.  We're looking for constScriptProjectName
+    (of which we are a part).  Once we find this, we want to record the
+    path to the script project directory. }
+  scriptsPath:='';
+  for i:=0 to projectCount-1 do
+  begin
+    { Get reference to project # i. }
+    Project := Workspace.DM_Projects(i);
+    { See if we found our script project. }
+    if (AnsiPos(constScriptProjectName, Project.DM_ProjectFullPath) > 0) then
+    begin
+      { Strip off project name to give us just the path. }
+      scriptsPath := StringReplace(Project.DM_ProjectFullPath, '\' +
+      constScriptProjectName + '.PrjScr','', MkSet(rfReplaceAll,rfIgnoreCase));
+    end;
+  end;
+  result := scriptsPath;
+end;
+
+{..............................................................................}
+{ Initialize file paths based on script location                               }
+{..............................................................................}
+procedure InitializeFilePaths();
+var
+    ScriptPath: String;
+    ParentPath: String;
+    Workspace: IWorkspace;
+begin
+    // Get the current workspace
+    Workspace := GetWorkspace;
+    
+    // Get the script project path
+    ScriptPath := ScriptProjectPath(Workspace);
+    
+    // Go back one directory from the script path
+    ParentPath := ExtractFilePath(ExtractFilePath(ScriptPath));
+    
+    // Set the file paths
+    REQUEST_FILE := ParentPath + 'request.json';
+    RESPONSE_FILE := ParentPath + 'response.json';
+end;
 
 // Extract the component pins logic
 function ExecuteGetComponentPins(RequestData: TStringList): String;
@@ -639,10 +698,8 @@ var
     Line: String;
     ValueStart: Integer;
 begin
-    
-    // Make sure the directory exists
-    if not DirectoryExists('C:\AltiumMCP') then
-        CreateDir('C:\AltiumMCP');
+    // Initialize file paths based on script location
+    InitializeFilePaths();
 
     // Check if request file exists
     if not FileExists(REQUEST_FILE) then

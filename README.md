@@ -17,13 +17,19 @@ Note: Having Claude place components on the PCB currently fails hard.
 - Give me a list of all IC designators in my design
 - Get me all length matching rules
 
-## Setup
-Currently only tested on Windows & the Altium scripts have hard coded `C:\AltiumMCP` paths for now. That's probably a good TODO item.
+## Installing the MCP Server
+1. Download the `altium-mcp.dxt` desktop extension file
+2. In Claude Desktop on Windows: `drop down > File > Settings > Extensions > Advanced > Install Extension...` Select the .dxt file
 
-1. Clone the repo to `C:\` so you end up with a `C:\AltiumMCP\` directory
-2. Install uv
+You shouldn't need to restart Claude and you should now see altium-mcp in the tool menu near the search bar.
 
+![altium-mcp in the tools menu](assets/extension.png)
+
+## Creating a new .dxt (For Developers)
+### uv server/venv (Recommended)
 **On Windows**
+
+1. 
 ```bash
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 
 ```
@@ -32,39 +38,56 @@ and then
 set Path=C:\Users\nntra\.local\bin;%Path%
 ```
 
-3. Open cmd in `C:\AltiumMCP\` directory and run `uv sync` to add packages from pyproject.toml file. 
-
-### Claude for Desktop Integration
-Enable Developer Mode under Claude > Help > Enable Developer Mode
-
-Go to Claude > Settings > Developer > Edit Config > claude_desktop_config.json to include the following:
-Below is specific to Windows, TODO: find out how to run on both without a hard coded path
-```json
-{
-    "mcpServers": {
-        "altium": {
-            "command": "uv",
-            "args": [
-                "--directory",
-                "C:\\AltiumMCP",
-                "run",
-                "server.py"
-            ]
-        }
-    }
-}
+2. Create the venv directory where DXT expects: from the root directory run `uv venv server/venv`
+3. Install dependencies to venv: `uv pip install --python server/venv/Scripts/python.exe -r requirements.txt`
+4. Update the manifest for `server/venv` and include any new tools that have been added, bump the revisions, etc.
 ```
+  "server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "${__dirname}/server/venv/Scripts/python.exe",
+      "args": ["${__dirname}/server/main.py"],
+	  "env": {
+		"PYTHONPATH": "${__dirname}/server/venv"
+	  }
+    }
+  }
+```
+5. Download Node.js, install Anthropic's DXT tool: `npm install -g @anthropic-ai/dxt`, package dxt: `dxt pack`
 
-### Using with Claude
-Restart Claude: Right click on the Claude icon in the System Tray > Quit. Then re-open Claude desktop. 
+### pip server/lib (Not Tested)
+1. Populate the packages in the `server/lib` directory: from root dir > `pip install -r requirements.txt -t server/lib`
+2. Update the manifest for `server/lib` and include any new tools that have been added, bump the revisions, etc.
+```
+"server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "python",
+      "args": [
+	    "${__dirname}/server/main.py",
+		"--workspace=${user_config.workspace_directory}"		
+		],
+	  "env": {
+		"PYTHONPATH": "${__dirname}/server/lib"
+	  }
+    }
+  }
+```
+3. Download Node.js, install Anthropic's DXT tool: `npm install -g @anthropic-ai/dxt`, package dxt: `dxt pack`
 
-Once the config file has been set on Claude, and the addon is running on Altium, you will see a hammer icon with tools for the Altium MCP.
+### DXT Resources
+- [Desktop Extensions](https://www.anthropic.com/engineering/desktop-extensions)
+- [Desktop Extensions Github](https://github.com/anthropics/dxt)
+- [Getting Started with DXT](https://support.anthropic.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
+- [Python DXT Example Code](https://github.com/anthropics/dxt/tree/main/examples/file-manager-python)
+- [DXT Manifest](https://github.com/anthropics/dxt/blob/main/MANIFEST.md)
 
-![AltiumMCP in the sidebar](assets/hammer-icon.png)
 
 ## Configuration
 
-When launching claude for the first time, the server will automatically try to locate your Altium Designer installation. It will search for all directories that start with `C:\Program Files\Altium\AD*` and use the one with the largest revision number. If it cannot find any, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server. Altium's DelphiScript scripting is used to create an API between the mcp server and Altium. It expects to find this script project in `C:\AltiumMCP\AltiumScript\`.
+When launching claude for the first time, the server will automatically try to locate your Altium Designer installation. It will search for all directories that start with `C:\Program Files\Altium\AD*` and use the one with the largest revision number. If it cannot find any, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server. Altium's DelphiScript scripting is used to create an API between the mcp server and Altium. 
 
 ## Available Tools
 
@@ -114,12 +137,13 @@ The cool thing about layout duplication this way as opposed to with Altium's bui
 
 The server communicates with Altium Designer using a scripting bridge:
 
-1. It writes command requests to `C:\AltiumMCP\request.json`
+1. It writes command requests to `workspace\request.json`
 2. It launches Altium with instructions to run the `Altium_API.PrjScr` script
-3. The script processes the request and writes results to `C:\AltiumMCP\response.json`
+3. The script processes the request and writes results to `workspace\response.json`
 4. The server reads and returns the response
 
 ## References
+- Get scripts' project path from Jeff Collins and William Kitchen's stripped down version
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
 - Used CopyDesignatorsToMechLayerPair script by Petar Perisin and Randy Clemmons for reference on how to .Replicate objects (used in layout duplicator)
 - Petar Perisin's Select Bad Connections Script: For understanding how to walk pcb primitives (track, arc, via, etc) connected to a pad

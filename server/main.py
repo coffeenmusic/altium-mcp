@@ -31,8 +31,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AltiumMCPServer")
 
-# File paths
-MCP_DIR = Path("C:/AltiumMCP")
+# Set MCP_DIR to the directory of the current Python file
+MCP_DIR = Path(__file__).parent
 REQUEST_FILE = MCP_DIR / "request.json"
 RESPONSE_FILE = MCP_DIR / "response.json"
 CONFIG_FILE = MCP_DIR / "config.json"
