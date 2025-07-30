@@ -18,7 +18,7 @@ Note: Having Claude place components on the PCB currently fails hard.
 - Get me all length matching rules
 
 ## Installing the MCP Server
-1. Download the `altium-mcp.dxt` desktop extension file
+1. Download the `altium-mcp.dxt` desktop extension file from [releases](https://github.com/coffeenmusic/altium-mcp/releases)
 2. In Claude Desktop on Windows: `drop down > File > Settings > Extensions > Advanced > Install Extension...` Select the .dxt file
 
 You shouldn't need to restart Claude and you should now see altium-mcp in the tool menu near the search bar.
