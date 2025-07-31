@@ -1,5 +1,5 @@
 // Function to get all unique net names from the current PCB document
-function GetAllNets: String;
+function GetAllNets(ROOT_DIR: String): String;
 var
     Board       : IPCB_Board;
     Net         : IPCB_Net;
@@ -41,7 +41,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONArray(NetsArray);
-            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_nets_data.json');
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_nets_data.json');
         finally
             OutputLines.Free;
         end;
@@ -144,7 +144,7 @@ begin
 end;
 
 // Function to get detailed layer stackup information
-function GetPCBLayerStackup: String;
+function GetPCBLayerStackup(ROOT_DIR): String;
 var
     Board           : IPCB_Board;
     LayerIterator   : IPCB_LayerObjectIterator;
@@ -246,7 +246,7 @@ begin
             OutputLines := TStringList.Create;
             try
                 OutputLines.Text := BuildJSONObject(LayerProps);
-                Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_stackup_data.json');
+                Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_stackup_data.json');
             finally
                 OutputLines.Free;
             end;
@@ -259,7 +259,7 @@ begin
 end;
 
 // Function to get all layer information from the PCB
-function GetPCBLayers: String;
+function GetPCBLayers(ROOT_DIR: String): String;
 var
     Board           : IPCB_Board;
     TheLayerStack   : IPCB_LayerStack_V7;
@@ -533,7 +533,7 @@ begin
             OutputLines := TStringList.Create;
             try
                 OutputLines.Text := BuildJSONObject(LayerProps);
-                Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_layers_data.json');
+                Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_layers_data.json');
             finally
                 OutputLines.Free;
             end;
@@ -792,7 +792,7 @@ begin
 end;
 
 // Function to get all PCB rules
-function GetPCBRules: String;
+function GetPCBRules(ROOT_DIR: String): String;
 Var
     Board         : IPCB_Board;
     Rule          : IPCB_Rule;
@@ -849,7 +849,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONArray(RulesArray);
-            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_rules_data.json');
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_rules_data.json');
         finally
             OutputLines.Free;
         end;
@@ -859,7 +859,7 @@ begin
 end;
 
 // Function to get all component data from the PCB
-function GetAllComponentData(SelectedOnly: Boolean = False): String;
+function GetAllComponentData(ROOT_DIR: String, SelectedOnly: Boolean = False): String;
 var
     Board       : IPCB_Board;
     Iterator    : IPCB_BoardIterator;
@@ -937,7 +937,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONArray(ComponentsArray);
-            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_component_data.json');
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_component_data.json');
         finally
             OutputLines.Free;
         end;
@@ -947,7 +947,7 @@ begin
 end;
 
 // Example refactored function using the new JSON utilities
-function GetSelectedComponentsCoordinates: String;
+function GetSelectedComponentsCoordinates(ROOT_DIR: String): String;
 var
     Board       : IPCB_Board;
     Component   : IPCB_Component;
@@ -1012,7 +1012,7 @@ begin
             
         // For consistency with existing code, write to file and read back
         OutputLines.Text := Result;
-        Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_selected_components.json');
+        Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_selected_components.json');
     finally
         ComponentsArray.Free;
         OutputLines.Free;
@@ -1020,7 +1020,7 @@ begin
 end;
 
 // Function to get pin data for specified components
-function GetComponentPinsFromList(DesignatorsList: TStringList): String;
+function GetComponentPinsFromList(ROOT_DIR: String; DesignatorsList: TStringList): String;
 var
     Board           : IPCB_Board;
     Component       : IPCB_Component;
@@ -1164,7 +1164,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONArray(ComponentsArray);
-            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_pins_data.json');
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_pins_data.json');
         finally
             OutputLines.Free;
         end;

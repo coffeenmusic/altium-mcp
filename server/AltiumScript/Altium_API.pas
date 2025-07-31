@@ -11,41 +11,7 @@ var
     Params : TStringList;
 	REQUEST_FILE : String;
     RESPONSE_FILE : String;
-	
-
-{..............................................................................}
-{ Get path of this script project.                                             }
-{ Get prj path from Jeff Collins and William Kitchen's stripped down version   }
-{..............................................................................}
-function ScriptProjectPath(Workspace: IWorkspace) : String;
-var
-  Project   : IProject;
-  scriptsPath : TDynamicString;
-  projectCount : Integer;
-  i      : Integer;
-begin
-  if (Workspace = nil) then begin result:=''; exit; end;
-  { Get a count of the number of currently opened projects.  The script project
-    from which this script runs must be one of these. }
-  projectCount := Workspace.DM_ProjectCount();
-  { Loop over all the open projects.  We're looking for constScriptProjectName
-    (of which we are a part).  Once we find this, we want to record the
-    path to the script project directory. }
-  scriptsPath:='';
-  for i:=0 to projectCount-1 do
-  begin
-    { Get reference to project # i. }
-    Project := Workspace.DM_Projects(i);
-    { See if we found our script project. }
-    if (AnsiPos(constScriptProjectName, Project.DM_ProjectFullPath) > 0) then
-    begin
-      { Strip off project name to give us just the path. }
-      scriptsPath := StringReplace(Project.DM_ProjectFullPath, '\' +
-      constScriptProjectName + '.PrjScr','', MkSet(rfReplaceAll,rfIgnoreCase));
-    end;
-  end;
-  result := scriptsPath;
-end;
+    ROOT_DIR: String;
 
 {..............................................................................}
 { Initialize file paths based on script location                               }
@@ -53,7 +19,6 @@ end;
 procedure InitializeFilePaths();
 var
     ScriptPath: String;
-    ParentPath: String;
     Workspace: IWorkspace;
 begin
     // Get the current workspace
@@ -63,11 +28,11 @@ begin
     ScriptPath := ScriptProjectPath(Workspace);
     
     // Go back one directory from the script path
-    ParentPath := ExtractFilePath(ExtractFilePath(ScriptPath));
+    ROOT_DIR := ExtractFilePath(ExtractFilePath(ScriptPath));
     
     // Set the file paths
-    REQUEST_FILE := ParentPath + 'request.json';
-    RESPONSE_FILE := ParentPath + 'response.json';
+    REQUEST_FILE := ROOT_DIR + 'request.json';
+    RESPONSE_FILE := ROOT_DIR + 'response.json';
 end;
 
 // Extract the component pins logic
@@ -109,7 +74,7 @@ begin
         
         if DesignatorsList.Count > 0 then
         begin
-            Result := GetComponentPinsFromList(DesignatorsList);
+            Result := GetComponentPinsFromList(ROOT_DIR, DesignatorsList);
         end
         else
         begin
@@ -508,7 +473,7 @@ begin
     end;
     
     // Call the appropriate function
-    Result := GetOutputJobContainers();
+    Result := GetOutputJobContainers(ROOT_DIR);
 end;
 
 // Function to execute run output jobs
@@ -547,7 +512,7 @@ begin
         
         if ContainersList.Count > 0 then
         begin
-            Result := RunOutputJobs(ContainersList);
+            Result := RunOutputJobs(ContainersList, ROOT_DIR);
         end
         else
         begin
@@ -570,27 +535,27 @@ begin
         'get_component_pins':
             Result := ExecuteGetComponentPins(RequestData);            
         'get_all_nets':
-            Result := GetAllNets();            
+            Result := GetAllNets(ROOT_DIR);            
         'create_net_class':
             Result := ExecuteCreateNetClass(RequestData);            
         'get_all_component_data':
-            Result := GetAllComponentData(False);            
+            Result := GetAllComponentData(ROOT_DIR, False);            
         'take_view_screenshot':
             Result := ExecuteTakeViewScreenshot(RequestData);            
         'get_library_symbol_reference':
-            Result := GetLibrarySymbolReference();            
+            Result := GetLibrarySymbolReference(ROOT_DIR);            
         'create_schematic_symbol':
             Result := ExecuteCreateSchematicSymbol(RequestData);            
         'get_schematic_data':
-            Result := GetSchematicData();            
+            Result := GetSchematicData(ROOT_DIR);            
         'get_pcb_layers':
-            Result := GetPCBLayers();            
+            Result := GetPCBLayers(ROOT_DIR);            
         'set_pcb_layer_visibility':
             Result := ExecuteSetPCBLayerVisibility(RequestData);   
         'get_pcb_layer_stackup':
-            Result := GetPCBLayerStackup();         
+            Result := GetPCBLayerStackup(ROOT_DIR);         
         'get_selected_components_coordinates':
-            Result := GetSelectedComponentsCoordinates();            
+            Result := GetSelectedComponentsCoordinates(ROOT_DIR);            
         'move_components':
             Result := ExecuteMoveComponents(RequestData);            
         'layout_duplicator':
@@ -598,7 +563,7 @@ begin
         'layout_duplicator_apply':
             Result := ExecuteLayoutDuplicatorApply(RequestData);            
         'get_pcb_rules':
-            Result := GetPCBRules();
+            Result := GetPCBRules(ROOT_DIR);
         'get_output_job_containers':
             Result := ExecuteGetOutputJobContainers(RequestData);
         'run_output_jobs':

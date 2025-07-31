@@ -37,7 +37,7 @@ begin
 end;
 
 // Function to get current schematic library component data
-function GetLibrarySymbolReference: String;
+function GetLibrarySymbolReference(ROOT_DIR: String): String;
 var
     CurrentLib       : ISch_Lib;
     SchComponent     : ISch_Component;
@@ -156,7 +156,7 @@ begin
             
             try
                 OutputLines.Text := BuildJSONObject(ComponentProps);
-                Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_symbol_reference.json');
+                Result := WriteJSONToFile(OutputLines, ROOT_DIR+'temp_symbol_reference.json');
             finally
                 OutputLines.Free;
             end;
@@ -377,7 +377,7 @@ begin
 end;
 
 // Function to get all schematic component data
-function GetSchematicData: String;
+function GetSchematicData(ROOT_DIR: String): String;
 var
     Project     : IProject;
     Doc         : IDocument;
@@ -532,7 +532,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONArray(ComponentsArray);
-            Result := WriteJSONToFile(OutputLines, 'C:\AltiumMCP\temp_schematic_data.json');
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR+'temp_schematic_data.json');
         finally
             OutputLines.Free;
         end;

@@ -23,10 +23,28 @@ Note: Having Claude place components on the PCB currently fails hard.
 
 You shouldn't need to restart Claude and you should now see altium-mcp in the tool menu near the search bar.
 
-![altium-mcp in the tools menu](assets/extension.png)
+![altium-mcp in the tools menu](assets/extension.jpg)
 
 ## Creating a new .dxt (For Developers)
-### uv server/venv (Recommended)
+### pip server/lib (Recommended)
+1. Populate the packages in the `server/lib` directory: from root dir > `python -m pip install --no-cache-dir --target server/lib -r requirements.txt`
+2. Update the manifest for `server/lib` and include any new tools that have been added, bump the revisions, etc.
+```
+"server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["${__dirname}/server/main.py"],
+	  "env": {
+		"PYTHONPATH": "${__dirname}/server/lib"
+	  }
+    }
+  }
+```
+3. Download Node.js, install Anthropic's DXT tool: `npm install -g @anthropic-ai/dxt`, package dxt: `dxt pack`
+
+### uv server/venv (Not Recommended)
 **On Windows**
 
 1. 
@@ -38,7 +56,7 @@ and then
 set Path=C:\Users\nntra\.local\bin;%Path%
 ```
 
-2. Create the venv directory where DXT expects: from the root directory run `uv venv server/venv`
+2. Create the venv directory where DXT expects: from the root directory run `uv venv server/venv --relocatable`
 3. Install dependencies to venv: `uv pip install --python server/venv/Scripts/python.exe -r requirements.txt`
 4. Update the manifest for `server/venv` and include any new tools that have been added, bump the revisions, etc.
 ```
@@ -55,27 +73,6 @@ set Path=C:\Users\nntra\.local\bin;%Path%
   }
 ```
 5. Download Node.js, install Anthropic's DXT tool: `npm install -g @anthropic-ai/dxt`, package dxt: `dxt pack`
-
-### pip server/lib (Not Tested)
-1. Populate the packages in the `server/lib` directory: from root dir > `pip install -r requirements.txt -t server/lib`
-2. Update the manifest for `server/lib` and include any new tools that have been added, bump the revisions, etc.
-```
-"server": {
-    "type": "python",
-    "entry_point": "server/main.py",
-    "mcp_config": {
-      "command": "python",
-      "args": [
-	    "${__dirname}/server/main.py",
-		"--workspace=${user_config.workspace_directory}"		
-		],
-	  "env": {
-		"PYTHONPATH": "${__dirname}/server/lib"
-	  }
-    }
-  }
-```
-3. Download Node.js, install Anthropic's DXT tool: `npm install -g @anthropic-ai/dxt`, package dxt: `dxt pack`
 
 ### DXT Resources
 - [Desktop Extensions](https://www.anthropic.com/engineering/desktop-extensions)

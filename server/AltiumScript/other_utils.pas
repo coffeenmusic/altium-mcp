@@ -1,6 +1,40 @@
 const
     DEFAULT = 'Blank';
 
+{..............................................................................}
+{ Get path of this script project.                                             }
+{ Get prj path from Jeff Collins and William Kitchen's stripped down version   }
+{..............................................................................}
+function ScriptProjectPath(Workspace: IWorkspace) : String;
+var
+  Project   : IProject;
+  scriptsPath : TDynamicString;
+  projectCount : Integer;
+  i      : Integer;
+begin
+  if (Workspace = nil) then begin result:=''; exit; end;
+  { Get a count of the number of currently opened projects.  The script project
+    from which this script runs must be one of these. }
+  projectCount := Workspace.DM_ProjectCount();
+  { Loop over all the open projects.  We're looking for constScriptProjectName
+    (of which we are a part).  Once we find this, we want to record the
+    path to the script project directory. }
+  scriptsPath:='';
+  for i:=0 to projectCount-1 do
+  begin
+    { Get reference to project # i. }
+    Project := Workspace.DM_Projects(i);
+    { See if we found our script project. }
+    if (AnsiPos(constScriptProjectName, Project.DM_ProjectFullPath) > 0) then
+    begin
+      { Strip off project name to give us just the path. }
+      scriptsPath := StringReplace(Project.DM_ProjectFullPath, '\' +
+      constScriptProjectName + '.PrjScr','', MkSet(rfReplaceAll,rfIgnoreCase));
+    end;
+  end;
+  result := scriptsPath;
+end;
+
 // Find the first open OutJob document
 function GetOpenOutputJob(): String;
 var
@@ -284,7 +318,7 @@ begin
 end;
 
 // Get all available output job containers from the first open OutJob
-function GetOutputJobContainers(): String;
+function GetOutputJobContainers(ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -385,7 +419,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := WriteJSONToFile(OutputLines);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR);
         finally
             OutputLines.Free;
         end;
@@ -396,7 +430,7 @@ begin
 end;
 
 // Run selected output job containers with simplified logic
-function RunOutputJobs(ContainerNames: TStringList): String;
+function RunOutputJobs(ContainerNames: TStringList, ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -582,7 +616,7 @@ begin
         OutputLines := TStringList.Create;
         try
             OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := WriteJSONToFile(OutputLines);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR);
         finally
             OutputLines.Free;
         end;

@@ -111,10 +111,14 @@ var
     TempFile: String;
 begin
     // Use provided filename or generate temp filename
-    if FileName = '' then
-        TempFile := 'C:\AltiumMCP\temp_json_output.json'
+    if Not(AnsiEndsStr('.json', LowerCase(FileName))) then
+    begin
+        TempFile := Path + 'temp_json_output.json';
+    end
     else
+    begin
         TempFile := FileName;
+    end;
     
     try
         // Save to file

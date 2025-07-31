@@ -1,3 +1,8 @@
+# --- force Python to treat server\lib as a site-directory ---
+import pathlib, site
+site.addsitedir(str(pathlib.Path(__file__).with_name("lib")))
+# ------------------------------------------------------------
+
 from mcp.server.fastmcp import FastMCP, Context
 import json
 import os
