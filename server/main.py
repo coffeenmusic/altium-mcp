@@ -959,17 +959,55 @@ async def create_net_class(ctx: Context, class_name: str, net_names: list) -> st
     
     logger.info(f"Net class '{class_name}' created/modified successfully")
     return json.dumps(result, indent=2)
+    
+@mcp.tool()
+async def set_component_position(ctx: Context, cmp_designator: str, x: float, y: float, rotation: float = -1) -> str:
+    """
+    Set a component's absolute position in the PCB layout
+    
+    Args:
+        cmp_designator (str): Designator of the component to position (e.g., "R1", "C5", "U3")
+        x (float): Absolute X position in mils
+        y (float): Absolute Y position in mils
+        rotation (float): Rotation angle in degrees (0-360), use -1 to keep current rotation
+    
+    Returns:
+        str: JSON object with the result of the position operation
+    """
+    logger.info(f"Setting component {cmp_designator} position to X:{x}, Y:{y}, Rotation:{rotation}")
+    
+    response = await altium_bridge.execute_command(
+        "set_component_position",
+        {
+            "designator": cmp_designator,
+            "x": x,
+            "y": y,
+            "rotation": rotation
+        }
+    )
+    
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error setting component position: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to set component position: {error_msg}"})
+    
+    result = response.get("result", {})
+    logger.info(f"Component position set successfully")
+    return json.dumps({"success": True, "result": result}, indent=2)
 
 @mcp.tool()
 async def move_components(ctx: Context, cmp_designators: list, x_offset: float, y_offset: float, rotation: float = 0) -> str:
     """
-    Move selected components by specified X and Y offsets in the PCB layout
+    Move components by RELATIVE offset from their current position (not absolute positioning)
+    
+    IMPORTANT: This moves components BY the offset amount, not TO a position.
+    For absolute positioning, use set_component_position instead.
     
     Args:
         cmp_designators (list): List of designators of the components to move (e.g., ["R1", "C5", "U3"])
-        x_offset (float): X offset distance in mils
-        y_offset (float): Y offset distance in mils
-        rotation (float): New rotation angle in degrees (0-360), if 0 the rotation is not changed
+        x_offset (float): X offset distance in mils (positive = right, negative = left)
+        y_offset (float): Y offset distance in mils (positive = up, negative = down)
+        rotation (float): New absolute rotation angle in degrees (0-360), if 0 the rotation is not changed
     
     Returns:
         str: JSON object with the result of the move operation
@@ -1117,10 +1155,14 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
                         (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
                         bmpstr, 'raw', 'BGRX', 0, 1)
                     
-                    # Save a local copy of the screenshot for debugging
-                    debug_filename = f"C:/AltiumMCP/screenshot_{view_type}.png"
-                    img.save(debug_filename)
-                    logger.info(f"Saved debug screenshot to {debug_filename}")
+                    # Save a local copy of the screenshot for debugging (non-fatal if it fails)
+                    try:
+                        debug_filename = str(MCP_DIR / f"screenshot_{view_type}.png")
+                        img.save(debug_filename)
+                        logger.info(f"Saved debug screenshot to {debug_filename}")
+                    except Exception as save_error:
+                        logger.warning(f"Could not save debug screenshot to {debug_filename}: {save_error}")
+                        debug_filename = None  # Clear it since save failed
                     
                     # Clean up GDI resources
                     win32gui.DeleteObject(saveBitMap.GetHandle())

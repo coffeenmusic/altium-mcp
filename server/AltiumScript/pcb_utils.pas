@@ -1173,6 +1173,61 @@ begin
     end;
 end;
 
+// Set absolute position of a single component
+function SetComponentPosition(Designator: String; NewX, NewY: Float; Rotation: Float): String;
+var
+    Board: IPCB_Board;
+    Component: IPCB_Component;
+    ResultProps: TStringList;
+    xorigin, yorigin: TCoord;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := '{"success": false, "error": "No PCB document is currently active"}';
+        Exit;
+    end;
+    
+    Component := Board.GetPcbComponentByRefDes(Designator);
+    if (Component = nil) then
+    begin
+        Result := '{"success": false, "error": "Component not found: ' + Designator + '"}';
+        Exit;
+    end;
+    
+    // Get board origin
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
+    
+    ResultProps := TStringList.Create;
+    try
+        PCBServer.PreProcess;
+        PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        
+        // Set absolute position using MoveToXY
+        // Add origin back since input coordinates are relative to origin
+        Component.MoveToXY(MilsToCoord(NewX) + xorigin, MilsToCoord(NewY) + yorigin);
+        
+        // Set rotation if specified (use -1 to keep current)
+        if (Rotation >= 0) then
+            Component.Rotation := Rotation;
+        
+        PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        PCBServer.PostProcess;
+        
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+        
+        AddJSONProperty(ResultProps, 'designator', Designator);
+        AddJSONProperty(ResultProps, 'new_x', FloatToStr(NewX), False);
+        AddJSONProperty(ResultProps, 'new_y', FloatToStr(NewY), False);
+        AddJSONProperty(ResultProps, 'rotation', FloatToStr(Component.Rotation), False);
+        
+        Result := '{"success": true, "result": ' + BuildJSONObject(ResultProps) + '}';
+    finally
+        ResultProps.Free;
+    end;
+end;
+
 // Function to move components by X and Y offsets and set rotation
 function MoveComponentsByDesignators(DesignatorsList: TStringList; XOffset, YOffset: TCoord; Rotation: TAngle): String;
 var

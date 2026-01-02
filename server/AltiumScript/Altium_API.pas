@@ -299,6 +299,72 @@ begin
     end;
 end;
 
+// Extract the set component position logic
+function ExecuteSetComponentPosition(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    Designator: String;
+    NewX, NewY: Float;
+    Rotation: Float;
+begin
+    Designator := '';
+    NewX := 0;
+    NewY := 0;
+    Rotation := -1;  // Default -1 means keep current rotation
+    
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for designator
+            if (Pos('"designator"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                Designator := Trim(ParamValue);
+            end
+            // Look for x
+            else if (Pos('"x"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                NewX := StrToFloat(ParamValue);
+            end
+            // Look for y
+            else if (Pos('"y"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                NewY := StrToFloat(ParamValue);
+            end
+            // Look for rotation
+            else if (Pos('"rotation"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                Rotation := StrToFloat(ParamValue);
+            end;
+        end;
+        
+        if Designator <> '' then
+        begin
+            Result := SetComponentPosition(Designator, NewX, NewY, Rotation);
+        end
+        else
+        begin
+            ShowMessage('Error: No designator found for set_component_position');
+            Result := '';
+        end;
+    finally
+    end;
+end;
+
 // Extract the move components logic
 function ExecuteMoveComponents(RequestData: TStringList): String;
 var
@@ -555,7 +621,9 @@ begin
         'get_pcb_layer_stackup':
             Result := GetPCBLayerStackup(ROOT_DIR);         
         'get_selected_components_coordinates':
-            Result := GetSelectedComponentsCoordinates(ROOT_DIR);            
+            Result := GetSelectedComponentsCoordinates(ROOT_DIR); 
+		'set_component_position':
+			Result := ExecuteSetComponentPosition(RequestData);
         'move_components':
             Result := ExecuteMoveComponents(RequestData);            
         'layout_duplicator':
