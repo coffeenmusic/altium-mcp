@@ -99,7 +99,8 @@ begin
         DocumentKind := 'PCB';
     end
     else if (CommandName = 'create_schematic_symbol')        or
-            (CommandName = 'get_library_symbol_reference')   then
+            (CommandName = 'get_library_symbol_reference')   or
+            (CommandName = 'search_library_symbol')          then
     begin
         DocumentKind := 'SCHLIB';
     end

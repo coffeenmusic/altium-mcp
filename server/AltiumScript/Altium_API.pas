@@ -590,6 +590,48 @@ begin
     end;
 end;
 
+// Extract the search library symbol logic
+function ExecuteSearchLibrarySymbol(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    LibraryPath: String;
+    SymbolName: String;
+begin
+    LibraryPath := '';
+    SymbolName := '';
+
+    // Parse parameters from the request
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        // Look for library_path
+        if (Pos('"library_path"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            LibraryPath := ParamValue;
+        end
+        // Look for symbol_name
+        else if (Pos('"symbol_name"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            SymbolName := ParamValue;
+        end;
+    end;
+
+    if SymbolName <> '' then
+    begin
+        Result := SearchLibrarySymbol(ROOT_DIR, LibraryPath, SymbolName);
+    end
+    else
+    begin
+        Result := 'ERROR: No symbol name provided for search_library_symbol';
+    end;
+end;
+
 // Function to execute a command with parameters
 function ExecuteCommand(CommandName: String): String;
 begin
@@ -636,6 +678,8 @@ begin
             Result := ExecuteGetOutputJobContainers(RequestData);
         'run_output_jobs':
             Result := ExecuteRunOutputJobs(RequestData);
+        'search_library_symbol':
+            Result := ExecuteSearchLibrarySymbol(RequestData);
     else
         ShowMessage('Error: Unknown command: ' + CommandName);
     end;

@@ -376,6 +376,152 @@ begin
     end;
 end;
 
+// Function to search for a symbol in a schematic library and navigate to it
+function SearchLibrarySymbol(ROOT_DIR: String; LibraryPath: String; SymbolName: String): String;
+var
+    CurrentLib       : ISch_Lib;
+    LibIterator      : ISch_Iterator;
+    LibComp          : ISch_Component;
+    MatchedComp      : ISch_Component;
+    ResultProps      : TStringList;
+    MatchesArray     : TStringList;
+    AllSymbolsArray  : TStringList;
+    MatchProps       : TStringList;
+    OutputLines      : TStringList;
+    SearchUpper      : String;
+    LibRefUpper      : String;
+    MatchCount       : Integer;
+    ServerDoc        : IServerDocument;
+begin
+    Result := '';
+    MatchedComp := Nil;
+    MatchCount := 0;
+    SearchUpper := UpperCase(SymbolName);
+
+    // If a library path is provided, open it
+    if (LibraryPath <> '') then
+    begin
+        // Check if the file exists
+        if not FileExists(LibraryPath) then
+        begin
+            Result := 'ERROR: Library file not found: ' + LibraryPath;
+            Exit;
+        end;
+
+        // Open the library document
+        ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
+        if ServerDoc = Nil then
+        begin
+            Result := 'ERROR: Failed to open library: ' + LibraryPath;
+            Exit;
+        end;
+        Client.ShowDocument(ServerDoc);
+        Sleep(500); // Give Altium time to focus the document
+    end;
+
+    // Get the current schematic library document
+    CurrentLib := SchServer.GetCurrentSchDocument;
+    if CurrentLib = Nil then
+    begin
+        Result := 'ERROR: No schematic document is currently open';
+        Exit;
+    end;
+
+    if (CurrentLib.ObjectID <> eSchLib) then
+    begin
+        Result := 'ERROR: Current document is not a schematic library. Please open a .SchLib file';
+        Exit;
+    end;
+
+    // Create arrays for results
+    MatchesArray := TStringList.Create;
+    AllSymbolsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+
+    try
+        // Create library iterator to enumerate all symbols
+        LibIterator := CurrentLib.SchIterator_Create;
+        LibIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+
+        LibComp := LibIterator.FirstSchObject;
+        while (LibComp <> Nil) do
+        begin
+            LibRefUpper := UpperCase(LibComp.LibReference);
+
+            // Add to all symbols list
+            AllSymbolsArray.Add('"' + LibComp.LibReference + '"');
+
+            // Check for partial match
+            if (Pos(SearchUpper, LibRefUpper) > 0) then
+            begin
+                MatchCount := MatchCount + 1;
+
+                // Record this match
+                MatchProps := TStringList.Create;
+                try
+                    AddJSONProperty(MatchProps, 'name', LibComp.LibReference);
+                    AddJSONProperty(MatchProps, 'description', LibComp.ComponentDescription);
+
+                    // Check for exact match
+                    if (LibRefUpper = SearchUpper) then
+                        AddJSONBoolean(MatchProps, 'exact_match', True)
+                    else
+                        AddJSONBoolean(MatchProps, 'exact_match', False);
+
+                    MatchesArray.Add(BuildJSONObject(MatchProps, 1));
+                finally
+                    MatchProps.Free;
+                end;
+
+                // Prefer exact match, otherwise use first partial match
+                if (LibRefUpper = SearchUpper) then
+                    MatchedComp := LibComp
+                else if (MatchedComp = Nil) then
+                    MatchedComp := LibComp;
+            end;
+
+            LibComp := LibIterator.NextSchObject;
+        end;
+
+        CurrentLib.SchIterator_Destroy(LibIterator);
+
+        // Navigate to the matched component if found
+        if (MatchedComp <> Nil) then
+        begin
+            CurrentLib.CurrentSchComponent := MatchedComp;
+            CurrentLib.GraphicallyInvalidate;
+
+            AddJSONBoolean(ResultProps, 'found', True);
+            AddJSONProperty(ResultProps, 'navigated_to', MatchedComp.LibReference);
+            AddJSONProperty(ResultProps, 'description', MatchedComp.ComponentDescription);
+        end
+        else
+        begin
+            AddJSONBoolean(ResultProps, 'found', False);
+            AddJSONProperty(ResultProps, 'message', 'No symbol matching "' + SymbolName + '" was found');
+        end;
+
+        AddJSONInteger(ResultProps, 'match_count', MatchCount);
+        AddJSONProperty(ResultProps, 'library_name', ExtractFileName(CurrentLib.DocumentName));
+        AddJSONInteger(ResultProps, 'total_symbols', AllSymbolsArray.Count);
+        ResultProps.Add('"matches": ' + BuildJSONArray(MatchesArray));
+        ResultProps.Add('"all_symbols": [' + AllSymbolsArray.CommaText + ']');
+
+        // Build final JSON
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_search_symbol.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        MatchesArray.Free;
+        AllSymbolsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
 // Function to get all schematic component data
 function GetSchematicData(ROOT_DIR: String): String;
 var

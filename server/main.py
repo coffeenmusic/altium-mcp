@@ -544,6 +544,49 @@ async def get_library_symbol_reference(ctx: Context) -> str:
     return json.dumps(symbol_data, indent=2)
 
 @mcp.tool()
+async def search_library_symbol(ctx: Context, symbol_name: str, library_path: str = "") -> str:
+    """
+    Search for a symbol by name in a schematic library (.SchLib) and navigate to it.
+    Supports partial name matching (case-insensitive). Returns all matches and navigates
+    to the best match (exact match preferred, otherwise first partial match).
+
+    Args:
+        symbol_name (str): Name or partial name of the symbol to search for
+        library_path (str): Full file path to the .SchLib file. If empty, uses the currently open library.
+                           If no library is open, you should ask the user for the file path.
+
+    Returns:
+        str: JSON object with search results including matches, navigated symbol, and full symbol list
+    """
+    logger.info(f"Searching for symbol: {symbol_name} in library: {library_path or '(current)'}")
+
+    # Execute the command in Altium
+    params = {"symbol_name": symbol_name}
+    if library_path:
+        params["library_path"] = library_path
+
+    response = await altium_bridge.execute_command(
+        "search_library_symbol",
+        params
+    )
+
+    # Check for success
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error searching for symbol: {error_msg}")
+        return json.dumps({"error": f"Failed to search for symbol: {error_msg}"})
+
+    # Get the result data
+    result = response.get("result", {})
+
+    if not result:
+        logger.info("No search results returned")
+        return json.dumps({"error": "No results returned from symbol search"})
+
+    logger.info(f"Symbol search complete. Found: {result.get('found', False)}")
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
 async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list) -> str:
     """
     Before executing, run get_symbol_placement_rules first.
