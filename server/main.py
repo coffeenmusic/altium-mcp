@@ -592,33 +592,45 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list) -> str:
+async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1) -> str:
     """
     Before executing, run get_symbol_placement_rules first.
     Create a new schematic symbol in the current library with the specified pins
-    Instructions: pins should be grouped together via function and only placed on 
+    Instructions: pins should be grouped together via function and only placed on
                   the left and right side in 100 mil increments
-    
+
+    Pin name inversion/overbar: To show an overbar on a pin name (for active-low signals),
+                  place a backslash after EACH character that should be overbarred.
+                  Examples: R\E\S\E\T\ renders as RESET with overbar.
+                           C\S\/A0 renders as CS with overbar followed by /A0 without overbar.
+                  Do NOT use ~{...} or other notation — only the backslash-per-character format works in Altium.
+
     Args:
         symbol_name (str): Name of the symbol to create
         description (str): Description of the schematic symbol
-        pins (list): List of pin data in format ["pin_number|pin_name|pin_type|pin_orientation|x|y", ...]
+        pins (list): List of pin data in format ["pin_number|pin_name|pin_type|pin_orientation|x|y|owner_part_id", ...]
                     Pin types: eElectricHiZ, eElectricInput, eElectricIO, eElectricOpenCollector,
                                eElectricOpenEmitter, eElectricOutput, eElectricPassive, eElectricPower
                     Pin orientations: eRotate0 (right), eRotate90 (down), eRotate180 (left), eRotate270 (up)
                     X,Y coordinates in mils
-    
+                    owner_part_id (optional): Part number the pin belongs to (1-based).
+                               Use 0 for pins shared across all parts (e.g. power/GND).
+                               Defaults to 1 if omitted. Only needed for multi-part symbols.
+        part_count (int): Number of parts in the symbol (default 1).
+                         Use >1 for multi-part symbols like quad op-amps or hex buffers.
+
     Returns:
         str: JSON object with the result of the component creation
     """
-    logger.info(f"Creating schematic symbol: {symbol_name} with {len(pins)} pins")
-    
+    logger.info(f"Creating schematic symbol: {symbol_name} with {len(pins)} pins, {part_count} part(s)")
+
     # Execute the command in Altium to create a symbol with pins
     response = await altium_bridge.execute_command(
         "create_schematic_symbol",
         {
             "symbol_name": symbol_name,
             "description": description,
+            "part_count": part_count,
             "pins": pins
         }
     )

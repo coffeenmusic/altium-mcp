@@ -179,12 +179,14 @@ var
     ParamValue: String;
     i, ValueStart: Integer;
     ComponentName: String;
+    PartCount: Integer;
     PinsList: TStringList;
 begin
     // Look for component name
     ComponentName := '';
+    PartCount := 1;  // Default to single-part symbol
     PinsList := TStringList.Create;
-    
+
     try
         // Parse parameters from the request
         for i := 0 to RequestData.Count - 1 do
@@ -196,12 +198,20 @@ begin
                 ComponentName := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ComponentName := TrimJSON(ComponentName);
             end
+            // Look for part_count
+            else if (Pos('"part_count"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                PartCount := StrToInt(ParamValue);
+            end
             // Look for pins array
             else if (Pos('"pins"', RequestData[i]) > 0) then
             begin
                 // Parse the array in the next lines
                 i := i + 1; // Move to the next line (should be '[')
-                
+
                 while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
                 begin
                     // Extract the pin data
@@ -209,10 +219,12 @@ begin
                     ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
                     ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
                     ParamValue := Trim(ParamValue);
+                    // Unescape JSON backslashes (e.g. \\ -> \ for Altium overbar notation)
+                    ParamValue := StringReplace(ParamValue, '\\', '\', REPLACEALL);
 
                     if (ParamValue <> '') and (ParamValue <> '[') then
                         PinsList.Add(ParamValue);
-                    
+
                     i := i + 1;
                 end;
             end
@@ -225,10 +237,10 @@ begin
                 PinsList.Add('Description=' + ParamValue);
             end;
         end;
-        
+
         if ComponentName <> '' then
         begin
-            Result := CreateSchematicSymbol(ComponentName, PinsList);
+            Result := CreateSchematicSymbol(ComponentName, PinsList, PartCount);
         end
         else
         begin

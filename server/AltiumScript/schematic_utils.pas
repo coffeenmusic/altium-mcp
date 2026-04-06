@@ -170,23 +170,23 @@ begin
     end;
 end;
 
-function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList): String;
+function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; PartCount: Integer = 1): String;
 var
     CurrentLib       : ISch_Lib;
     SchComponent     : ISch_Component;
     SchPin           : ISch_Pin;
     R                : ISch_Rectangle;
-    I, PinCount      : Integer;
+    I, J, PinCount   : Integer;
     PinData          : TStringList;
     PinName, PinNum  : String;
     PinType          : String;
     PinOrient        : String;
     PinX, PinY       : Integer;
+    PinOwnerPartId   : Integer;
     PinElec          : TPinElectrical;
     PinOrientation   : TRotationBy90;
     MinX, MaxX, MinY, MaxY : Integer;
-    CenterX, CenterY : Integer;
-    Padding          : Integer;
+    HasPins          : Boolean;
     ResultProps      : TStringList;
     Description      : String;
     OutputLines      : TStringList;
@@ -201,13 +201,29 @@ begin
 
     Description := 'New Component';  // Default description
 
-    // Parse the pins list for description
+    // Parse the pins list for description and auto-detect PartCount from max owner_part_id
     for I := 0 to PinsList.Count - 1 do
     begin
         if (Pos('Description=', PinsList[I]) = 1) then
         begin
             Description := Copy(PinsList[I], 13, Length(PinsList[I]) - 12);
-            Break;
+        end
+        else
+        begin
+            // Check for owner_part_id in pin data to auto-detect PartCount
+            PinData := TStringList.Create;
+            try
+                PinData.Delimiter := '|';
+                PinData.DelimitedText := PinsList[I];
+                if (PinData.Count >= 7) then
+                begin
+                    PinOwnerPartId := StrToInt(PinData[6]);
+                    if (PinOwnerPartId > PartCount) then
+                        PartCount := PinOwnerPartId;
+                end;
+            finally
+                PinData.Free;
+            end;
         end;
     end;
 
@@ -220,93 +236,89 @@ begin
     end;
 
     // Set up parameters for the library component
-    SchComponent.CurrentPartID := 1; // Is this automatically generated if not manually assigned? What if two IDs overlap?
+    SchComponent.CurrentPartID := 1;
     SchComponent.DisplayMode := 0;
+    SchComponent.PartCount := PartCount;
 
     // Define the LibReference and component description
     SchComponent.LibReference := SymbolName;
     SchComponent.ComponentDescription := Description;
-    SchComponent.Designator.Text := 'U';
+    SchComponent.Designator.Text := 'U?';
 
-    // First pass - collect pin data for sizing the rectangle
-    MinX := 9999; MaxX := -9999; MinY := 9999; MaxY := -9999;
+    // Create a body rectangle for each part
     PinCount := 0;
-
-    for I := 0 to PinsList.Count - 1 do
+    for J := 1 to PartCount do
     begin
-        // Skip if this is the description line
-        if (Pos('Description=', PinsList[I]) = 1) then Continue;
+        // Compute bounding box for this part's pins (including shared pins with OwnerPartId=0)
+        MinX := 9999; MaxX := -9999; MinY := 9999; MaxY := -9999;
+        HasPins := False;
 
-        // Parse the pin data
-        PinData := TStringList.Create;
-        try
-            PinData.Delimiter := '|';
-            PinData.DelimitedText := PinsList[I];
+        for I := 0 to PinsList.Count - 1 do
+        begin
+            if (Pos('Description=', PinsList[I]) = 1) then Continue;
 
-            if (PinData.Count >= 6) then
-            begin
-                // Get pin coordinates and orientation
-                PinX := StrToInt(PinData[4]);
-                PinY := StrToInt(PinData[5]);
-                PinOrient := PinData[3];
+            PinData := TStringList.Create;
+            try
+                PinData.Delimiter := '|';
+                PinData.DelimitedText := PinsList[I];
 
-                // Track overall min/max for all pins
-                MinX := Min(MinX, PinX);
-                MaxX := Max(MaxX, PinX);
-                MinY := Min(MinY, PinY);
-                MaxY := Max(MaxY, PinY);
+                if (PinData.Count >= 6) then
+                begin
+                    PinX := StrToInt(PinData[4]);
+                    PinY := StrToInt(PinData[5]);
 
-                PinCount := PinCount + 1;
+                    // Determine owner part id (default 1 for backward compatibility)
+                    if (PinData.Count >= 7) then
+                        PinOwnerPartId := StrToInt(PinData[6])
+                    else
+                        PinOwnerPartId := 1;
+
+                    // Include pin in this part's bounding box if it belongs to this part or is shared (0)
+                    if (PinOwnerPartId = J) or (PinOwnerPartId = 0) then
+                    begin
+                        MinX := Min(MinX, PinX);
+                        MaxX := Max(MaxX, PinX);
+                        MinY := Min(MinY, PinY);
+                        MaxY := Max(MaxY, PinY);
+                        HasPins := True;
+                    end;
+                end;
+            finally
+                PinData.Free;
             end;
-        finally
-            PinData.Free;
         end;
+
+        // Default rectangle if no pins for this part
+        if not HasPins then
+        begin
+            MinX := 300; MinY := 0; MaxX := 1000; MaxY := 1000;
+        end;
+
+        // Create a rectangle for this part's body
+        R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
+        if (R <> Nil) Then
+        begin
+            R.LineWidth := eSmall;
+            R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY - 100));
+            R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY + 100));
+            R.AreaColor := $00B0FFFF; // Yellow (BGR format)
+            R.Color := $00FF0000;     // Blue (BGR format)
+            R.IsSolid := True;
+            R.OwnerPartId := J;
+            R.OwnerPartDisplayMode := 0;
+            SchComponent.AddSchObject(R);
+        end;
+
+        // Position designator using Part 1's bounding box
+        if (J = 1) then
+            SchComponent.Designator.Location := Point(MilsToCoord(MinX), MilsToCoord(MaxY + 100));
     end;
 
-    // Set rectangle to cover all pins with padding
-    if (PinCount = 0) then
-    begin
-        // Default rectangle if no pins
-        MinX := 300;
-        MinY := 0;
-        MaxX := 1000;
-        MaxY := 1000;
-    end;
-
-    // Create a rectangle for the component body
-    R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
-    if (R = Nil) Then
-    begin
-        Result := 'ERROR: Failed to create rectangle';
-        Exit;
-    end;
-
-    // Define the rectangle parameters using determined boundaries
-    R.LineWidth := eSmall;
-    R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY - 100));
-    R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY + 100));
-    R.AreaColor := $00B0FFFF; // Yellow (BGR format)
-    R.Color := $00FF0000;     // Blue (BGR format)
-    R.IsSolid := True;
-    R.OwnerPartId := SchComponent.CurrentPartID;
-    R.OwnerPartDisplayMode := SchComponent.DisplayMode;
-
-    // Add the rectangle to the component
-    SchComponent.AddSchObject(R);
-
-    // TODO: Define Designator Name as U?, J?, etc
-    SchComponent.Designator.Name := 'U?';
-
-    // Move designator to top left
-    SchComponent.Designator.Location := Point(MilsToCoord(MinX), MilsToCoord(MaxY + 100)); // Autoposition is another option: ISch_Component.Designator.Autoposition
-
-    // Second pass - add pins to the component
+    // Add pins to the component
     for I := 0 to PinsList.Count - 1 do
     begin
-        // Skip if this is the description line
         if (Pos('Description=', PinsList[I]) = 1) then Continue;
 
-        // Parse the pin data
         PinData := TStringList.Create;
         try
             PinData.Delimiter := '|';
@@ -320,6 +332,12 @@ begin
                 PinOrient := PinData[3];
                 PinX := StrToInt(PinData[4]);
                 PinY := StrToInt(PinData[5]);
+
+                // Determine owner part id (default 1 for backward compatibility)
+                if (PinData.Count >= 7) then
+                    PinOwnerPartId := StrToInt(PinData[6])
+                else
+                    PinOwnerPartId := 1;
 
                 // Create a pin
                 SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
@@ -336,12 +354,12 @@ begin
                 SchPin.Orientation := PinOrientation;
                 SchPin.Location := Point(MilsToCoord(PinX), MilsToCoord(PinY));
 
-                // Set ownership
-                SchPin.OwnerPartId := SchComponent.CurrentPartID;
-                SchPin.OwnerPartDisplayMode := SchComponent.DisplayMode;
+                // Set ownership to the specified part (0 = shared across all parts)
+                SchPin.OwnerPartId := PinOwnerPartId;
+                SchPin.OwnerPartDisplayMode := 0;
 
-                // Add the pin to the component
                 SchComponent.AddSchObject(SchPin);
+                PinCount := PinCount + 1;
             end;
         finally
             PinData.Free;
@@ -364,7 +382,8 @@ begin
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONProperty(ResultProps, 'component_name', SymbolName);
         AddJSONInteger(ResultProps, 'pins_count', PinCount);
-        
+        AddJSONInteger(ResultProps, 'part_count', PartCount);
+
         // Build final JSON
         OutputLines := TStringList.Create;
         try
