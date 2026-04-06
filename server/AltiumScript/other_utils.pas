@@ -80,6 +80,13 @@ begin
     DocFound := False;
     DocumentKind := 'PCB'; // Default
 
+    // Commands that handle their own document management - skip focusing
+    if (CommandName = 'search_library_symbol') then
+    begin
+        Result := True;
+        Exit;
+    end;
+
     // For PCB-related commands, ensure PCB is available first
     if (CommandName = 'create_net_class')                    or
        (CommandName = 'get_all_component_data')              or
@@ -99,8 +106,7 @@ begin
         DocumentKind := 'PCB';
     end
     else if (CommandName = 'create_schematic_symbol')        or
-            (CommandName = 'get_library_symbol_reference')   or
-            (CommandName = 'search_library_symbol')          then
+            (CommandName = 'get_library_symbol_reference')   then
     begin
         DocumentKind := 'SCHLIB';
     end

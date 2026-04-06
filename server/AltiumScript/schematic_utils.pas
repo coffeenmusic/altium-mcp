@@ -392,13 +392,56 @@ var
     LibRefUpper      : String;
     MatchCount       : Integer;
     ServerDoc        : IServerDocument;
+    OpenDlg          : TOpenDialog;
+    NeedToOpen       : Boolean;
 begin
     Result := '';
     MatchedComp := Nil;
     MatchCount := 0;
     SearchUpper := UpperCase(SymbolName);
+    NeedToOpen := False;
 
     // If a library path is provided, open it
+    if (LibraryPath <> '') then
+    begin
+        NeedToOpen := True;
+    end
+    else
+    begin
+        // No path provided - check if a SchLib is already open
+        if (SchServer <> Nil) then
+        begin
+            CurrentLib := SchServer.GetCurrentSchDocument;
+            if (CurrentLib <> Nil) and (CurrentLib.ObjectID = eSchLib) then
+                NeedToOpen := False  // Already have a SchLib open
+            else
+                NeedToOpen := True;  // No SchLib open, need to browse
+        end
+        else
+            NeedToOpen := True;
+    end;
+
+    // If we need to open a library and no path was given, prompt the user
+    if NeedToOpen and (LibraryPath = '') then
+    begin
+        OpenDlg := TOpenDialog.Create(nil);
+        try
+            OpenDlg.Title := 'Select Schematic Library (.SchLib)';
+            OpenDlg.Filter := 'Schematic Library (*.SchLib)|*.SchLib|All Files (*.*)|*.*';
+            OpenDlg.FilterIndex := 1;
+            if OpenDlg.Execute then
+                LibraryPath := OpenDlg.FileName
+            else
+            begin
+                Result := 'ERROR: No library selected. User cancelled the file browser.';
+                Exit;
+            end;
+        finally
+            OpenDlg.Free;
+        end;
+    end;
+
+    // Open the library if we have a path
     if (LibraryPath <> '') then
     begin
         // Check if the file exists
@@ -423,7 +466,7 @@ begin
     CurrentLib := SchServer.GetCurrentSchDocument;
     if CurrentLib = Nil then
     begin
-        Result := 'ERROR: No schematic document is currently open';
+        Result := 'ERROR: No schematic library document is currently open';
         Exit;
     end;
 
@@ -440,7 +483,8 @@ begin
 
     try
         // Create library iterator to enumerate all symbols
-        LibIterator := CurrentLib.SchIterator_Create;
+        // NOTE: Must use SchLibIterator_Create (not SchIterator_Create) for SchLib documents
+        LibIterator := CurrentLib.SchLibIterator_Create;
         LibIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
 
         LibComp := LibIterator.FirstSchObject;
@@ -505,7 +549,6 @@ begin
         AddJSONProperty(ResultProps, 'library_name', ExtractFileName(CurrentLib.DocumentName));
         AddJSONInteger(ResultProps, 'total_symbols', AllSymbolsArray.Count);
         ResultProps.Add('"matches": ' + BuildJSONArray(MatchesArray));
-        ResultProps.Add('"all_symbols": [' + AllSymbolsArray.CommaText + ']');
 
         // Build final JSON
         OutputLines := TStringList.Create;

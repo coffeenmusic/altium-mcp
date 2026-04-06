@@ -550,10 +550,15 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
     Supports partial name matching (case-insensitive). Returns all matches and navigates
     to the best match (exact match preferred, otherwise first partial match).
 
+    This tool will automatically open the library file in Altium if a path is provided,
+    so no SchLib needs to be open beforehand.
+
     Args:
         symbol_name (str): Name or partial name of the symbol to search for
-        library_path (str): Full file path to the .SchLib file. If empty, uses the currently open library.
-                           If no library is open, you should ask the user for the file path.
+        library_path (str): Full file path to the .SchLib file (e.g. "N:\\Libs\\Integrated_Circuits.SchLib").
+                           The tool will open this file in Altium if it is not already open.
+                           If empty, uses the currently open library.
+                           If no library is open and no path is provided, ask the user for the file path.
 
     Returns:
         str: JSON object with search results including matches, navigated symbol, and full symbol list
