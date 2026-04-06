@@ -9,6 +9,8 @@ Note: Having Claude place components on the PCB currently fails hard.
 - Run all output jobs
 - Create a symbol for the part in the attached datasheet and use the currently open symbol as a reference example.
 - Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` description as pin placement rules. Please modify for your own preferences.)
+- Find me the LM358 symbol in my opamp library and open it
+- Create a multi-part symbol for a quad op-amp from the attached LM324 datasheet (creates parts A, B, C, D with shared V+/V- power pins)
 - Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region)
 - Show all my inner layers. Show the top and bottom layer. Turn off solder paste.
 - Get me all parts on my design made by Molex
@@ -106,9 +108,10 @@ The server provides several tools to interact with Altium Designer:
 
 ### Schematic/Symbol
 - `get_schematic_data`: Get schematic data for specified components
-- `create_schematic_symbol` ([YouTube](https://youtu.be/MMP7ZfmbCMI)): Passes pin list with pin type & coordinates to Altium script
+- `create_schematic_symbol` ([YouTube](https://youtu.be/MMP7ZfmbCMI)): Passes pin list with pin type & coordinates to Altium script. Supports multi-part symbols (e.g. quad op-amps) via a `part_count` parameter and an `owner_part_id` field on each pin (use 0 for shared power/GND pins). Also supports active-low pin name overbars by placing a backslash after each overbarred character (e.g. `R\E\S\E\T\` renders as `RESET` with overbar).
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `~\AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
+- `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
 
 ![Symbol Creator](assets/symbol_creator.gif)
 
