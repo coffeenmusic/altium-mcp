@@ -79,7 +79,8 @@ begin
         AddJSONProperty(ComponentProps, 'component_name', SchComponent.LibReference);
         AddJSONProperty(ComponentProps, 'description', SchComponent.ComponentDescription);
         AddJSONProperty(ComponentProps, 'designator', SchComponent.Designator.Text);
-        
+        AddJSONInteger(ComponentProps, 'part_count', SchComponent.PartCount);
+
         // Create an array for pins
         PinsArray := TStringList.Create;
         
@@ -134,7 +135,8 @@ begin
                     AddJSONProperty(PinProps, 'pin_orientation', PinOrient);
                     AddJSONNumber(PinProps, 'x', PinX);
                     AddJSONNumber(PinProps, 'y', PinY);
-                    
+                    AddJSONInteger(PinProps, 'owner_part_id', Pin.OwnerPartId);
+
                     // Add this pin to the pins array
                     PinsArray.Add(BuildJSONObject(PinProps, 1));
                     
