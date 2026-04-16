@@ -9,6 +9,8 @@ function ScriptProjectPath(Workspace: IWorkspace) : String;
 var
   Project   : IProject;
   scriptsPath : TDynamicString;
+  candidatePath : TDynamicString;
+  rootDir : TDynamicString;
   projectCount : Integer;
   i      : Integer;
 begin
@@ -18,7 +20,10 @@ begin
   projectCount := Workspace.DM_ProjectCount();
   { Loop over all the open projects.  We're looking for constScriptProjectName
     (of which we are a part).  Once we find this, we want to record the
-    path to the script project directory. }
+    path to the script project directory.
+    If multiple projects match (e.g. stale copies cached by Altium), prefer
+    the one whose ROOT_DIR contains request.json — since the MCP server
+    writes request.json before launching, only the active copy will have it. }
   scriptsPath:='';
   for i:=0 to projectCount-1 do
   begin
@@ -28,8 +33,21 @@ begin
     if (AnsiPos(constScriptProjectName, Project.DM_ProjectFullPath) > 0) then
     begin
       { Strip off project name to give us just the path. }
-      scriptsPath := StringReplace(Project.DM_ProjectFullPath, '\' +
+      candidatePath := StringReplace(Project.DM_ProjectFullPath, '\' +
       constScriptProjectName + '.PrjScr','', MkSet(rfReplaceAll,rfIgnoreCase));
+
+      { Check if request.json exists at this candidate's ROOT_DIR }
+      rootDir := ExtractFilePath(ExtractFilePath(candidatePath));
+      if FileExists(rootDir + 'request.json') then
+      begin
+        { Found the active copy — use it immediately }
+        result := candidatePath;
+        exit;
+      end;
+
+      { Keep as fallback in case no candidate has request.json }
+      if scriptsPath = '' then
+        scriptsPath := candidatePath;
     end;
   end;
   result := scriptsPath;
