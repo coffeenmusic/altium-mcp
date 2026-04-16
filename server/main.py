@@ -315,26 +315,56 @@ class AltiumBridge:
             logger.error(f"Error executing command: {e}")
             return {"success": False, "error": str(e)}
     
+    @staticmethod
+    def _resolve_msix_path(virtual_path: str) -> str:
+        """Resolve an MSIX-virtualized path to the real filesystem path.
+
+        When Claude Desktop is installed via MSIX (the standard .exe installer
+        on modern Windows), file paths are virtualized under AppData\\Roaming\\
+        but the real files live at AppData\\Local\\Packages\\Claude_*\\
+        LocalCache\\Roaming\\. Child processes of the MSIX app (like Python)
+        can see the virtualized paths, but external apps (like Altium) cannot.
+        This resolves the path so external processes can find the files.
+        """
+        appdata = os.environ.get('APPDATA', '')
+        if not appdata or not virtual_path.startswith(appdata):
+            return virtual_path
+
+        localappdata = os.environ.get('LOCALAPPDATA', '')
+        packages_dir = os.path.join(localappdata, 'Packages')
+        if not os.path.isdir(packages_dir):
+            return virtual_path
+
+        try:
+            for item in os.listdir(packages_dir):
+                if item.startswith('Claude_'):
+                    relative = os.path.relpath(virtual_path, appdata)
+                    real_path = os.path.join(packages_dir, item, 'LocalCache', 'Roaming', relative)
+                    if os.path.exists(real_path):
+                        logger.info(f"Resolved MSIX path: {virtual_path} -> {real_path}")
+                        return real_path
+        except Exception as e:
+            logger.warning(f"Error resolving MSIX path: {e}")
+
+        return virtual_path
+
     async def run_altium_script(self) -> bool:
         """Run the Altium bridge script"""
         if not os.path.exists(self.config.altium_exe_path):
             logger.error(f"Altium executable not found at: {self.config.altium_exe_path}")
             print(f"Error: Altium executable not found. Please check the configuration.")
             return False
-        
+
         if not os.path.exists(self.config.script_path):
             logger.error(f"Script file not found at: {self.config.script_path}")
             print(f"Error: Script file not found. Please check the configuration.")
             return False
-        
+
         try:
-            # Updated command to run the script in Altium with the proper format
-            script_path = self.config.script_path
-            
-            # Extract project name and procedure name
-            script_dir = os.path.dirname(script_path)
-            script_file = os.path.basename(script_path)
-            
+            # Resolve MSIX-virtualized path so Altium (an external process
+            # outside the MSIX sandbox) can find the script files
+            script_path = self._resolve_msix_path(self.config.script_path)
+
             # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
             command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
             
