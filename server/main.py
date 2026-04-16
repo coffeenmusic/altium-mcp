@@ -38,10 +38,18 @@ logger = logging.getLogger("AltiumMCPServer")
 
 # Set MCP_DIR to the directory of the current Python file
 MCP_DIR = Path(__file__).parent
-REQUEST_FILE = MCP_DIR / "request.json"
-RESPONSE_FILE = MCP_DIR / "response.json"
 CONFIG_FILE = MCP_DIR / "config.json"
 DEFAULT_SCRIPT_PATH = MCP_DIR / "AltiumScript" / "Altium_API.PrjScr"
+
+# Use a fixed exchange directory for request/response JSON files.
+# Both the Python MCP server and the Altium DelphiScript need to independently
+# resolve to the same directory. C:\Users\Public is writable by all users and
+# exists on every Windows machine. This avoids fragile script-project-path
+# resolution that breaks when Altium caches stale script projects.
+EXCHANGE_DIR = Path("C:/Users/Public/altium_mcp")
+EXCHANGE_DIR.mkdir(exist_ok=True)
+REQUEST_FILE = EXCHANGE_DIR / "request.json"
+RESPONSE_FILE = EXCHANGE_DIR / "response.json"
 
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")

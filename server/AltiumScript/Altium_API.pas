@@ -14,22 +14,19 @@ var
     ROOT_DIR: String;
 
 {..............................................................................}
-{ Initialize file paths based on script location                               }
+{ Initialize file paths using a fixed exchange directory.                      }
+{ Both the Python MCP server and this script independently resolve to          }
+{ C:\Users\Public\altium_mcp\ — avoiding fragile script-project-path          }
+{ resolution that breaks when Altium caches stale script projects.             }
 {..............................................................................}
 procedure InitializeFilePaths();
-var
-    ScriptPath: String;
-    Workspace: IWorkspace;
 begin
-    // Get the current workspace
-    Workspace := GetWorkspace;
-    
-    // Get the script project path
-    ScriptPath := ScriptProjectPath(Workspace);
-    
-    // Go back one directory from the script path
-    ROOT_DIR := ExtractFilePath(ExtractFilePath(ScriptPath));
-    
+    ROOT_DIR := 'C:\Users\Public\altium_mcp\';
+
+    // Create the directory if it doesn't exist
+    if not DirectoryExists(ROOT_DIR) then
+        ForceDirectories(ROOT_DIR);
+
     // Set the file paths
     REQUEST_FILE := ROOT_DIR + 'request.json';
     RESPONSE_FILE := ROOT_DIR + 'response.json';
