@@ -599,6 +599,73 @@ begin
     end;
 end;
 
+// Extract the create PCB footprint logic
+function ExecuteCreatePCBFootprint(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    FootprintName: String;
+    Description: String;
+    PadsList: TStringList;
+    CourtyardXMM: Double;
+    CourtyardYMM: Double;
+begin
+    FootprintName := '';
+    Description := '';
+    CourtyardXMM := 0;
+    CourtyardYMM := 0;
+    PadsList := TStringList.Create;
+
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"footprint_name"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                FootprintName := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+            end
+            else if (Pos('"description"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                Description := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+            end
+            else if (Pos('"courtyard_x_mm"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+                CourtyardXMM := StrToFloat(ParamValue);
+            end
+            else if (Pos('"courtyard_y_mm"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+                CourtyardYMM := StrToFloat(ParamValue);
+            end
+            else if (Pos('"pads"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        PadsList.Add(ParamValue);
+                    i := i + 1;
+                end;
+            end;
+        end;
+
+        if FootprintName <> '' then
+            Result := CreatePCBFootprint(FootprintName, Description, PadsList, CourtyardXMM, CourtyardYMM)
+        else
+            Result := '{"success": false, "error": "No footprint name provided"}';
+    finally
+        PadsList.Free;
+    end;
+end;
+
 // Extract the search library symbol logic
 function ExecuteSearchLibrarySymbol(RequestData: TStringList): String;
 var
@@ -689,6 +756,8 @@ begin
             Result := ExecuteRunOutputJobs(RequestData);
         'search_library_symbol':
             Result := ExecuteSearchLibrarySymbol(RequestData);
+        'create_pcb_footprint':
+            Result := ExecuteCreatePCBFootprint(RequestData);
     else
         ShowMessage('Error: Unknown command: ' + CommandName);
     end;

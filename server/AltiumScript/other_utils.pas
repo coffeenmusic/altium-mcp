@@ -99,7 +99,8 @@ begin
     DocumentKind := 'PCB'; // Default
 
     // Commands that handle their own document management - skip focusing
-    if (CommandName = 'search_library_symbol') then
+    if (CommandName = 'search_library_symbol') or
+       (CommandName = 'create_pcb_footprint') then
     begin
         Result := True;
         Exit;
@@ -127,6 +128,10 @@ begin
             (CommandName = 'get_library_symbol_reference')   then
     begin
         DocumentKind := 'SCHLIB';
+    end
+    else if (CommandName = 'create_pcb_footprint') then
+    begin
+        DocumentKind := 'PCBLIB';
     end
     else if (CommandName = 'get_schematic_data')             then
     begin
@@ -198,6 +203,14 @@ begin
             Exit;
         end;
     end
+    else if (DocumentKind = 'PCBLIB') and (PCBServer <> Nil) then
+    begin
+        if PCBServer.GetCurrentPCBLibrary <> Nil then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end
     else if (DocumentKind = 'OUTJOB') then
     begin
         OutJobPath := GetOpenOutputJob();
@@ -250,13 +263,20 @@ begin
                     Exit;
                 end;
             end
+            else if DocumentKind = 'PCBLIB' then
+            begin
+                if PCBServer.GetCurrentPCBLibrary <> Nil then
+                begin
+                    Result := True;
+                    Exit;
+                end;
+            end
             else if DocumentKind = 'OUTJOB' then
             begin
                 CurrentDoc := SchServer.GetCurrentSchDocument;
                 if (CurrentDoc <> Nil) then
                 begin
                     Result := True;
-                    // ShowMessage('Successfully focused SCH document');
                     Exit;
                 end;
             end;
