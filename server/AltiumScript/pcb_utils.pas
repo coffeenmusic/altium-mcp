@@ -1228,6 +1228,211 @@ begin
     end;
 end;
 
+// Create a PCB footprint (SMD pads + silkscreen + courtyard) in the active PcbLib
+function CreatePCBFootprint(FootprintName: String; Description: String; PadsList: TStringList; CourtyardXMM: Double; CourtyardYMM: Double): String;
+var
+    PcbLib      : IPCB_Library;
+    LibComp     : IPCB_Component;
+    Pad         : IPCB_Pad;
+    Track       : IPCB_Track;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+    i, j        : Integer;
+    PadData     : String;
+    PadNum      : String;
+    XMM, YMM    : Double;
+    WMM, HMM    : Double;
+    ShapeStr    : String;
+    PadShape    : TShape;
+    PadCount    : Integer;
+    MaxX, MaxY  : Double;
+    MinX, MinY  : Double;
+    CrtX1, CrtY1, CrtX2, CrtY2 : Double;
+    TrackWidth  : TCoord;
+    FieldStart  : Integer;
+    Fields      : TStringList;
+    SilkLayer   : TLayer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    Fields := TStringList.Create;
+    PadCount := 0;
+    MaxX := -1e9; MaxY := -1e9;
+    MinX :=  1e9; MinY :=  1e9;
+    SilkLayer := String2Layer('Top Overlay');
+
+    try
+        LibComp := PCBServer.CreatePCBLibComp;
+        LibComp.Name := FootprintName;
+
+        for i := 0 to PadsList.Count - 1 do
+        begin
+            PadData := Trim(PadsList[i]);
+            if (PadData = '') then continue;
+
+            // Parse pipe-delimited fields manually
+            Fields.Clear;
+            FieldStart := 1;
+            for j := 1 to Length(PadData) + 1 do
+            begin
+                if (j > Length(PadData)) or (PadData[j] = '|') then
+                begin
+                    Fields.Add(Trim(Copy(PadData, FieldStart, j - FieldStart)));
+                    FieldStart := j + 1;
+                end;
+            end;
+
+            if Fields.Count < 5 then continue;
+
+            PadNum := Fields[0];
+            XMM := StrToFloat(Fields[1]);
+            YMM := StrToFloat(Fields[2]);
+            WMM := StrToFloat(Fields[3]);
+            HMM := StrToFloat(Fields[4]);
+
+            if Fields.Count >= 6 then
+                ShapeStr := Fields[5]
+            else
+                ShapeStr := 'Rect';
+
+            if ShapeStr = 'Round' then
+                PadShape := eRound
+            else if ShapeStr = 'Oval' then
+                PadShape := eRoundedRectangle
+            else
+                PadShape := eRectangular;
+
+            Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+            Pad.Name := PadNum;
+            Pad.x := MMsToCoord(XMM);
+            Pad.y := MMsToCoord(YMM);
+            Pad.Layer := eTopLayer;
+            Pad.TopXSize := MMsToCoord(WMM);
+            Pad.TopYSize := MMsToCoord(HMM);
+            Pad.TopShape := PadShape;
+
+            LibComp.AddPCBObject(Pad);
+            PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+            if (XMM - WMM/2) < MinX then MinX := XMM - WMM/2;
+            if (YMM - HMM/2) < MinY then MinY := YMM - HMM/2;
+            if (XMM + WMM/2) > MaxX then MaxX := XMM + WMM/2;
+            if (YMM + HMM/2) > MaxY then MaxY := YMM + HMM/2;
+
+            PadCount := PadCount + 1;
+        end;
+
+        // Compute courtyard extents
+        if (CourtyardXMM > 0) and (CourtyardYMM > 0) then
+        begin
+            CrtX1 := -CourtyardXMM; CrtX2 :=  CourtyardXMM;
+            CrtY1 := -CourtyardYMM; CrtY2 :=  CourtyardYMM;
+        end
+        else
+        begin
+            CrtX1 := MinX - 0.25; CrtX2 := MaxX + 0.25;
+            CrtY1 := MinY - 0.25; CrtY2 := MaxY + 0.25;
+        end;
+
+        TrackWidth := MMsToCoord(0.1);
+
+        // Courtyard on Mechanical 15
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := ILayer.MechanicalLayer(15);
+        Track.x1 := MMsToCoord(CrtX1); Track.y1 := MMsToCoord(CrtY1);
+        Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY1);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := ILayer.MechanicalLayer(15);
+        Track.x1 := MMsToCoord(CrtX1); Track.y1 := MMsToCoord(CrtY2);
+        Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY2);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := ILayer.MechanicalLayer(15);
+        Track.x1 := MMsToCoord(CrtX1); Track.y1 := MMsToCoord(CrtY1);
+        Track.x2 := MMsToCoord(CrtX1); Track.y2 := MMsToCoord(CrtY2);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := ILayer.MechanicalLayer(15);
+        Track.x1 := MMsToCoord(CrtX2); Track.y1 := MMsToCoord(CrtY1);
+        Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY2);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        // Silkscreen on TopOverlay (inset 0.1mm from courtyard)
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := SilkLayer;
+        Track.x1 := MMsToCoord(CrtX1+0.1); Track.y1 := MMsToCoord(CrtY1+0.1);
+        Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY1+0.1);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := SilkLayer;
+        Track.x1 := MMsToCoord(CrtX1+0.1); Track.y1 := MMsToCoord(CrtY2-0.1);
+        Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY2-0.1);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        // Left silk — split to mark pin 1 (gap at top-left corner for pin 1 indicator)
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := SilkLayer;
+        Track.x1 := MMsToCoord(CrtX1+0.1); Track.y1 := MMsToCoord(CrtY1+0.1);
+        Track.x2 := MMsToCoord(CrtX1+0.1); Track.y2 := MMsToCoord(CrtY2-0.6);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        // Right silk
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.Layer := SilkLayer;
+        Track.x1 := MMsToCoord(CrtX2-0.1); Track.y1 := MMsToCoord(CrtY1+0.1);
+        Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY2-0.1);
+        Track.Width := TrackWidth;
+        LibComp.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+
+        // Register and refresh
+        PcbLib.RegisterComponent(LibComp);
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'footprint_name', FootprintName);
+        AddJSONInteger(ResultProps, 'pad_count', PadCount);
+        AddJSONNumber(ResultProps, 'courtyard_width_mm', CrtX2 - CrtX1);
+        AddJSONNumber(ResultProps, 'courtyard_height_mm', CrtY2 - CrtY1);
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        Fields.Free;
+    end;
+end;
+
 // Function to move components by X and Y offsets and set rotation
 function MoveComponentsByDesignators(DesignatorsList: TStringList; XOffset, YOffset: TCoord; Rotation: TAngle): String;
 var

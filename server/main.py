@@ -1553,6 +1553,52 @@ async def run_output_jobs(ctx: Context, container_names: list) -> str:
     return json.dumps(result_data, indent=2)
 
 @mcp.tool()
+async def create_pcb_footprint(ctx: Context, footprint_name: str, description: str, pads: list, courtyard_x_mm: float = 0, courtyard_y_mm: float = 0) -> str:
+    """
+    Create a new PCB footprint in the currently active PcbLib document.
+    The PcbLib (e.g. Discrete.PcbLib) must be the focused document in Altium.
+
+    Pad format: each element is "pad_number|x_mm|y_mm|width_mm|height_mm|shape"
+                shape options: Rect (default), Round, Oval
+                Coordinates are in mm relative to component origin (0,0).
+                Pin 1 is indicated by a gap in the top-left silkscreen corner.
+
+    Courtyard & silkscreen are auto-generated from pad extents + 0.25 mm margin
+    unless courtyard_x_mm / courtyard_y_mm are provided explicitly (half-dimensions).
+
+    Args:
+        footprint_name (str): Footprint name as it will appear in the library
+        description (str): Description string
+        pads (list): List of pad definitions, e.g. ["1|-0.9|0.55|1.0|0.8|Rect", ...]
+        courtyard_x_mm (float): Half-width of courtyard in mm (0 = auto)
+        courtyard_y_mm (float): Half-height of courtyard in mm (0 = auto)
+
+    Returns:
+        str: JSON object with result
+    """
+    logger.info(f"Creating PCB footprint: {footprint_name} with {len(pads)} pads")
+
+    response = await altium_bridge.execute_command(
+        "create_pcb_footprint",
+        {
+            "footprint_name": footprint_name,
+            "description": description,
+            "pads": pads,
+            "courtyard_x_mm": courtyard_x_mm,
+            "courtyard_y_mm": courtyard_y_mm,
+        }
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error creating footprint: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to create footprint: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info(f"Footprint {footprint_name} created successfully")
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
     status = {
