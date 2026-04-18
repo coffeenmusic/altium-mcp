@@ -11,6 +11,7 @@ Note: Having Claude place components on the PCB currently fails hard.
 - Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` description as pin placement rules. Please modify for your own preferences.)
 - Find me the LM358 symbol in my opamp library and open it
 - Create a multi-part symbol for a quad op-amp from the attached LM324 datasheet (creates parts A, B, C, D with shared V+/V- power pins)
+- Create a PCB footprint for the SMD part in the attached datasheet and add it to my open PcbLib
 - Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region)
 - Show all my inner layers. Show the top and bottom layer. Turn off solder paste.
 - Get me all parts on my design made by Molex
@@ -20,6 +21,8 @@ Note: Having Claude place components on the PCB currently fails hard.
 - Get me all length matching rules
 
 ## Installing the MCP Server
+The easiest way to install is to use Claude Code, point it to this repo and ask it to install it for you. Or alternatively, see below.
+
 [Watch on YouTube](https://youtu.be/HKQMK-hluLs)
 
 1. Make sure Claude has Python 3.11 installed: `drop down > File > Settings > Extensions > Advanced > Python: 3.11.0`. If not, install 3.11 and add python to PATH.
@@ -130,6 +133,9 @@ The server provides several tools to interact with Altium Designer:
 The cool thing about layout duplication this way as opposed to with Altium's built in layout replication, is that the exact components don't have to match because the LLM can look through the descriptions and understand which components match and which don't have a match. That's something that can't really be hard coded.
 ![Placement Duplicator](assets/placement_duplicator.gif)
 
+### PCB Footprint Library
+- `create_pcb_footprint`: Create a new PCB footprint in the currently active .PcbLib document. Supports SMD pads (Rect, Round, Oval shapes) defined in mm relative to the component origin. Auto-generates a courtyard on Mech 15 and silkscreen with a pin 1 indicator (gap in the top-left corner), or accepts explicit courtyard dimensions. Contributed by [coffeedust](https://github.com/coffeedust) ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7)).
+
 ### Both
 - `get_screenshot`: Take a screenshot of the Altium PCB window or Schematic Window that is the current view. It should auto focus either of these if it is open but a different document type is focused. Note: Claude is not very good at analyzing images like circuits or layout screenshots. ChatGPT is very good at it, but they haven't released MCP yet, so this functionality will be more useful in the future.
 
@@ -154,6 +160,10 @@ The server communicates with Altium Designer using a scripting bridge:
 - Petar Perisin's Room from Poly: Used as reference to detect poly to pad overlap since I couldn't get more tradition methods to work.
 - Petar Perisin's Layer Panel Script: Used as reference for getting layers and changing layer visibility
 - Jeff Collins has an XIA_Release_Manager.pas script that taught me the art of the Output Job. See his post on the Altium Forums: https://forum.live.altium.com/#/posts/189423
+
+## Contributors
+- [coffeedust](https://github.com/coffeedust) — `create_pcb_footprint` tool for PcbLib automation ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7))
+- [fwolter](https://github.com/fwolter) — Fix JSON parsing error when the decimal separator is a comma ([PR #3](https://github.com/coffeenmusic/altium-mcp/pull/3))
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
