@@ -402,12 +402,6 @@ var
 
     // For net invalidation
     NetsToInvalidate: TStringList;
-
-    // For net name remapping (source net name -> destination net name)
-    NetNameMap  : TStringList;
-    DstPadList  : TStringList;
-    SrcNetName  : String;
-    DstNetName  : String;
 begin
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
@@ -466,59 +460,6 @@ begin
             end;
         end;
 
-        // Build a source net name -> destination net name mapping table.
-        // This is used in the cleanup pass to fix any objects that the
-        // flood fill didn't reach (they would otherwise keep source net names).
-        NetNameMap := TStringList.Create;
-        DstPadList := TStringList.Create;
-        try
-            for i := 0 to SourceList.Count - 1 do
-            begin
-                if (i < DestList.Count) then
-                begin
-                    CmpSrc := Board.GetPcbComponentByRefDes(SourceList.Get(i));
-                    CmpDst := Board.GetPcbComponentByRefDes(DestList.Get(i));
-
-                    if (CmpSrc <> nil) and (CmpDst <> nil) then
-                    begin
-                        // Build destination pad-name -> net-name lookup
-                        DstPadList.Clear;
-                        PadIterator := CmpDst.GroupIterator_Create;
-                        PadIterator.AddFilter_ObjectSet(MkSet(ePadObject));
-                        Pad := PadIterator.FirstPCBObject;
-                        while Pad <> nil do
-                        begin
-                            if Pad.InComponent and (Pad.Net <> nil) then
-                                DstPadList.Values[Pad.Name] := Pad.Net.Name;
-                            Pad := PadIterator.NextPCBObject;
-                        end;
-                        CmpDst.GroupIterator_Destroy(PadIterator);
-
-                        // Map each source pad net to the corresponding destination pad net
-                        PadIterator := CmpSrc.GroupIterator_Create;
-                        PadIterator.AddFilter_ObjectSet(MkSet(ePadObject));
-                        Pad := PadIterator.FirstPCBObject;
-                        while Pad <> nil do
-                        begin
-                            if Pad.InComponent and (Pad.Net <> nil) then
-                            begin
-                                SrcNetName := Pad.Net.Name;
-                                DstNetName := DstPadList.Values[Pad.Name];
-                                // Only add if nets differ and not already mapped
-                                if (DstNetName <> '') and (SrcNetName <> DstNetName) and
-                                   (NetNameMap.IndexOfName(SrcNetName) < 0) then
-                                    NetNameMap.Values[SrcNetName] := DstNetName;
-                            end;
-                            Pad := PadIterator.NextPCBObject;
-                        end;
-                        CmpSrc.GroupIterator_Destroy(PadIterator);
-                    end;
-                end;
-            end;
-        finally
-            DstPadList.Free;
-        end;
-
         // Process component pairs
         for i := 0 to SourceList.Count - 1 do
         begin
@@ -546,7 +487,7 @@ begin
                     CmpDst.EndModify;
 
                     // Register component with the board
-                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, CmpDst.I_ObjectAddress);
+                    Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, CmpDst.I_ObjectAddress);
 
                     // Clear the processed points list for this component
                     ProcessedPoints.Clear;
@@ -620,14 +561,13 @@ begin
                                         if CheckWithTolerance(ConnectedPrim.x1, ConnectedPrim.y1, X, Y) or
                                            CheckWithTolerance(ConnectedPrim.x2, ConnectedPrim.y2, X, Y) then
                                         begin
-                                            // Apply the net and register with net's connectivity
+                                            // Apply the net
                                             ConnectedPrim.BeginModify;
                                             ConnectedPrim.Net := Net;
                                             ConnectedPrim.EndModify;
-                                            Net.AddPCBObject(ConnectedPrim);
 
                                             // Register primitive with the board
-                                            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
+                                            Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
 
                                             // Mark as processed
                                             ProcessedObjects.Add(IntToStr(ObjectAddress));
@@ -648,14 +588,13 @@ begin
                                         if CheckWithTolerance(ConnectedPrim.StartX, ConnectedPrim.StartY, X, Y) or
                                            CheckWithTolerance(ConnectedPrim.EndX, ConnectedPrim.EndY, X, Y) then
                                         begin
-                                            // Apply the net and register with net's connectivity
+                                            // Apply the net
                                             ConnectedPrim.BeginModify;
                                             ConnectedPrim.Net := Net;
                                             ConnectedPrim.EndModify;
-                                            Net.AddPCBObject(ConnectedPrim);
 
                                             // Register primitive with the board
-                                            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
+                                            Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
 
                                             // Mark as processed
                                             ProcessedObjects.Add(IntToStr(ObjectAddress));
@@ -678,10 +617,9 @@ begin
                                             ConnectedPrim.BeginModify;
                                             ConnectedPrim.Net := Net;
                                             ConnectedPrim.EndModify;
-                                            Net.AddPCBObject(ConnectedPrim);
 
                                             // Register primitive with the board
-                                            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
+                                            Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
 
                                             // Mark as processed
                                             ProcessedObjects.Add(IntToStr(ObjectAddress));
@@ -750,14 +688,13 @@ begin
 
                                         if Overlapping then
                                         begin
-                                            // Assign pad's net to the polygon and register with net
+                                            // Assign pad's net to the polygon
                                             Polygon.BeginModify;
                                             Polygon.Net := Net;
                                             Polygon.EndModify;
-                                            Net.AddPCBObject(Polygon);
 
                                             // Register with board
-                                            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Polygon.I_ObjectAddress);
+                                            Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Polygon.I_ObjectAddress);
 
                                             // Mark as processed
                                             ProcessedObjects.Add(IntToStr(ObjectAddress));
@@ -782,48 +719,19 @@ begin
             end;
         end;
 
-        // Cleanup pass: any objects still in SelectedObjects were not reached by
-        // the flood fill and still carry source net names. Remap them using the
-        // net name map built above.
-        if NetNameMap.Count > 0 then
-        begin
-            for j := 0 to SelectedObjects.Count - 1 do
-            begin
-                ConnectedPrim := SelectedObjects[j];
-                if (ConnectedPrim.Net <> nil) then
-                begin
-                    SrcNetName := ConnectedPrim.Net.Name;
-                    DstNetName := NetNameMap.Values[SrcNetName];
-                    if DstNetName <> '' then
-                    begin
-                        Net := Board.GetNetByName(DstNetName);
-                        if Net <> nil then
-                        begin
-                            ConnectedPrim.BeginModify;
-                            ConnectedPrim.Net := Net;
-                            ConnectedPrim.EndModify;
-                            Net.AddPCBObject(ConnectedPrim);
-                            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
-                                PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
-                            if (ConnectedPrim.ObjectId = ePolyObject) or
-                               (ConnectedPrim.ObjectId = eRegionObject) or
-                               (ConnectedPrim.ObjectId = eFillObject) then
-                                Inc(PolygonCount);
-                        end;
-                    end;
-                end;
-            end;
-        end;
-        NetNameMap.Free;
-
         // End board modification
         PCBServer.PostProcess;
 
-        // Rebuild net connectivity so ratsnest and net highlighting work correctly
-        Board.ConnectivelyValidateNets;
-
         // Force redraw of the view - once at the end
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        // Update connectivity
+        ResetParameters;
+        AddStringParameter('Action', 'RebuildConnectivity');
+        RunProcess('PCB:UpdateConnectivity');
+
+        // Rebuild net connectivity so ratsnest and net highlighting work correctly
+        Board.ConnectivelyValidateNets;
 
         // Run full update
         Board.ViewManager_FullUpdate;
