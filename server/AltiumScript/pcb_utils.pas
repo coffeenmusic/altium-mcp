@@ -1312,6 +1312,8 @@ begin
 
             Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
             Pad.Name := PadNum;
+            Pad.Mode := ePadMode_Simple;
+            Pad.HoleSize := 0;
             Pad.x := MMsToCoord(XMM);
             Pad.y := MMsToCoord(YMM);
             Pad.Layer := eTopLayer;
