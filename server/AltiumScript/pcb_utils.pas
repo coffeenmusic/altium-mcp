@@ -1302,7 +1302,7 @@ begin
                 ShapeStr := 'Rect';
 
             if ShapeStr = 'Round' then
-                PadShape := eRound
+                PadShape := eRounded
             else if ShapeStr = 'Oval' then
                 PadShape := eRoundedRectangle
             else
