@@ -1,8 +1,3 @@
-# --- force Python to treat server\lib as a site-directory ---
-import pathlib, site
-site.addsitedir(str(pathlib.Path(__file__).with_name("lib")))
-# ------------------------------------------------------------
-
 from mcp.server.fastmcp import FastMCP, Context
 import json
 import os
@@ -31,7 +26,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),  # Output to console
-        logging.FileHandler(str(pathlib.Path(__file__).with_name('altium_mcp.log')))  # Also log to file
+        logging.FileHandler(str(Path(__file__).with_name('altium_mcp.log')))  # Also log to file
     ]
 )
 logger = logging.getLogger("AltiumMCPServer")

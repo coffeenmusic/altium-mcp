@@ -25,7 +25,7 @@ The easiest way to install is to use Claude Code, point it to this repo and ask 
 
 [Watch on YouTube](https://youtu.be/HKQMK-hluLs)
 
-1. Make sure Claude has Python 3.11 installed: `drop down > File > Settings > Extensions > Advanced > Python: 3.11.0`. If not, install 3.11 and add python to PATH.
+1. Make sure Claude has Python 3.10+ installed: `drop down > File > Settings > Extensions > Advanced > Python`. If not, install Python and add it to PATH.
 2. Download the `altium-mcp.dxt` desktop extension file from [releases](https://github.com/coffeenmusic/altium-mcp/releases)
 3. In Claude Desktop on Windows: `drop down > File > Settings > Extensions > Advanced > Install Extension...` Select the .dxt file
 
@@ -34,53 +34,96 @@ You shouldn't need to restart Claude and you should now see altium-mcp in the to
 ![altium-mcp in the tools menu](assets/extension.jpg)
 
 ## Creating a new .dxt (For Developers)
-### pip server/lib (Recommended)
-1. Populate the packages in the `server/lib` directory: from root dir > `python -m pip install --no-cache-dir --target server/lib -r requirements.txt`
-2. Update the manifest for `server/lib` and include any new tools that have been added, bump the revisions, etc.
+
+### Bootstrap Venv (Recommended)
+
+This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is tiny (~60 KB) and works across any Python 3.10+ version.
+
+The older approach of bundling pre-compiled packages in `server/lib/` is no longer recommended — it breaks when the user's Python version doesn't match the version used to build the bundled `.pyd` files (e.g. pydantic_core compiled for 3.11 fails on 3.13).
+
+**How it works:**
+
+1. `start_server.py` (at the repo root) checks for `server/.venv/Scripts/python.exe`
+2. If the venv doesn't exist, it creates one and pip-installs the pinned dependencies
+3. It then launches `server/main.py` using the venv's Python
+4. First launch takes ~20-30 seconds; subsequent launches are instant
+
+**Build steps:**
+
+1. Make sure `start_server.py` exists at the repo root (see below for contents)
+2. Make sure `server/main.py` does NOT have the old `site.addsitedir` hack at the top
+3. Update `manifest.json`: set `entry_point` to `start_server.py`, remove any `env`/`PYTHONPATH` fields, and use `manifest_version: "0.3"`
+4. Package the DXT — either use `dxt pack` or manually zip and rename:
+```powershell
+Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, server -DestinationPath altium-mcp.zip
+Rename-Item altium-mcp.zip altium-mcp.dxt
 ```
+
+**Do NOT include `server/lib/` or `server/.venv/` in the .dxt.** The whole point is that these are created on the user's machine.
+
+**`start_server.py`:**
+```python
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+VENV_DIR = SCRIPT_DIR / "server" / ".venv"
+REQUIREMENTS = [
+    "mcp[cli]==1.5.0",
+    "pillow>=11.1.0",
+    "pywin32>=310",
+]
+
+def ensure_venv():
+    python_exe = VENV_DIR / "Scripts" / "python.exe"
+    if python_exe.exists():
+        return str(python_exe)
+
+    subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
+    pip_exe = str(VENV_DIR / "Scripts" / "pip.exe")
+    subprocess.check_call([pip_exe, "install", "--quiet"] + REQUIREMENTS)
+    return str(python_exe)
+
+if __name__ == "__main__":
+    venv_python = ensure_venv()
+    server_path = str(SCRIPT_DIR / "server" / "main.py")
+    sys.exit(subprocess.call([venv_python, server_path]))
+```
+
+**`manifest.json` server section:**
+```json
 "server": {
     "type": "python",
-    "entry_point": "server/main.py",
+    "entry_point": "start_server.py",
     "mcp_config": {
       "command": "python",
-      "args": ["${__dirname}/server/main.py"],
-	  "env": {
-		"PYTHONPATH": "${__dirname}/server/lib"
-	  }
+      "args": ["${__dirname}/start_server.py"]
     }
   }
 ```
-3. Download Node.js, install Anthropic's DXT tool: `npm install -g @anthropic-ai/dxt`, package dxt: `dxt pack`
 
-### uv server/venv (Not Recommended)
-**On Windows**
+### Pitfalls
 
-1. 
-```bash
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 
-```
-and then
-```bash
-set Path=C:\Users\nntra\.local\bin;%Path%
-```
+These are hard-won lessons from debugging DXT builds. Violating any of these will produce errors that are difficult to diagnose.
 
-2. Create the venv directory where DXT expects: from the root directory run `uv venv server/venv --relocatable`
-3. Install dependencies to venv: `uv pip install --python server/venv/Scripts/python.exe -r requirements.txt`
-4. Update the manifest for `server/venv` and include any new tools that have been added, bump the revisions, etc.
-```
-  "server": {
-    "type": "python",
-    "entry_point": "server/main.py",
-    "mcp_config": {
-      "command": "${__dirname}/server/venv/Scripts/python.exe",
-      "args": ["${__dirname}/server/main.py"],
-	  "env": {
-		"PYTHONPATH": "${__dirname}/server/venv"
-	  }
-    }
-  }
-```
-5. Download Node.js, install Anthropic's DXT tool: `npm install -g @anthropic-ai/dxt`, package dxt: `dxt pack`
+1. **Do NOT use `os.execv()` in `start_server.py`.** The DXT installs to a path containing spaces (`Claude Extensions`). On Windows, `os.execv` splits the path at the space and fails. Use `sys.exit(subprocess.call([...]))` instead.
+
+2. **Pin `mcp` to `==1.5.0`.** Using `>=1.5.0` pulls in the latest version, which has breaking API changes (`FastMCP.__init__()` dropped the `description` kwarg). The server code was written against 1.5.0.
+
+3. **Do NOT use `manifest_version: "0.4"` with `"type": "uv"`.** Claude Desktop does not support it yet. You will get `Invalid manifest: server: Required`. Use `"type": "python"` with `manifest_version: "0.3"`.
+
+4. **After removing the `site.addsitedir` hack from `main.py`, fix the `pathlib.Path` reference.** The hack included `import pathlib` at the top of the file. The logging setup later uses `pathlib.Path(...)` which will throw `NameError` once that import is gone. Change it to `Path(...)` — the `from pathlib import Path` import already exists in the file, just make sure it comes before the logging setup.
+
+5. **Do NOT bundle `server/lib/` in the DXT.** That was the old approach and defeats the purpose of the venv bootstrap.
+
+### Legacy: Bundled server/lib (Not Recommended)
+
+This approach bundles all dependencies in `server/lib/` and sets `PYTHONPATH` to point to it. It produces a much larger .dxt (~17 MB) and **only works if the user's Python version matches the version used to compile the bundled packages**.
+
+1. Populate packages: `python -m pip install --no-cache-dir --target server/lib -r requirements.txt`
+2. Set the manifest `entry_point` to `server/main.py` and add `"env": {"PYTHONPATH": "${__dirname}/server/lib"}` to `mcp_config`
+3. Package: `npm install -g @anthropic-ai/dxt && dxt pack`
 
 ### DXT Resources
 - [Desktop Extensions](https://www.anthropic.com/engineering/desktop-extensions)
