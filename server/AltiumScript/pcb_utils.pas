@@ -1271,6 +1271,8 @@ begin
         LibComp := PCBServer.CreatePCBLibComp;
         LibComp.Name := FootprintName;
 
+        PcbLib.RegisterComponent(LibComp);
+
         for i := 0 to PadsList.Count - 1 do
         begin
             PadData := Trim(PadsList[i]);
@@ -1410,9 +1412,10 @@ begin
         LibComp.AddPCBObject(Track);
         PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
 
-        // Register and refresh
-        PcbLib.RegisterComponent(LibComp);
-        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+        // Register with library board, navigate, and refresh
+        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
+        PcbLib.CurrentComponent := LibComp;
+        PcbLib.Board.ViewManager_FullUpdate;
 
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONProperty(ResultProps, 'footprint_name', FootprintName);
