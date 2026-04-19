@@ -341,7 +341,7 @@ begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
-                NewX := StrToFloat(ParamValue);
+                NewX := SafeStrToFloat(ParamValue);
             end
             // Look for y
             else if (Pos('"y"', RequestData[i]) > 0) then
@@ -349,7 +349,7 @@ begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
-                NewY := StrToFloat(ParamValue);
+                NewY := SafeStrToFloat(ParamValue);
             end
             // Look for rotation
             else if (Pos('"rotation"', RequestData[i]) > 0) then
@@ -357,7 +357,7 @@ begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
-                Rotation := StrToFloat(ParamValue);
+                Rotation := SafeStrToFloat(ParamValue);
             end;
         end;
         
@@ -419,7 +419,7 @@ begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
-                XOffset := MilsToCoord(StrToFloat(ParamValue));
+                XOffset := MilsToCoord(SafeStrToFloat(ParamValue));
             end
             // Look for y_offset
             else if (Pos('"y_offset"', RequestData[i]) > 0) then
@@ -427,7 +427,7 @@ begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
-                YOffset := MilsToCoord(StrToFloat(ParamValue));
+                YOffset := MilsToCoord(SafeStrToFloat(ParamValue));
             end
             // Look for rotation
             else if (Pos('"rotation"', RequestData[i]) > 0) then
@@ -435,7 +435,7 @@ begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
                 ParamValue := TrimJSON(ParamValue);
-                Rotation := StrToFloat(ParamValue);
+                Rotation := SafeStrToFloat(ParamValue);
             end;
         end;
         
@@ -633,13 +633,13 @@ begin
             begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
-                CourtyardXMM := StrToFloat(ParamValue);
+                CourtyardXMM := SafeStrToFloat(ParamValue);
             end
             else if (Pos('"courtyard_y_mm"', RequestData[i]) > 0) then
             begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
-                CourtyardYMM := StrToFloat(ParamValue);
+                CourtyardYMM := SafeStrToFloat(ParamValue);
             end
             else if (Pos('"pads"', RequestData[i]) > 0) then
             begin

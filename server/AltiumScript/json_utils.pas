@@ -137,6 +137,14 @@ begin
     end;
 end;
 
+// Locale-safe StrToFloat: normalizes '.' to the system decimal separator before parsing.
+// Mirrors AddJSONNumber which does the reverse on output (fwolter PR #3).
+function SafeStrToFloat(S: String): Double;
+begin
+    S := StringReplace(S, '.', DecimalSeparator, REPLACEALL);
+    Result := StrToFloat(S);
+end;
+
 // Helper function to add a simple property to a JSON object
 procedure AddJSONProperty(List: TStringList; Name: String; Value: String; IsString: Boolean = True);
 begin

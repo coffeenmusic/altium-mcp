@@ -1291,10 +1291,10 @@ begin
             if Fields.Count < 5 then continue;
 
             PadNum := Fields[0];
-            XMM := StrToFloat(Fields[1]);
-            YMM := StrToFloat(Fields[2]);
-            WMM := StrToFloat(Fields[3]);
-            HMM := StrToFloat(Fields[4]);
+            XMM := SafeStrToFloat(Fields[1]);
+            YMM := SafeStrToFloat(Fields[2]);
+            WMM := SafeStrToFloat(Fields[3]);
+            HMM := SafeStrToFloat(Fields[4]);
 
             if Fields.Count >= 6 then
                 ShapeStr := Fields[5]
