@@ -149,25 +149,49 @@ var
     ParamValue: String;
     i, ValueStart: Integer;
     ViewType: String;
+    DesignatorsList: TStringList;
 begin
     // Extract the view type parameter
     ViewType := 'pcb';  // Default to PCB
-    
-    // Parse parameters from the request
-    for i := 0 to RequestData.Count - 1 do
-    begin
-        // Look for view_type parameter
-        if (Pos('"view_type"', RequestData[i]) > 0) then
+    DesignatorsList := TStringList.Create;
+
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
         begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            ViewType := ParamValue;
-            Break;
+            // Look for view_type parameter
+            if (Pos('"view_type"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                ViewType := ParamValue;
+            end
+            // Look for optional designators array to zoom to before capture
+            else if (Pos('"designators"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DesignatorsList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end;
         end;
+
+        Result := TakeViewScreenshot(ViewType, DesignatorsList);
+    finally
+        DesignatorsList.Free;
     end;
-    
-    Result := TakeViewScreenshot(ViewType);
 end;
 
 // Extract the create schematic symbol logic
@@ -450,6 +474,106 @@ begin
         end;
     finally
         DesignatorsList.Free;
+    end;
+end;
+
+// Extract the check placement logic
+function ExecuteCheckPlacement(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    DesignatorsList: TStringList;
+    ClearanceMils: Double;
+begin
+    DesignatorsList := TStringList.Create;
+    ClearanceMils := 6;
+
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for designators array (optional - empty means use selection)
+            if (Pos('"designators"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DesignatorsList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end
+            // Look for clearance_mils
+            else if (Pos('"clearance_mils"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                ClearanceMils := SafeStrToFloat(ParamValue);
+            end;
+        end;
+
+        Result := CheckPlacement(DesignatorsList, ClearanceMils);
+    finally
+        DesignatorsList.Free;
+    end;
+end;
+
+// Extract the place components logic
+function ExecutePlaceComponents(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    PlacementsList: TStringList;
+begin
+    // Placements arrive as an array of pipe-delimited strings
+    // ('Designator|X|Y|Rotation|Layer') so the line-based parser stays robust
+    PlacementsList := TStringList.Create;
+
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for placements array
+            if (Pos('"placements"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    // Extract the placement value
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        PlacementsList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end;
+        end;
+
+        if PlacementsList.Count > 0 then
+        begin
+            Result := PlaceComponentsFromList(PlacementsList);
+        end
+        else
+        begin
+            Result := 'ERROR: No placements provided for place_components';
+        end;
+    finally
+        PlacementsList.Free;
     end;
 end;
 
@@ -743,7 +867,11 @@ begin
 		'set_component_position':
 			Result := ExecuteSetComponentPosition(RequestData);
         'move_components':
-            Result := ExecuteMoveComponents(RequestData);            
+            Result := ExecuteMoveComponents(RequestData);
+        'place_components':
+            Result := ExecutePlaceComponents(RequestData);
+        'check_placement':
+            Result := ExecuteCheckPlacement(RequestData);
         'layout_duplicator':
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':

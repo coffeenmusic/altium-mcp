@@ -81,6 +81,33 @@ begin
     end;
 end;
 
+// Return the Index-th (0-based) field of a pipe-delimited string,
+// e.g. GetFieldFromPipeString('R1|100|200', 1) = '100'.
+// Returns '' if the field does not exist.
+function GetFieldFromPipeString(S: String; Index: Integer): String;
+var
+    i, FieldStart, FieldIndex: Integer;
+begin
+    Result := '';
+    FieldIndex := 0;
+    FieldStart := 1;
+    for i := 1 to Length(S) do
+    begin
+        if S[i] = '|' then
+        begin
+            if FieldIndex = Index then
+            begin
+                Result := Copy(S, FieldStart, i - FieldStart);
+                Exit;
+            end;
+            FieldIndex := FieldIndex + 1;
+            FieldStart := i + 1;
+        end;
+    end;
+    if FieldIndex = Index then
+        Result := Copy(S, FieldStart, Length(S) - FieldStart + 1);
+end;
+
 // Modify the EnsureDocumentFocused function to handle all document types
 // and return more detailed information
 function EnsureDocumentFocused(CommandName: String): Boolean;
@@ -118,6 +145,9 @@ begin
        (CommandName = 'layout_duplicator')                   or
        (CommandName = 'layout_duplicator_apply')             or
        (CommandName = 'move_components')                     or
+       (CommandName = 'place_components')                    or
+       (CommandName = 'check_placement')                     or
+       (CommandName = 'set_component_position')              or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'get_pcb_layer_stackup')               or
        (CommandName = 'take_view_screenshot')                then
@@ -299,8 +329,67 @@ begin
     Result := False;
 end;
 
-// Add a screenshot function that supports both PCB and SCH views
-function TakeViewScreenshot(ViewType: String): String;
+// Zoom the current PCB view to the union bounding box of the given
+// components (plus a margin) so a following screenshot shows them clearly.
+// Returns the number of components found.
+function ZoomToComponents(DesignatorsList: TStringList): Integer;
+var
+    Board      : IPCB_Board;
+    Component  : IPCB_Component;
+    Rect       : TCoordRect;
+    i          : Integer;
+    HaveBounds : Boolean;
+    MinX, MinY, MaxX, MaxY : TCoord;
+    Margin     : TCoord;
+begin
+    Result := 0;
+    HaveBounds := False;
+
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then Exit;
+
+    for i := 0 to DesignatorsList.Count - 1 do
+    begin
+        Component := Board.GetPcbComponentByRefDes(Trim(DesignatorsList[i]));
+        if (Component <> nil) then
+        begin
+            Rect := Component.BoundingRectangleNoNameComment;
+            if not HaveBounds then
+            begin
+                MinX := Rect.Left;
+                MaxX := Rect.Right;
+                MinY := Rect.Bottom;
+                MaxY := Rect.Top;
+                HaveBounds := True;
+            end
+            else
+            begin
+                if Rect.Left < MinX then MinX := Rect.Left;
+                if Rect.Right > MaxX then MaxX := Rect.Right;
+                if Rect.Bottom < MinY then MinY := Rect.Bottom;
+                if Rect.Top > MaxY then MaxY := Rect.Top;
+            end;
+            Result := Result + 1;
+        end;
+    end;
+
+    if HaveBounds then
+    begin
+        // 10% margin on the larger span, at least 100 mils
+        Margin := (MaxX - MinX);
+        if (MaxY - MinY) > Margin then Margin := (MaxY - MinY);
+        Margin := Margin div 10;
+        if Margin < MilsToCoord(100) then Margin := MilsToCoord(100);
+
+        Board.GraphicalView_ZoomOnRect(MinX - Margin, MinY - Margin, MaxX + Margin, MaxY + Margin);
+        Board.GraphicalView_ZoomRedraw;
+    end;
+end;
+
+// Add a screenshot function that supports both PCB and SCH views.
+// If DesignatorsList is non-empty (PCB view only), the view is zoomed to
+// those components before the server captures the window.
+function TakeViewScreenshot(ViewType: String; DesignatorsList: TStringList): String;
 var
     Board          : IPCB_Board;
     SchDoc         : ISch_Document;
@@ -309,14 +398,15 @@ var
     ClassName      : String;
     DocType        : String;
     WindowFound    : Boolean;
-    
+    ZoomedCount    : Integer;
+
     // For screenshot thread
     ThreadStarted  : Boolean;
     ScreenshotResult : String;
 begin
     // Default result
     Result := '{"success": false, "error": "Failed to initialize screenshot capture"}';
-    
+
     // Determine what type of document we need to focus
     if LowerCase(ViewType) = 'pcb' then
     begin
@@ -333,7 +423,12 @@ begin
         Result := '{"success": false, "error": "Invalid view type: ' + ViewType + '. Must be ''pcb'' or ''sch''"}';
         Exit;
     end;
-    
+
+    // Optionally zoom to the requested components before capture
+    ZoomedCount := 0;
+    if (DocType = 'PCB') and (DesignatorsList <> nil) and (DesignatorsList.Count > 0) then
+        ZoomedCount := ZoomToComponents(DesignatorsList);
+
     // Build the command to call the external screenshot utility
     // This part depends on how your C# server calls Altium for screenshots
     
@@ -345,6 +440,7 @@ begin
         AddJSONProperty(ResultProps, 'view_type', ViewType);
         AddJSONProperty(ResultProps, 'class_filter', ClassName);
         AddJSONBoolean(ResultProps, 'window_found', WindowFound);
+        AddJSONInteger(ResultProps, 'zoomed_component_count', ZoomedCount);
         
         // Add signal to the server that it can now capture the screenshot
         AddJSONBoolean(ResultProps, 'ready_for_capture', True);

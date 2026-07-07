@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp.utilities.types import Image as MCPImage
 import json
 import os
 import time
@@ -223,13 +224,21 @@ class AltiumBridge:
     def __init__(self):
         # Ensure the MCP directory exists
         MCP_DIR.mkdir(exist_ok=True)
-        
+
         # Load configuration
         self.config = AltiumConfig()
         self.config.verify_paths()
-    
+
+        # Commands share a single request.json/response.json pair, so
+        # concurrent tool calls must be serialized or they clobber each other
+        self._command_lock = asyncio.Lock()
+
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
+        async with self._command_lock:
+            return await self._execute_command_locked(command, params)
+
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         try:
             # Clean up any existing response file
             if RESPONSE_FILE.exists():
@@ -965,12 +974,22 @@ async def get_all_designators(ctx: Context) -> str:
 async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     """
     Get pin data for components in Altium
-    
+
     Args:
         cmp_designators (list): List of designators of the components (e.g., ["R1", "C5", "U3"])
-    
+
     Returns:
-        str: JSON object with pin data for requested designators
+        str: JSON array, one entry per component with its placement info
+             (x/y in mils relative to the board origin, rotation in degrees
+             counterclockwise, layer) and a "pins" list. Per pin:
+             - x/y: absolute pad position (mils, relative to board origin)
+             - dx/dy: pad offset from the component origin in the footprint's
+               rotation-0 frame. To predict a pad position for a planned
+               placement: mirror dx (dx = -dx) if placing on the bottom layer,
+               rotate (dx, dy) counterclockwise by the planned rotation, then
+               add the planned component x/y.
+             - rotation: the pad's own rotation (NOT the component rotation)
+             - net, layer, width, height, shape
     """
     logger.info(f"Getting pin data for components: {cmp_designators}")
     
@@ -1126,28 +1145,168 @@ async def move_components(ctx: Context, cmp_designators: list, x_offset: float, 
     
     # Get the result data
     result = response.get("result", {})
-    
+
     logger.info(f"Components moved successfully")
     return json.dumps({"success": True, "result": result}, indent=2)
 
 @mcp.tool()
-async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
+async def place_components(ctx: Context, placements: list) -> str:
     """
-    Take a screenshot of the Altium window
-    
+    Place multiple components at absolute positions in a single Altium transaction.
+
+    This is the batch version of set_component_position - prefer it whenever
+    placing more than one component, since every tool call is a full round
+    trip into Altium. The whole batch is one undo step.
+
+    Coordinate conventions: x/y are in mils relative to the board origin;
+    rotation is in degrees counterclockwise.
+
+    Args:
+        placements (list): One dict per component:
+            - designator (str, required): e.g. "R1"
+            - x (float, required): absolute X position in mils
+            - y (float, required): absolute Y position in mils
+            - rotation (float, optional): absolute rotation in degrees (0-360).
+              Omit (or pass -1) to keep the current rotation.
+            - layer (str, optional): "top" or "bottom" to set the board side
+              (the footprint is mirrored when flipped). Omit to keep the
+              current side.
+
+    Example:
+        placements=[{"designator": "R1", "x": 1000, "y": 2000, "rotation": 90},
+                    {"designator": "C5", "x": 1050, "y": 2000, "layer": "bottom"}]
+
+    Returns:
+        str: JSON object with placed_count, missing_designators, and the final
+             x/y/rotation/layer of each placed component as Altium reports them
+    """
+    logger.info(f"Placing {len(placements)} components")
+
+    # Flatten each placement into a pipe-delimited string
+    # ('Designator|X|Y|Rotation|Layer') - the DelphiScript side parses the
+    # request line by line, so nested JSON objects are not safe to send
+    entries = []
+    errors = []
+    for idx, placement in enumerate(placements):
+        if not isinstance(placement, dict):
+            errors.append(f"placements[{idx}] must be an object")
+            continue
+
+        designator = str(placement.get("designator", "")).strip()
+        x = placement.get("x")
+        y = placement.get("y")
+
+        if not designator or x is None or y is None:
+            errors.append(f"placements[{idx}] must include designator, x, and y")
+            continue
+        if "|" in designator:
+            errors.append(f"placements[{idx}] designator must not contain '|'")
+            continue
+
+        rotation = placement.get("rotation", -1)
+        layer = str(placement.get("layer", "") or "").strip().lower()
+        if layer not in ("", "top", "bottom"):
+            errors.append(f"placements[{idx}] layer must be 'top' or 'bottom'")
+            continue
+
+        try:
+            entry = f"{designator}|{float(x)}|{float(y)}|{float(rotation)}|{layer}"
+        except (TypeError, ValueError):
+            errors.append(f"placements[{idx}] x, y, and rotation must be numbers")
+            continue
+        entries.append(entry)
+
+    if errors:
+        return json.dumps({"success": False, "error": "; ".join(errors)})
+    if not entries:
+        return json.dumps({"success": False, "error": "No placements provided"})
+
+    response = await altium_bridge.execute_command(
+        "place_components",
+        {"placements": entries}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error placing components: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to place components: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info(f"Placed components successfully")
+    return json.dumps({"success": True, "result": result}, indent=2)
+
+@mcp.tool()
+async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6) -> str:
+    """
+    Verify component placement: find overlaps and clearance violations.
+
+    Checks each target component against every other component on the same
+    side of the board. Bounding boxes (which include silkscreen) are used as
+    a fast prefilter; close pairs are then measured precisely with Altium's
+    primitive-to-primitive distance, so reported distances are true minimum
+    distances between any primitives (pads, silk, etc.) of the two parts.
+
+    Run this after placing components - a screenshot is not verification.
+
+    Args:
+        cmp_designators (list, optional): Components to check (e.g. ["U12", "R42"]).
+            Omit to check the components currently selected in Altium.
+        clearance_mils (float): Minimum allowed primitive-to-primitive distance
+            in mils (default 6). Pairs closer than this are reported.
+
+    Returns:
+        str: JSON object with checked_count, violation_count, and a violations
+             list. Each violation has a/b designators, type
+             ("bounding_box_overlap" = the parts' outlines intersect, or
+             "clearance" = distance below threshold), distance_mils (0 =
+             touching/overlapping copper or silk), overlap sizes when boxes
+             intersect, and the other part's x/y position. An empty violations
+             list means the placement is clean at the given clearance.
+    """
+    logger.info(f"Checking placement (designators={cmp_designators}, clearance={clearance_mils})")
+
+    params = {"clearance_mils": clearance_mils}
+    if cmp_designators:
+        params["designators"] = cmp_designators
+
+    response = await altium_bridge.execute_command("check_placement", params)
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error checking placement: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to check placement: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info(f"Placement check complete: {result.get('violation_count', '?')} violations")
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
+    """
+    Take a screenshot of the Altium window, returned as viewable image content.
+
     Args:
         view_type (str): Type of view to capture - 'pcb' or 'sch'
-    
+        zoom_to (list, optional): List of component designators (e.g. ["U12", "R42"]).
+            PCB view only: Altium zooms to the bounding box of these components
+            (plus a margin) before the capture, so the components fill the frame.
+            Omit to capture at the current zoom level.
+
     Returns:
-        str: JSON object with screenshot data (base64 encoded) and metadata
+        Image content of the captured window plus a JSON metadata text block
+        (window title, size, zoomed component count)
     """
-    logger.info(f"Taking screenshot of Altium {view_type} window")
-    
+    logger.info(f"Taking screenshot of Altium {view_type} window (zoom_to={zoom_to})")
+
     try:
-        # First, execute the Altium command to ensure the right document type is focused
+        # First, execute the Altium command to ensure the right document type
+        # is focused, optionally zooming to the requested components
+        params = {"view_type": view_type.lower()}
+        if zoom_to:
+            params["designators"] = zoom_to
         response = await altium_bridge.execute_command(
-            "take_view_screenshot", 
-            {"view_type": view_type.lower()}
+            "take_view_screenshot",
+            params
         )
         
         # Check for success
@@ -1319,15 +1478,28 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
             return json.dumps({"success": False, "error": "Screenshot thread did not return a result"})
         
         result = result_queue.get()
-        
+
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
             logger.error(f"Screenshot error: {error_msg}")
             return json.dumps({"success": False, "error": error_msg})
-        
+
         logger.info(f"Screenshot taken successfully, size: {result['width']}x{result['height']}")
-        return json.dumps(result)
-    
+
+        # Return the PNG as a proper MCP image content block instead of inline
+        # base64 text: raw base64 in the text result exceeds client token
+        # limits (a full-window capture is ~300 KB), while image blocks are
+        # rendered natively by clients
+        image_base64 = result.pop("image_data")
+        result.pop("encoding", None)
+        zoom_info = response.get("result", {})
+        if isinstance(zoom_info, dict) and "zoomed_component_count" in zoom_info:
+            result["zoomed_component_count"] = zoom_info["zoomed_component_count"]
+        return [
+            json.dumps(result),
+            MCPImage(data=base64.b64decode(image_base64), format="png"),
+        ]
+
     except Exception as e:
         logger.error(f"Error in screenshot function: {str(e)}")
         return json.dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})

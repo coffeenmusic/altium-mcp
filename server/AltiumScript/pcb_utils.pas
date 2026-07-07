@@ -916,9 +916,9 @@ begin
                     AddJSONNumber(ComponentProps, 'x', CoordToMils(Component.x - xorigin));
                     AddJSONNumber(ComponentProps, 'y', CoordToMils(Component.y - yorigin));
                     AddJSONNumber(ComponentProps, 'width', CoordToMils(Rect.Right - Rect.Left));
-                    AddJSONNumber(ComponentProps, 'height', CoordToMils(Rect.Bottom - Rect.Top));
+                    AddJSONNumber(ComponentProps, 'height', CoordToMils(Rect.Top - Rect.Bottom));
                     AddJSONNumber(ComponentProps, 'rotation', Component.Rotation);
-                    
+
                     // Add to components array
                     ComponentsArray.Add(BuildJSONObject(ComponentProps, 1));
                 finally
@@ -990,10 +990,12 @@ begin
                 try
                     // Add component properties
                     AddJSONProperty(ComponentProps, 'designator', Component.Name.Text);
+                    AddJSONProperty(ComponentProps, 'layer', Layer2String(Component.Layer));
+                    AddJSONProperty(ComponentProps, 'footprint', Component.Pattern);
                     AddJSONNumber(ComponentProps, 'x', CoordToMils(Component.x - xorigin));
                     AddJSONNumber(ComponentProps, 'y', CoordToMils(Component.y - yorigin));
                     AddJSONNumber(ComponentProps, 'width', CoordToMils(Rect.Right - Rect.Left));
-                    AddJSONNumber(ComponentProps, 'height', CoordToMils(Rect.Bottom - Rect.Top));
+                    AddJSONNumber(ComponentProps, 'height', CoordToMils(Rect.Top - Rect.Bottom));
                     AddJSONNumber(ComponentProps, 'rotation', Component.Rotation);
                     
                     // Add component JSON to array
@@ -1036,6 +1038,10 @@ var
     Designator      : String;
     i               : Integer;
     OutputLines     : TStringList;
+    CompX, CompY    : Double;
+    CompRad         : Double;
+    AbsDX, AbsDY    : Double;
+    RelDX, RelDY    : Double;
 begin
     // Retrieve the current board
     Board := PCBServer.GetCurrentPCBBoard;
@@ -1070,7 +1076,16 @@ begin
                 try
                     // Add designator to component
                     AddJSONProperty(CompProps, 'designator', Component.Name.Text);
-                    
+
+                    // Component placement info so pin data is self-contained
+                    CompX := CoordToMils(Component.x - xorigin);
+                    CompY := CoordToMils(Component.y - yorigin);
+                    CompRad := Component.Rotation * Pi / 180;
+                    AddJSONNumber(CompProps, 'x', CompX);
+                    AddJSONNumber(CompProps, 'y', CompY);
+                    AddJSONNumber(CompProps, 'rotation', Component.Rotation);
+                    AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+
                     // Create pad iterator
                     GrpIter := Component.GroupIterator_Create;
                     GrpIter.SetState_FilterAll;
@@ -1112,6 +1127,28 @@ begin
                                 AddJSONProperty(PinProps, 'net', NetName);
                                 AddJSONNumber(PinProps, 'x', CoordToMils(Pad.x - xorigin));
                                 AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
+
+                                // Pad offset from the component origin in the
+                                // footprint's rotation-0 frame: un-rotate the
+                                // current offset, and un-mirror X for parts on
+                                // the bottom side. Predicted pad position after
+                                // placement = origin + (mirror-x if bottom,
+                                // then rotate CCW by rotation) applied to dx/dy.
+                                AbsDX := CoordToMils(Pad.x - xorigin) - CompX;
+                                AbsDY := CoordToMils(Pad.y - yorigin) - CompY;
+                                RelDX := AbsDX * Cos(CompRad) + AbsDY * Sin(CompRad);
+                                RelDY := -AbsDX * Sin(CompRad) + AbsDY * Cos(CompRad);
+                                if (Component.Layer = eBottomLayer) then
+                                begin
+                                    RelDX := -(AbsDX * Cos(CompRad) - AbsDY * Sin(CompRad));
+                                    RelDY := AbsDX * Sin(CompRad) + AbsDY * Cos(CompRad);
+                                end;
+                                // Round away trig noise (0.0001 mil resolution)
+                                RelDX := Round(RelDX * 10000) / 10000;
+                                RelDY := Round(RelDY * 10000) / 10000;
+                                AddJSONNumber(PinProps, 'dx', RelDX);
+                                AddJSONNumber(PinProps, 'dy', RelDY);
+
                                 AddJSONNumber(PinProps, 'rotation', Pad.Rotation);
                                 AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
                                 AddJSONNumber(PinProps, 'width', CoordToMils(Pad.XSizeOnLayer[Pad.Layer]));
@@ -1525,5 +1562,344 @@ begin
     finally
         ResultProps.Free;
         MissingArray.Free;
+    end;
+end;
+
+// Minimum primitive-to-primitive distance between two components in mils,
+// ignoring text primitives (designator/comment strings float over neighbors
+// and would poison the measurement). 0 = touching or overlapping.
+function ComponentMinDistance(Board: IPCB_Board; CompA, CompB: IPCB_Component): Double;
+var
+    ItA, ItB : IPCB_GroupIterator;
+    PA, PB   : IPCB_Primitive;
+    D, MinD  : Integer;
+begin
+    MinD := 2147483647;
+
+    ItA := CompA.GroupIterator_Create;
+    ItA.SetState_FilterAll;
+    PA := ItA.FirstPCBObject;
+    while (PA <> nil) do
+    begin
+        if (PA.ObjectId <> eTextObject) then
+        begin
+            ItB := CompB.GroupIterator_Create;
+            ItB.SetState_FilterAll;
+            PB := ItB.FirstPCBObject;
+            while (PB <> nil) do
+            begin
+                if (PB.ObjectId <> eTextObject) then
+                begin
+                    D := Board.PrimPrimDistance(PA, PB);
+                    if (D < MinD) then MinD := D;
+                end;
+
+                // Early exit once touching - it cannot get closer
+                if (MinD = 0) then
+                    PB := nil
+                else
+                    PB := ItB.NextPCBObject;
+            end;
+            CompB.GroupIterator_Destroy(ItB);
+        end;
+
+        if (MinD = 0) then
+            PA := nil
+        else
+            PA := ItA.NextPCBObject;
+    end;
+    CompA.GroupIterator_Destroy(ItA);
+
+    Result := CoordToMils(MinD);
+end;
+
+// Check component placement for overlaps and clearance violations.
+// Targets are the given designators (or the current selection when the list
+// is empty); each target is checked against every other component on the same
+// side of the board. Bounding boxes act as a fast prefilter; close pairs are
+// measured precisely with Board.PrimPrimDistance (minimum distance between
+// any two primitives of the components, 0 = touching/overlapping).
+function CheckPlacement(DesignatorsList: TStringList; ClearanceMils: Double): String;
+var
+    Board           : IPCB_Board;
+    Iterator        : IPCB_BoardIterator;
+    Target, Other   : IPCB_Component;
+    Targets         : TStringList;
+    Processed       : TStringList;
+    MissingArray    : TStringList;
+    ViolationsArray : TStringList;
+    VProps          : TStringList;
+    ResultProps     : TStringList;
+    RectA, RectB    : TCoordRect;
+    Designator      : String;
+    i               : Integer;
+    OverlapX, OverlapY : Double;
+    Separation      : Double;
+    DistMils        : Double;
+    PairsChecked    : Integer;
+    IsOverlap       : Boolean;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    if (ClearanceMils <= 0) then
+        ClearanceMils := 6;
+
+    Targets := TStringList.Create;
+    Processed := TStringList.Create;
+    MissingArray := TStringList.Create;
+    ViolationsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    PairsChecked := 0;
+
+    try
+        // Build the target list: explicit designators, or current selection
+        if (DesignatorsList.Count > 0) then
+        begin
+            for i := 0 to DesignatorsList.Count - 1 do
+            begin
+                Designator := Trim(DesignatorsList[i]);
+                if (Board.GetPcbComponentByRefDes(Designator) <> nil) then
+                    Targets.Add(Designator)
+                else
+                    MissingArray.Add('"' + JSONEscapeString(Designator) + '"');
+            end;
+        end
+        else
+        begin
+            for i := 0 to Board.SelectecObjectCount - 1 do
+                if (Board.SelectecObject[i].ObjectId = eComponentObject) then
+                    Targets.Add(Board.SelectecObject[i].Name.Text);
+        end;
+
+        if (Targets.Count = 0) then
+        begin
+            Result := 'ERROR: No components to check (no designators given and no components selected)';
+            Exit;
+        end;
+
+        // Check each target against every other component on the same side
+        for i := 0 to Targets.Count - 1 do
+        begin
+            Target := Board.GetPcbComponentByRefDes(Targets[i]);
+            RectA := Target.BoundingRectangleNoNameComment;
+
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+
+            Other := Iterator.FirstPCBObject;
+            while (Other <> nil) do
+            begin
+                if (Other.Name.Text <> Target.Name.Text) and
+                   (Other.Layer = Target.Layer) and
+                   (Processed.IndexOf(Other.Name.Text) < 0) then
+                begin
+                    RectB := Other.BoundingRectangleNoNameComment;
+
+                    // Bounding-box overlap/separation in mils (negative = gap)
+                    OverlapX := CoordToMils(Min(RectA.Right, RectB.Right) - Max(RectA.Left, RectB.Left));
+                    OverlapY := CoordToMils(Min(RectA.Top, RectB.Top) - Max(RectA.Bottom, RectB.Bottom));
+
+                    if (OverlapX > 0) and (OverlapY > 0) then
+                        Separation := 0
+                    else
+                        Separation := Max(-OverlapX, -OverlapY);
+
+                    // Only measure precisely when the prefilter says "close"
+                    if (Separation < ClearanceMils + 25) then
+                    begin
+                        PairsChecked := PairsChecked + 1;
+                        DistMils := ComponentMinDistance(Board, Target, Other);
+                        IsOverlap := (OverlapX > 0) and (OverlapY > 0);
+
+                        if (IsOverlap) or (DistMils < ClearanceMils) then
+                        begin
+                            VProps := TStringList.Create;
+                            try
+                                AddJSONProperty(VProps, 'a', Target.Name.Text);
+                                AddJSONProperty(VProps, 'b', Other.Name.Text);
+                                AddJSONProperty(VProps, 'layer', Layer2String(Target.Layer));
+                                if IsOverlap then
+                                    AddJSONProperty(VProps, 'type', 'bounding_box_overlap')
+                                else
+                                    AddJSONProperty(VProps, 'type', 'clearance');
+                                AddJSONNumber(VProps, 'distance_mils', Round(DistMils * 100) / 100);
+                                if IsOverlap then
+                                begin
+                                    AddJSONNumber(VProps, 'overlap_x_mils', Round(OverlapX * 100) / 100);
+                                    AddJSONNumber(VProps, 'overlap_y_mils', Round(OverlapY * 100) / 100);
+                                end;
+                                AddJSONNumber(VProps, 'b_x', CoordToMils(Other.x - Board.XOrigin));
+                                AddJSONNumber(VProps, 'b_y', CoordToMils(Other.y - Board.YOrigin));
+                                ViolationsArray.Add(BuildJSONObject(VProps, 2));
+                            finally
+                                VProps.Free;
+                            end;
+                        end;
+                    end;
+                end;
+
+                Other := Iterator.NextPCBObject;
+            end;
+
+            Board.BoardIterator_Destroy(Iterator);
+            Processed.Add(Target.Name.Text);
+        end;
+
+        AddJSONInteger(ResultProps, 'checked_count', Targets.Count);
+        AddJSONNumber(ResultProps, 'clearance_mils', ClearanceMils);
+        AddJSONInteger(ResultProps, 'close_pairs_measured', PairsChecked);
+        AddJSONInteger(ResultProps, 'violation_count', ViolationsArray.Count);
+
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'missing_designators'))
+        else
+            ResultProps.Add('"missing_designators": []');
+
+        if (ViolationsArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(ViolationsArray, 'violations', 1))
+        else
+            ResultProps.Add('"violations": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Targets.Free;
+        Processed.Free;
+        MissingArray.Free;
+        ViolationsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// Place multiple components at absolute positions in a single transaction.
+// Each entry in PlacementsList is 'Designator|X|Y|Rotation|Layer' where X/Y
+// are mils relative to the board origin, Rotation is degrees CCW (-1 = keep
+// current) and Layer is 'top', 'bottom' or '' (keep current side).
+function PlaceComponentsFromList(PlacementsList: TStringList): String;
+var
+    Board            : IPCB_Board;
+    Component        : IPCB_Component;
+    ResultProps      : TStringList;
+    MissingArray     : TStringList;
+    PlacedArray      : TStringList;
+    CompProps        : TStringList;
+    Entry            : String;
+    Designator       : String;
+    FieldValue       : String;
+    LayerStr         : String;
+    NewX, NewY       : Double;
+    Rotation         : Double;
+    xorigin, yorigin : TCoord;
+    i                : Integer;
+    PlacedCount      : Integer;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
+
+    ResultProps := TStringList.Create;
+    MissingArray := TStringList.Create;
+    PlacedArray := TStringList.Create;
+    PlacedCount := 0;
+
+    try
+        // Single transaction for the whole batch (one undo step)
+        PCBServer.PreProcess;
+
+        for i := 0 to PlacementsList.Count - 1 do
+        begin
+            Entry := Trim(PlacementsList[i]);
+            if (Entry <> '') then
+            begin
+                Designator := Trim(GetFieldFromPipeString(Entry, 0));
+                NewX := SafeStrToFloat(GetFieldFromPipeString(Entry, 1));
+                NewY := SafeStrToFloat(GetFieldFromPipeString(Entry, 2));
+
+                // Rotation is optional: missing/empty field means keep current
+                FieldValue := Trim(GetFieldFromPipeString(Entry, 3));
+                if (FieldValue <> '') then
+                    Rotation := SafeStrToFloat(FieldValue)
+                else
+                    Rotation := -1;
+
+                LayerStr := LowerCase(Trim(GetFieldFromPipeString(Entry, 4)));
+
+                Component := Board.GetPcbComponentByRefDes(Designator);
+
+                if (Component <> nil) then
+                begin
+                    PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+
+                    // Change layer first: flipping mirrors the footprint, so
+                    // position and rotation are applied afterwards to keep the
+                    // requested values authoritative
+                    if (LayerStr = 'top') and (Component.Layer = eBottomLayer) then
+                        Component.Layer := eTopLayer
+                    else if (LayerStr = 'bottom') and (Component.Layer = eTopLayer) then
+                        Component.Layer := eBottomLayer;
+
+                    Component.MoveToXY(MilsToCoord(NewX) + xorigin, MilsToCoord(NewY) + yorigin);
+
+                    if (Rotation >= 0) then
+                        Component.Rotation := Rotation;
+
+                    PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                    // Report the final state as Altium sees it
+                    CompProps := TStringList.Create;
+                    try
+                        AddJSONProperty(CompProps, 'designator', Component.Name.Text);
+                        AddJSONNumber(CompProps, 'x', CoordToMils(Component.x - xorigin));
+                        AddJSONNumber(CompProps, 'y', CoordToMils(Component.y - yorigin));
+                        AddJSONNumber(CompProps, 'rotation', Component.Rotation);
+                        AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                        PlacedArray.Add(BuildJSONObject(CompProps, 2));
+                    finally
+                        CompProps.Free;
+                    end;
+
+                    PlacedCount := PlacedCount + 1;
+                end
+                else
+                begin
+                    MissingArray.Add('"' + JSONEscapeString(Designator) + '"');
+                end;
+            end;
+        end;
+
+        PCBServer.PostProcess;
+
+        // Update PCB document
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONInteger(ResultProps, 'placed_count', PlacedCount);
+
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'missing_designators'))
+        else
+            ResultProps.Add('"missing_designators": []');
+
+        if (PlacedArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(PlacedArray, 'components', 1))
+        else
+            ResultProps.Add('"components": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        ResultProps.Free;
+        MissingArray.Free;
+        PlacedArray.Free;
     end;
 end;
