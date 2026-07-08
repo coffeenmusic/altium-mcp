@@ -1358,11 +1358,15 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
     A component is reported when a different rotation beats the current one
     by at least min_improvement_mils.
 
-    This is advisory, not pass/fail: an intentional orientation (e.g. chosen
-    for routing reasons or per a datasheet layout recommendation) may be
-    flagged - review suggestions rather than applying them blindly. If a
-    suggestion with bbox_changes=true is applied (a 90-degree change alters
-    the body outline), re-run check_placement afterwards.
+    This is advisory, not pass/fail: it measures geometry only and knows
+    nothing about net criticality. Suggestions matter for loop-critical
+    parts (capacitor ground returns, snubbers, input/output filters) and
+    should usually be ignored for parts whose orientation is electrically
+    arbitrary (pull-ups, strapping resistors, enables) or where a datasheet
+    layout recommendation says otherwise. Weigh suggestions with judgement
+    rather than applying them blindly. If a suggestion with
+    bbox_changes=true is applied (a 90-degree change alters the body
+    outline), re-run check_placement afterwards.
 
     Args:
         cmp_designators (list, optional): Components to check. Omit to use
