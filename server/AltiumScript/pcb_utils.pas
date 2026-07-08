@@ -1777,6 +1777,160 @@ begin
     end;
 end;
 
+// Get all pads on every net touched by the given components (or the current
+// selection when the list is empty). Returns a flat board-wide pad list -
+// including pads of components outside the target set - so the caller can
+// group by net and compute airline lengths. Coordinates in mils relative to
+// the board origin.
+function GetNetConnections(ROOT_DIR: String; DesignatorsList: TStringList): String;
+var
+    Board       : IPCB_Board;
+    Component   : IPCB_Component;
+    Iterator    : IPCB_BoardIterator;
+    GrpIter     : IPCB_GroupIterator;
+    Pad         : IPCB_Pad;
+    NetNames    : TStringList;
+    TargetNames : TStringList;
+    PadsArray   : TStringList;
+    PadProps    : TStringList;
+    ResultProps : TStringList;
+    NamesArray  : TStringList;
+    OutputLines : TStringList;
+    Designator  : String;
+    xorigin, yorigin : Integer;
+    i           : Integer;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    xorigin := Board.XOrigin;
+    yorigin := Board.YOrigin;
+
+    NetNames := TStringList.Create;
+    TargetNames := TStringList.Create;
+    PadsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    NamesArray := TStringList.Create;
+
+    try
+        // Build the target component list: explicit designators, or selection
+        if (DesignatorsList.Count > 0) then
+        begin
+            for i := 0 to DesignatorsList.Count - 1 do
+            begin
+                Designator := Trim(DesignatorsList[i]);
+                if (Board.GetPcbComponentByRefDes(Designator) <> nil) then
+                    TargetNames.Add(Designator);
+            end;
+        end
+        else
+        begin
+            for i := 0 to Board.SelectecObjectCount - 1 do
+                if (Board.SelectecObject[i].ObjectId = eComponentObject) then
+                    TargetNames.Add(Board.SelectecObject[i].Name.Text);
+        end;
+
+        if (TargetNames.Count = 0) then
+        begin
+            Result := 'ERROR: No components found (no designators given and no components selected)';
+            Exit;
+        end;
+
+        // Collect the set of nets touched by the target components
+        for i := 0 to TargetNames.Count - 1 do
+        begin
+            Component := Board.GetPcbComponentByRefDes(TargetNames[i]);
+            GrpIter := Component.GroupIterator_Create;
+            GrpIter.SetState_FilterAll;
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+
+            Pad := GrpIter.FirstPCBObject;
+            while (Pad <> nil) do
+            begin
+                if (Pad.Net <> nil) then
+                    if (NetNames.IndexOf(Pad.Net.Name) < 0) then
+                        NetNames.Add(Pad.Net.Name);
+                Pad := GrpIter.NextPCBObject;
+            end;
+
+            Component.GroupIterator_Destroy(GrpIter);
+        end;
+
+        // One board-wide pass: emit every pad on any of those nets
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(ePadObject));
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+
+        Pad := Iterator.FirstPCBObject;
+        while (Pad <> nil) do
+        begin
+            if (Pad.Net <> nil) then
+            begin
+                if (NetNames.IndexOf(Pad.Net.Name) >= 0) then
+                begin
+                    PadProps := TStringList.Create;
+                    try
+                        AddJSONProperty(PadProps, 'net', Pad.Net.Name);
+                        if (Pad.Component <> nil) then
+                            AddJSONProperty(PadProps, 'designator', Pad.Component.Name.Text)
+                        else
+                            AddJSONProperty(PadProps, 'designator', '');
+                        AddJSONProperty(PadProps, 'pin', Pad.Name);
+                        AddJSONNumber(PadProps, 'x', CoordToMils(Pad.x - xorigin));
+                        AddJSONNumber(PadProps, 'y', CoordToMils(Pad.y - yorigin));
+                        PadsArray.Add(BuildJSONObject(PadProps, 2));
+                    finally
+                        PadProps.Free;
+                    end;
+                end;
+            end;
+            Pad := Iterator.NextPCBObject;
+        end;
+
+        Board.BoardIterator_Destroy(Iterator);
+
+        // Build the result - include the resolved targets so the caller
+        // knows which components were analyzed when using the selection
+        for i := 0 to TargetNames.Count - 1 do
+            NamesArray.Add('"' + JSONEscapeString(TargetNames[i]) + '"');
+        ResultProps.Add(BuildJSONArray(NamesArray, 'targets'));
+        NamesArray.Clear;
+
+        for i := 0 to NetNames.Count - 1 do
+            NamesArray.Add('"' + JSONEscapeString(NetNames[i]) + '"');
+
+        if (NamesArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(NamesArray, 'net_names'))
+        else
+            ResultProps.Add('"net_names": []');
+
+        if (PadsArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(PadsArray, 'pads', 1))
+        else
+            ResultProps.Add('"pads": []');
+
+        // Potentially large (plane nets) - go through the temp-file path
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR+'\temp_net_connections.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        NetNames.Free;
+        TargetNames.Free;
+        PadsArray.Free;
+        ResultProps.Free;
+        NamesArray.Free;
+    end;
+end;
+
 // Place multiple components at absolute positions in a single transaction.
 // Each entry in PlacementsList is 'Designator|X|Y|Rotation|Layer' where X/Y
 // are mils relative to the board origin, Rotation is degrees CCW (-1 = keep

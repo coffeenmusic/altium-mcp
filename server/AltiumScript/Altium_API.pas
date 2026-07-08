@@ -477,6 +477,46 @@ begin
     end;
 end;
 
+// Extract the get net connections logic
+function ExecuteGetNetConnections(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    DesignatorsList: TStringList;
+begin
+    DesignatorsList := TStringList.Create;
+
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for designators array (optional - empty means use selection)
+            if (Pos('"designators"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DesignatorsList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end;
+        end;
+
+        Result := GetNetConnections(ROOT_DIR, DesignatorsList);
+    finally
+        DesignatorsList.Free;
+    end;
+end;
+
 // Extract the check placement logic
 function ExecuteCheckPlacement(RequestData: TStringList): String;
 var
@@ -872,6 +912,8 @@ begin
             Result := ExecutePlaceComponents(RequestData);
         'check_placement':
             Result := ExecuteCheckPlacement(RequestData);
+        'get_net_connections':
+            Result := ExecuteGetNetConnections(RequestData);
         'layout_duplicator':
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':

@@ -1235,6 +1235,105 @@ async def place_components(ctx: Context, placements: list) -> str:
     logger.info(f"Placed components successfully")
     return json.dumps({"success": True, "result": result}, indent=2)
 
+def _mst_length(points: list) -> float:
+    """Minimum-spanning-tree length over (x, y) points (Prim's algorithm)."""
+    n = len(points)
+    if n < 2:
+        return 0.0
+    import math
+    in_tree = [False] * n
+    best = [float("inf")] * n
+    best[0] = 0.0
+    total = 0.0
+    for _ in range(n):
+        u = min((i for i in range(n) if not in_tree[i]), key=lambda i: best[i])
+        in_tree[u] = True
+        total += best[u]
+        ux, uy = points[u]
+        for v in range(n):
+            if not in_tree[v]:
+                d = math.dist((ux, uy), points[v])
+                if d < best[v]:
+                    best[v] = d
+    return total
+
+@mcp.tool()
+async def get_net_connections(ctx: Context, cmp_designators: list = None, max_pads_per_net: int = 40) -> str:
+    """
+    Get net connectivity and airline (unrouted connection) lengths for the
+    nets touching the given components.
+
+    Use this to plan or score a placement: it shows every pad on each net -
+    including pads of OTHER components outside the given set (e.g. an input
+    filter the cluster must connect to) - plus the net's minimum-spanning-tree
+    airline length in mils. Shorter airlines on critical nets (switching
+    loops, input/output capacitors) mean a better placement; non-critical
+    nets (enables, set resistors, feedback dividers) may be lengthened to
+    buy routing space. Plane nets like GND have many pads and a meaningless
+    airline - judge them by proximity to plane connections instead.
+
+    Args:
+        cmp_designators (list, optional): Components whose nets to analyze
+            (e.g. ["U12", "R42"]). Omit to use the current Altium selection.
+        max_pads_per_net (int): Nets with more pads than this (e.g. GND)
+            return only pads belonging to the given components, plus the
+            total pad_count. Their airline is also skipped. Default 40.
+
+    Returns:
+        str: JSON object with one entry per net: pad_count,
+             airline_mst_mils (None for large nets), and pads
+             [{designator, pin, x, y}, ...] in mils relative to the board
+             origin. Large nets set pads_truncated=true.
+    """
+    logger.info(f"Getting net connections (designators={cmp_designators})")
+
+    params = {}
+    if cmp_designators:
+        params["designators"] = cmp_designators
+
+    response = await altium_bridge.execute_command("get_net_connections", params)
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting net connections: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to get net connections: {error_msg}"})
+
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result)
+
+    target_set = set(cmp_designators or result.get("targets", []))
+
+    # Group the flat pad list by net and compute airline lengths
+    nets = {}
+    for pad in result.get("pads", []):
+        nets.setdefault(pad["net"], []).append(pad)
+
+    out_nets = []
+    for name in result.get("net_names", []):
+        pads = nets.get(name, [])
+        entry = {"net": name, "pad_count": len(pads)}
+        if len(pads) <= max_pads_per_net:
+            entry["airline_mst_mils"] = round(_mst_length([(p["x"], p["y"]) for p in pads]), 1)
+            entry["pads"] = [
+                {"designator": p["designator"], "pin": p["pin"], "x": p["x"], "y": p["y"]}
+                for p in pads
+            ]
+        else:
+            entry["airline_mst_mils"] = None
+            entry["pads_truncated"] = True
+            entry["pads"] = [
+                {"designator": p["designator"], "pin": p["pin"], "x": p["x"], "y": p["y"]}
+                for p in pads
+                if not target_set or p["designator"] in target_set
+            ]
+        out_nets.append(entry)
+
+    out_nets.sort(key=lambda e: (e["airline_mst_mils"] is None, -(e["airline_mst_mils"] or 0)))
+
+    logger.info(f"Net connections: {len(out_nets)} nets")
+    return json.dumps({"net_count": len(out_nets), "nets": out_nets}, indent=2)
+
 @mcp.tool()
 async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6) -> str:
     """

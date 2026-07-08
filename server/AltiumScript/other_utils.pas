@@ -147,6 +147,7 @@ begin
        (CommandName = 'move_components')                     or
        (CommandName = 'place_components')                    or
        (CommandName = 'check_placement')                     or
+       (CommandName = 'get_net_connections')                 or
        (CommandName = 'set_component_position')              or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'get_pcb_layer_stackup')               or
