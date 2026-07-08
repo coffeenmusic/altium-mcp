@@ -1334,6 +1334,150 @@ async def get_net_connections(ctx: Context, cmp_designators: list = None, max_pa
     logger.info(f"Net connections: {len(out_nets)} nets")
     return json.dumps({"net_count": len(out_nets), "nets": out_nets}, indent=2)
 
+def _rotate_offset(dx: float, dy: float, degrees: float) -> tuple:
+    """Rotate a rotation-0 pad offset counterclockwise by the given angle."""
+    import math
+    rad = math.radians(degrees)
+    return (dx * math.cos(rad) - dy * math.sin(rad),
+            dx * math.sin(rad) + dy * math.cos(rad))
+
+@mcp.tool()
+async def check_orientation(ctx: Context, cmp_designators: list = None, min_improvement_mils: float = 25) -> str:
+    """
+    Advisory check: find 2-pad passives whose rotation could be improved.
+
+    For each 2-pad component in the target set, every orthogonal rotation
+    (0/90/180/270) is scored in place, summing one term per pad:
+    - routable nets (few pads): the net's total airline (MST) length with
+      this pad at the candidate position - so a pad that merely slides along
+      a pass-through flow (e.g. a bulk cap in a power chain) scores as
+      nearly free, while a genuine detour costs its real length
+    - plane nets (many pads, e.g. GND): distance to the nearest same-net
+      pad - a capacitor's ground-return loop is local, so proximity to the
+      IC's GND/thermal pad is what matters
+    A component is reported when a different rotation beats the current one
+    by at least min_improvement_mils.
+
+    This is advisory, not pass/fail: an intentional orientation (e.g. chosen
+    for routing reasons or per a datasheet layout recommendation) may be
+    flagged - review suggestions rather than applying them blindly. If a
+    suggestion with bbox_changes=true is applied (a 90-degree change alters
+    the body outline), re-run check_placement afterwards.
+
+    Args:
+        cmp_designators (list, optional): Components to check. Omit to use
+            the current Altium selection. Components with more or fewer than
+            2 pads are skipped.
+        min_improvement_mils (float): Only report components where the best
+            rotation improves the connection score by at least this many
+            mils (default 25).
+
+    Returns:
+        str: JSON object with checked_count and suggestions, each having
+             designator, current_rotation, suggested_rotation,
+             improvement_mils, bbox_changes, and a per-pad breakdown of
+             nearest same-net distances at the current vs suggested rotation.
+    """
+    import math
+
+    logger.info(f"Checking orientation (designators={cmp_designators})")
+
+    # Resolve the target designators from the selection when not given
+    if not cmp_designators:
+        sel_resp = await altium_bridge.execute_command("get_selected_components_coordinates", {})
+        if not sel_resp.get("success", False):
+            return json.dumps({"success": False, "error": sel_resp.get("error", "Unknown error")})
+        sel = sel_resp.get("result", [])
+        if isinstance(sel, str):
+            sel = json.loads(sel)
+        cmp_designators = [c["designator"] for c in sel if "designator" in c]
+        if not cmp_designators:
+            return json.dumps({"success": False, "error": "No components selected and no designators given"})
+
+    pins_resp = await altium_bridge.execute_command("get_component_pins", {"designators": cmp_designators})
+    if not pins_resp.get("success", False):
+        return json.dumps({"success": False, "error": pins_resp.get("error", "Unknown error")})
+    comps = pins_resp.get("result", [])
+    if isinstance(comps, str):
+        comps = json.loads(comps)
+
+    nets_resp = await altium_bridge.execute_command("get_net_connections", {"designators": cmp_designators})
+    if not nets_resp.get("success", False):
+        return json.dumps({"success": False, "error": nets_resp.get("error", "Unknown error")})
+    net_data = nets_resp.get("result", {})
+    if isinstance(net_data, str):
+        net_data = json.loads(net_data)
+
+    # net name -> list of (designator, x, y) for every pad on the net
+    net_pads = {}
+    for p in net_data.get("pads", []):
+        net_pads.setdefault(p["net"], []).append((p["designator"], p["x"], p["y"]))
+
+    PLANE_NET_PAD_COUNT = 40  # nets above this are treated as planes
+
+    suggestions = []
+    checked = 0
+    for comp in comps:
+        pins = comp.get("pins", [])
+        if len(pins) != 2 or "x" not in comp:
+            continue
+        mirror = comp.get("layer") == "Bottom Layer"
+
+        def score(rotation):
+            """Hybrid per-pad score (see docstring); None if no pad scores."""
+            total, detail = 0.0, []
+            for pin in pins:
+                net = pin.get("net", "")
+                cands = [(x, y) for (d, x, y) in net_pads.get(net, [])
+                         if d != comp["designator"]] if net else []
+                if not cands:
+                    continue
+                dx = -pin["dx"] if mirror else pin["dx"]
+                ox, oy = _rotate_offset(dx, pin["dy"], rotation)
+                px, py = comp["x"] + ox, comp["y"] + oy
+                if len(cands) > PLANE_NET_PAD_COUNT:
+                    value = min(math.dist((px, py), c) for c in cands)
+                    metric = "nearest_return_mils"
+                else:
+                    value = _mst_length(cands + [(px, py)])
+                    metric = "net_airline_mils"
+                total += value
+                detail.append({"pin": pin["name"], "net": net, metric: round(value, 1)})
+            return (total, detail) if detail else None
+
+        current = comp.get("rotation", 0) % 360
+        cur = score(current)
+        if cur is None:
+            continue
+        checked += 1
+
+        best_rot, best = current, cur
+        for r in (0, 90, 180, 270):
+            s = score(r)
+            if s is not None and s[0] < best[0]:
+                best_rot, best = r, s
+
+        improvement = cur[0] - best[0]
+        if best_rot != current and improvement >= min_improvement_mils:
+            suggestions.append({
+                "designator": comp["designator"],
+                "current_rotation": current,
+                "suggested_rotation": best_rot,
+                "improvement_mils": round(improvement, 1),
+                "bbox_changes": (best_rot - current) % 180 != 0,
+                "current_pads": cur[1],
+                "suggested_pads": best[1],
+            })
+
+    suggestions.sort(key=lambda s: -s["improvement_mils"])
+    logger.info(f"Orientation check: {len(suggestions)} suggestions from {checked} components")
+    return json.dumps({
+        "checked_count": checked,
+        "min_improvement_mils": min_improvement_mils,
+        "suggestion_count": len(suggestions),
+        "suggestions": suggestions,
+    }, indent=2)
+
 @mcp.tool()
 async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6) -> str:
     """
