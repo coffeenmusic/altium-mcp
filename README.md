@@ -3,12 +3,11 @@
 TLDR: Use Claude to control or ask questions about your Altium project.
 This is a Model Context Protocol (MCP) server that provides an interface to interact with Altium Designer through Python. The server allows for querying and manipulation of PCB designs programmatically.
 
-Note: Having Claude place components on the PCB currently fails hard.
-
 ## Example commands
 - Run all output jobs
 - Create a symbol for the part in the attached datasheet and use the currently open symbol as a reference example.
 - Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` description as pin placement rules. Please modify for your own preferences.)
+- Create an op-amp symbol with a triangle body like the other op-amps in my library (symbols support line/polygon/arc/ellipse/label body graphics, not just rectangles)
 - Find me the LM358 symbol in my opamp library and open it
 - Create a multi-part symbol for a quad op-amp from the attached LM324 datasheet (creates parts A, B, C, D with shared V+/V- power pins)
 - Create a PCB footprint for the SMD part in the attached datasheet and add it to my open PcbLib
@@ -16,7 +15,7 @@ Note: Having Claude place components on the PCB currently fails hard.
 - Show all my inner layers. Show the top and bottom layer. Turn off solder paste.
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
-- Place the selected parts on my pcb with best practices for a switching regulator. Note: It tries, but does terrible placement. Hopefully I can find a way to improve this.
+- Place the selected parts on my pcb with best practices for a switching regulator, then verify clearances and show me a screenshot of the result
 - Give me a list of all IC designators in my design
 - Get me all length matching rules
 
@@ -154,7 +153,8 @@ The server provides several tools to interact with Altium Designer:
 
 ### Schematic/Symbol
 - `get_schematic_data`: Get schematic data for specified components
-- `create_schematic_symbol` ([YouTube](https://youtu.be/MMP7ZfmbCMI)): Passes pin list with pin type & coordinates to Altium script. Supports multi-part symbols (e.g. quad op-amps) via a `part_count` parameter and an `owner_part_id` field on each pin (use 0 for shared power/GND pins). Also supports active-low pin name overbars by placing a backslash after each overbarred character (e.g. `R\E\S\E\T\` renders as `RESET` with overbar).
+- `create_schematic_symbol` ([YouTube](https://youtu.be/MMP7ZfmbCMI)): Passes pin list with pin type & coordinates to Altium script. Supports multi-part symbols (e.g. quad op-amps) via a `part_count` parameter and an `owner_part_id` field on each pin (use 0 for shared power/GND pins), active-low pin name overbars by placing a backslash after each overbarred character (e.g. `R\E\S\E\T\` renders as `RESET` with overbar), per-pin length and name/designator visibility, and an optional `graphics` list (lines, polylines, polygons, rectangles, arcs, ellipses, labels) for non-rectangular bodies like op-amp triangles and diode glyphs. When creating a symbol, the agent is instructed to first look up a similar symbol in an available library as a style reference (skipped gracefully if no library is available).
+- `get_symbol_primitives`: Inventory a .SchLib (every symbol with per-type primitive counts) or dump one symbol's complete geometry (all graphics + pin details, in mils). Used to gap-analyze a library, to give the agent a reference example when drawing a new symbol, and to verify recreations. Verified by exact round-trips against a 284-symbol production library.
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `~\AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 - `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
@@ -168,8 +168,13 @@ The server provides several tools to interact with Altium Designer:
 - `get_pcb_layer_stackup`: Gets stackup info like dielectric, layer thickness, etc.
 - `set_pcb_layer_visibility` ([YouTube](https://youtu.be/XaWs5A6-h30)): Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
-- `get_selected_components_coordinates`: Get position and rotation information for currently selected components
+- `get_selected_components_coordinates`: Get position, rotation, layer, and footprint information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
+- `set_component_position`: Set one component's absolute position and rotation
+- `place_components`: Batch absolute placement - place any number of components (x, y, rotation, top/bottom layer) in a single transaction / one undo step. The workhorse for AI-driven placement.
+- `check_placement`: Verify a placement - finds overlaps and clearance violations against every other component on the board using true primitive-to-primitive distances (designator text excluded). Run after placing; a screenshot is not verification.
+- `check_orientation`: Advisory check for 2-pad passives whose rotation could be improved (e.g. a decoupling cap with its GND pad facing away from the IC). Geometry only - review suggestions with judgement; parts like pull-ups don't care.
+- `get_net_connections`: For the nets touching a set of components, list every pad on each net board-wide with per-net airline (MST) lengths - the data behind connectivity-driven placement (shorten critical nets, see off-cluster loads and filter banks).
 - `layout_duplicator` ([YouTube](https://youtu.be/HD-A_8iVV70)): Starts layout duplication assuming you have already selected the source components on the PCB.
 - `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
@@ -180,7 +185,7 @@ The cool thing about layout duplication this way as opposed to with Altium's bui
 - `create_pcb_footprint`: Create a new PCB footprint in the currently active .PcbLib document. Supports SMD pads (Rect, Round, Oval shapes) defined in mm relative to the component origin. Auto-generates a courtyard on Mech 15 and silkscreen with a pin 1 indicator (gap in the top-left corner), or accepts explicit courtyard dimensions. Contributed by [coffeedust](https://github.com/coffeedust) ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7)).
 
 ### Both
-- `get_screenshot`: Take a screenshot of the Altium PCB window or Schematic Window that is the current view. It should auto focus either of these if it is open but a different document type is focused. Note: Claude is not very good at analyzing images like circuits or layout screenshots. ChatGPT is very good at it, but they haven't released MCP yet, so this functionality will be more useful in the future.
+- `get_screenshot`: Take a screenshot of the Altium PCB window or Schematic Window that is the current view, returned as a proper image the agent can see. For PCB views, an optional `zoom_to` list of designators makes Altium zoom to those components before capture so they fill the frame. It should auto focus either document type if it is open but a different document type is focused.
 
 ### Server Status
 - `get_server_status`: Check the status of the MCP server, including paths to Altium and script files

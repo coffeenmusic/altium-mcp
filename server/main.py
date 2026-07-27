@@ -637,6 +637,17 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
 async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1, graphics: list = None) -> str:
     """
     Before executing, run get_symbol_placement_rules first.
+
+    Also look for a similar existing symbol to use as a style reference
+    before drawing: search a company/library .SchLib for a comparable part
+    (same category - op-amp, comparator, MCU, regulator, diode...) with
+    search_library_symbol, then dump it with get_symbol_primitives and
+    mirror its conventions (body style, pin lengths, pin name visibility,
+    grid spacing, glyph shapes). This produces symbols consistent with the
+    user's library. If no symbol library is available to reference, that is
+    fine - skip this step and proceed with the defaults below; do not treat
+    a missing reference as an error.
+
     Create a new schematic symbol in the current library with the specified pins
     Instructions: pins should be grouped together via function and only placed on
                   the left and right side in 100 mil increments
@@ -675,6 +686,7 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                     - "polygon|part|width|solid|x1|y1|x2|y2|..." (closed/filled shape)
                     - "rectangle|part|width|solid|x1|y1|x2|y2"
                     - "arc|part|width|cx|cy|radius|start_angle|end_angle" (degrees CCW from 3 o'clock)
+                    - "elliptical_arc|part|width|cx|cy|radius|secondary_radius|start_angle|end_angle"
                     - "ellipse|part|width|solid|cx|cy|radius|secondary_radius"
                     - "label|part|x|y|text" (free text annotation)
                     Tip: to reproduce an existing symbol's style, dump it first

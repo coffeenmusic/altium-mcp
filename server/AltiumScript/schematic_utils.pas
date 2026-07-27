@@ -453,6 +453,23 @@ begin
                 SchComponent.AddSchObject(SchArc);
             end;
         end
+        else if (GType = 'elliptical_arc') then
+        begin
+            SchArc := SchServer.SchObjectFactory(eEllipticalArc, eCreate_Default);
+            if (SchArc <> Nil) then
+            begin
+                SchArc.LineWidth := GWidth;
+                SchArc.Location := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 3))),
+                                         MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 4))));
+                SchArc.Radius := MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 5)));
+                SchArc.SecondaryRadius := MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 6)));
+                SchArc.StartAngle := SafeStrToFloat(GetFieldFromPipeString(Entry, 7));
+                SchArc.EndAngle := SafeStrToFloat(GetFieldFromPipeString(Entry, 8));
+                SchArc.OwnerPartId := GPart;
+                SchArc.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchArc);
+            end;
+        end
         else if (GType = 'ellipse') then
         begin
             SchEllipse := SchServer.SchObjectFactory(eEllipse, eCreate_Default);
@@ -651,8 +668,12 @@ begin
             Exit;
         end;
 
-        // Open the library document
-        ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
+        // Open the library document. If it is already open, only focus it -
+        // re-opening reloads from disk and silently discards unsaved changes.
+        if Client.IsDocumentOpen(LibraryPath) then
+            ServerDoc := Client.GetDocumentByPath(LibraryPath)
+        else
+            ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
         if ServerDoc = Nil then
         begin
             Result := 'ERROR: Failed to open library: ' + LibraryPath;
@@ -816,7 +837,10 @@ var
 begin
     Result := '';
 
-    // Open the requested library, or use the currently focused SchLib
+    // Open the requested library, or use the currently focused SchLib.
+    // IMPORTANT: if the document is already open, only focus it -
+    // re-opening an open document reloads it from disk and silently
+    // discards any unsaved changes (e.g. symbols created this session).
     if (LibraryPath <> '') then
     begin
         if not FileExists(LibraryPath) then
@@ -824,7 +848,10 @@ begin
             Result := 'ERROR: Library file not found: ' + LibraryPath;
             Exit;
         end;
-        ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
+        if Client.IsDocumentOpen(LibraryPath) then
+            ServerDoc := Client.GetDocumentByPath(LibraryPath)
+        else
+            ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
         if ServerDoc = Nil then
         begin
             Result := 'ERROR: Failed to open library: ' + LibraryPath;
@@ -908,16 +935,18 @@ begin
                     SymProps.Free;
                 end;
             end
-            else if (UpperCase(LibComp.LibReference) = UpperCase(SymbolName)) then
+            else if (SymbolName = '*') or (UpperCase(LibComp.LibReference) = UpperCase(SymbolName)) then
             begin
-                // Dump mode: full geometry of every primitive
+                // Dump mode: full geometry of every primitive.
+                // SymbolName '*' dumps every symbol into the symbols array.
                 Found := True;
-                AddJSONProperty(ResultProps, 'symbol_name', LibComp.LibReference);
-                AddJSONProperty(ResultProps, 'description', LibComp.ComponentDescription);
-                AddJSONInteger(ResultProps, 'part_count', LibComp.PartCount);
-
+                SymProps := TStringList.Create;
                 PrimsArray := TStringList.Create;
                 try
+                    AddJSONProperty(SymProps, 'symbol_name', LibComp.LibReference);
+                    AddJSONProperty(SymProps, 'description', LibComp.ComponentDescription);
+                    AddJSONInteger(SymProps, 'part_count', LibComp.PartCount);
+
                     PrimIterator := LibComp.SchIterator_Create;
                     Prim := PrimIterator.FirstSchObject;
                     while (Prim <> Nil) do
@@ -1059,8 +1088,15 @@ begin
                     end;
                     LibComp.SchIterator_Destroy(PrimIterator);
 
-                    ResultProps.Add(BuildJSONArray(PrimsArray, 'primitives', 1));
+                    SymProps.Add(BuildJSONArray(PrimsArray, 'primitives', 1));
+
+                    if (SymbolName = '*') then
+                        SymbolsArray.Add(BuildJSONObject(SymProps, 1))
+                    else
+                        for i := 0 to SymProps.Count - 1 do
+                            ResultProps.Add(SymProps[i]);
                 finally
+                    SymProps.Free;
                     PrimsArray.Free;
                 end;
             end;
@@ -1070,7 +1106,7 @@ begin
 
         CurrentLib.SchIterator_Destroy(LibIterator);
 
-        if (SymbolName = '') then
+        if (SymbolName = '') or (SymbolName = '*') then
         begin
             AddJSONInteger(ResultProps, 'symbol_count', SymbolsArray.Count);
             ResultProps.Add(BuildJSONArray(SymbolsArray, 'symbols', 1));
