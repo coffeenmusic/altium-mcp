@@ -170,14 +170,26 @@ begin
     end;
 end;
 
-function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; PartCount: Integer = 1): String;
+function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; GraphicsList: TStringList; PartCount: Integer = 1): String;
 var
     CurrentLib       : ISch_Lib;
     SchComponent     : ISch_Component;
     SchPin           : ISch_Pin;
     R                : ISch_Rectangle;
+    SchLine          : ISch_Line;
+    SchPolyline      : ISch_Polyline;
+    SchPolygon       : ISch_Polygon;
+    SchArc           : ISch_Arc;
+    SchEllipse       : ISch_Ellipse;
+    SchLabel         : ISch_Label;
     I, J, PinCount   : Integer;
-    PinData          : TStringList;
+    GraphicsCount    : Integer;
+    Entry            : String;
+    FieldValue       : String;
+    GType            : String;
+    GPart            : Integer;
+    GWidth           : Integer;
+    FIdx, VCount, V  : Integer;
     PinName, PinNum  : String;
     PinType          : String;
     PinOrient        : String;
@@ -210,22 +222,28 @@ begin
         end
         else
         begin
-            // Check for owner_part_id in pin data to auto-detect PartCount
-            PinData := TStringList.Create;
-            try
-                PinData.Delimiter := '|';
-                PinData.DelimitedText := PinsList[I];
-                if (PinData.Count >= 7) then
-                begin
-                    PinOwnerPartId := StrToInt(PinData[6]);
-                    if (PinOwnerPartId > PartCount) then
-                        PartCount := PinOwnerPartId;
-                end;
-            finally
-                PinData.Free;
+            FieldValue := Trim(GetFieldFromPipeString(PinsList[I], 6));
+            if (FieldValue <> '') then
+            begin
+                PinOwnerPartId := StrToInt(FieldValue);
+                if (PinOwnerPartId > PartCount) then
+                    PartCount := PinOwnerPartId;
             end;
         end;
     end;
+
+    // Also auto-detect PartCount from graphics owner part ids
+    if (GraphicsList <> nil) then
+        for I := 0 to GraphicsList.Count - 1 do
+        begin
+            FieldValue := Trim(GetFieldFromPipeString(GraphicsList[I], 1));
+            if (FieldValue <> '') then
+            begin
+                GPart := StrToInt(FieldValue);
+                if (GPart > PartCount) then
+                    PartCount := GPart;
+            end;
+        end;
 
     // Create a library component (a page of the library is created)
     SchComponent := SchServer.SchObjectFactory(eSchComponent, eCreate_Default);
@@ -245,8 +263,15 @@ begin
     SchComponent.ComponentDescription := Description;
     SchComponent.Designator.Text := 'U?';
 
-    // Create a body rectangle for each part
+    // Create a body for each part: an auto-sized rectangle when no explicit
+    // graphics are given (legacy behavior), otherwise the caller's graphics
+    // define the body and only the designator position is derived from pins
     PinCount := 0;
+    if (GraphicsList <> nil) then
+        GraphicsCount := GraphicsList.Count
+    else
+        GraphicsCount := 0;
+
     for J := 1 to PartCount do
     begin
         // Compute bounding box for this part's pins (including shared pins with OwnerPartId=0)
@@ -257,34 +282,26 @@ begin
         begin
             if (Pos('Description=', PinsList[I]) = 1) then Continue;
 
-            PinData := TStringList.Create;
-            try
-                PinData.Delimiter := '|';
-                PinData.DelimitedText := PinsList[I];
+            FieldValue := Trim(GetFieldFromPipeString(PinsList[I], 4));
+            if (FieldValue = '') then Continue;
+            PinX := StrToInt(FieldValue);
+            PinY := StrToInt(Trim(GetFieldFromPipeString(PinsList[I], 5)));
 
-                if (PinData.Count >= 6) then
-                begin
-                    PinX := StrToInt(PinData[4]);
-                    PinY := StrToInt(PinData[5]);
+            // Determine owner part id (default 1 for backward compatibility)
+            FieldValue := Trim(GetFieldFromPipeString(PinsList[I], 6));
+            if (FieldValue <> '') then
+                PinOwnerPartId := StrToInt(FieldValue)
+            else
+                PinOwnerPartId := 1;
 
-                    // Determine owner part id (default 1 for backward compatibility)
-                    if (PinData.Count >= 7) then
-                        PinOwnerPartId := StrToInt(PinData[6])
-                    else
-                        PinOwnerPartId := 1;
-
-                    // Include pin in this part's bounding box if it belongs to this part or is shared (0)
-                    if (PinOwnerPartId = J) or (PinOwnerPartId = 0) then
-                    begin
-                        MinX := Min(MinX, PinX);
-                        MaxX := Max(MaxX, PinX);
-                        MinY := Min(MinY, PinY);
-                        MaxY := Max(MaxY, PinY);
-                        HasPins := True;
-                    end;
-                end;
-            finally
-                PinData.Free;
+            // Include pin in this part's bounding box if it belongs to this part or is shared (0)
+            if (PinOwnerPartId = J) or (PinOwnerPartId = 0) then
+            begin
+                MinX := Min(MinX, PinX);
+                MaxX := Max(MaxX, PinX);
+                MinY := Min(MinY, PinY);
+                MaxY := Max(MaxY, PinY);
+                HasPins := True;
             end;
         end;
 
@@ -294,19 +311,22 @@ begin
             MinX := 300; MinY := 0; MaxX := 1000; MaxY := 1000;
         end;
 
-        // Create a rectangle for this part's body
-        R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
-        if (R <> Nil) Then
+        // Create an auto-sized body rectangle only when no graphics are given
+        if (GraphicsCount = 0) then
         begin
-            R.LineWidth := eSmall;
-            R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY - 100));
-            R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY + 100));
-            R.AreaColor := $00B0FFFF; // Yellow (BGR format)
-            R.Color := $00FF0000;     // Blue (BGR format)
-            R.IsSolid := True;
-            R.OwnerPartId := J;
-            R.OwnerPartDisplayMode := 0;
-            SchComponent.AddSchObject(R);
+            R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
+            if (R <> Nil) Then
+            begin
+                R.LineWidth := eSmall;
+                R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY - 100));
+                R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY + 100));
+                R.AreaColor := $00B0FFFF; // Yellow (BGR format)
+                R.Color := $00FF0000;     // Blue (BGR format)
+                R.IsSolid := True;
+                R.OwnerPartId := J;
+                R.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(R);
+            end;
         end;
 
         // Position designator using Part 1's bounding box
@@ -314,56 +334,215 @@ begin
             SchComponent.Designator.Location := Point(MilsToCoord(MinX), MilsToCoord(MaxY + 100));
     end;
 
-    // Add pins to the component
+    // Create explicit graphic primitives. Entry formats (coords in mils,
+    // width 0..3 = zero/small/medium/large, solid 0/1):
+    //   line|part|width|x1|y1|x2|y2
+    //   polyline|part|width|x1|y1|x2|y2|...
+    //   polygon|part|width|solid|x1|y1|x2|y2|...
+    //   rectangle|part|width|solid|x1|y1|x2|y2
+    //   arc|part|width|cx|cy|radius|start_angle|end_angle
+    //   ellipse|part|width|solid|cx|cy|radius|secondary_radius
+    //   label|part|x|y|text
+    for I := 0 to GraphicsCount - 1 do
+    begin
+        Entry := Trim(GraphicsList[I]);
+        if (Entry = '') then Continue;
+
+        GType := LowerCase(Trim(GetFieldFromPipeString(Entry, 0)));
+
+        FieldValue := Trim(GetFieldFromPipeString(Entry, 1));
+        if (FieldValue <> '') then
+            GPart := StrToInt(FieldValue)
+        else
+            GPart := 1;
+
+        FieldValue := Trim(GetFieldFromPipeString(Entry, 2));
+        if (FieldValue <> '') then
+            GWidth := StrToInt(FieldValue)
+        else
+            GWidth := 1;
+
+        if (GType = 'line') then
+        begin
+            SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
+            if (SchLine <> Nil) then
+            begin
+                SchLine.LineWidth := GWidth;
+                SchLine.Location := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 3))),
+                                          MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 4))));
+                SchLine.Corner := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 5))),
+                                        MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 6))));
+                SchLine.OwnerPartId := GPart;
+                SchLine.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchLine);
+            end;
+        end
+        else if (GType = 'polyline') then
+        begin
+            SchPolyline := SchServer.SchObjectFactory(ePolyline, eCreate_Default);
+            if (SchPolyline <> Nil) then
+            begin
+                SchPolyline.LineWidth := GWidth;
+                // Count coordinate fields from index 3 up
+                VCount := 0;
+                while (Trim(GetFieldFromPipeString(Entry, 3 + VCount)) <> '') do
+                    VCount := VCount + 1;
+                VCount := VCount div 2;
+                SchPolyline.VerticesCount := VCount;
+                for V := 1 to VCount do
+                    SchPolyline.Vertex[V] := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 3 + (V-1)*2))),
+                                                   MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 4 + (V-1)*2))));
+                SchPolyline.OwnerPartId := GPart;
+                SchPolyline.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchPolyline);
+            end;
+        end
+        else if (GType = 'polygon') then
+        begin
+            SchPolygon := SchServer.SchObjectFactory(ePolygon, eCreate_Default);
+            if (SchPolygon <> Nil) then
+            begin
+                SchPolygon.LineWidth := GWidth;
+                SchPolygon.IsSolid := (Trim(GetFieldFromPipeString(Entry, 3)) = '1');
+                SchPolygon.AreaColor := $00B0FFFF; // Standard body yellow (BGR)
+                SchPolygon.Color := $00FF0000;     // Standard body blue (BGR)
+                VCount := 0;
+                while (Trim(GetFieldFromPipeString(Entry, 4 + VCount)) <> '') do
+                    VCount := VCount + 1;
+                VCount := VCount div 2;
+                SchPolygon.VerticesCount := VCount;
+                for V := 1 to VCount do
+                    SchPolygon.Vertex[V] := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 4 + (V-1)*2))),
+                                                  MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 5 + (V-1)*2))));
+                SchPolygon.OwnerPartId := GPart;
+                SchPolygon.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchPolygon);
+            end;
+        end
+        else if (GType = 'rectangle') then
+        begin
+            R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
+            if (R <> Nil) then
+            begin
+                R.LineWidth := GWidth;
+                R.IsSolid := (Trim(GetFieldFromPipeString(Entry, 3)) = '1');
+                R.AreaColor := $00B0FFFF;
+                R.Color := $00FF0000;
+                R.Location := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 4))),
+                                    MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 5))));
+                R.Corner := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 6))),
+                                  MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 7))));
+                R.OwnerPartId := GPart;
+                R.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(R);
+            end;
+        end
+        else if (GType = 'arc') then
+        begin
+            SchArc := SchServer.SchObjectFactory(eArc, eCreate_Default);
+            if (SchArc <> Nil) then
+            begin
+                SchArc.LineWidth := GWidth;
+                SchArc.Location := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 3))),
+                                         MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 4))));
+                SchArc.Radius := MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 5)));
+                SchArc.StartAngle := SafeStrToFloat(GetFieldFromPipeString(Entry, 6));
+                SchArc.EndAngle := SafeStrToFloat(GetFieldFromPipeString(Entry, 7));
+                SchArc.OwnerPartId := GPart;
+                SchArc.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchArc);
+            end;
+        end
+        else if (GType = 'ellipse') then
+        begin
+            SchEllipse := SchServer.SchObjectFactory(eEllipse, eCreate_Default);
+            if (SchEllipse <> Nil) then
+            begin
+                SchEllipse.LineWidth := GWidth;
+                SchEllipse.IsSolid := (Trim(GetFieldFromPipeString(Entry, 3)) = '1');
+                SchEllipse.Location := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 4))),
+                                             MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 5))));
+                SchEllipse.Radius := MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 6)));
+                SchEllipse.SecondaryRadius := MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 7)));
+                SchEllipse.OwnerPartId := GPart;
+                SchEllipse.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchEllipse);
+            end;
+        end
+        else if (GType = 'label') then
+        begin
+            SchLabel := SchServer.SchObjectFactory(eLabel, eCreate_Default);
+            if (SchLabel <> Nil) then
+            begin
+                // label|part|x|y|text (no width field)
+                SchLabel.Location := Point(MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 2))),
+                                           MilsToCoord(SafeStrToFloat(GetFieldFromPipeString(Entry, 3))));
+                SchLabel.Text := GetFieldFromPipeString(Entry, 4);
+                SchLabel.OwnerPartId := GPart;
+                SchLabel.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchLabel);
+            end;
+        end;
+    end;
+
+    // Add pins to the component. Format:
+    //   number|name|electrical|orientation|x|y[|owner_part_id[|length[|show_name[|show_designator]]]]
     for I := 0 to PinsList.Count - 1 do
     begin
         if (Pos('Description=', PinsList[I]) = 1) then Continue;
 
-        PinData := TStringList.Create;
-        try
-            PinData.Delimiter := '|';
-            PinData.DelimitedText := PinsList[I];
+        Entry := PinsList[I];
+        FieldValue := Trim(GetFieldFromPipeString(Entry, 5));
+        if (FieldValue = '') then Continue;
 
-            if (PinData.Count >= 6) then
-            begin
-                PinNum := PinData[0];
-                PinName := PinData[1];
-                PinType := PinData[2];
-                PinOrient := PinData[3];
-                PinX := StrToInt(PinData[4]);
-                PinY := StrToInt(PinData[5]);
+        PinNum := Trim(GetFieldFromPipeString(Entry, 0));
+        PinName := Trim(GetFieldFromPipeString(Entry, 1));
+        PinType := Trim(GetFieldFromPipeString(Entry, 2));
+        PinOrient := Trim(GetFieldFromPipeString(Entry, 3));
+        PinX := StrToInt(Trim(GetFieldFromPipeString(Entry, 4)));
+        PinY := StrToInt(FieldValue);
 
-                // Determine owner part id (default 1 for backward compatibility)
-                if (PinData.Count >= 7) then
-                    PinOwnerPartId := StrToInt(PinData[6])
-                else
-                    PinOwnerPartId := 1;
+        // Determine owner part id (default 1 for backward compatibility)
+        FieldValue := Trim(GetFieldFromPipeString(Entry, 6));
+        if (FieldValue <> '') then
+            PinOwnerPartId := StrToInt(FieldValue)
+        else
+            PinOwnerPartId := 1;
 
-                // Create a pin
-                SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
-                if (SchPin = Nil) Then
-                    Continue;
+        // Create a pin
+        SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
+        if (SchPin = Nil) Then
+            Continue;
 
-                // Set pin properties
-                PinElec := StrToPinElectricalType(PinType);
-                PinOrientation := StrToPinOrientation(PinOrient);
+        // Set pin properties
+        PinElec := StrToPinElectricalType(PinType);
+        PinOrientation := StrToPinOrientation(PinOrient);
 
-                SchPin.Designator := PinNum;
-                SchPin.Name := PinName;
-                SchPin.Electrical := PinElec;
-                SchPin.Orientation := PinOrientation;
-                SchPin.Location := Point(MilsToCoord(PinX), MilsToCoord(PinY));
+        SchPin.Designator := PinNum;
+        SchPin.Name := PinName;
+        SchPin.Electrical := PinElec;
+        SchPin.Orientation := PinOrientation;
+        SchPin.Location := Point(MilsToCoord(PinX), MilsToCoord(PinY));
 
-                // Set ownership to the specified part (0 = shared across all parts)
-                SchPin.OwnerPartId := PinOwnerPartId;
-                SchPin.OwnerPartDisplayMode := 0;
+        // Optional pin length in mils
+        FieldValue := Trim(GetFieldFromPipeString(Entry, 7));
+        if (FieldValue <> '') then
+            SchPin.PinLength := MilsToCoord(SafeStrToFloat(FieldValue));
 
-                SchComponent.AddSchObject(SchPin);
-                PinCount := PinCount + 1;
-            end;
-        finally
-            PinData.Free;
-        end;
+        // Optional name/designator visibility (1 = shown, 0 = hidden)
+        FieldValue := Trim(GetFieldFromPipeString(Entry, 8));
+        if (FieldValue <> '') then
+            SchPin.ShowName := (FieldValue = '1');
+        FieldValue := Trim(GetFieldFromPipeString(Entry, 9));
+        if (FieldValue <> '') then
+            SchPin.ShowDesignator := (FieldValue = '1');
+
+        // Set ownership to the specified part (0 = shared across all parts)
+        SchPin.OwnerPartId := PinOwnerPartId;
+        SchPin.OwnerPartDisplayMode := 0;
+
+        SchComponent.AddSchObject(SchPin);
+        PinCount := PinCount + 1;
     end;
 
     // Add the component to the library
@@ -583,6 +762,335 @@ begin
         MatchesArray.Free;
         AllSymbolsArray.Free;
         ResultProps.Free;
+    end;
+end;
+
+// Dump the vertices of a polyline-like object as a JSON array property
+procedure AddVerticesProperty(Props: TStringList; Poly: ISch_Polyline);
+var
+    VertsArray : TStringList;
+    VProps     : TStringList;
+    V          : Integer;
+begin
+    VertsArray := TStringList.Create;
+    try
+        for V := 1 to Poly.VerticesCount do
+        begin
+            VProps := TStringList.Create;
+            try
+                AddJSONNumber(VProps, 'x', CoordToMils(Poly.Vertex[V].X));
+                AddJSONNumber(VProps, 'y', CoordToMils(Poly.Vertex[V].Y));
+                VertsArray.Add(BuildJSONObject(VProps, 3));
+            finally
+                VProps.Free;
+            end;
+        end;
+        Props.Add(BuildJSONArray(VertsArray, 'vertices', 2));
+    finally
+        VertsArray.Free;
+    end;
+end;
+
+// Get the graphic primitives of symbols in a schematic library.
+// SymbolName = '' -> inventory mode: every symbol with per-type primitive
+// counts. SymbolName given -> full geometry dump of that symbol (mils).
+function GetSymbolPrimitives(ROOT_DIR: String; LibraryPath: String; SymbolName: String): String;
+var
+    CurrentLib   : ISch_Lib;
+    LibIterator  : ISch_Iterator;
+    LibComp      : ISch_Component;
+    PrimIterator : ISch_Iterator;
+    Prim         : ISch_GraphicalObject;
+    ServerDoc    : IServerDocument;
+    ResultProps  : TStringList;
+    SymbolsArray : TStringList;
+    SymProps     : TStringList;
+    PrimsArray   : TStringList;
+    PrimProps    : TStringList;
+    OutputLines  : TStringList;
+    Counts       : TStringList;
+    TypeName     : String;
+    i            : Integer;
+    Found        : Boolean;
+    PinObj       : ISch_Pin;
+begin
+    Result := '';
+
+    // Open the requested library, or use the currently focused SchLib
+    if (LibraryPath <> '') then
+    begin
+        if not FileExists(LibraryPath) then
+        begin
+            Result := 'ERROR: Library file not found: ' + LibraryPath;
+            Exit;
+        end;
+        ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
+        if ServerDoc = Nil then
+        begin
+            Result := 'ERROR: Failed to open library: ' + LibraryPath;
+            Exit;
+        end;
+        Client.ShowDocument(ServerDoc);
+        Sleep(500);
+    end;
+
+    CurrentLib := SchServer.GetCurrentSchDocument;
+    if (CurrentLib = Nil) or (CurrentLib.ObjectID <> eSchLib) then
+    begin
+        Result := 'ERROR: No schematic library is open (provide library_path or open a .SchLib)';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    SymbolsArray := TStringList.Create;
+    Found := False;
+
+    try
+        AddJSONProperty(ResultProps, 'library_name', ExtractFileName(CurrentLib.DocumentName));
+
+        LibIterator := CurrentLib.SchLibIterator_Create;
+        LibIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+
+        LibComp := LibIterator.FirstSchObject;
+        while (LibComp <> Nil) do
+        begin
+            if (SymbolName = '') then
+            begin
+                // Inventory mode: count primitives by type
+                Counts := TStringList.Create;
+                SymProps := TStringList.Create;
+                try
+                    PrimIterator := LibComp.SchIterator_Create;
+                    Prim := PrimIterator.FirstSchObject;
+                    while (Prim <> Nil) do
+                    begin
+                        case Prim.ObjectId of
+                            ePin:            TypeName := 'pins';
+                            eRectangle:      TypeName := 'rectangles';
+                            eLine:           TypeName := 'lines';
+                            ePolyline:       TypeName := 'polylines';
+                            ePolygon:        TypeName := 'polygons';
+                            eArc:            TypeName := 'arcs';
+                            eEllipticalArc:  TypeName := 'elliptical_arcs';
+                            eEllipse:        TypeName := 'ellipses';
+                            eBezier:         TypeName := 'beziers';
+                            ePie:            TypeName := 'pies';
+                            eRoundRectangle: TypeName := 'round_rectangles';
+                            eLabel:          TypeName := 'labels';
+                            eParameter:      TypeName := '';
+                            eDesignator:     TypeName := '';
+                        else
+                            TypeName := 'other';
+                        end;
+
+                        if (TypeName <> '') then
+                        begin
+                            i := Counts.IndexOfName(TypeName);
+                            if (i < 0) then
+                                Counts.Add(TypeName + '=1')
+                            else
+                                Counts[i] := TypeName + '=' + IntToStr(StrToInt(Counts.ValueFromIndex[i]) + 1);
+                        end;
+
+                        Prim := PrimIterator.NextSchObject;
+                    end;
+                    LibComp.SchIterator_Destroy(PrimIterator);
+
+                    AddJSONProperty(SymProps, 'name', LibComp.LibReference);
+                    AddJSONProperty(SymProps, 'description', LibComp.ComponentDescription);
+                    AddJSONInteger(SymProps, 'part_count', LibComp.PartCount);
+                    for i := 0 to Counts.Count - 1 do
+                        AddJSONInteger(SymProps, Counts.Names[i], StrToInt(Counts.ValueFromIndex[i]));
+
+                    SymbolsArray.Add(BuildJSONObject(SymProps, 1));
+                finally
+                    Counts.Free;
+                    SymProps.Free;
+                end;
+            end
+            else if (UpperCase(LibComp.LibReference) = UpperCase(SymbolName)) then
+            begin
+                // Dump mode: full geometry of every primitive
+                Found := True;
+                AddJSONProperty(ResultProps, 'symbol_name', LibComp.LibReference);
+                AddJSONProperty(ResultProps, 'description', LibComp.ComponentDescription);
+                AddJSONInteger(ResultProps, 'part_count', LibComp.PartCount);
+
+                PrimsArray := TStringList.Create;
+                try
+                    PrimIterator := LibComp.SchIterator_Create;
+                    Prim := PrimIterator.FirstSchObject;
+                    while (Prim <> Nil) do
+                    begin
+                        PrimProps := TStringList.Create;
+                        try
+                            case Prim.ObjectId of
+                                ePin:
+                                begin
+                                    PinObj := Prim;
+                                    AddJSONProperty(PrimProps, 'type', 'pin');
+                                    AddJSONProperty(PrimProps, 'pin_number', PinObj.Designator);
+                                    AddJSONProperty(PrimProps, 'pin_name', PinObj.Name);
+                                    AddJSONInteger(PrimProps, 'electrical', PinObj.Electrical);
+                                    AddJSONInteger(PrimProps, 'orientation', PinObj.Orientation);
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(PinObj.Location.X));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(PinObj.Location.Y));
+                                    AddJSONNumber(PrimProps, 'length', CoordToMils(PinObj.PinLength));
+                                    AddJSONBoolean(PrimProps, 'show_name', PinObj.ShowName);
+                                    AddJSONBoolean(PrimProps, 'show_designator', PinObj.ShowDesignator);
+                                end;
+                                eRectangle:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'rectangle');
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.Location.Y));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.Corner.X));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.Corner.Y));
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                    AddJSONBoolean(PrimProps, 'is_solid', Prim.IsSolid);
+                                end;
+                                eLine:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'line');
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.Location.Y));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.Corner.X));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.Corner.Y));
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                end;
+                                ePolyline:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'polyline');
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                    AddVerticesProperty(PrimProps, Prim);
+                                end;
+                                ePolygon:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'polygon');
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                    AddJSONBoolean(PrimProps, 'is_solid', Prim.IsSolid);
+                                    AddVerticesProperty(PrimProps, Prim);
+                                end;
+                                eArc:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'arc');
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
+                                    AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
+                                    AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                end;
+                                eEllipticalArc:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'elliptical_arc');
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
+                                    AddJSONNumber(PrimProps, 'secondary_radius', CoordToMils(Prim.SecondaryRadius));
+                                    AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
+                                    AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                end;
+                                eEllipse:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'ellipse');
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
+                                    AddJSONNumber(PrimProps, 'secondary_radius', CoordToMils(Prim.SecondaryRadius));
+                                    AddJSONBoolean(PrimProps, 'is_solid', Prim.IsSolid);
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                end;
+                                eBezier:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'bezier');
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                    AddVerticesProperty(PrimProps, Prim);
+                                end;
+                                ePie:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'pie');
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
+                                    AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
+                                    AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
+                                    AddJSONBoolean(PrimProps, 'is_solid', Prim.IsSolid);
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                end;
+                                eRoundRectangle:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'round_rectangle');
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.Location.Y));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.Corner.X));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.Corner.Y));
+                                    AddJSONNumber(PrimProps, 'corner_x_radius', CoordToMils(Prim.CornerXRadius));
+                                    AddJSONNumber(PrimProps, 'corner_y_radius', CoordToMils(Prim.CornerYRadius));
+                                    AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
+                                    AddJSONBoolean(PrimProps, 'is_solid', Prim.IsSolid);
+                                end;
+                                eLabel:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'label');
+                                    AddJSONProperty(PrimProps, 'text', Prim.Text);
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.Location.X));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.Location.Y));
+                                end;
+                            else
+                                AddJSONProperty(PrimProps, 'type', '');
+                            end;
+
+                            if (PrimProps.Count > 0) then
+                            begin
+                                // Skip parameters/designator and unknown types
+                                if (Pos('"type": ""', PrimProps[0]) = 0) then
+                                begin
+                                    AddJSONInteger(PrimProps, 'owner_part_id', Prim.OwnerPartId);
+                                    PrimsArray.Add(BuildJSONObject(PrimProps, 1));
+                                end;
+                            end;
+                        finally
+                            PrimProps.Free;
+                        end;
+
+                        Prim := PrimIterator.NextSchObject;
+                    end;
+                    LibComp.SchIterator_Destroy(PrimIterator);
+
+                    ResultProps.Add(BuildJSONArray(PrimsArray, 'primitives', 1));
+                finally
+                    PrimsArray.Free;
+                end;
+            end;
+
+            LibComp := LibIterator.NextSchObject;
+        end;
+
+        CurrentLib.SchIterator_Destroy(LibIterator);
+
+        if (SymbolName = '') then
+        begin
+            AddJSONInteger(ResultProps, 'symbol_count', SymbolsArray.Count);
+            ResultProps.Add(BuildJSONArray(SymbolsArray, 'symbols', 1));
+        end
+        else if not Found then
+        begin
+            Result := 'ERROR: Symbol not found in library: ' + SymbolName;
+            Exit;
+        end;
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + '\temp_symbol_primitives.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        SymbolsArray.Free;
     end;
 end;
 

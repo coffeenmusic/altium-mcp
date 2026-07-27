@@ -202,11 +202,13 @@ var
     ComponentName: String;
     PartCount: Integer;
     PinsList: TStringList;
+    GraphicsList: TStringList;
 begin
     // Look for component name
     ComponentName := '';
     PartCount := 1;  // Default to single-part symbol
     PinsList := TStringList.Create;
+    GraphicsList := TStringList.Create;
 
     try
         // Parse parameters from the request
@@ -249,6 +251,25 @@ begin
                     i := i + 1;
                 end;
             end
+            // Look for graphics array
+            else if (Pos('"graphics"', RequestData[i]) > 0) then
+            begin
+                // Parse the array in the next lines
+                i := i + 1; // Move to the next line (should be '[')
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        GraphicsList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end
             // Look for description
             else if (Pos('"description"', RequestData[i]) > 0) then
             begin
@@ -261,7 +282,7 @@ begin
 
         if ComponentName <> '' then
         begin
-            Result := CreateSchematicSymbol(ComponentName, PinsList, PartCount);
+            Result := CreateSchematicSymbol(ComponentName, PinsList, GraphicsList, PartCount);
         end
         else
         begin
@@ -270,6 +291,7 @@ begin
         end;
     finally
         PinsList.Free;
+        GraphicsList.Free;
     end;
 end;
 
@@ -475,6 +497,41 @@ begin
     finally
         DesignatorsList.Free;
     end;
+end;
+
+// Extract the get symbol primitives logic
+function ExecuteGetSymbolPrimitives(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    LibraryPath: String;
+    SymbolName: String;
+begin
+    LibraryPath := '';
+    SymbolName := '';
+
+    // Parse parameters from the request
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        // Look for library_path
+        if (Pos('"library_path"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            LibraryPath := ParamValue;
+        end
+        // Look for symbol_name
+        else if (Pos('"symbol_name"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            SymbolName := ParamValue;
+        end;
+    end;
+
+    Result := GetSymbolPrimitives(ROOT_DIR, LibraryPath, SymbolName);
 end;
 
 // Extract the get net connections logic
@@ -914,6 +971,8 @@ begin
             Result := ExecuteCheckPlacement(RequestData);
         'get_net_connections':
             Result := ExecuteGetNetConnections(RequestData);
+        'get_symbol_primitives':
+            Result := ExecuteGetSymbolPrimitives(RequestData);
         'layout_duplicator':
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':

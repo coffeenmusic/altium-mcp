@@ -634,7 +634,7 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1) -> str:
+async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1, graphics: list = None) -> str:
     """
     Before executing, run get_symbol_placement_rules first.
     Create a new schematic symbol in the current library with the specified pins
@@ -650,7 +650,8 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     Args:
         symbol_name (str): Name of the symbol to create
         description (str): Description of the schematic symbol
-        pins (list): List of pin data in format ["pin_number|pin_name|pin_type|pin_orientation|x|y|owner_part_id", ...]
+        pins (list): List of pin data in format
+                    "pin_number|pin_name|pin_type|pin_orientation|x|y[|owner_part_id[|length[|show_name[|show_designator]]]]"
                     Pin types: eElectricHiZ, eElectricInput, eElectricIO, eElectricOpenCollector,
                                eElectricOpenEmitter, eElectricOutput, eElectricPassive, eElectricPower
                     Pin orientations: eRotate0 (right), eRotate90 (down), eRotate180 (left), eRotate270 (up)
@@ -658,23 +659,45 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                     owner_part_id (optional): Part number the pin belongs to (1-based).
                                Use 0 for pins shared across all parts (e.g. power/GND).
                                Defaults to 1 if omitted. Only needed for multi-part symbols.
+                    length (optional): pin length in mils (default 300)
+                    show_name / show_designator (optional): 1 or 0 to show/hide
+                               the pin name / number (e.g. op-amp pins often hide names)
         part_count (int): Number of parts in the symbol (default 1).
                          Use >1 for multi-part symbols like quad op-amps or hex buffers.
+        graphics (list, optional): Explicit body graphics. When given, the
+                    default auto-sized body rectangle is NOT drawn - the
+                    graphics fully define the symbol body (triangles for
+                    op-amps, diode glyphs, etc.). Entry formats (coordinates
+                    in mils; part = owner part id, 1-based; width 0-3 =
+                    zero/small/medium/large; solid 1 or 0):
+                    - "line|part|width|x1|y1|x2|y2"
+                    - "polyline|part|width|x1|y1|x2|y2|..." (any number of vertices)
+                    - "polygon|part|width|solid|x1|y1|x2|y2|..." (closed/filled shape)
+                    - "rectangle|part|width|solid|x1|y1|x2|y2"
+                    - "arc|part|width|cx|cy|radius|start_angle|end_angle" (degrees CCW from 3 o'clock)
+                    - "ellipse|part|width|solid|cx|cy|radius|secondary_radius"
+                    - "label|part|x|y|text" (free text annotation)
+                    Tip: to reproduce an existing symbol's style, dump it first
+                    with get_symbol_primitives and mirror its primitives.
 
     Returns:
         str: JSON object with the result of the component creation
     """
     logger.info(f"Creating schematic symbol: {symbol_name} with {len(pins)} pins, {part_count} part(s)")
 
-    # Execute the command in Altium to create a symbol with pins
+    params = {
+        "symbol_name": symbol_name,
+        "description": description,
+        "part_count": part_count,
+        "pins": pins
+    }
+    if graphics:
+        params["graphics"] = graphics
+
+    # Execute the command in Altium to create the symbol
     response = await altium_bridge.execute_command(
         "create_schematic_symbol",
-        {
-            "symbol_name": symbol_name,
-            "description": description,
-            "part_count": part_count,
-            "pins": pins
-        }
+        params
     )
     
     # Check for success
@@ -1014,6 +1037,48 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     
     logger.info(f"Retrieved pin data for components")
     return json.dumps(pins_data, indent=2)
+
+@mcp.tool()
+async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_name: str = "") -> str:
+    """
+    Read the graphic primitives of symbols in a schematic library (.SchLib).
+
+    Two modes:
+    - symbol_name omitted: inventory of every symbol in the library with
+      per-type primitive counts (pins, rectangles, lines, polylines,
+      polygons, arcs, ellipses, beziers, labels, ...). Use this to survey
+      what drawing features a library's symbols require.
+    - symbol_name given (exact match, case-insensitive): full geometry dump
+      of that symbol - every primitive with coordinates in mils, plus pin
+      details (number, name, electrical type, orientation, length,
+      owner_part_id). Use this as the reference/spec when recreating or
+      validating a symbol.
+
+    Args:
+        library_path (str, optional): Full path to the .SchLib file to open.
+            Omit to use the schematic library currently focused in Altium.
+        symbol_name (str, optional): Exact symbol (LibReference) name to dump.
+
+    Returns:
+        str: JSON object - inventory mode: {library_name, symbol_count,
+             symbols: [{name, description, part_count, <type counts>}]};
+             dump mode: {library_name, symbol_name, description, part_count,
+             primitives: [...]}
+    """
+    logger.info(f"Getting symbol primitives (library={library_path}, symbol={symbol_name})")
+
+    response = await altium_bridge.execute_command(
+        "get_symbol_primitives",
+        {"library_path": library_path, "symbol_name": symbol_name}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting symbol primitives: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to get symbol primitives: {error_msg}"})
+
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
 @mcp.tool()
 async def get_all_nets(ctx: Context) -> str:
