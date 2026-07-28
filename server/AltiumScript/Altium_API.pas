@@ -499,6 +499,33 @@ begin
     end;
 end;
 
+// Extract the create symbols batch logic
+function ExecuteCreateSymbolsBatch(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    SpecFile: String;
+begin
+    SpecFile := '';
+
+    // Parse parameters from the request
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"spec_file"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ParamValue := TrimJSON(ParamValue);
+            SpecFile := ParamValue;
+        end;
+    end;
+
+    if (SpecFile <> '') then
+        Result := CreateSymbolsBatch(SpecFile)
+    else
+        Result := 'ERROR: No spec_file provided for create_symbols_batch';
+end;
+
 // Extract the get symbol primitives logic
 function ExecuteGetSymbolPrimitives(RequestData: TStringList): String;
 var
@@ -973,6 +1000,8 @@ begin
             Result := ExecuteGetNetConnections(RequestData);
         'get_symbol_primitives':
             Result := ExecuteGetSymbolPrimitives(RequestData);
+        'create_symbols_batch':
+            Result := ExecuteCreateSymbolsBatch(RequestData);
         'layout_duplicator':
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':

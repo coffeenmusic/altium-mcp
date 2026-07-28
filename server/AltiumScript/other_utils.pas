@@ -128,6 +128,7 @@ begin
     // Commands that handle their own document management - skip focusing
     if (CommandName = 'search_library_symbol') or
        (CommandName = 'get_symbol_primitives') or
+       (CommandName = 'create_symbols_batch') or
        (CommandName = 'create_pcb_footprint') then
     begin
         Result := True;
@@ -182,7 +183,7 @@ begin
     if DocumentKind = 'PCB' then
     begin
         if PCBServer <> nil then
-            LogMessage := LogMessage + '. Current PCB: ' + BoolToStr(PCBServer.GetCurrentPCBBoard <> nil, True);
+            LogMessage := LogMessage + '. Current PCB: ' + BoolToStr(GetBoardSafe(0) <> nil, True);
     end
     else if DocumentKind = 'SCH' then
     begin
@@ -211,7 +212,7 @@ begin
     // Check if the correct document type is already focused
     if (DocumentKind = 'PCB') and (PCBServer <> Nil) then
     begin
-        if PCBServer.GetCurrentPCBBoard <> Nil then
+        if GetBoardSafe(0) <> Nil then
         begin
             Result := True;
             Exit;
@@ -237,7 +238,7 @@ begin
     end
     else if (DocumentKind = 'PCBLIB') and (PCBServer <> Nil) then
     begin
-        if PCBServer.GetCurrentPCBLibrary <> Nil then
+        if GetPcbLibSafe(0) <> Nil then
         begin
             Result := True;
             Exit;
@@ -268,7 +269,7 @@ begin
             // Verify that the document is now focused
             if DocumentKind = 'PCB' then
             begin
-                if PCBServer.GetCurrentPCBBoard <> Nil then
+                if GetBoardSafe(0) <> Nil then
                 begin
                     Result := True;
                     // ShowMessage('Successfully focused PCB document');
@@ -297,7 +298,7 @@ begin
             end
             else if DocumentKind = 'PCBLIB' then
             begin
-                if PCBServer.GetCurrentPCBLibrary <> Nil then
+                if GetPcbLibSafe(0) <> Nil then
                 begin
                     Result := True;
                     Exit;
@@ -347,7 +348,7 @@ begin
     Result := 0;
     HaveBounds := False;
 
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then Exit;
 
     for i := 0 to DesignatorsList.Count - 1 do

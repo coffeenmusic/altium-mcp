@@ -1,3 +1,23 @@
+// Nil-safe access to the current PCB board. When no PCB document has ever
+// been opened this session, PCBServer itself is nil and calling
+// GetCurrentPCBBoard on it throws an access violation that leaves the
+// script paused in the debugger - silently blocking every later script run.
+// All board lookups must go through this helper.
+function GetBoardSafe(Dummy: Integer): IPCB_Board;
+begin
+    Result := nil;
+    if (PCBServer <> nil) then
+        Result := PCBServer.GetCurrentPCBBoard;
+end;
+
+// Nil-safe access to the current PCB library (same hazard as GetBoardSafe)
+function GetPcbLibSafe(Dummy: Integer): IPCB_Library;
+begin
+    Result := nil;
+    if (PCBServer <> nil) then
+        Result := PCBServer.GetCurrentPCBLibrary;
+end;
+
 // Function to get all unique net names from the current PCB document
 function GetAllNets(ROOT_DIR: String): String;
 var
@@ -11,7 +31,7 @@ begin
     Result := '[]';
     
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if Board = nil then Exit;
 
     // Create array for storing unique nets
@@ -69,7 +89,7 @@ begin
     
     try
         // Retrieve the current board
-        Board := PCBServer.GetCurrentPCBBoard;
+        Board := GetBoardSafe(0);
         if (Board = nil) then
         begin
             AddJSONBoolean(ResultProps, 'success', False);
@@ -158,7 +178,7 @@ begin
     Result := '';
 
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := '{"error": "No PCB document is currently active"}';
@@ -276,7 +296,7 @@ begin
     Result := '';
 
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := '[]';
@@ -568,7 +588,7 @@ var
     FoundLayers    : TStringList;
 begin
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := '{"success": false, "error": "No PCB document is currently active"}';
@@ -802,7 +822,7 @@ Var
     OutputLines   : TStringList;
 begin
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = Nil) then
     begin
         Result := '[]';
@@ -873,7 +893,7 @@ var
     OutputLines : TStringList;
 begin
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := '[]';
@@ -961,7 +981,7 @@ begin
     Result := '';
 
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if Board = nil then Exit;
 
     // Get board origin coordinates
@@ -1044,7 +1064,7 @@ var
     RelDX, RelDY    : Double;
 begin
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := '[]';
@@ -1218,7 +1238,7 @@ var
     ResultProps: TStringList;
     xorigin, yorigin: TCoord;
 begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := '{"success": false, "error": "No PCB document is currently active"}';
@@ -1290,7 +1310,7 @@ var
     Fields      : TStringList;
     SilkLayer   : TLayer;
 begin
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    PcbLib := GetPcbLibSafe(0);
     if PcbLib = nil then
     begin
         Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
@@ -1488,7 +1508,7 @@ var
     OutputLines    : TStringList;
 begin
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := 'ERROR: No PCB document is currently active';
@@ -1639,7 +1659,7 @@ var
     PairsChecked    : Integer;
     IsOverlap       : Boolean;
 begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := 'ERROR: No PCB document is currently active';
@@ -1800,7 +1820,7 @@ var
     xorigin, yorigin : Integer;
     i           : Integer;
 begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := 'ERROR: No PCB document is currently active';
@@ -1953,7 +1973,7 @@ var
     i                : Integer;
     PlacedCount      : Integer;
 begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = nil) then
     begin
         Result := 'ERROR: No PCB document is currently active';

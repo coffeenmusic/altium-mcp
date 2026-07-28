@@ -1051,6 +1051,47 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     return json.dumps(pins_data, indent=2)
 
 @mcp.tool()
+async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
+    """
+    Create many schematic symbols in a single Altium script run.
+
+    Use instead of repeated create_schematic_symbol calls when creating
+    more than a handful of symbols (bulk library imports/migrations): one
+    script launch instead of one per symbol, and pipe-delimited plain text
+    instead of JSON so field text (commas, brackets, spaces) is preserved
+    exactly. Verified by exact round-trips of a complete 284-symbol
+    production library.
+
+    Args:
+        spec_file (str): Path to a plain-text spec file, one record per line:
+            LIBRARY|<path to .SchLib>   (optional first line: opens/focuses;
+                                         an already-open library is only
+                                         focused, never reloaded)
+            SYMBOL|<name>|<description>|<part_count>
+            PIN|<same pipe fields as create_schematic_symbol pins>
+            GRAPHIC|<same entry format as create_schematic_symbol graphics>
+            Each SYMBOL line starts a new symbol; PIN/GRAPHIC lines belong
+            to the most recent SYMBOL.
+
+    Returns:
+        str: JSON object with created count and a failed name list
+    """
+    logger.info(f"Creating symbols batch from {spec_file}")
+
+    response = await altium_bridge.execute_command(
+        "create_symbols_batch",
+        {"spec_file": spec_file}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error in batch symbol creation: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed batch creation: {error_msg}"})
+
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+@mcp.tool()
 async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_name: str = "") -> str:
     """
     Read the graphic primitives of symbols in a schematic library (.SchLib).

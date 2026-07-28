@@ -311,8 +311,10 @@ begin
             MinX := 300; MinY := 0; MaxX := 1000; MaxY := 1000;
         end;
 
-        // Create an auto-sized body rectangle only when no graphics are given
-        if (GraphicsCount = 0) then
+        // Create an auto-sized body rectangle only when no graphics are
+        // given AND the part actually has content - a symbol with neither
+        // pins nor graphics stays empty
+        if (GraphicsCount = 0) and HasPins then
         begin
             R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
             if (R <> Nil) Then
@@ -513,7 +515,9 @@ begin
         if (FieldValue = '') then Continue;
 
         PinNum := Trim(GetFieldFromPipeString(Entry, 0));
-        PinName := Trim(GetFieldFromPipeString(Entry, 1));
+        // Pin name is NOT trimmed: some libraries carry trailing spaces in
+        // pin names and round-trip fidelity preserves them exactly
+        PinName := GetFieldFromPipeString(Entry, 1);
         PinType := Trim(GetFieldFromPipeString(Entry, 2));
         PinOrient := Trim(GetFieldFromPipeString(Entry, 3));
         PinX := StrToInt(Trim(GetFieldFromPipeString(Entry, 4)));
@@ -782,6 +786,142 @@ begin
     finally
         MatchesArray.Free;
         AllSymbolsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// Create one symbol for CreateSymbolsBatch. Returns True when created.
+function BatchCreateOne(SymName, SymDesc: String; PartCount: Integer; PinsList, GraphicsList: TStringList): Boolean;
+var
+    R: String;
+begin
+    Result := False;
+    if (SymName = '') then Exit;
+    if (SymDesc <> '') then
+        PinsList.Add('Description=' + SymDesc);
+    R := CreateSchematicSymbol(SymName, PinsList, GraphicsList, PartCount);
+    Result := (Pos('"success": true', R) > 0);
+end;
+
+// Create many symbols in a single script run from a spec file. The file is
+// plain text, one record per line, pipe-delimited (no JSON, so field text
+// is preserved exactly):
+//   LIBRARY|<path to .SchLib>            (optional first line - focus/open)
+//   SYMBOL|<name>|<description>|<part_count>
+//   PIN|<same fields as create_schematic_symbol pins>
+//   GRAPHIC|<same entry format as create_schematic_symbol graphics>
+// Each SYMBOL line flushes the previous symbol. Far fewer Altium script
+// launches than one create call per symbol - use for bulk imports.
+function CreateSymbolsBatch(SpecFilePath: String): String;
+var
+    Lines        : TStringList;
+    PinsList     : TStringList;
+    GraphicsList : TStringList;
+    FailedArray  : TStringList;
+    ResultProps  : TStringList;
+    ServerDoc    : IServerDocument;
+    Line, Kind   : String;
+    LibPath      : String;
+    CurrentName  : String;
+    CurrentDesc  : String;
+    FieldValue   : String;
+    PartCount    : Integer;
+    CreatedCount : Integer;
+    i            : Integer;
+begin
+    if not FileExists(SpecFilePath) then
+    begin
+        Result := 'ERROR: Spec file not found: ' + SpecFilePath;
+        Exit;
+    end;
+
+    Lines := TStringList.Create;
+    PinsList := TStringList.Create;
+    GraphicsList := TStringList.Create;
+    FailedArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    CurrentName := '';
+    CurrentDesc := '';
+    PartCount := 1;
+    CreatedCount := 0;
+
+    try
+        Lines.LoadFromFile(SpecFilePath);
+
+        for i := 0 to Lines.Count - 1 do
+        begin
+            Line := Lines[i];
+            Kind := UpperCase(Trim(GetFieldFromPipeString(Line, 0)));
+
+            if (Kind = 'LIBRARY') then
+            begin
+                LibPath := Trim(GetFieldFromPipeString(Line, 1));
+                if (LibPath <> '') and FileExists(LibPath) then
+                begin
+                    // Focus if already open; never re-open (reload discards
+                    // unsaved symbols)
+                    if Client.IsDocumentOpen(LibPath) then
+                        ServerDoc := Client.GetDocumentByPath(LibPath)
+                    else
+                        ServerDoc := Client.OpenDocument('SchLib', LibPath);
+                    if (ServerDoc <> Nil) then
+                    begin
+                        Client.ShowDocument(ServerDoc);
+                        Sleep(500);
+                    end;
+                end;
+            end
+            else if (Kind = 'SYMBOL') then
+            begin
+                // Flush the previous symbol
+                if (CurrentName <> '') then
+                begin
+                    if BatchCreateOne(CurrentName, CurrentDesc, PartCount, PinsList, GraphicsList) then
+                        CreatedCount := CreatedCount + 1
+                    else
+                        FailedArray.Add('"' + JSONEscapeString(CurrentName) + '"');
+                end;
+                PinsList.Clear;
+                GraphicsList.Clear;
+                CurrentName := Trim(GetFieldFromPipeString(Line, 1));
+                CurrentDesc := GetFieldFromPipeString(Line, 2);
+                FieldValue := Trim(GetFieldFromPipeString(Line, 3));
+                if (FieldValue <> '') then
+                    PartCount := StrToInt(FieldValue)
+                else
+                    PartCount := 1;
+            end
+            else if (Kind = 'PIN') then
+            begin
+                PinsList.Add(Copy(Line, 5, Length(Line)));
+            end
+            else if (Kind = 'GRAPHIC') then
+            begin
+                GraphicsList.Add(Copy(Line, 9, Length(Line)));
+            end;
+        end;
+
+        // Flush the last symbol
+        if (CurrentName <> '') then
+        begin
+            if BatchCreateOne(CurrentName, CurrentDesc, PartCount, PinsList, GraphicsList) then
+                CreatedCount := CreatedCount + 1
+            else
+                FailedArray.Add('"' + JSONEscapeString(CurrentName) + '"');
+        end;
+
+        AddJSONInteger(ResultProps, 'created', CreatedCount);
+        if (FailedArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(FailedArray, 'failed'))
+        else
+            ResultProps.Add('"failed": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Lines.Free;
+        PinsList.Free;
+        GraphicsList.Free;
+        FailedArray.Free;
         ResultProps.Free;
     end;
 end;
