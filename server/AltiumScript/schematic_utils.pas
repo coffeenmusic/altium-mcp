@@ -1093,6 +1093,11 @@ begin
                     begin
                         PrimProps := TStringList.Create;
                         try
+                          // One unreadable primitive must not crash the dump:
+                          // a property access that throws would otherwise leave
+                          // the script paused in the debugger, wedging all
+                          // later script runs
+                          try
                             case Prim.ObjectId of
                                 ePin:
                                 begin
@@ -1207,19 +1212,43 @@ begin
                                     AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.Location.X));
                                     AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.Location.Y));
                                 end;
-                            else
+                            eParameter:
                                 AddJSONProperty(PrimProps, 'type', '');
+                            eDesignator:
+                                AddJSONProperty(PrimProps, 'type', '');
+                            // Footprint/model links are metadata, not drawn
+                            // graphics - excluded like parameters
+                            eImplementation:
+                                AddJSONProperty(PrimProps, 'type', '');
+                            eImplementationMap:
+                                AddJSONProperty(PrimProps, 'type', '');
+                            else
+                            begin
+                                // Surface unknown graphic types instead of
+                                // hiding them - the object_id identifies them
+                                AddJSONProperty(PrimProps, 'type', 'unknown');
+                                AddJSONInteger(PrimProps, 'object_id', Prim.ObjectId);
+                            end;
                             end;
 
                             if (PrimProps.Count > 0) then
                             begin
-                                // Skip parameters/designator and unknown types
+                                // Skip parameters/designator
                                 if (Pos('"type": ""', PrimProps[0]) = 0) then
                                 begin
-                                    AddJSONInteger(PrimProps, 'owner_part_id', Prim.OwnerPartId);
+                                    // Unknown object kinds may not expose
+                                    // OwnerPartId (they are not standard
+                                    // graphical objects) - do not touch it
+                                    if (Pos('"type": "unknown"', PrimProps[0]) = 0) then
+                                        AddJSONInteger(PrimProps, 'owner_part_id', Prim.OwnerPartId);
                                     PrimsArray.Add(BuildJSONObject(PrimProps, 1));
                                 end;
                             end;
+                          except
+                            PrimProps.Clear;
+                            AddJSONProperty(PrimProps, 'type', 'unreadable');
+                            PrimsArray.Add(BuildJSONObject(PrimProps, 1));
+                          end;
                         finally
                             PrimProps.Free;
                         end;
