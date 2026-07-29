@@ -597,7 +597,7 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
 
     Args:
         symbol_name (str): Name or partial name of the symbol to search for
-        library_path (str): Full file path to the .SchLib file (e.g. "N:\\Libs\\Integrated_Circuits.SchLib").
+        library_path (str): Full file path to the .SchLib file (e.g. "C:\\Libraries\\MyParts.SchLib").
                            The tool will open this file in Altium if it is not already open.
                            If empty, uses the currently open library.
                            If no library is open and no path is provided, ask the user for the file path.
