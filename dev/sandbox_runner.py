@@ -45,6 +45,9 @@ END = "// === END EXPERIMENT"
 
 config = json.load(open(REPO / "server" / "config.json"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from unwedge import unwedge  # noqa: E402
+
 
 def _title(hwnd):
     user32 = ctypes.windll.user32
@@ -55,29 +58,21 @@ def _title(hwnd):
 
 
 def screenshot_dialog(hwnd, tag):
-    """Save a PNG of the dialog so its text can be read visually."""
+    """Render the dialog to PNG via PrintWindow.
+
+    PrintWindow asks the window to paint itself into a DC, so it works even
+    when the window is obscured or the desktop is not rendering (remote /
+    disconnected sessions) - unlike screen-scraping, which returns blanks.
+    """
     try:
-        # Bring it forward first - CopyFromScreen captures whatever is on
-        # screen, so an obscured/unpainted dialog yields a blank image
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
-        ctypes.windll.user32.BringWindowToTop(hwnd)
-        time.sleep(0.6)
-        rect = wintypes.RECT()
-        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        w, h = rect.right - rect.left, rect.bottom - rect.top
-        if w <= 0 or h <= 0:
-            return None
+        from capture_window import capture
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from capture_window import capture
+    try:
         out = Path.cwd() / f"dialog_{tag}.png"
-        ps = (
-            "Add-Type -AssemblyName System.Drawing;"
-            f"$b=New-Object System.Drawing.Bitmap {w},{h};"
-            "$g=[System.Drawing.Graphics]::FromImage($b);"
-            f"$g.CopyFromScreen({rect.left},{rect.top},0,0,$b.Size);"
-            f"$b.Save('{out}');"
-        )
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                       capture_output=True, timeout=25)
-        return str(out) if out.exists() else None
+        path, _info = capture(hwnd, out)
+        return path
     except Exception:
         return None
 
@@ -102,6 +97,32 @@ def read_dialog_text(hwnd):
         return " | ".join(texts[:6])
     except Exception as e:
         return f"(could not read: {e})"
+
+
+def capture_script_editor(tag="script_editor"):
+    """Capture Altium's document windows, including the script editor.
+
+    When a script dies, the editor highlights the exact line execution stopped
+    on - and unlike error dialogs, that highlight exists even for silent
+    debugger pauses (which show no dialog at all). Altium hosts each document
+    frame in its own top-level window, so all of them are captured; the one
+    showing a .pas tab is the script editor.
+    """
+    try:
+        from capture_window import capture, find_windows, _title
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from capture_window import capture, find_windows, _title
+
+    hits = find_windows(lambda h: "Altium Designer" in _title(h))
+    # Script-project frames first - most likely to host the editor
+    hits.sort(key=lambda h: ".PrjScr" not in _title(h))
+    out = []
+    for i, h in enumerate(hits[:4]):
+        path, _info = capture(h, Path.cwd() / f"{tag}_{i}.png")
+        if path:
+            out.append(path)
+    return out
 
 
 def find_dialogs():
@@ -190,10 +211,16 @@ def run(timeout=120, quiet=False):
         print("-" * 62)
         print(f">> Script STOPPED after: {lines[-1] if lines else '(nothing)'}")
         print(">> The statement AFTER that step is what crashed or paused.")
+        print(">> Clearing the paused debugger (Ctrl+F3) so the next run works...")
+        unwedge(verbose=False)
+        for shot in capture_script_editor():
+            print(f">> Altium window captured (look for the paused line): {shot}")
     else:
         print("STEP LOG: (missing - the script never started)")
         print(">> Usually a COMPILE error (see dialog text above), or a")
         print(">> previously paused script blocking execution.")
+        for shot in capture_script_editor():
+            print(f">> Altium window captured: {shot}")
     return False
 
 

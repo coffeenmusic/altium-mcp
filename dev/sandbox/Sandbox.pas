@@ -9,6 +9,11 @@
 // error), the log still shows the last step that completed - the statement
 // after it is the culprit.
 
+const
+    // Constants the production units define; the sandbox is standalone so it
+    // must declare anything experiments borrow from them
+    REPLACEALL = 1;
+
 var
     LogLines : TStringList;
     LogPath  : String;
@@ -44,32 +49,60 @@ begin
         // === BEGIN EXPERIMENT (rewritten by dev/sandbox_runner.py) ===
         SandboxLog('getting IntegratedLibraryManager');
         IntMan := IntegratedLibraryManager;
-        SandboxLog('IntMan nil? ' + BoolToStr(IntMan = nil, True));
-
-        if (IntMan <> nil) then
+        if (IntMan = nil) then
         begin
-            SandboxLog('reading AvailableLibraryCount');
-            I1 := IntMan.AvailableLibraryCount;
-            SandboxLog('AvailableLibraryCount = ' + IntToStr(I1));
-
-            List1 := TStringList.Create;
-            for I2 := 0 to I1 - 1 do
-            begin
-                SandboxLog('  reading library ' + IntToStr(I2));
-                S1 := IntMan.AvailableLibraryPath(I2);
-                SandboxLog('    path: ' + S1);
-                I3 := IntMan.AvailableLibraryType(I2);
-                SandboxLog('    type enum: ' + IntToStr(I3));
-                List1.Add(IntToStr(I3) + ' | ' + S1);
-            end;
-
-            List1.SaveToFile('C:\Users\Public\altium_mcp\sandbox_libs.txt');
-            SandboxLog('wrote library list');
-            ResultText := '{"library_count": ' + IntToStr(I1) + ', "list_file": "sandbox_libs.txt"}';
-            List1.Free;
+            ResultText := '{"error": "IntMan nil"}';
+            SandboxLog('IntMan is nil - stopping');
         end
         else
-            ResultText := '{"error": "IntegratedLibraryManager is nil"}';
+        begin
+            SandboxLog('locating the DbLib among available libraries');
+            S1 := '';
+            for I2 := 0 to IntMan.AvailableLibraryCount - 1 do
+            begin
+                S2 := IntMan.AvailableLibraryPath(I2);
+                SandboxLog('  candidate: ' + S2);
+                if (Pos('.DbLib', S2) > 0) then
+                begin
+                    S1 := S2;
+                    SandboxLog('  -> selected DbLib: ' + S1);
+                end;
+            end;
+
+            if (S1 = '') then
+            begin
+                ResultText := '{"error": "no .DbLib found in available libraries"}';
+                SandboxLog('no DbLib found');
+            end
+            else
+            begin
+                SandboxLog('calling GetAvailableDBLibDocAtPath (may hit the network share)');
+                DbDoc := IntMan.GetAvailableDBLibDocAtPath(S1);
+                SandboxLog('DbDoc nil? ' + BoolToStr(DbDoc = nil, True));
+
+                if (DbDoc <> nil) then
+                begin
+                    SandboxLog('reading GetTableCount');
+                    I1 := DbDoc.GetTableCount;
+                    SandboxLog('table count = ' + IntToStr(I1));
+
+                    List1 := TStringList.Create;
+                    for I2 := 0 to I1 - 1 do
+                    begin
+                        S3 := DbDoc.GetTableNameAt(I2);
+                        SandboxLog('  table ' + IntToStr(I2) + ': ' + S3);
+                        List1.Add(S3);
+                    end;
+                    List1.SaveToFile('C:\Users\Public\altium_mcp\sandbox_dblib_tables.txt');
+                    List1.Free;
+                    ResultText := '{"dblib": "' + StringReplace(S1, '\', '/', REPLACEALL) +
+                                  '", "table_count": ' + IntToStr(I1) + '}';
+                end
+                else
+                    ResultText := '{"error": "GetAvailableDBLibDocAtPath returned nil", "path": "' +
+                                  StringReplace(S1, '\', '/', REPLACEALL) + '"}';
+            end;
+        end;
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the experiment body');

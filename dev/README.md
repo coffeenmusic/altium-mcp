@@ -14,6 +14,33 @@ hostile to automation:
 - Compile/runtime errors surface only as modal dialogs, with no log or
   traceback, and their text is often unreadable programmatically.
 
+## Recovering a wedged executor
+
+- `python dev/unwedge.py` sends Altium's Stop Debugging shortcut (Ctrl+F3).
+  Fast (~2s) but it only lands when the **script editor tab is the active
+  document** in Altium - keep `Sandbox.pas` focused for this to work.
+- `--auto-restart` on the runner force-restarts Altium instead (~60-90s,
+  kills X2.EXE, unsaved Altium work is lost). Guaranteed, unattended.
+
+## Diagnosing failures
+
+1. **Step log** (primary): the last logged line tells you which statement
+   died - the one right after it.
+2. **Altium window capture** (`dev/capture_window.py`): uses `PrintWindow`,
+   which renders the window even when obscured or the desktop is not
+   rendering. Screen-scraping (`CopyFromScreen`) returns blanks on
+   remote/disconnected sessions - do not use it. When the script editor tab
+   is active, its capture shows the paused line highlighted.
+3. Silent debugger pauses produce **no dialog at all**; compile errors do.
+
+## Gotcha: the sandbox is standalone
+
+Experiments cannot use constants/helpers defined in the production units
+(`REPLACEALL`, `TrimJSON`, `AddJSONProperty`, ...) - those live in
+`server/AltiumScript/*.pas`, which this project does not include. Declare
+what you need in `Sandbox.pas`. An undefined constant compiles fine and then
+kills the script at runtime.
+
 ## sandbox_runner.py
 
 Runs an experiment body inside `dev/sandbox/`, a **standalone script project**
