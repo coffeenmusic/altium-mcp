@@ -1051,6 +1051,94 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     return json.dumps(pins_data, indent=2)
 
 @mcp.tool()
+async def get_footprint_primitives(ctx: Context, library_path: str = "", footprint_name: str = "") -> str:
+    """
+    Read the primitives of footprints in a PCB library (.PcbLib).
+
+    Modes:
+    - footprint_name omitted: inventory of every footprint with per-type
+      primitive counts (pads, tracks, arcs, fills, texts, regions, vias,
+      component_bodies)
+    - footprint_name given (exact, case-insensitive): full geometry dump -
+      pads (position, rotation, layer, sizes/shape per stack, hole size/
+      type/width/rotation, plating), tracks, arcs, fills, texts, regions
+      (outline vertices). Coordinates in mils; shapes and hole types as raw
+      Altium enum ints; layers as names. 3D component bodies are models,
+      not 2D primitives, and are excluded.
+    - footprint_name "*": full dump of every footprint
+
+    Use as the reference when recreating or validating footprints, and to
+    survey what a library requires.
+
+    Args:
+        library_path (str, optional): Full path to the .PcbLib. Omit to use
+            the currently focused PCB library (an already-open library is
+            only focused, never reloaded).
+        footprint_name (str, optional): Exact footprint name, or "*".
+
+    Returns:
+        str: JSON - inventory: {library_name, footprint_count, footprints:
+             [{name, description, <type counts>}]}; dump: primitives list
+             per footprint
+    """
+    logger.info(f"Getting footprint primitives (library={library_path}, footprint={footprint_name})")
+
+    response = await altium_bridge.execute_command(
+        "get_footprint_primitives",
+        {"library_path": library_path, "footprint_name": footprint_name}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        return json.dumps({"success": False, "error": f"Failed to get footprint primitives: {error_msg}"})
+
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+@mcp.tool()
+async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
+    """
+    Create many PCB footprints in a single Altium script run.
+
+    The batch equivalent of create_pcb_footprint with far broader coverage:
+    through-hole and SMD pads (full pad stack, holes, slots, plating,
+    rotation), tracks, arcs, fills, texts, and regions on any layer.
+    Verified by exact round-trips of complete production footprint
+    libraries. Prefer this for bulk imports/migrations; use
+    get_footprint_primitives on an existing footprint to learn the exact
+    field conventions.
+
+    Args:
+        spec_file (str): Path to a plain-text spec file, one record per line
+            (coords in mils, layers as names, shapes/hole types as raw
+            Altium enum ints, booleans as 1/0):
+            FPLIB|<path to .PcbLib>   (optional first line: opens/focuses)
+            FOOTPRINT|<name>|<description>
+            PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape]]
+            TRACK|x1|y1|x2|y2|width|layer
+            ARC|cx|cy|radius|start_angle|end_angle|width|layer
+            FILL|x1|y1|x2|y2|rotation|layer
+            TEXT|x|y|size|width|rotation|layer|mirror|ttf|text
+            REGION|layer|kind|x1|y1|x2|y2|...
+
+    Returns:
+        str: JSON with created count, primitive_errors, failed names
+    """
+    logger.info(f"Creating footprints batch from {spec_file}")
+
+    response = await altium_bridge.execute_command(
+        "create_footprints_batch",
+        {"spec_file": spec_file}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        return json.dumps({"success": False, "error": f"Failed batch footprint creation: {error_msg}"})
+
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+@mcp.tool()
 async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     """
     Create many schematic symbols in a single Altium script run.

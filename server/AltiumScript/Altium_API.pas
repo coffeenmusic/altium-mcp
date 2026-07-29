@@ -499,6 +499,61 @@ begin
     end;
 end;
 
+// Extract the get footprint primitives logic
+function ExecuteGetFootprintPrimitives(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    LibraryPath: String;
+    FootprintName: String;
+begin
+    LibraryPath := '';
+    FootprintName := '';
+
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"library_path"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            LibraryPath := TrimJSON(ParamValue);
+        end
+        else if (Pos('"footprint_name"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            FootprintName := TrimJSON(ParamValue);
+        end;
+    end;
+
+    Result := GetFootprintPrimitives(ROOT_DIR, LibraryPath, FootprintName);
+end;
+
+// Extract the create footprints batch logic
+function ExecuteCreateFootprintsBatch(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    SpecFile: String;
+begin
+    SpecFile := '';
+
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"spec_file"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            SpecFile := TrimJSON(ParamValue);
+        end;
+    end;
+
+    if (SpecFile <> '') then
+        Result := CreateFootprintsBatch(SpecFile)
+    else
+        Result := 'ERROR: No spec_file provided for create_footprints_batch';
+end;
+
 // Extract the create symbols batch logic
 function ExecuteCreateSymbolsBatch(RequestData: TStringList): String;
 var
@@ -1002,6 +1057,10 @@ begin
             Result := ExecuteGetSymbolPrimitives(RequestData);
         'create_symbols_batch':
             Result := ExecuteCreateSymbolsBatch(RequestData);
+        'get_footprint_primitives':
+            Result := ExecuteGetFootprintPrimitives(RequestData);
+        'create_footprints_batch':
+            Result := ExecuteCreateFootprintsBatch(RequestData);
         'layout_duplicator':
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':

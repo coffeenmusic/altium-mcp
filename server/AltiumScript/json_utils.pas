@@ -28,6 +28,7 @@ begin
     Result := StringReplace(Result, '"', '\"', REPLACEALL);
     Result := StringReplace(Result, #13#10, '\n', REPLACEALL);
     Result := StringReplace(Result, #10, '\n', REPLACEALL);
+    Result := StringReplace(Result, #13, '\n', REPLACEALL);
     Result := StringReplace(Result, #9, '\t', REPLACEALL);
 end;
 

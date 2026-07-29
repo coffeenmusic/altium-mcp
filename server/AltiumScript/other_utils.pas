@@ -129,6 +129,8 @@ begin
     if (CommandName = 'search_library_symbol') or
        (CommandName = 'get_symbol_primitives') or
        (CommandName = 'create_symbols_batch') or
+       (CommandName = 'get_footprint_primitives') or
+       (CommandName = 'create_footprints_batch') or
        (CommandName = 'create_pcb_footprint') then
     begin
         Result := True;

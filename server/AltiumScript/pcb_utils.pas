@@ -18,6 +18,546 @@ begin
         Result := PCBServer.GetCurrentPCBLibrary;
 end;
 
+// Create many footprints in a single script run from a spec file (plain
+// text, pipe-delimited; coords in mils, layers as names, shapes/hole types
+// as raw enum ints - symmetric with get_footprint_primitives):
+//   FPLIB|<path to .PcbLib>              (optional first line - focus/open)
+//   FOOTPRINT|<name>|<description>
+//   PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape]]
+//   TRACK|x1|y1|x2|y2|width|layer
+//   ARC|cx|cy|radius|start_angle|end_angle|width|layer
+//   FILL|x1|y1|x2|y2|rotation|layer
+//   TEXT|x|y|size|width|rotation|layer|mirror|ttf|text
+function CreateFootprintsBatch(SpecFilePath: String): String;
+var
+    PcbLib      : IPCB_Library;
+    LibComp     : IPCB_LibComponent;
+    ServerDoc   : IServerDocument;
+    Lines       : TStringList;
+    FailedArray : TStringList;
+    ResultProps : TStringList;
+    Pad         : IPCB_Pad;
+    Track       : IPCB_Track;
+    Arc         : IPCB_Arc;
+    Fill        : IPCB_Fill;
+    Text        : IPCB_Text;
+    Region      : IPCB_Region;
+    Contour     : IPCB_Contour;
+    Via         : IPCB_Via;
+    Line, Kind  : String;
+    LibPath     : String;
+    FieldValue  : String;
+    CreatedCount: Integer;
+    PrimErrors  : Integer;
+    i, V        : Integer;
+
+
+begin
+    if not FileExists(SpecFilePath) then
+    begin
+        Result := 'ERROR: Spec file not found: ' + SpecFilePath;
+        Exit;
+    end;
+
+    Lines := TStringList.Create;
+    FailedArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    LibComp := nil;
+    CreatedCount := 0;
+    PrimErrors := 0;
+
+    try
+        Lines.LoadFromFile(SpecFilePath);
+
+        for i := 0 to Lines.Count - 1 do
+        begin
+            Line := Lines[i];
+            Kind := UpperCase(Trim(GetFieldFromPipeString(Line, 0)));
+
+            try
+                if (Kind = 'FPLIB') then
+                begin
+                    LibPath := GetFieldFromPipeString(Line, 1);
+                    if (LibPath <> '') and FileExists(LibPath) then
+                    begin
+                        if Client.IsDocumentOpen(LibPath) then
+                            ServerDoc := Client.GetDocumentByPath(LibPath)
+                        else
+                            ServerDoc := Client.OpenDocument('PcbLib', LibPath);
+                        if (ServerDoc <> Nil) then
+                        begin
+                            Client.ShowDocument(ServerDoc);
+                            Sleep(500);
+                        end;
+                    end;
+                end
+                else if (Kind = 'FOOTPRINT') then
+                begin
+                    PcbLib := GetPcbLibSafe(0);
+                    // Focus can drift between chunks - retry via the opened
+                    // document before giving up
+                    if (PcbLib = nil) and (ServerDoc <> nil) then
+                    begin
+                        Client.ShowDocument(ServerDoc);
+                        Sleep(1000);
+                        PcbLib := GetPcbLibSafe(0);
+                    end;
+                    if (PcbLib = nil) then
+                    begin
+                        Result := 'ERROR: No PCB library document is active';
+                        Exit;
+                    end;
+                    LibComp := PCBServer.CreatePCBLibComp;
+                    LibComp.Name := Trim(GetFieldFromPipeString(Line, 1));
+                    LibComp.Description := GetFieldFromPipeString(Line, 2);
+                    PcbLib.RegisterComponent(LibComp);
+                    CreatedCount := CreatedCount + 1;
+                end
+                else if (LibComp <> nil) and (Kind = 'PAD') then
+                begin
+                    Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+                    // Pad name is NOT trimmed - round-trip fidelity preserves
+                    // whitespace and even control characters found in source data
+                    Pad.Name := GetFieldFromPipeString(Line, 1);
+                    // Mode first so per-stack sizes land correctly
+                    FieldValue := Trim(GetFieldFromPipeString(Line, 15));
+                    if (FieldValue <> '') then
+                        Pad.Mode := StrToInt(FieldValue)
+                    else
+                        Pad.Mode := ePadMode_Simple;
+                    Pad.x := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 2))));
+                    Pad.y := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))));
+                    Pad.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 5)));
+                    Pad.Plated := (Trim(GetFieldFromPipeString(Line, 6)) = '1');
+                    Pad.HoleSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 7))));
+                    Pad.HoleType := StrToInt(Trim(GetFieldFromPipeString(Line, 8)));
+                    Pad.HoleWidth := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 9))));
+                    Pad.HoleRotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 10)));
+                    Pad.TopXSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 11))));
+                    Pad.TopYSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 12))));
+                    Pad.TopShape := StrToInt(Trim(GetFieldFromPipeString(Line, 13)));
+                    FieldValue := Trim(GetFieldFromPipeString(Line, 14));
+                    if (FieldValue <> '') then
+                        Pad.StackCRPctOnLayer[eTopLayer] := StrToInt(FieldValue);
+                    if (Pad.Mode <> ePadMode_Simple) then
+                    begin
+                        Pad.MidXSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 16))));
+                        Pad.MidYSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 17))));
+                        Pad.MidShape := StrToInt(Trim(GetFieldFromPipeString(Line, 18)));
+                        Pad.BotXSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 19))));
+                        Pad.BotYSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 20))));
+                        Pad.BotShape := StrToInt(Trim(GetFieldFromPipeString(Line, 21)));
+                    end;
+                    // Rotation last: it rotates the pad about its location
+                    Pad.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4)));
+                    LibComp.AddPCBObject(Pad);
+                    PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                end
+                else if (LibComp <> nil) and (Kind = 'TRACK') then
+                begin
+                    Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                    Track.x1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 1))));
+                    Track.y1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 2))));
+                    Track.x2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))));
+                    Track.y2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))));
+                    Track.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5))));
+                    Track.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
+                    LibComp.AddPCBObject(Track);
+                    PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                end
+                else if (LibComp <> nil) and (Kind = 'ARC') then
+                begin
+                    Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+                    Arc.XCenter := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 1))));
+                    Arc.YCenter := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 2))));
+                    Arc.Radius := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))));
+                    Arc.StartAngle := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4)));
+                    Arc.EndAngle := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
+                    Arc.LineWidth := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 6))));
+                    Arc.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 7)));
+                    LibComp.AddPCBObject(Arc);
+                    PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                end
+                else if (LibComp <> nil) and (Kind = 'FILL') then
+                begin
+                    Fill := PCBServer.PCBObjectFactory(eFillObject, eNoDimension, eCreate_Default);
+                    Fill.x1Location := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 1))));
+                    Fill.y1Location := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 2))));
+                    Fill.x2Location := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))));
+                    Fill.y2Location := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))));
+                    Fill.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
+                    Fill.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
+                    LibComp.AddPCBObject(Fill);
+                    PCBServer.SendMessageToRobots(Fill.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                end
+                else if (LibComp <> nil) and (Kind = 'VIA') then
+                begin
+                    Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+                    Via.x := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 1))));
+                    Via.y := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 2))));
+                    Via.Size := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))));
+                    Via.HoleSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))));
+                    Via.LowLayer := String2Layer(Trim(GetFieldFromPipeString(Line, 5)));
+                    Via.HighLayer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
+                    LibComp.AddPCBObject(Via);
+                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                end
+                else if (LibComp <> nil) and (Kind = 'REGION') then
+                begin
+                    Region := PCBServer.PCBObjectFactory(eRegionObject, eNoDimension, eCreate_Default);
+                    Contour := PCBServer.PCBContourFactory;
+                    V := 3;
+                    while (Trim(GetFieldFromPipeString(Line, V)) <> '') do
+                    begin
+                        Contour.AddPoint(MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, V)))),
+                                         MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, V + 1)))));
+                        V := V + 2;
+                    end;
+                    Region.SetOutlineContour(Contour);
+                    Region.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 1)));
+                    Region.Kind := StrToInt(Trim(GetFieldFromPipeString(Line, 2)));
+                    LibComp.AddPCBObject(Region);
+                    PCBServer.SendMessageToRobots(Region.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                end
+                else if (LibComp <> nil) and (Kind = 'TEXT') then
+                begin
+                    Text := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+                    Text.XLocation := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 1))));
+                    Text.YLocation := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 2))));
+                    Text.Size := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))));
+                    Text.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))));
+                    Text.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
+                    Text.MirrorFlag := (Trim(GetFieldFromPipeString(Line, 7)) = '1');
+                    Text.UseTTFonts := (Trim(GetFieldFromPipeString(Line, 8)) = '1');
+                    // <NL> placeholder carries embedded newlines through the
+                    // line-based spec file
+                    Text.Text := StringReplace(GetFieldFromPipeString(Line, 9), '<NL>', #13#10, REPLACEALL);
+                    Text.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
+                    LibComp.AddPCBObject(Text);
+                    PCBServer.SendMessageToRobots(Text.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                end;
+            except
+                PrimErrors := PrimErrors + 1;
+                if (Kind = 'FOOTPRINT') then
+                    FailedArray.Add('"' + JSONEscapeString(Trim(GetFieldFromPipeString(Line, 1))) + '"');
+            end;
+        end;
+
+        AddJSONInteger(ResultProps, 'created', CreatedCount);
+        AddJSONInteger(ResultProps, 'primitive_errors', PrimErrors);
+        if (FailedArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(FailedArray, 'failed'))
+        else
+            ResultProps.Add('"failed": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Lines.Free;
+        FailedArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// Get the graphic/copper primitives of footprints in a PCB library.
+// FootprintName = '' -> inventory (per-footprint primitive counts);
+// '*' -> full dump of every footprint; name -> dump that footprint.
+// Coordinates in mils, layers as names, shapes/hole types as raw enum ints
+// (pass-through symmetric with create_footprints_batch).
+function GetFootprintPrimitives(ROOT_DIR: String; LibraryPath: String; FootprintName: String): String;
+var
+    PcbLib      : IPCB_Library;
+    LibComp     : IPCB_LibComponent;
+    GrpIter     : IPCB_GroupIterator;
+    Prim        : IPCB_Primitive;
+    ServerDoc   : IServerDocument;
+    ResultProps : TStringList;
+    FPArray     : TStringList;
+    FPProps     : TStringList;
+    PrimsArray  : TStringList;
+    PrimProps   : TStringList;
+    PointsArray : TStringList;
+    PProps      : TStringList;
+    Counts      : TStringList;
+    OutputLines : TStringList;
+    TypeName    : String;
+    i, C, V     : Integer;
+    Found       : Boolean;
+begin
+    Result := '';
+
+    if (LibraryPath <> '') then
+    begin
+        if not FileExists(LibraryPath) then
+        begin
+            Result := 'ERROR: Library file not found: ' + LibraryPath;
+            Exit;
+        end;
+        // Never re-open an open document (reload discards unsaved changes)
+        if Client.IsDocumentOpen(LibraryPath) then
+            ServerDoc := Client.GetDocumentByPath(LibraryPath)
+        else
+            ServerDoc := Client.OpenDocument('PcbLib', LibraryPath);
+        if ServerDoc = Nil then
+        begin
+            Result := 'ERROR: Failed to open library: ' + LibraryPath;
+            Exit;
+        end;
+        Client.ShowDocument(ServerDoc);
+        Sleep(500);
+    end;
+
+    PcbLib := GetPcbLibSafe(0);
+    if (PcbLib = nil) then
+    begin
+        Result := 'ERROR: No PCB library is open (provide library_path or open a .PcbLib)';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    FPArray := TStringList.Create;
+    Found := False;
+
+    try
+        AddJSONProperty(ResultProps, 'library_name', ExtractFileName(PcbLib.Board.FileName));
+
+        for C := 0 to PcbLib.ComponentCount - 1 do
+        begin
+            LibComp := PcbLib.GetComponent(C);
+
+            if (FootprintName = '') then
+            begin
+                // Inventory mode
+                Counts := TStringList.Create;
+                FPProps := TStringList.Create;
+                try
+                    GrpIter := LibComp.GroupIterator_Create;
+                    Prim := GrpIter.FirstPCBObject;
+                    while (Prim <> nil) do
+                    begin
+                        case Prim.ObjectId of
+                            ePadObject:           TypeName := 'pads';
+                            eTrackObject:         TypeName := 'tracks';
+                            eArcObject:           TypeName := 'arcs';
+                            eFillObject:          TypeName := 'fills';
+                            eTextObject:          TypeName := 'texts';
+                            eRegionObject:        TypeName := 'regions';
+                            eViaObject:           TypeName := 'vias';
+                            eComponentBodyObject: TypeName := 'component_bodies';
+                        else
+                            TypeName := 'other';
+                        end;
+                        i := Counts.IndexOfName(TypeName);
+                        if (i < 0) then
+                            Counts.Add(TypeName + '=1')
+                        else
+                            Counts[i] := TypeName + '=' + IntToStr(StrToInt(Counts.ValueFromIndex[i]) + 1);
+                        Prim := GrpIter.NextPCBObject;
+                    end;
+                    LibComp.GroupIterator_Destroy(GrpIter);
+
+                    AddJSONProperty(FPProps, 'name', LibComp.Name);
+                    AddJSONProperty(FPProps, 'description', LibComp.Description);
+                    for i := 0 to Counts.Count - 1 do
+                        AddJSONInteger(FPProps, Counts.Names[i], StrToInt(Counts.ValueFromIndex[i]));
+                    FPArray.Add(BuildJSONObject(FPProps, 1));
+                finally
+                    Counts.Free;
+                    FPProps.Free;
+                end;
+            end
+            else if (FootprintName = '*') or (UpperCase(LibComp.Name) = UpperCase(FootprintName)) then
+            begin
+                // Dump mode
+                Found := True;
+                FPProps := TStringList.Create;
+                PrimsArray := TStringList.Create;
+                try
+                    AddJSONProperty(FPProps, 'footprint_name', LibComp.Name);
+                    AddJSONProperty(FPProps, 'description', LibComp.Description);
+
+                    GrpIter := LibComp.GroupIterator_Create;
+                    Prim := GrpIter.FirstPCBObject;
+                    while (Prim <> nil) do
+                    begin
+                        PrimProps := TStringList.Create;
+                        try
+                          // Armor: an unreadable primitive degrades to a
+                          // reported entry instead of crashing the script
+                          try
+                            case Prim.ObjectId of
+                                ePadObject:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'pad');
+                                    AddJSONProperty(PrimProps, 'name', Prim.Name);
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y));
+                                    AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
+                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONBoolean(PrimProps, 'plated', Prim.Plated);
+                                    AddJSONInteger(PrimProps, 'mode', Prim.Mode);
+                                    AddJSONNumber(PrimProps, 'top_x_size', CoordToMils(Prim.TopXSize));
+                                    AddJSONNumber(PrimProps, 'top_y_size', CoordToMils(Prim.TopYSize));
+                                    AddJSONInteger(PrimProps, 'top_shape', Prim.TopShape);
+                                    AddJSONNumber(PrimProps, 'hole_size', CoordToMils(Prim.HoleSize));
+                                    AddJSONInteger(PrimProps, 'hole_type', Prim.HoleType);
+                                    AddJSONNumber(PrimProps, 'hole_width', CoordToMils(Prim.HoleWidth));
+                                    AddJSONNumber(PrimProps, 'hole_rotation', Prim.HoleRotation);
+                                    if (Prim.Mode <> ePadMode_Simple) then
+                                    begin
+                                        AddJSONNumber(PrimProps, 'mid_x_size', CoordToMils(Prim.MidXSize));
+                                        AddJSONNumber(PrimProps, 'mid_y_size', CoordToMils(Prim.MidYSize));
+                                        AddJSONInteger(PrimProps, 'mid_shape', Prim.MidShape);
+                                        AddJSONNumber(PrimProps, 'bot_x_size', CoordToMils(Prim.BotXSize));
+                                        AddJSONNumber(PrimProps, 'bot_y_size', CoordToMils(Prim.BotYSize));
+                                        AddJSONInteger(PrimProps, 'bot_shape', Prim.BotShape);
+                                    end;
+                                    if (Prim.TopShape = eRoundedRectangular) then
+                                        AddJSONInteger(PrimProps, 'corner_pct', Prim.StackCRPctOnLayer[eTopLayer]);
+                                end;
+                                eTrackObject:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'track');
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2));
+                                    AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
+                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                end;
+                                eArcObject:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'arc');
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.XCenter));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.YCenter));
+                                    AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
+                                    AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
+                                    AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
+                                    AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.LineWidth));
+                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                end;
+                                eFillObject:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'fill');
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1Location));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1Location));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2Location));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2Location));
+                                    AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
+                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                end;
+                                eTextObject:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'text');
+                                    AddJSONProperty(PrimProps, 'text', Prim.Text);
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.XLocation));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.YLocation));
+                                    AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
+                                    AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
+                                    AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
+                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONBoolean(PrimProps, 'mirror', Prim.MirrorFlag);
+                                    AddJSONBoolean(PrimProps, 'ttf', Prim.UseTTFonts);
+                                end;
+                                eRegionObject:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'region');
+                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONInteger(PrimProps, 'kind', Prim.Kind);
+                                    PointsArray := TStringList.Create;
+                                    try
+                                        for V := 1 to Prim.MainContour.Count do
+                                        begin
+                                            PProps := TStringList.Create;
+                                            try
+                                                AddJSONNumber(PProps, 'x', CoordToMils(Prim.MainContour.x[V]));
+                                                AddJSONNumber(PProps, 'y', CoordToMils(Prim.MainContour.y[V]));
+                                                PointsArray.Add(BuildJSONObject(PProps, 3));
+                                            finally
+                                                PProps.Free;
+                                            end;
+                                        end;
+                                        PrimProps.Add(BuildJSONArray(PointsArray, 'vertices', 2));
+                                    finally
+                                        PointsArray.Free;
+                                    end;
+                                    AddJSONInteger(PrimProps, 'hole_count', Prim.HoleCount);
+                                end;
+                                eViaObject:
+                                begin
+                                    AddJSONProperty(PrimProps, 'type', 'via');
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y));
+                                    AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
+                                    AddJSONNumber(PrimProps, 'hole_size', CoordToMils(Prim.HoleSize));
+                                    AddJSONProperty(PrimProps, 'low_layer', Layer2String(Prim.LowLayer));
+                                    AddJSONProperty(PrimProps, 'high_layer', Layer2String(Prim.HighLayer));
+                                end;
+                                eComponentBodyObject:
+                                    // 3D bodies are models, not 2D primitives -
+                                    // excluded from the graphics round-trip
+                                    AddJSONProperty(PrimProps, 'type', '');
+                            else
+                            begin
+                                AddJSONProperty(PrimProps, 'type', 'unknown');
+                                AddJSONInteger(PrimProps, 'object_id', Prim.ObjectId);
+                            end;
+                            end;
+
+                            if (PrimProps.Count > 0) then
+                                if (Pos('"type": ""', PrimProps[0]) = 0) then
+                                    PrimsArray.Add(BuildJSONObject(PrimProps, 1));
+                          except
+                            PrimProps.Clear;
+                            AddJSONProperty(PrimProps, 'type', 'unreadable');
+                            PrimsArray.Add(BuildJSONObject(PrimProps, 1));
+                          end;
+                        finally
+                            PrimProps.Free;
+                        end;
+
+                        Prim := GrpIter.NextPCBObject;
+                    end;
+                    LibComp.GroupIterator_Destroy(GrpIter);
+
+                    FPProps.Add(BuildJSONArray(PrimsArray, 'primitives', 1));
+
+                    if (FootprintName = '*') then
+                        FPArray.Add(BuildJSONObject(FPProps, 1))
+                    else
+                        for i := 0 to FPProps.Count - 1 do
+                            ResultProps.Add(FPProps[i]);
+                finally
+                    FPProps.Free;
+                    PrimsArray.Free;
+                end;
+            end;
+        end;
+
+        if (FootprintName = '') or (FootprintName = '*') then
+        begin
+            AddJSONInteger(ResultProps, 'footprint_count', FPArray.Count);
+            ResultProps.Add(BuildJSONArray(FPArray, 'footprints', 1));
+        end
+        else if not Found then
+        begin
+            Result := 'ERROR: Footprint not found in library: ' + FootprintName;
+            Exit;
+        end;
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + '\temp_footprint_primitives.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        FPArray.Free;
+    end;
+end;
+
+
 // Function to get all unique net names from the current PCB document
 function GetAllNets(ROOT_DIR: String): String;
 var
