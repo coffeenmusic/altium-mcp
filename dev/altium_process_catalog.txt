@@ -1,0 +1,1029 @@
+AcquisitionManager|RunAcquisitionDialog|RunAcquisitionDialog
+ADVSIM|AddNsxToNewProject|
+ADVSIM|RunDialog_AnalysesSetup|Run analyses setup dialog
+ADVSIM|RunSimulator|Run simulation
+ADVSIM|StopSimulator|Stop simulation
+ADVSIM|ViewError|View Netlist Generation Error
+Altium.Edp.ComponentSearch.Plugin|ClearCache|Clear Cache
+Altium.Edp.ComponentSearch.Plugin|OpenMultipleComponents_URL|Open Multiple Components
+Altium.Edp.ComponentSearch.Plugin|SearchComponent|Search in Libraries
+Altium.Edp.PartSearch.Plugin|SearchPart|Manufacturer Part Search
+Altium.PinsPanel|ShowPinsPanel|Show Pins panel
+ArngeCmp|ArrangeComponents|ArrangeComponents
+CAMtastic|ApertureFileOpen|Load in a new Aperture File using Aperture Wizard formats 
+CAMtastic|ApertureWizard|Create customized templates used to read-in any aperture format 
+CAMtastic|AppAbout|Display program information, version number and copyright
+CAMtastic|BonusComposAuto|Create a single Composite layer by simply selecting all objects
+CAMtastic|BonusTextExplode|Explode Text into Polylines for Individual Editing 
+CAMtastic|BuildComposite|Create Composite (Dark/Clear) Merging using existing layers
+CAMtastic|BuildMerge|Combine Layers into another layer
+CAMtastic|CamLayerControl|Control Layer Settings On-Off, Dark-Clear, Color && Sequence order 
+CAMtastic|ChangeLayerColor|Change selected layer color
+CAMtastic|DrawAddLayer|Creates a new layer, using your assigned layer name
+CAMtastic|DrawArc|Draw Arc using Start, End, Tangent Point on the arc
+CAMtastic|DrawArc2pt|Draw an Arc using Start, End and Current Direction 
+CAMtastic|DrawArcCsa|Create an Arc using Points Center,Start and Sweep Angle 
+CAMtastic|DrawArcCsed|Create an Arc using Points Center,Start,End and current direction
+CAMtastic|DrawArcTtr|Draw an arc by select 2 tangent lines, and a radius
+CAMtastic|DrawCircle2P|Create Circle with two tangent points
+CAMtastic|DrawCircle3P|Create Circle with three tangent points 
+CAMtastic|DrawCircleCenRad|Create circle with given center and a tangent point 
+CAMtastic|DrawCircleCenRad2|Create a circle using a center point, and given radius
+CAMtastic|DrawCircleTtr|Construct a Circle by selecting 2 tangent lines, and a radius
+CAMtastic|DrawDimDatum|Create either Horizontal or Vertical Ordinate Dimension 
+CAMtastic|DrawDimHorz|Add Horizontal Dimension
+CAMtastic|DrawDimRad|Create a radius dimension
+CAMtastic|DrawDimSettings|Modify Dimension Settings for Fonts, Accuracy, and spacing
+CAMtastic|DrawDimVert|Add Vertical Dimension
+CAMtastic|DrawEllipse|Draw an Ellipse
+CAMtastic|DrawFlash|Draw Flash
+CAMtastic|DrawLine|Draw Line
+CAMtastic|DrawNegative|Changes view to Negative field 
+CAMtastic|DrawPolygon|Draw filled Polygon
+CAMtastic|DrawPolyline|Draw a Polyline which is a sequence of connected Lines && Arcs
+CAMtastic|DrawRect|Draw a Rectangle by defining two points
+CAMtastic|DrawText|Add Text
+CAMtastic|DrawVoid|Draw Voided (Clear) Polygon area
+CAMtastic|DrillAdd|Add drill, select tool and center point
+CAMtastic|DrillAndPlunge|Allows a drill point to be placed at the start of a rout path
+CAMtastic|DrillCircle|Cuts a hole by drilling a set of overlapping holes
+CAMtastic|DrillConvertFlash|Convert existing flashes to drill points. Tool table will be created automatically
+CAMtastic|DrillFileImport|Import Drill File(s)
+CAMtastic|DrillHorText|Drill a series of holes that represents text
+CAMtastic|DrillModify|Change Drill Tool 
+CAMtastic|DrillSave|Export complete drill data files including slots, circles, text, and steps
+CAMtastic|DrillSaveEasy|Easily create drill data by selecting a layer 
+CAMtastic|DrillSlot|Cuts a slot by drilling a series of closely spaced holes between two points
+CAMtastic|DrillSymbol|Display X symbol over drill holes.  Used for visual reference. 
+CAMtastic|EditAlign|Align various Layers
+CAMtastic|EditAlignBorder|Align layers by selecting 1 border 
+CAMtastic|EditAperture|Change the specified Dcode features with the passed in shape, size & custom string
+CAMtastic|EditApertures|Displays the list of all Shapes && Sizes used
+CAMtastic|EditArray|Array Selected Objects
+CAMtastic|EditBoundBox|Create / Modify Bounding Box Attributes
+CAMtastic|EditBreak|Seperate a trace into two individual segments 
+CAMtastic|EditChamfer|Bevels the edges of objects 
+CAMtastic|EditCloseStep|Remove objects from a Step && Repeat panel
+CAMtastic|EditCompositeClose|Restore an Opened Composite
+CAMtastic|EditCompositeOpen|Explode a Composite for Editing Purposes, when Finished Close to Original State
+CAMtastic|EditConvert|Convert Draws (Tracks/Arcs) to Polygon (Copper Pour, Cut-Out or Solid Region)
+CAMtastic|EditCopy|Copy the selection and put it on the Clipboard
+CAMtastic|EditCopyEntity|Copy selected Objects (1 Time) 
+CAMtastic|EditCopyLayer|Copy Objects to Multiple Layers
+CAMtastic|EditCopyMult|Copy Selection to Multiple Locations 
+CAMtastic|EditCut|Cut the selection and put it on the Clipboard 
+CAMtastic|EditErase|Erase Selected Objects 
+CAMtastic|EditExplode|Explode Step and Repeated Blocks Objects
+CAMtastic|EditExplodeComposite|Explode Composites into individual Layers
+CAMtastic|EditExplodeCustom|Convert Custom Apertures to basic components 
+CAMtastic|EditExplodePoly|Explode Polylines into Individual Segments
+CAMtastic|EditExtend|Extends an object to meet another
+CAMtastic|EditFillet|Rounds the edges of objects
+CAMtastic|EditJoin|Join Lines/Arcs together by selecting one segment
+CAMtastic|EditMirror|Mirror Selected Objects
+CAMtastic|EditModify|Modify/Change Existing Objects 
+CAMtastic|EditModifyComposite|Change merge parameters defining a composite layer  
+CAMtastic|EditModifyStep|Change Step && Repeat Distance or Count
+CAMtastic|EditMove|Move Selected Objects
+CAMtastic|EditOffset|Creates a new object at a specified distance from an existing object 
+CAMtastic|EditOpenStep|Add Objects to an existing Step && Repeat panel
+CAMtastic|EditOriginUser|Sets User defined Origin 
+CAMtastic|EditPaste|Insert Clipboard contents 
+CAMtastic|EditPasteSpecial|Insert Clipboard contents 
+CAMtastic|EditRedo|Redo the previously undone action 
+CAMtastic|EditRotate|Rotate Selected Objects
+CAMtastic|EditScale|Scale Selected Objects
+CAMtastic|EditScaleLayer|Scale Layers Independently in X,Y 
+CAMtastic|EditSwapLayers|Swap data between the selected layers 
+CAMtastic|EditText|Change existing text properties and/or characters 
+CAMtastic|EditUndo|Undo the last action
+CAMtastic|EditVertexAdd|Add an additional vertex point to any trace
+CAMtastic|EditVertexDelete|Remove an existing vertex point
+CAMtastic|EditVertexMove|Change the location of an Existing vertex point
+CAMtastic|EscapeBreak|Cancel the last action
+CAMtastic|ExecuteFunction|Execute the current action
+CAMtastic|ExportToPCB|Loads the CAM file into a new PCB document
+CAMtastic|FileExportCentroid|Export Part Centroid, Rotation, and refdes.
+CAMtastic|FileExportGraphite|Save CAM file to Graphite format
+CAMtastic|FileExportIPCD350|Save database as IPC standard D350
+CAMtastic|FileExportIPCD356|Save database as IPC standard D356 
+CAMtastic|FileExportIPCD356A|Save database as IPC standard D356A
+CAMtastic|FileExportNetList|Save netlist to an ascii file
+CAMtastic|FileExportODB|Save CAM file to ODB++ format
+CAMtastic|FileImport|Import Gerber File(s) 
+CAMtastic|FileImportDirectory|Load Gerber files for viewing
+CAMtastic|FileImportNetList|Load Netlist file
+CAMtastic|FileImportNetListA|Load Netlist file
+CAMtastic|FileImportODB|Imprt ODB++ data into CAMtastic
+CAMtastic|FileImportSingleFile|Load Gerber files for viewing 
+CAMtastic|FilePrint|Print the active document 
+CAMtastic|FilePrintPreview|Display full pages
+CAMtastic|FileSaveBitmap|Export Windows Bitmap file (*.BMP)
+CAMtastic|GerberWrite|Write Layers as Gerber format 
+CAMtastic|GetDisplayCoords|Transform from logical coordinates to device coordinates
+CAMtastic|GetLogicalCoords|Transform from device coordinates to logical coordinates
+CAMtastic|GetMouseClickPosition|Get the positon of the last mouse click in screen coordinates
+CAMtastic|HelpIndex|CAMtastic! Online Instruction Manual 
+CAMtastic|HighlightAll|Highlights Selected Objects
+CAMtastic|InfoDrc|View all Drc Errors in a detailed user interface list. 
+CAMtastic|InfoDrcList|View all Drc Errors in a detailed user interface list
+CAMtastic|InfoLoadDRCRulesFromPCB|Re-load the DRC Rules from the PCB associated with the current CAMtastic! file 
+CAMtastic|InfoMeasure|Measure Distances
+CAMtastic|InfoMeasureNet|Determine Closest Distance between two Nets
+CAMtastic|InfoMeasureObject|Determine Closest Distance between two Objects
+CAMtastic|InfoMinAnnularRing|Query the Annular Ring for the selected pad
+CAMtastic|InfoPCBReport|Build PCB Report/Quote 
+CAMtastic|InfoPolygons|Locate any Invalid Polygon Boundaries, that will cause Photoplotting Errors 
+CAMtastic|InfoQuery|Examine Specific Entity 
+CAMtastic|InfoQueryMultiple|Select multiple objects to query
+CAMtastic|InfoQueryNet|Query a specific netlist 
+CAMtastic|InfoStatus|Determine Memory, Disk space, Image Size & Extents  
+CAMtastic|InfoViewNets|View available nets in a detailed user interface list.
+CAMtastic|InspectReport|Display Information about DCode & Layer Information  
+CAMtastic|InspectReportDrcDfm|Extract a detailed report of DRC/DFM violations.
+CAMtastic|InspectReportsAperture|Generate Aperture Report
+CAMtastic|InspectReportsDrill|Generate Drill Report
+CAMtastic|InspectReportsLibrary|
+CAMtastic|InspectReportsRout|Generate Rout/Mill Reports
+CAMtastic|InspectReportsXYCoordinates|Build X/Y Report 
+CAMtastic|LayersOnOff|Turn selected layers ON / OFF
+CAMtastic|LayerToggleLock|Lock / Unlock the selected layer
+CAMtastic|LeftBtn_Click|Emulate the LEFT mouse button click
+CAMtastic|MacroEdit|Edit the selected macro script file
+CAMtastic|MacroRecord|Start recording a new macro script
+CAMtastic|MacroRun|Play the selected macro script
+CAMtastic|MacroStopRecording|Stop the current macro recording process
+CAMtastic|MillExport|Export Mill/Route Data 
+CAMtastic|MillFileImport|Import Mill File(s)
+CAMtastic|MillMilling|Create paths for milling Closed boundaries
+CAMtastic|MillSortAuto|Sort using predefined Scan box
+CAMtastic|MillSortNone|Objects are sorted in the order they were created.
+CAMtastic|MillSortUser|Sort objects in order of user selection
+CAMtastic|MouseMove|Emulate the mouse move
+CAMtastic|MouseWheelRollDown|Zoom Out using the mouse wheel
+CAMtastic|MouseWheelRollUp|Zoom In using the mouse wheel
+CAMtastic|OpenFileLibrary|Imports Custom Aperture Definitions from a Library File 
+CAMtastic|PolygonCloseFill|Closes & Fills the drawn poygon
+CAMtastic|PolylineArcMode|Change from drawing lines to drawing arcs.
+CAMtastic|PolylineCClockwise|Sets the arc drawing direction to counter-clockwise
+CAMtastic|PolylineClockwise|Sets the arc drawing direction to clockwise
+CAMtastic|PolylineClose|Finish the current polyline drawing cycle by automatically closing the contur
+CAMtastic|PolylineEnd|Finish the current polyline drawing cycle
+CAMtastic|PolylineLineMode|Change from drawing arcs to drawing lines
+CAMtastic|PolylineUndo|Undo the last polyline changes
+CAMtastic|PreferencesBox|References box preferences
+CAMtastic|PreferencesDrawMode|Drawing mode preferences
+CAMtastic|PreferencesGeneral|General preferences
+CAMtastic|PreferencesImport|Data import, export preferences
+CAMtastic|ProcessModify|Modify ODB++ step  
+CAMtastic|ProcessTable|Add/Modify ODB++ steps
+CAMtastic|QuickFileImport|Import Gerber, Drill, Mill & Netlist Files  
+CAMtastic|Redraw|Redraw Entire Screen 
+CAMtastic|RenameLayer|Rename the desired layer
+CAMtastic|RepeatFunction|Repeat the last action
+CAMtastic|ResetDocument|Reset the data stored in the current document (active CAMtatsic window).
+CAMtastic|RightBtn_Click|Emulate the RIGHT mouse button click
+CAMtastic|SelmenuAddToggle|Add Objects to Existing Selection Set 
+CAMtastic|SelmenuAll|Select All Objects
+CAMtastic|SelmenuCross|Select Objects using a Crossing Window  
+CAMtastic|SelmenuDisplay|Select All Objects Currently Displayed on the Screen 
+CAMtastic|SelmenuEntity|Select one Object using the mouse cursor
+CAMtastic|SelmenuFilter|Filter Selection by using Aperture & Layer references 
+CAMtastic|SelmenuFlash|Select Flash/Point Objects
+CAMtastic|SelmenuPrev|Use Previous Selection 
+CAMtastic|SelmenuRemove|Remove Objects from Existing Selection Set
+CAMtastic|SelmenuTrace|Select Draws (Non Flashed) Ojbects 
+CAMtastic|SelmenuWindow|Select Objects using a Window 
+CAMtastic|SetCurrentDcode|Sets the current Dcode to the value passed in by the user
+CAMtastic|SetCurrentLayer|Sets the current layer, turns it ON & redraw the image
+CAMtastic|SetCurrentLayerEx|Sets the Current layer, turns it ON & no redraw
+CAMtastic|SetRepeatMode|Set / Reset the repeat mode
+CAMtastic|SetSnapMode|Set the current snap mode to the desired value.
+CAMtastic|SetUnits|Set the database units to Inch / mm.
+CAMtastic|SetupCamtastic|Load a new CAMtatsic instance
+CAMtastic|SnapGrid|SnapGrid
+CAMtastic|TablesLayersOrder|Create / Update the physical layers order 
+CAMtastic|TablesLayerSort|Determine order of layers for viewing purposes
+CAMtastic|TablesLayersSets|Create / Update the layers pairs for handling blind / burried vias
+CAMtastic|TablesLayerType|Determine characters used to detect layer types.
+CAMtastic|TablesMill|Configure Mill Tool Number, Size, Feed Rate, Tab Size
+CAMtastic|ToolsAnimate|Draw Slowly while displaying data, using variable speed  
+CAMtastic|ToolsAssignRefDes|Assign/Edit reference designators to existing parts. 
+CAMtastic|ToolsBuildCentroid|Create and group parts from existing non-intelligent data
+CAMtastic|ToolsCopperArea|Calculate Copper Area for selected objects
+CAMtastic|ToolsCopperPour|Create copper area inside selected border
+CAMtastic|ToolsCreateFab|Create a Fab Drawing from a Drill layer
+CAMtastic|ToolsCreateToolPathCam|Create rout path(s) from existing geometries
+CAMtastic|ToolsCreateToolPathOptions|Create rout path options
+CAMtastic|ToolsDraw2Cust|Converts Selected Drawn Images to a Custom Flash 
+CAMtastic|ToolsDraw2Flash|Automatic Conversion of Drawn Pads to Flashed Apertures  
+CAMtastic|ToolsDraw2FlashSel|Convert Selected object to Flashes pads throughout database
+CAMtastic|ToolsDrillTemplate|Create a PTH Drill template when no drill layer is supplied
+CAMtastic|ToolsEpoxy|Add Epoxy bars between selected pad pair combinations 
+CAMtastic|ToolsFilmWizard|Automatically created a panelized Film layer
+CAMtastic|ToolsHomebase|Convert Flashed Pads to Homebase shape 
+CAMtastic|ToolsMillAnimate|Redraw selected path displaying each rout command 
+CAMtastic|ToolsMillArrow|Display Direction Arrows for Rout Path
+CAMtastic|ToolsMillAuto|Create a rout path, selecting a corner on a closed PCB border.
+CAMtastic|ToolsMillConvertArcs|Detect and create arcs from line segments
+CAMtastic|ToolsMillConvertCircle|Detect and create circles from line segments
+CAMtastic|ToolsMillG32|Rout out an inside circle in a clockwise direction 
+CAMtastic|ToolsMillG33|Rout out an inside circle in a counter clockwise direction 
+CAMtastic|ToolsMillManual|Rout a PCB board manually 
+CAMtastic|ToolsMillTab|Create Tabs on Mill/Route Boundary
+CAMtastic|ToolsMillViewOriginal|Display original centered Path
+CAMtastic|ToolsMillViewPlunge|Display Plunge Symbol
+CAMtastic|ToolsMillViewRetract|Display Retraction Symbol 
+CAMtastic|ToolsModifyToolPathCam|Modify rout paths(s) 
+CAMtastic|ToolsNetListCleanNets|Remove all nets from database
+CAMtastic|ToolsNetListComparison|Compare the current netlist with the one imported 
+CAMtastic|ToolsNetListEx|Generate Netlist Information from non-intelligent data 
+CAMtastic|ToolsNetListRenameNets|Change the net names using the values from the loaded IPC-356-D file
+CAMtastic|ToolsPads|Remove isolated && stacked pads on internal layers
+CAMtastic|ToolsPanelize|Array pcb on a Sheet with a variety of Spacing Options
+CAMtastic|ToolsPoly2Vect|Fill Closed Boundaries with Line Strokes  
+CAMtastic|ToolsPolyLinePro|Automatically Close and Fix open Boundaries
+CAMtastic|ToolsSpread|Enlarge or Reduce Entity Sizes
+CAMtastic|ToolsTearDrop|Add Teardrop to Trace->Pad Connection
+CAMtastic|ToolsTrimsilk|Clip silkscreen traces to clear solder mask pads  
+CAMtastic|ToolsVect2Out|Create Outlined Boundaries from selected objects
+CAMtastic|ToolsVenting|Add a Venting Pattern to a PCB Panel
+CAMtastic|TurnLayerOnOff|Turn selected layer ON / OFF
+CAMtastic|UpdatePolygonsDrawingOrder|Updates the drawing order of database objects including solid polygons
+CAMtastic|ViewBoundBox|Display Box, used as a visual reference 
+CAMtastic|ViewDeleteLayers|Delete all the selected layers
+CAMtastic|ViewExtents|Display drawing Extents                                                               
+CAMtastic|ViewFill|Toggles between Fill and Outline Viewing 
+CAMtastic|ViewGrid|Change Grid, Snap or Drawing Mode Settings                                            
+CAMtastic|ViewIsolateLayer|Isolate the layer which number is passed in as a parameter
+CAMtastic|ViewLayersAllOff|Hide all layers 
+CAMtastic|ViewLayersAllOn|Make all layers visible
+CAMtastic|ViewLayersIsolate|Select an object. Only that objects layer will be displayed 
+CAMtastic|ViewLayersTurn|Select an object.  The objects layer will be set OFF
+CAMtastic|ViewOrigin|Display Drawing Origin
+CAMtastic|ViewSetLayOff|Choose Layer(s) to Turn Off 
+CAMtastic|ViewSetLayOn|Choose Layer(s) to Turn On 
+CAMtastic|ViewShowDiff|Display the Difference between layers
+CAMtastic|ViewTranslucent|Display Images as - See Through
+CAMtastic|WindowToggleMenu|Toggle between CAMTASTIC & NC menus
+CAMtastic|ZoomAll|Zooms to original view 
+CAMtastic|ZoomDcode|Zoom Out to View All Objects drawn with the current Dcode
+CAMtastic|ZoomDynamicPan|Real Time Panning 
+CAMtastic|ZoomDynamicZoom|Zoom In or Out by dragging the Mouse to the Right(+) or Left(-)
+CAMtastic|ZoomFilmBox|Zoom Out to Film Box Extents 
+CAMtastic|ZoomIn|Zoom In
+CAMtastic|ZoomInButton|Zoom In towards image 
+CAMtastic|ZoomMouseWheel|Zoom In / Out using the mouse wheel
+CAMtastic|ZoomOut|Zoom Out
+CAMtastic|ZoomOutButton|Zoom Out from Image 
+CAMtastic|ZoomPan|Scrolls(Pan) View across a specified distance
+CAMtastic|ZoomPrevious|Change View State to Previous
+CAMtastic|ZoomWindow|Zooms in towards a selected window area.
+Client|ArrangeAllWindows|Arrange all opened windows horizontally or vertically
+Client|CascadeAllOpenDocuments|Cascade all open document windows
+Client|ChangeTransparency|Control the transparency of floating windows
+Client|CrossProbe|Cross probing is a technique of locating matching objects in different documents
+Client|CustomizeResources|Allocate menus, shortcut keys and toolbar resources for current Editor 
+Client|Favorites|Favorites
+Client|FullScreen|FullScreen
+Client|HelpAbout|Display the version number and copyright of EDA/Client 
+Client|ImportSpeedsettings|Imports predefined settings
+Client|Licensing|Run the licensing dialog
+Client|MacroManagerExport|Save recorded data to a file
+Client|MacroManagerPlayback|Play previously recorded file
+Client|MacroManagerSetState|Start/Stop recording
+Client|Navigate|Navigate
+Client|NewDocumentForm|Creates a new application window
+Client|QuitFromEDAClient|Quit from EDA/Client 
+Client|RestoreLayout|Restores the current desktop from a layout
+Client|RunCommonDialog|Run a common file, document, process, or color dialog  
+Client|RunProcess|Run Client Process  
+Client|SaveLayout|Saves the current desktop as a layout
+Client|SelectNextDocumentOfTheSameKind|Activates next document of the same kind
+Client|SetupEDAServers|Install and configure EDA servers
+Client|SetupPreferences|Setup Preferences
+Client|SwitchDocumentAndPanel|Switches focus between panel and active document
+Client|SwitchViews|Change the active view
+Client|TileAllOpenDocuments|Tile all open document windows 
+Client|ToggleClientStatusBar|Turn the Status Line on or off  
+Client|ToggleFloatingBars|Shows or hides floating windows
+Client|ToggleProcessStatusBar|Turn the Process Status Line on or off  
+Client|ViewToolsMenu|Displays the toolbars and panels menus
+CMPTEditor|Copy|Copy
+CMPTEditor|Cut|Cut
+CMPTEditor|LinkDocumentToReleaseVault|Link Document With Vault Item Revision
+CMPTEditor|Paste|Paste
+CMPTEditor|Redo|Redo
+CMPTEditor|Refresh|Refresh
+CMPTEditor|ShowCMPTEditor|Show CMPTEditor dialog
+CMPTEditor|Undo|Undo
+Comments|PlaceComment|Places a comment into the document of a managed project
+CompMake|RunWizard|RunWizard
+ComponentFromSupplierSearch|Execute|
+DocumentReleaser|LinkDocumentToReleaseVault|LinkDocumentToReleaseVault
+DocumentReleaser|ReleaseDocument|ReleaseDocument
+EDesignData|ActivateSearchFilter|
+EDesignData|CloneItemRevision|
+EditConstraints|AddConstraint|Add Constraint
+EditConstraints|ImportPinFile|Import Pin File
+EditScript|AddBreakPoint|
+EditScript|AddWatch|
+EditScript|RunMacro|
+EditScript|RunScriptingSystemSettingsDialog|
+EditScript|RunToCursor|
+EditScript|SetProjectStartupProc|
+EditScript|ShowEvaluateDialog|
+EditScript|StepInto|
+EditScript|StepOver|
+EditScript|Stop|
+EditScript|ToggleBreakPoint|
+EditScript|ToggleFormDesigner|
+Engagement|OpenEngagementPage|Opens a page with news and learning materials
+Export3D|Export3D_PDF|Export PCB to PDF with 3D view
+ExtensionManager|ManageExtensions|Manage Extensions
+FolderReleaser|ReleaseFolder|ReleaseFolder
+FootprintWizard|BatchPCBLibCreate|This process draws footprints from a file containing datasheet package data.
+FootprintWizard|PCBLibCreate|This process draws footprints from datasheet package data.
+HelpAdvisor|RunHelpTopic|Run a help topic 
+HelpAdvisor|ShowDynamicHelp|
+HelpAdvisor|UpdateHotkeysPanel|
+HSEdit|Run|Run Hole Size Editor
+ImporterManager|RunImporterManagerDialog|Import files from other vendors
+IntegratedLibrary|AddRemoveLibraries|Add or remove from the list of installed libraries
+IntegratedLibrary|Commit|Check in changes to repository
+IntegratedLibrary|Copy|Copy selected cells to the clipboard
+IntegratedLibrary|CopyDocument|Copy selected subdocuments to the clipboard
+IntegratedLibrary|CreateLibraryFromProject|Make an integrated library of parts contained in the current project
+IntegratedLibrary|Cut|Copy selected cells to the clipboard and remove from current document
+IntegratedLibrary|CutDocument|Copy selected subdocuments to the clipboard and remove from current document
+IntegratedLibrary|DebugRepository|This command is for Altium internal use only
+IntegratedLibrary|Delete|Delete components from current document
+IntegratedLibrary|DeleteDocument|Delete subdocuments from current document
+IntegratedLibrary|DocumentOptions|Edit options for the current document
+IntegratedLibrary|EditComponent|Edit a component in Schematic or PCB libraries
+IntegratedLibrary|EditDocument|Edit entity in current document
+IntegratedLibrary|EditParameterColumns|Select which parameters to display for each item
+IntegratedLibrary|FindComponent|Find a component in Integrated, Schematic or PCB libraries
+IntegratedLibrary|GenerateComponentReport|Generate a list of components in the current library
+IntegratedLibrary|GenerateComponentReportAdvanced|Generate a list of components/entities in the current library
+IntegratedLibrary|Insert|Insert new components into current document
+IntegratedLibrary|InsertDocument|Insert new components into current document
+IntegratedLibrary|InstallCurrentLibrary|Install the library currently selected in the query results
+IntegratedLibrary|NavigateBack|Return to where you were before you clicked a hyperlink
+IntegratedLibrary|NavigateForward|Repeat following a hyperlink after going back
+IntegratedLibrary|OpenFromRepository|Download and open a new Altium Library document from your repository
+IntegratedLibrary|Paste|Place clipboard contents onto current document
+IntegratedLibrary|PasteDocument|Place clipboard contents onto current document
+IntegratedLibrary|Place|Place component from current document into a design
+IntegratedLibrary|PlaceCurrentComponent|Place the component currently selected in the library browser
+IntegratedLibrary|PlaceLibraryComponent|Place a component from a PCB, Schematic or Integrated Library
+IntegratedLibrary|Redo|Redo the most recently undone command
+IntegratedLibrary|Refresh|Refresh from repository
+IntegratedLibrary|RefreshInstalledLibraries|Refresh one or all installed libraries
+IntegratedLibrary|RenameDocument|Rename a subdocument in the current document
+IntegratedLibrary|ShowComponentInVaultExplorer|Show component in Vault Explorer
+IntegratedLibrary|ShowComponentLink|Show a URL linked to the current component
+IntegratedLibrary|Undo|Undo previous command 
+IntegratedLibrary|Update|Check out changes from repository
+LibraryToVaultReleaser|ReleaseLibrariesToVault|Runs the release library to vault wizard
+LoadPCADPCB|LoadPCADPCBLibrary|Import P-CAD PCB Library File
+LoadPCADPCB|RunImporterDialog|Import P-CAD Designs and Libraries
+MakeLib|BuildPCBLibrary|Builds a PCB library from the current board
+MechatronicAD|ShowMechatronicCollaborationWindow|CoDesigner Panel Collaboration
+MgcVariantMigrator|ImportMgcVariants|Import variants
+PCB|AlignComponents|AlignComponents
+PCB|Annotate|Annotate
+PCB|ApertureLibrary|ApertureLibrary
+PCB|ArrangeComponents|ArrangeComponents
+PCB|AutopositionComponentTexts|AutopositionComponentTexts
+PCB|AutoRoute|AutoRoute
+PCB|BackAnnotate|BackAnnotate
+PCB|BoardInformation|BoardInformation
+PCB|BreakTrack|BreakTrack
+PCB|ChangeComponentName|ChangeComponentName
+PCB|ChangeObject|ChangeObject
+PCB|Clear|Clear
+PCB|ComponentRuleCheck|ComponentRuleCheck
+PCB|ConfigureColorOverride|Configure Net Color Override Behaviour
+PCB|ConfigureHeadsUpDisplay|Configure the Heads Up Display
+PCB|ConnectSubnets|Automatically Connect Subnets
+PCB|ConvertSelected|ConvertSelected
+PCB|Copy|Copy
+PCB|CopyComponent|CopyComponent
+PCB|CreateApertureList|CreateApertureList
+PCB|CreateCommentThread|Begin new comments thread for managed project
+PCB|CreateComponent|CreateComponent
+PCB|CrossProbeChoose|CrossProbeChoose
+PCB|CrossProbeNotify|CrossProbeNotify
+PCB|Cut|Cut
+PCB|DeleteComponentFromLibrary|DeleteComponentFromLibrary
+PCB|DeleteObjects|DeleteObjects
+PCB|DensityMap|DensityMap
+PCB|DeSelect|DeSelect
+PCB|DesignRuleCheck|DesignRuleCheck
+PCB|DocumentPreferences|DocumentPreferences
+PCB|DoViaStitching|DoViaStitching
+PCB|EditClasses|EditClasses
+PCB|EditFromTo|EditFromTo
+PCB|EditInternalPlanes|EditInternalPlanes
+PCB|EditRules|EditRules
+PCB|EngineeringChangeOrder|EngineeringChangeOrder
+PCB|EqualizeNetLengths|EqualizeNetLengths
+PCB|ExplodeComponent|ExplodeComponent
+PCB|Export|Export
+PCB|Fanout|Fanout
+PCB|FilterSelect|FilterSelect
+PCB|FindTestPoints|FindTestPoints
+PCB|FirstComponent|FirstComponent
+PCB|FlipSelectedObjects|FlipSelectedObjects
+PCB|GenerateLibraryReport|Generate library report
+PCB|Gloss|Gloss
+PCB|GotoLibraryComponent|GotoLibraryComponent
+PCB|GroupPrimitives|GroupPrimitives
+PCB|HideConnections|HideConnections
+PCB|IdentifyNet|IdentifyNet
+PCB|Import|Import
+PCB|Jump|Jump
+PCB|LastComponent|LastComponent
+PCB|LibraryBrowse|LibraryBrowse
+PCB|ListAllSelectedPins|ListAllSelectedPins
+PCB|ListComponents|ListComponents
+PCB|ListInternalPlanePins|ListInternalPlanePins
+PCB|ListNets|ListNets
+PCB|ManageLayerSets|Manage Board Layer Sets
+PCB|ManageUnions|Manage Unions of Objects
+PCB|ManualRoute|Manual Route
+PCB|MeasureDistance|MeasureDistance
+PCB|MeasureSelectedObjects|MeasureSelectedObjects
+PCB|MoveAllComponentsToGrid|MoveAllComponentsToGrid
+PCB|MoveCursor|MoveCursor
+PCB|MoveObject|MoveObject
+PCB|Netlist|Netlist
+PCB|NextComponent|NextComponent
+PCB|OffsetSelection|Offset Selected Objects by X, Y
+PCB|OutlineSelectedObjects|OutlineSelectedObjects
+PCB|Paste|Paste
+PCB|PasteComponent|PasteComponent
+PCB|PinSwap|PinSwap
+PCB|PlaceArc|PlaceArc
+PCB|PlaceBoardOutline|Place Board Outline defining boundaries of the PCB design
+PCB|PlaceComponent|PlaceComponent
+PCB|PlaceComponentBody|Place 3D Body
+PCB|PlaceComponentFromLibraryEditor|PlaceComponentFromLibraryEditor
+PCB|PlaceComponentsFromFile|PlaceComponentsFromFile
+PCB|PlaceCoordinate|PlaceCoordinate
+PCB|PlaceDifferentialPair|Place Differential Pair
+PCB|PlaceDimension|PlaceDimension
+PCB|PlaceEmbeddedBoard|PlaceEmbeddedBoard
+PCB|PlaceFill|PlaceFill
+PCB|PlaceGraphic|PlaceGraphic
+PCB|PlacePad|PlacePad
+PCB|PlacePolygonPlane|PlacePolygonPlane
+PCB|PlaceRegion|Place Copper or Cutout Region
+PCB|PlaceRoom|PlaceRoom
+PCB|PlaceString|PlaceString
+PCB|PlaceTrack|PlaceTrack
+PCB|PlaceVia|PlaceVia
+PCB|PlaceWireBond|PlaceWireBond
+PCB|PreviousComponent|PreviousComponent
+PCB|PrimitiveSelect|PrimitiveSelect
+PCB|PrintDocument|PrintDocument
+PCB|ReAnnotate|ReAnnotate
+PCB|Redo|Redo
+PCB|ReportBoardSpecs|ReportBoardSpecs
+PCB|ReportBOM|ReportBOM
+PCB|ReportLayerStackupCompatibility|Report Layer Stackup compatibility issues for the boards embedded in board arrays
+PCB|ReportNetlistStatus|ReportNetlistStatus
+PCB|ReportPickPlace|ReportPickPlace
+PCB|ResetAllErrorMarkers|ResetAllErrorMarkers
+PCB|ResetCamera|ResetCamera
+PCB|ResetOrigin|ResetOrigin
+PCB|Retrace|Retrace
+PCB|RotateSelectedObjects|RotateSelectedObjects
+PCB|RunConvertDrilledSMTPadsToMultilayer|Run Convert Drilled SMT Pads To Multilayer
+PCB|RunPolygonManager|Run Polygon Manager
+PCB|RunQuery|RunQuery
+PCB|RunQueryBuilder|RunQueryBuilder
+PCB|RunScissors|Run Polygon Scissors
+PCB|RunSpecctraForDos|RunSpecctraForDos
+PCB|RunSpecctraForWindows|RunSpecctraForWindows
+PCB|Select|Select
+PCB|SelectionMemory|Selection Memory
+PCB|SetCamera|SetCamera
+PCB|SetComponentReference|SetComponentReference
+PCB|SetCurrentLayer|SetCurrentLayer
+PCB|SetOrigin|SetOrigin
+PCB|Setup|Setup
+PCB|SetupOutputOptions|SetupOutputOptions
+PCB|SetupPreferences|SetupPreferences
+PCB|SetupPrinter|SetupPrinter
+PCB|SetupSpecctraInterface|SetupSpecctraInterface
+PCB|ShoveComponents|ShoveComponents
+PCB|ShowApplicableRules|ShowApplicableRules
+PCB|ShowConnections|ShowConnections
+PCB|ShowNetlistLength|ShowNetlistLength
+PCB|SnapGrid|SnapGrid
+PCB|SwitchTo2D3D|SwitchTo2D3D
+PCB|TearDropSelectedPads|TearDropSelectedPads
+PCB|TestGraphicsSystem|Test performance of the GDI and DirectX graphics systems
+PCB|TestpointManager|TestpointManager
+PCB|ToggleSelection|ToggleSelection
+PCB|Undo|Undo
+PCB|UnRoute|UnRoute
+PCB|UpdateFootprints|UpdateFootprints
+PCB|UpdateRotationOnSelectedComponents|UpdateRotationOnSelectedComponents
+PCB|Zoom|Zoom
+PCB3D|ConstrainAxis|ConstrainAxis
+PCB3D|OrientView|OrientView
+PCB3D|Pan|Pan
+PCB3D|PrintDocument|PrintDocument
+PCB3D|SetupPrinter|SetupPrinter
+PCB3D|ViewObjects|ViewObjects
+PCB3D|ViewPCB3D|ViewPCB3D
+PCB3D|Zoom|Zoom
+PCBMaker|RunDocumentWizard|Run Document Wizard
+PCBMaker|RunWizard|Run Wizard
+PinSwapper|ConfigurePinSwapper|Configure pin-Swapping for this project
+PinSwapper|RunAutoPinSwapper|Run Auto Pin Swapping
+PinSwapper|RunAutoPinSwapperForPcad|Run Auto Pin Swapping
+PinSwapper|RunManualPinSwapper|Run Manual Pin Swapping
+PinSwapper|RunManualPinSwapperForPcad|Run Manual Pin Swapping
+PinSwapper|RunTASKINGPinSwapper|Run Manual TASKING Pin Swapping
+ProjectHistory|ShowProjectHistory|Show Project History
+ReportGenerator|RunReport|Run a report
+RouteCCT|ExportDesignFile|Export design file to Specctra
+RouteCCT|ImportRouteFile|Import routed connections from Specctra
+RouteCCT|RunWizard|Run Wizard
+RouteCCT|Setup|Run Specctra Setup
+RouteCCT|Toggle Pin LOC|toggle the pin assignment statements
+Routing3D|Output|Generate Routing 3D Output
+SavePCADPCB|SavePCADLibrary|Export P-CAD Library
+SavePCADPCB|SavePCADPCBFile|Export P-CAD PCB File
+Sch|AddComponentPart|Add a new part to the currently displayed component 
+Sch|AddOpenBusPort|Add OpenBus bus port
+Sch|AddRemoveLibraryInSchEditor|Add and remove libraries from the schematic editor library list
+Sch|AlignObjects|Align selected objects according to parameters or dialog settings
+Sch|AskForXYLocation| Prompt for a user specified X and Y location 
+Sch|BringObjectToFront|Bring an object graphically to the front of all other objects
+Sch|BringObjectToFrontOf|Bring an object to the front of another object
+Sch|ChangeComponentName|Change the name of the current component in the current library
+Sch|ChangeCurrentTemplate|Change the current template to a different template file 
+Sch|ChangeCursorStyle|Changes mouse cursor style
+Sch|ChangeObject|Select and use dialog to change objects
+Sch|ChangeObjectGraphically|Select and change objects on current document
+Sch|ChangeObjectGraphicallyOrSetFocus|Select and change objects on current document
+Sch|ChangeOpenBusLinkShape|Change OpenBus Link(s) Shape
+Sch|ChangeSingleObject|Use dialog to change object under the cursor 
+Sch|Clear|Delete all selected objects from the current document
+Sch|ClearLocationMark|Clear location mark (1-10) on the current document
+Sch|ComponentRuleCheck|Validate changes to current library 
+Sch|ConvertCrossJunctions|Convert Cross Junctions
+Sch|Copy|Copy all selected objects to the clipboard
+Sch|CopyComponentToLibrary|Copy component from current library to another library file 
+Sch|CreateCommentThread|Begin new comments thread for managed project
+Sch|CreateComponent|Add a new component to library
+Sch|CreateLibraryFromProject|Make a library of parts contained in the current project
+Sch|CreateSheetFromFPGAPart|Creates a new vhdl document and adds ports for the pins as well as other FPGA parameters
+Sch|CreateSheetFromSheetSymbol|Creates a new schematic document and adds ports for the sheet entries that are on the sheet symbol
+Sch|CreateSheetSymbolFromSheet|Create a sheet symbol that represents the current schematic document 
+Sch|CrossProbeChoose|Choose object to cross-probe 
+Sch|CrossProbeNetOnSch|Internal process used when cross probing nets from Advanced PCB
+Sch|CrossProbeNotify|called by the Client module to notify the Advanced Schematic server of a cross-probe message
+Sch|CrossReference|Add Port Cross References
+Sch|Cut|Copy selected objects to clipboard and remove from current document 
+Sch|DeleteComponentFromLibrary|Remove component from the current library 
+Sch|DeleteObjects|Select and delete objects on current document
+Sch|DeSelect|De-Select selected objects  
+Sch|DocumentPreferences|Setup options for current document window 
+Sch|DownHierarchy|Switch to the parent or a child sheet of the current sheet
+Sch|Drag|Move objects together with connected wires/buses 
+Sch|ExportLibraryToDatabase|Export a Library to database
+Sch|ExportSchematicToDatabase|Export schematic to a database 
+Sch|FilterSelect|Selects a filter from an object 
+Sch|FindAndReplaceText|Search for and replace text strings
+Sch|FindNextText|Search for and jump to the next matching text string
+Sch|FindText|Search for and jump to a text string
+Sch|FirstComponentLibraryEditor|Show the first component in the library
+Sch|GenerateLibraryReport|Generate library report
+Sch|IncrementComponentPartNumber|Increment Part Number 
+Sch|Jump|Jump to a specified Location 
+Sch|JumpComponent|Jump to Components 
+Sch|LastComponentLibraryEditor|Show the last component in the library 
+Sch|LibraryDocumentDescription|Description of current library document
+Sch|LinkOpenBusPorts|Link OpenBus Devices
+Sch|ListAllSelectedPins|List all selected pins
+Sch|ManageUnions|Add, remove and organize Unions
+Sch|MeasureDistance|MeasureDistance
+Sch|MirrorSelectedSheetSymbol|Flip selected sheet symbol along the X or Y-axis
+Sch|MoveComponentToLibrary|Move component from current library to another library file
+Sch|MoveCursor|Move the cursor along the snap grid
+Sch|MoveObject|Select and move objects in current document 
+Sch|MoveObjectToFront|Move and place an object in the front of all other objects 
+Sch|MoveSelectedObjects|Move selected objects to another area of the document
+Sch|MoveSingleObject|Select and move objects on the current document 
+Sch|NextComponentLibraryEditor|Show the next component in the library 
+Sch|NextComponentPart|Show the next part of the currently displayed component 
+Sch|OffsetSelection|Offset Selected Objects by X, Y
+Sch|OpenBusSignalManager|Manage OpenBus Signals and Interrupts
+Sch|Paste|Place clipboard contents onto current document
+Sch|PlaceAnnotation|Place single line text on the current document 
+Sch|PlaceArc|Place graphical arcs on the current document 
+Sch|PlaceArray|Place array with the last set array placement options
+Sch|PlaceBezier|Place bezier curves on the current document 
+Sch|PlaceBus|Place bus lines on the current schematic document 
+Sch|PlaceBusEntry|Place bus entry on the current schematic document 
+Sch|PlaceCompileMask|Place compile masks on the current document 
+Sch|PlaceComponentFromLibraryEditor|   Places part from library editor into the current schematic editor document
+Sch|PlaceDifferentialPair|Places a differential pair object on the current schematic document
+Sch|PlaceEllipse|Place elliptical shapes on the current document
+Sch|PlaceEllipticalArc|Place elliptical arcs on the current document
+Sch|PlaceFSMState|Place State on the current FSM document
+Sch|PlaceFSMTransition|Place Transition on the current FSM document
+Sch|PlaceGraphicImage|Place graphical images on the current document
+Sch|PlaceHighLevelCodeEntry|Place a C parameter code entry onto a C code symbol
+Sch|PlaceHighLevelCodeSymbol|Place a C code symbol on the current schematic document
+Sch|PlaceIEEESymbol|Place specified IEEE symbol on the current library document 
+Sch|PlaceIntegratedComponent|Place integrated components on the current schematic document
+Sch|PlaceJunction|Place junctions on the current schematic document 
+Sch|PlaceLine|Place graphical lines on the current document
+Sch|PlaceNetLabel|Place net labels on the current schematic document
+Sch|PlaceNoERC|Silence compilation errors on a net
+Sch|PlaceNote|Place multi-line text Notes on the current document 
+Sch|PlaceOffSheetConnector|Place off-sheet connector on the current schematic document 
+Sch|PlaceParameterSet|Places a set of parameters
+Sch|PlacePart|Place parts on the current schematic document
+Sch|PlacePartFromLibraryEditor|Place a part from the library editor panel
+Sch|PlacePartFromSchEditorPanel|Place a part from the schematic editor panel 
+Sch|PlacePCBLayoutDirective|Add directives to nets for PCB routing 
+Sch|PlacePieChart|Place pie shapes on the current document
+Sch|PlacePin|Place electrical pin on the current library document
+Sch|PlacePolygon|Place graphical polygon shapes on the current document 
+Sch|PlacePort|Place ports on the current schematic document
+Sch|PlacePowerPort|Place power ports on the current schematic document 
+Sch|PlaceProbe|Add net to list of nets to be traced by digital simulator 
+Sch|PlaceRectangle|Place rectangles on the current document 
+Sch|PlaceRoundRectangle|Place round rectangles on the current document 
+Sch|PlaceSheetEntry|Add net connections to sheet symbols 
+Sch|PlaceSheetSymbol|Place hierarchical sheet symbols on the current schematic document
+Sch|PlaceSplice|Place splice on the current schematic document 
+Sch|PlaceStimulus|Add stimulus information to nets for digital simulation 
+Sch|PlaceTestVectorIndex|Mark nets to identify which simulation vector to use 
+Sch|PlaceTextFrame|Place multi-line text frames on the current document 
+Sch|PlaceWire|Place electrical wires on the current schematic document 
+Sch|PreviousComponentLibraryEditor|  Show the previous component in the library 
+Sch|PreviousComponentPart|Show the previous part of the currently displayed component 
+Sch|PrintDocument|Print the current document with the last set printer options
+Sch|Redo|Redo previous undo command 
+Sch|RemoveComponentPart|Remove a part from the currently displayed component
+Sch|RemoveDuplicateComponentNames|Remove duplicate components from library
+Sch|RemoveTemplate|Remove any template information from the current schematic document
+Sch|RenameObjectText|Changes the text field associated with an object from the Browser
+Sch|ReportComponent|Display component information for current library document 
+Sch|ReportComponentLibrary|Display library statistics
+Sch|ReportOpenBus|Generate report from OpenBus sheet
+Sch|ResetUniqueIds|Reset Duplicate Component Unique IDs
+Sch|ReverseSelectedSheetEntryOrder|Reverse the order of selected sheet entries
+Sch|RotateSelectedObjects|Select and rotate objects on the current document 
+Sch|SavePartToServer|Save to Server...
+Sch|SavePartToWorkspace|Save to My Workspace...
+Sch|Select|Select specified objects
+Sch|SelectionMemory|Selection Memory
+Sch|SendObjectToBack|Send an object to the back of all other objects
+Sch|SendObjectToBackOf|Send an object to the back of another object 
+Sch|SetChannel|Set Displayed Channe
+Sch|SetLocationMark|Set location mark (1-10) on the current document 
+Sch|SetupArrayPlacement|Define an array placement of clipboard contents 
+Sch|SetupPreferences|Setup Schematic and Library Editor Preferences 
+Sch|SetupPrinter|Printer and page setup
+Sch|SwapSelectedSheetEntrySide|Swap selected sheet entries to the other side of the sheet symbols
+Sch|SynchronizeHierarchy|Synchronizes hierarchy elements like ports, sheet entries, sheet symbols, ...
+Sch|ToggleComponentDisplayMode|Display component in the specified notation
+Sch|ToggleComponentFittedInPhysicalSheet|Toggle component fitted or not fitted in current variant
+Sch|ToggleElectricalGrid|Turn the electrical grid on or off
+Sch|ToggleHiddenPins|Show/Hide hidden component pins in library documents
+Sch|ToggleIOTypeInSelectedSheetSymbol|Toggle the I/O type of all sheet entries in selected sheet symbols
+Sch|ToggleSelectedSheetEntryIO|Toggle the I/O type of selected sheet entries
+Sch|ToggleSelection|Toggle selection-state of objects 
+Sch|ToggleSingleObjectSelection|Toggle selection-state of objects
+Sch|ToggleSnapGrid|Turn the snap grid on or off  
+Sch|ToggleVisibleGrid|Turn the visible grid on or off  
+Sch|Undo|Undo previous command 
+Sch|UpdateComponentsFromLibraryEditor|Update components in all opened schematic documents  
+Sch|UpdateCurrentTemplate|Update the current schematic document from its template file.
+Sch|UpdateLibraryMask|Internal process used when updating library editor component list box 
+Sch|UpdatePartDatabaseLinks|Update all schematic parts database links 
+Sch|UpdatePartFromLibraryEditor|Update part from library editor
+Sch|UpdatePartsFromLibraryList|Update all parts from listed libraries 
+Sch|Zoom|Perform Zoom action depending on defined parameters
+SchDwgUtility|ExportToDwg|Export to Dwg file
+SchDwgUtility|ImportFromDwg|Import from Dwg file
+SchDwgUtility|Setup|Setup Dialog
+SchLibGenerationTool|ShowSymbolWizard|Show symbol wizard
+ScriptingSystem|RunScript|
+ScriptingSystem|RunScriptFile|
+ScriptingSystem|RunScriptText|
+SignalIntegrity|AbortSimulation|Abort the current simulation
+SignalIntegrity|LinkDocumentToReleaseVault|Link Document To Release Vault
+SignalIntegrity|ReleaseDocument|Release Document To Vault
+SignalIntegrity|RunSimulator|Run an SI simulation
+SignalIntegrity|RunStandardTests|Run standard SI tests
+SignalIntegrity|UpdateSchFromOldSIModels|Create new SI implementations based on 99SE model definitions
+SIM|LinkDocumentToReleaseVault|Link Document To Release Vault
+SIM|Redo|Redo previous undo command
+SIM|ReleaseDocument|Release Document To Vault
+SIM|RunXSpiceModelWizard|Run XSpice Model Wizard
+SIM|Undo|Undo previous command
+SimView|AbortSimulation|Abort the current simulation
+SimView|AddPlot|Add a new plot
+SimView|AddSourceData|Add source data to the current chart
+SimView|AddWaveToPlot|Add a wave to the current plot
+SimView|AddYAxis|Add a Y Axis to the current plot
+SimView|ChartSettings|Define chart settings for the active chart
+SimView|Clear|Clear all selections from the current document
+SimView|Copy|Copy the selection in the current document
+SimView|CopyToClip|Copy the current document to clipboard
+SimView|CreateFFTChart|Create a Fast Fourier Transform of the chart
+SimView|CreateSmokeChart|Create or update existing Stress analysis chart
+SimView|CrossProbeChoose|Choose object and create cross-probe message
+SimView|CrossProbeNotify|Respond to cross-probe message
+SimView|CursorA|Turn on Cursor A for selected wave
+SimView|CursorB|Turn on Cursor B for selected wave
+SimView|Cut|Cut the selection in the current document
+SimView|Delete|Delete all selections from the current document
+SimView|DeleteChart|Delete the currently selected chart
+SimView|DeleteSourceData|Delete source data for the current chart
+SimView|EditSourceData|Edit the selected source data wave
+SimView|EditWaveform|Edit the currently selected waveform
+SimView|ExportChart|Export the currently selected chart
+SimView|ExportPlot|Export the currently selected plot
+SimView|ExportWaveform|Export the currently selected waveform
+SimView|FormatWave|Format  the selected waveform
+SimView|ImportWaveforms|Imports one or more waveforms into the active chart
+SimView|InsertCell|Insert a new cell above the selected item
+SimView|ModifyWaveColors|Modify wave colors
+SimView|MoveWaveCursor|Function to move cursor along selected waveform
+SimView|NewChart|Add a new chart to simulation file
+SimView|Paste|Place clipboard contents into current document
+SimView|PlotSettings|Customise Plot Settings
+SimView|PrintDocument|Print the current document with the last set printer options
+SimView|RecallWaveform|Recall a stored waveform
+SimView|RemovePlot|Remove the selected Plot
+SimView|RemoveWave|Remove the selected waveform
+SimView|RemoveYAxis|Remove the selected Y Axis
+SimView|Scroll|Scroll
+SimView|SetCurrentAnalysis|Set the current analysis
+SimView|SetupDocumentOptions|Setup document options
+SimView|SetupPrinter|Printer and page setup
+SimView|StoreWaveform|Store a waveform for later recall
+SimView|YAxisSettings|Settings for selected Y Axis
+SimView|Zoom|Zoom
+SingleComponentEditor|CreateFromPartSearch|
+SingleComponentEditor|LaunchSingleComponentEditor|Launch Single Component Editor
+SiSupport|LinkDocumentToReleaseVault|Link Document To Release Vault
+SiSupport|ReleaseDocument|Release Document To Vault
+SpecctraIF|DeleteEmbeddedObjects|Debug process
+SpecctraIF|ExportSpecctraRouteFile|Export Routes File
+SpecctraIF|ExportSpecctraSessionFile|Export Session File
+SpecctraIF|ImportSpecctraDesignFile|Import Specctra (TM) DSN File
+SpecctraIF|ReturnToHostPCB|Return routed data to host PCB
+SpecctraIF|ViewEmbeddedObjects|Debug process
+TextEdit|Clear|Delete all the selected text from the current document
+TextEdit|ClearBrowserMarks|Clears any browser marks like : mask, select, graph
+TextEdit|ClearLocationMark|Clear the location mark from the current document
+TextEdit|CommentSelected|Comments the selected block
+TextEdit|Copy|Copy the selected text to the clipboard
+TextEdit|CrossProbeChoose|Choose object to cross-probe
+TextEdit|CrossProbeNotify|Notifys the SCH server of a cross-probe message
+TextEdit|Cut|Cur the selected text to the clipboard
+TextEdit|DeleteCharacter|Delete the right character from the cursor
+TextEdit|DeleteCharacterToLeft|Delete the left character from the cursor
+TextEdit|DeleteLine|Delete the current line of the cursor
+TextEdit|DeleteToBeginningOfWord|Delete to the beginning of the word from the cursor
+TextEdit|DeleteToEndOfLine|Delete to the end of the line from the cursor
+TextEdit|DeleteToEndOfWord|Delete to the end of the word from the cursor
+TextEdit|DuplicateSelected|Copy and paste the selected text from the current document
+TextEdit|EditSyntax|Edit the current syntax of the current document
+TextEdit|ExecuteSystemCommand|Execute a system command
+TextEdit|ExtendSelectionColumnOnePageDown|Extends selection column one page down from the cursor
+TextEdit|ExtendSelectionColumnOnePageUp|Extends selection column one page up from the cursor
+TextEdit|ExtendSelectionColumnOneWordLeft|Extends selection column one word left from the cursor
+TextEdit|ExtendSelectionColumnOneWordRight|Extends selection column one word right from the cursor
+TextEdit|ExtendSelectionColumnToBottomOfWindow|Extends selection column to the bottom of window from the cursor
+TextEdit|ExtendSelectionColumnToFileBegin|Extends selection column to the beginning of file from the cursor
+TextEdit|ExtendSelectionColumnToFileEnd|Extends selection column to the end of file from the cursor
+TextEdit|ExtendSelectionColumnToLineBegin|Extends selection column to the beginning of the line from the cursor
+TextEdit|ExtendSelectionColumnToLineEnd|Extends selection column to the end of line from the cursor
+TextEdit|ExtendSelectionColumnToTopOfWindow|Extends selection column to top of window from the cursor
+TextEdit|ExtendSelectionLeftOneCharacter|Extends selection left one character from the cursor
+TextEdit|ExtendSelectionLeftOneWord|Extends selection left one word from the cursor
+TextEdit|ExtendSelectionOneColumnDown|Extends selection one column down from the cursor
+TextEdit|ExtendSelectionOneColumnLeft|Extends selection one column left from the cursor
+TextEdit|ExtendSelectionOneColumnRight|Extends selection one column right from the cursor
+TextEdit|ExtendSelectionOneColumnUp|Extends selection one column up from the cursor
+TextEdit|ExtendSelectionOnePageDown|Extends selection one page down from the cursor
+TextEdit|ExtendSelectionRightOneCharacter|Extends selection right one character from the cursor
+TextEdit|ExtendSelectionRightOneWord|Extends selection right one word from the cursor
+TextEdit|ExtendSelectionToBeginningOfFile|Extends selection to the beginning of the file from the cursor
+TextEdit|ExtendSelectionToBeginningOfLine|Extends selection to the beginning of the line from the cursor
+TextEdit|ExtendSelectionToBottomOfWindow|Extends selection to the bottom of the window from the cursor
+TextEdit|ExtendSelectionToEndOfFile|Extends selection to the end of file from the cursor
+TextEdit|ExtendSelectionToEndOfLine|Extends selection to the end of line from the cursor
+TextEdit|ExtendSelectionToOnePageUp|Extends selection one page up from the cursor
+TextEdit|ExtendSelectionToSameColumnOnNextLine|Extends selection to the same column on the next line from the cursor
+TextEdit|ExtendSelectionToSameColumnOnPreviousLine|Extends selection to the same column on the previous line from the cursor
+TextEdit|ExtendSelectionToTopOfWindow|Extends selection to the top of the window from the cursor
+TextEdit|Find|Search for and jump to text in current document
+TextEdit|FindAndReplace|Search for and replace text in the current document
+TextEdit|FindNext|Search for and jump to the next found text in the current document
+TextEdit|FindNextSelected|Search for and jump to the next occurence of the text currently selected
+TextEdit|FindReplaceInFiles|Search for and replace text in opened documents and in files on disk
+TextEdit|GetTextAt|Get text at a specified line number
+TextEdit|GotoLineNumber|Jump to a specific line in the current document
+TextEdit|IndentTextBlock|Indent selected text
+TextEdit|InsertLine|Insert a new line
+TextEdit|InsertReturn|Insert a carriage return at the current cursor position
+TextEdit|InsertShiftTab|Insert a reverse tab at the current cursor position
+TextEdit|InsertTab|Insert a tab at the current cursor position
+TextEdit|InsertText|Insert text at current cursor position
+TextEdit|JumpLocationMark|Jump to a location previously specified
+TextEdit|JumpToHelpTopicUnderCursor|Open the help for the current word under the cursor
+TextEdit|JumpToLineFromPanel|Internal process used when when jumping from found instances list box
+TextEdit|MoveCursorDown|Moves the cursor down one character
+TextEdit|MoveCursorLeft|Moves the cursor left one character
+TextEdit|MoveCursorLeftOneWord|Moves the cursor left by one word
+TextEdit|MoveCursorRight|Moves the cursor right one character
+TextEdit|MoveCursorRightOneWord|Moves the cursor right by one word
+TextEdit|MoveCursorToBeginningOfLine|Moves the cursor to the beginning of the line
+TextEdit|MoveCursorToBottomOfDocument|Moves the cursor to the bottom of the document
+TextEdit|MoveCursorToBottomOfWindow|Moves the cursor to the bottom of the window
+TextEdit|MoveCursorToEndOfLine|Moves the cursor to the end of line
+TextEdit|MoveCursorToLastPosition|Move the cursor to the previous cursor position
+TextEdit|MoveCursorToTopOfDocument|Move the cursor to the top of the document
+TextEdit|MoveCursorToTopOfWindow|Move the cursor to the top of the window
+TextEdit|MoveCursorUp|Move the cursor up one character
+TextEdit|OpenDocumentUnderCursor|Attempt to open the document under the cursor with the same filename
+TextEdit|PageDown|Scroll the screen one page down
+TextEdit|PageUp|Scroll the screen one page up
+TextEdit|Paste|Paste text from the clipboard
+TextEdit|PrintDocument|Print the current document
+TextEdit|QuoteSelected|Add reply quotes to the current selected text
+TextEdit|Redo|Redo previous undo command
+TextEdit|ReloadTextFile|Update the current text document
+TextEdit|ScrollDownOneLine|Scroll the window down one line
+TextEdit|ScrollUpOneLine|Scroll the window up one line
+TextEdit|SelectAll|Select all the text in the current document
+TextEdit|SelectLine|Select the current line in the current document
+TextEdit|SelectWord|Selects the current word for the current document
+TextEdit|SetLocationMark|Set location mark on the current document
+TextEdit|SetSelectedToCapitalize|Capitalize all words in the selected text
+TextEdit|SetSelectedToLowerCase|Sets the selected text to all lower case characters
+TextEdit|SetSelectedToUpperCase|Sets the selected text to all upper case characters
+TextEdit|SetTextAt|Set text at a specified line number
+TextEdit|SetupLanguage|Setup the language settings for the text editor
+TextEdit|SetupPreferences|Setup the preferences of the text editor
+TextEdit|SetupPrinter|Setup the printing preferences for the current document
+TextEdit|SetWordToCapitalize|Capitalize the current word on the cursor
+TextEdit|SetWordToLowerCase|Set the current word on the cursor to all lower case
+TextEdit|SetWordToUpperCase|Set the current word on the cursor to all upper case
+TextEdit|ShowCodeTemplates|Show the code templates for the current document
+TextEdit|SplitEditor|Split or combine editor
+TextEdit|ToggleAutoIndent|Toggles auto indent mode
+TextEdit|ToggleInsertMode|Toggles insert mode
+TextEdit|UncommentSelected|Uncomments the selected block
+TextEdit|Undo|Undos the previous command
+TextEdit|UnindentTextBlock|Unindents the current selected block
+TextEdit|UpdateFoundInstanceList|Internal process used to update the found instance list
+TextEdit|UpdateLocationMarks|Internal process used to update the location marks on the panel
+TextEdit|UpdateSearchListOnPanel|Internal prorcess used to update the search list on the panel
+TextEdit|WordWrap|Wraps the text around the cursor/margin for the current text document
+UnifiedComponent|Add|Add
+UnifiedComponent|ClearContents|Clear contents
+UnifiedComponent|Clone|Make a copy
+UnifiedComponent|Copy|Copy
+UnifiedComponent|Cut|Cut
+UnifiedComponent|Delete|Delete
+UnifiedComponent|Disable|Disable
+UnifiedComponent|EditPinMapping|EditPinMapping
+UnifiedComponent|Enable|Enable
+UnifiedComponent|GenerateComponents|Run component generator
+UnifiedComponent|ImportDesignLib|ImportDesignLib
+UnifiedComponent|Insert|Insert
+UnifiedComponent|Paste|Paste
+UnifiedComponent|Redo|Redo
+UnifiedComponent|Refresh|Refresh
+UnifiedComponent|Release|Release
+UnifiedComponent|SwitchEditorView|Switch editor view
+UnifiedComponent|Undo|Undo
+UnifiedComponent|ValidateComponent|ValidateComponent
+VaultExplorer|LaunchVaultExplorer|Launches Vault Explorer
+VaultExplorer|Navigate|Navigate In Vault Explorer
+VaultExplorer|Navigate_URL|Navigate In Vault Explorer With URL
+VaultExplorer|OpenInSystemWebBrowser_URL|Open given url in system web browser
+VersionControl|CheckOut|Check out documents from Version Control
+VersionControl|CompareHistory|Compare selected versions from history
+VersionControl|CompareRevisions|Compare selected revisions from VCS
+VersionControl|Copy|Copy document(s) to clipboard
+VersionControl|CreateRepository|Create new empty version control repository
+VersionControl|Delete|Delete document(s) selected in storage manager
+VersionControl|DeleteFolder|Delete selected folder
+VersionControl|DeleteHistory|Delete history for selected documents
+VersionControl|DeleteVersion|Delete version from Local History
+VersionControl|ExploreRelease|Open the folder where the release is stored
+VersionControl|LabelVersion|Assign label to a version in Local History
+VersionControl|LocalRevert|Revert to a version in Local History
+VersionControl|NewFolder|Create new subfolder
+VersionControl|Open|Open document(s) selected in storage manager
+VersionControl|OpenRevision|Open revision from VCS
+VersionControl|OpenVersion|Open version from Local History
+VersionControl|Paste|Paste document(s) to current folder
+VersionControl|Refresh|Refresh storage manager
+VersionControl|Rename|Rename document selected in storage manager
+VersionControl|RenameFolder|Rename selected folder
+VersionControl|ShowAutobackups|Show autobackups in Local History
+VersionControl|ShowExplorer|Show storage manager
+VersionControl|ShowHistory|Show Local History dialog
+VersionControl|VCSWizard|Run version control wizard
+VersionControl|VersionControl|Version Control
+WebAppHost|CloseNavDialog|Close  Web App Dialog with navigation controls
+WebAppHost|CreateDialog|Create Web App Dialog
+WebAppHost|CreateDocument|Create Web App Document
+WebAppHost|CreateNavDialog|Create Web App Dialog with navigation controls
+WebAppHost|CreatePanel|Create Web App Panel
+WebAppHost|CreateWebBrowserPanel|Create Web Browser Panel
+Workflow|BrowseFolders_URL|Displays Vault Browse Folders dialog
+Workflow|BrowseMultipleReleasedItems_URL|Displays Vault Explorer that shows released items
+Workflow|CloneManagedProject|Starts the process of making a copy of the managed project
+Workflow|ConvertToManagedProject|Starts process of conversion regular to managed project
+Workflow|CreateProcess_URL|Create process with given Id
+Workflow|CreateProject|Starts process of project creation
+Workflow|GetPartRequests|Get a list of Part Request process definitions
+Workflow|GetSubdirectoriesNamesFromDirectory_URL|Get a list of subdirectories names stored in given directory
+Workflow|HandleProjectConversion_URL|Finishes conversion to managed project
+Workflow|InitializeEdaPublish_URL|Initializes project publish through Teamcenter EDA Gateway
+Workflow|NewProject_URL|Display new project dialog
+Workflow|OpenAttachmentFromServer_URL|Opens attachment from server in default application
+Workflow|OpenInSystemWebBrowser_URL|Open given url in system web browser
+Workflow|OpenProject_URL|Open managed project with callback
+Workflow|ProjectActivity|Starts process of project activity
+Workflow|ProjectRelease|Starts process of project release
+Workflow|RefreshTasklist_URL|Refreshes tasklist
+Workflow|SelectDirectory_URL|Displays Select directory dialog
+Workflow|SelectProjectTemplate_URL|Displays Vault Explorer which can be used to select project template
+Workflow|SelectRepositoryPath_URL|Displays Select Repository Path dialog
+Workflow|ShowProcessInstance_URL|Display process instance diagram in dialog
+Workflow|ShowProjectReleaseView_URL|Displays project release view
+Workflow|ShowProjectReviewPackager_URL|Displays project review packager
+Workflow|ShowTask_URL|Show task with given Id
+Workflow|StartPartRequestFromPartData|Start Part Request process, fill form with part data
+Workflow|StartPartRequestFromSupplierSearch|Search and start Part Request process for selected part
+Workflow|StartPartRequestUsingDefaults|Start Part Request process
+Workflow|SubmitRequest|Called by VE to start new part request process
+Workflow|UploadAttachment_URL|Uploads attachment
+WorkspaceManager|BeginDebugSession|Begin a debug session for the specified project
+WorkspaceManager|BrowseReleases|Browse releases of all projects
+WorkspaceManager|CancelFileLessEditing|Discard changes and cancel editing document from server
+WorkspaceManager|ChangeObject|Change Object
+WorkspaceManager|ChooseVariantsScope|Choose Output Job Variant Scope
+WorkspaceManager|ClipboardAction|Clipboard Action
+WorkspaceManager|CloseObject|Close Object
+WorkspaceManager|Compare|Compare Project with implementation
+WorkspaceManager|Compile|Compile the Project
+WorkspaceManager|CompileAbort|Abort compilation of the Projects
+WorkspaceManager|ConfirmReloadDocuments|Confirm to reload documents, modified outside of Altium Designer
+WorkspaceManager|ConvertToManagedObject|Make Project Available on Server
+WorkspaceManager|CurrentProjectVariant|Current Project Variant
+WorkspaceManager|DeleteObject|Delete Object
+WorkspaceManager|Difference|Show differences between documents
+WorkspaceManager|DocumentOptions|Setup document options
+WorkspaceManager|EditDebugSettings|Edit the debugger settings for the specified project
+WorkspaceManager|EmbeddedOptions|Setup options for embedded projects and documents
+WorkspaceManager|EmbeddedScanDependencies|Scan the dependencies for the entire project
+WorkspaceManager|EmbeddedSelectToolchain|Select a new toolchain
+WorkspaceManager|ExploreTo|Open Windows Explorer
+WorkspaceManager|FileLessReleaseToVault|Release current document to new revision in server
+WorkspaceManager|FPGAPins|Edit FPGA Pin Settings
+WorkspaceManager|FPGAWorkspace|Run the FPGA workspace view
+WorkspaceManager|GenerateReport|Generate a report/netlist from the current document or project
+WorkspaceManager|GenerateSymbol|Generate a schematic library symbol from the current document
+WorkspaceManager|HideObject|Hide the specified document or all documents in the specified object
+WorkspaceManager|Import_99SE_DDB|Import Design from 99SE DDB
+WorkspaceManager|InsertObject|Insert Object
+WorkspaceManager|IntLibMaker|Convert Database and SVN Database Libraries to Integrated Libraries
+WorkspaceManager|LibraryToSVN|Convert Schematic, PCB, Database, and Integrated Libraries to SVN
+WorkspaceManager|OpenObject|Open Object
+WorkspaceManager|Print|Print
+WorkspaceManager|RunWizard|Run project wizard
+WorkspaceManager|SaveManagedObject|Save Managed Object
+WorkspaceManager|SaveObject|Save Object
+WorkspaceManager|SetCurrentProject|Set the focused project as the active project
+WorkspaceManager|SetSubProject|Set the Sub Project for a component
+WorkspaceManager|SetupPreferences|Setup Preferences
+WorkspaceManager|ShowHiddenDocument|Show hidden document with the specified index
+WorkspaceManager|ShowHide|Toggle Compiled View
+WorkspaceManager|ShowPCBReleaseView|Show PCB Release View to allow validation, management and release of board outputs.
+WorkspaceManager|ShowProjectReleaseView|Show Project Release View to allow validation, management and release of board outputs.
+WorkspaceManager|ShowProjectReviewPackager|Show Project Review Packager to create and release project review package
+WorkspaceManager|SplitLibrary|Split Schematic, PCB, and PCB3D Libraries
+WorkspaceManager|Synchronize|Synchronize
+WorkspaceManager|VersionControl|Version Control
+WorkspaceManager|View|View

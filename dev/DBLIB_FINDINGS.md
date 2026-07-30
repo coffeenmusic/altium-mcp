@@ -281,12 +281,48 @@ yet placed parts show the symbol name in the schematic - consistent with the
 current default (Comment = LibReference) and with 3 of the 4 references
 checked. The IC's empty comment looks like the outlier.
 
+## Found: the update processes DO exist (enumerated from Altium)
+
+The API references do not document them, but Altium's own process registry
+does. `IClient` exposes the full catalog:
+
+```pascal
+for i := 0 to Client.GetServerRecordCount - 1 do
+begin
+    Rec := Client.GetServerRecord(i);          // IServerRecord
+    for j := 0 to Rec.GetCommandCount - 1 do
+    begin
+        Cmd := Rec.GetCommand(j);              // IServerProcess
+        // Rec.GetName + ':' + Cmd.GetOriginalId, Cmd.GetLongSummary,
+        // Cmd.GetParameterCount / GetParameter(k)
+    end;
+end;
+```
+
+Dumping it yields **1029 processes across 86 modules** (saved as
+`dev/altium_process_catalog.txt`). The relevant ones:
+
+| process | summary | params |
+|---|---|---|
+| `Sch:UpdatePartDatabaseLinks` | Update all schematic parts database links | 0 |
+| `Sch:UpdatePartsFromLibraryList` | Update all parts from listed libraries | 0 |
+| `Sch:UpdateComponentsFromLibraryEditor` | Update components in all opened schematic documents | 0 |
+| `Sch:UpdatePartFromLibraryEditor` | Update part from library editor | 0 |
+
+All take **no parameters**, so they act on the focused document/selection -
+meaning `RunProcess('Sch:UpdatePartDatabaseLinks')` should be callable directly
+after placing and selecting parts. **Not yet verified**: the test run was
+blocked by a wedged executor.
+
+This enumeration technique is generally useful: any undocumented Altium
+command can be found this way rather than guessed.
+
 ## Still open
 
-- Triggering "Update from Database / Update From Libraries" programmatically.
-  No process name found in the Altium API references or in the existing
-  BatchUpdateFromLibraries script; both rely on the user running the menu
-  action. Selecting the placed parts makes that a single gesture.
+- **Verify `Sch:UpdatePartDatabaseLinks`** actually populates a placed part
+  (process found by enumeration, takes no parameters, but the confirming test
+  has not run yet). If it works, placement becomes: replicate symbol, set
+  identity, select, run the process - and Altium does the rest natively.
 - Deriving parameters dynamically per table instead of hardcoding columns:
   query the part's `*_Query` view and use its non-null columns, so every
   category works without table-specific code. (Only relevant if construction

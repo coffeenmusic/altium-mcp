@@ -22,7 +22,7 @@ var
     // declarations, so experiments reuse these)
     S1, S2, S3 : String;
     I1, I2, I3 : Integer;
-    B1         : Boolean;
+    B1         : Integer;   // reused as a loop counter by some experiments
     Obj1, Obj2, Obj3, Obj4, Obj5 : IDispatch;
     List1      : TStringList;
     LibPathFromSpec : String;
@@ -48,46 +48,96 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by dev/sandbox_runner.py) ===
-        // Append the newly placed R921 to the placed dump for verification
-        List1 := TStringList.Create;
-        List1.LoadFromFile('C:\Users\Public\altium_mcp\placed_components.txt');
+        // DECISIVE TEST: place an identity-only part, then run the process
+        // Sch:UpdatePartDatabaseLinks (0 parameters) and see whether Altium populates
+        // the parameters and model by itself.
+
+        SandboxLog('opening symbol library');
+        Obj2 := Client.OpenDocument('SchLib',
+            'N:\IT\Neoventus_Altium_CAD\Altium_Libraries\Altium_Symbols\Passives.SchLib');
+        Client.ShowDocument(Obj2);
+        Sleep(1500);
         Obj1 := SchServer.GetCurrentSchDocument;
-        SandboxLog('doc: ' + Obj1.DocumentName);
-        Obj2 := Obj1.SchIterator_Create;
+
+        Obj2 := Obj1.SchLibIterator_Create;
         Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
         Obj3 := Obj2.FirstSchObject;
-        I1 := 0;
+        S1 := '';
         while (Obj3 <> nil) do
         begin
-            I1 := I1 + 1;
-            SandboxLog('  COMP ' + Obj3.Designator.Text);
-            List1.Add('COMP|' + Obj3.Designator.Text + '|' + Obj3.DesignItemID + '|' +
-                      Obj3.LibReference + '|' + Obj3.DatabaseTableName + '|' +
-                      Obj3.DatabaseLibraryName + '|' + Obj3.Comment.Text);
-            Obj4 := Obj3.SchIterator_Create;
-            Obj4.AddFilter_ObjectSet(MkSet(eParameter));
-            Obj5 := Obj4.FirstSchObject;
-            while (Obj5 <> nil) do
-            begin
-                List1.Add('  PARAM|' + Obj3.Designator.Text + '|' + Obj5.Name + '|' + Obj5.Text);
-                Obj5 := Obj4.NextSchObject;
-            end;
-            Obj3.SchIterator_Destroy(Obj4);
-            Obj4 := Obj3.SchIterator_Create;
-            Obj4.AddFilter_ObjectSet(MkSet(eImplementation));
-            Obj5 := Obj4.FirstSchObject;
-            while (Obj5 <> nil) do
-            begin
-                List1.Add('  MODEL|' + Obj3.Designator.Text + '|' + Obj5.ModelType + '|' + Obj5.ModelName);
-                Obj5 := Obj4.NextSchObject;
-            end;
-            Obj3.SchIterator_Destroy(Obj4);
+            if (Obj3.LibReference = 'RES-DISCRETE') then begin S1 := 'found'; Break; end;
             Obj3 := Obj2.NextSchObject;
         end;
-        Obj1.SchIterator_Destroy(Obj2);
-        List1.SaveToFile('C:\Users\Public\altium_mcp\placed_components.txt');
-        List1.Free;
-        ResultText := '{"appended": ' + IntToStr(I1) + '}';
+        SandboxLog('symbol ' + S1);
+        Obj3 := Obj3.Replicate;
+
+        SandboxLog('creating target schematic');
+        GetWorkSpace.DM_CreateNewDocument('SCH');
+        Obj1 := SchServer.GetCurrentSchDocument;
+        SandboxLog('target: ' + Obj1.DocumentName + ' objectID=' + IntToStr(Obj1.ObjectID));
+
+        if (Obj1.ObjectID <> 32) then
+            ResultText := '{"error": "target not a schematic"}'
+        else
+        begin
+            Obj3.Designator.Text := 'R930';
+            Obj3.DesignItemID := '1112-0003';
+            SandboxLog('identity set: R930 / 1112-0003 (NO parameters, NO model)');
+
+            Obj1.RegisterSchObjectInContainer(Obj3);
+            SchServer.RobotManager.SendMessage(Obj1.I_ObjectAddress, c_BroadCast,
+                SCHM_PrimitiveRegistration, Obj3.I_ObjectAddress);
+            Obj3.Selection := True;
+            SandboxLog('registered and selected');
+
+            SandboxLog('params BEFORE update:');
+            I1 := 0;
+            Obj2 := Obj3.SchIterator_Create;
+            Obj2.AddFilter_ObjectSet(MkSet(eParameter));
+            Obj4 := Obj2.FirstSchObject;
+            while (Obj4 <> nil) do
+            begin
+                I1 := I1 + 1;
+                SandboxLog('    ' + Obj4.Name + ' = ' + Obj4.Text);
+                Obj4 := Obj2.NextSchObject;
+            end;
+            Obj3.SchIterator_Destroy(Obj2);
+
+            SandboxLog('>>> running Sch:UpdatePartDatabaseLinks');
+            ResetParameters;
+            RunProcess('Sch:UpdatePartDatabaseLinks');
+            SandboxLog('>>> process returned');
+            Sleep(2000);
+
+            SandboxLog('params AFTER update:');
+            I2 := 0;
+            Obj2 := Obj3.SchIterator_Create;
+            Obj2.AddFilter_ObjectSet(MkSet(eParameter));
+            Obj4 := Obj2.FirstSchObject;
+            while (Obj4 <> nil) do
+            begin
+                I2 := I2 + 1;
+                SandboxLog('    ' + Obj4.Name + ' = ' + Obj4.Text);
+                Obj4 := Obj2.NextSchObject;
+            end;
+            Obj3.SchIterator_Destroy(Obj2);
+
+            I3 := 0;
+            Obj2 := Obj3.SchIterator_Create;
+            Obj2.AddFilter_ObjectSet(MkSet(eImplementation));
+            Obj4 := Obj2.FirstSchObject;
+            while (Obj4 <> nil) do
+            begin
+                I3 := I3 + 1;
+                SandboxLog('    MODEL ' + Obj4.ModelType + '/' + Obj4.ModelName);
+                Obj4 := Obj2.NextSchObject;
+            end;
+            Obj3.SchIterator_Destroy(Obj2);
+
+            SandboxLog('dbTable now = ' + Obj3.DatabaseTableName + ' dbLib = ' + Obj3.DatabaseLibraryName);
+            ResultText := '{"params_before": ' + IntToStr(I1) + ', "params_after": ' + IntToStr(I2) +
+                          ', "models_after": ' + IntToStr(I3) + ', "dbTable": "' + Obj3.DatabaseTableName + '"}';
+        end;
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the experiment body');
