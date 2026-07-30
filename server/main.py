@@ -638,6 +638,9 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     """
     Before executing, run get_symbol_placement_rules first.
 
+    For Altium API guidance while scripting, use the "altium-script" skill
+    (ensure_altium_script_skill reports whether it is installed).
+
     Also look for a similar existing symbol to use as a style reference
     before drawing: search a company/library .SchLib for a comparable part
     (same category - op-amp, comparator, MCU, regulator, diode...) with
@@ -1049,6 +1052,221 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     
     logger.info(f"Retrieved pin data for components")
     return json.dumps(pins_data, indent=2)
+
+SANDBOX_DIR = MCP_DIR / "SandboxScript"
+SANDBOX_PAS = SANDBOX_DIR / "Sandbox.pas"
+SANDBOX_PRJ = SANDBOX_DIR / "Sandbox.PrjScr"
+SANDBOX_LOG = EXCHANGE_DIR / "sandbox_log.txt"
+SANDBOX_RESULT = EXCHANGE_DIR / "sandbox_result.json"
+SANDBOX_BEGIN = "// === BEGIN EXPERIMENT"
+SANDBOX_END = "// === END EXPERIMENT"
+
+
+def _dismiss_altium_dialogs():
+    """Close Altium modal popups that would otherwise block a script run.
+
+    Altium uses two kinds: Win32 task dialogs (#32770) and Delphi TMessageForm
+    error/warning boxes.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return 0
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def cb(hwnd, lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        if cls.value == "#32770":
+            found.append(hwnd)
+        elif cls.value == "TMessageForm":
+            n = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if buf.value in ("Error", "Warning", "Information", "Confirm"):
+                found.append(hwnd)
+        return True
+
+    user32.EnumWindows(cb, 0)
+    for h in found:
+        user32.PostMessageW(h, 0x0010, 0, 0)
+    return len(found)
+
+
+@mcp.tool()
+async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
+    """
+    Run a DelphiScript snippet inside an isolated Altium sandbox and report
+    what happened, step by step.
+
+    Use this to develop and verify Altium API code before relying on it.
+    Altium has no headless test mode and its failure modes are hostile: a
+    runtime error leaves the script PAUSED IN THE DEBUGGER with no dialog,
+    after which every later script run silently does nothing until the
+    debugger is stopped (Ctrl+F3) or Altium is restarted. This tool detects
+    that state and reports exactly which statement died.
+
+    The script runs in a SEPARATE script project, so a crash here can never
+    break the other MCP tools.
+
+    Writing the script:
+    - Call SandboxLog('...') before each risky statement. The log is flushed
+      after every call, so the last logged line identifies what failed.
+    - Assign findings to the string variable ResultText - it is returned.
+    - DelphiScript has NO inline variable declarations. Reuse the provided
+      scratch variables: S1..S3 (String), I1..I3 and B1 (Integer),
+      Obj1..Obj5 (IDispatch), List1 (TStringList), IntMan, DbDoc.
+    - try/except does NOT catch runtime errors such as bad conversions or
+      invalid API calls, so it cannot be relied on to keep a script alive.
+    - The sandbox is standalone: helpers and constants from the production
+      units (TrimJSON, AddJSONProperty, ...) are NOT available; REPLACEALL is.
+    - Never register objects into a library document and never write to shared
+      or network library paths. Verify the target document kind first
+      (ObjectID 32 = schematic, 33 = symbol library).
+
+    For API guidance - interfaces, object models, worked examples - use the
+    "altium-script" skill. ensure_altium_script_skill reports whether that
+    skill is installed and can install it.
+
+    Args:
+        script (str): DelphiScript statements to execute (body only).
+        timeout_seconds (int): How long to wait for completion (default 120).
+
+    Returns:
+        str: JSON with success, the step log, the script's ResultText, and on
+             failure the last step reached plus whether Altium's script
+             executor is now wedged and needs recovery.
+    """
+    logger.info(f"run_altium_script: {len(script.splitlines())} lines")
+
+    if not SANDBOX_PAS.exists() or not SANDBOX_PRJ.exists():
+        return json.dumps({"success": False,
+                           "error": f"sandbox project missing at {SANDBOX_DIR}"})
+
+    try:
+        src = SANDBOX_PAS.read_text(encoding="utf-8")
+        pre, rest = src.split(SANDBOX_BEGIN, 1)
+        marker_line, rest = rest.split("\n", 1)
+        _, post = rest.split(SANDBOX_END, 1)
+        body = "\n".join("        " + ln if ln.strip() else ln
+                          for ln in script.strip("\n").splitlines())
+        SANDBOX_PAS.write_text(
+            pre + SANDBOX_BEGIN + marker_line + "\n" + body + "\n        " + SANDBOX_END + post,
+            encoding="utf-8")
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"could not inject script: {e}"})
+
+    for f in (SANDBOX_LOG, SANDBOX_RESULT):
+        if f.exists():
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+    cmd = (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScript('
+           f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
+    subprocess.Popen(cmd, shell=True)
+
+    start = time.time()
+    dialogs = 0
+    while not SANDBOX_RESULT.exists() and time.time() - start < timeout_seconds:
+        await asyncio.sleep(0.5)
+        if time.time() - start > 6:
+            dialogs += _dismiss_altium_dialogs()
+
+    steps = []
+    if SANDBOX_LOG.exists():
+        steps = SANDBOX_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    if SANDBOX_RESULT.exists():
+        result_text = SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace").strip()
+        return json.dumps({"success": True, "result": result_text, "steps": steps,
+                           "dialogs_dismissed": dialogs}, indent=2)
+
+    if steps:
+        return json.dumps({
+            "success": False,
+            "error": "script started but did not finish",
+            "last_step_reached": steps[-1],
+            "diagnosis": "The statement AFTER the last step is what crashed or paused the script.",
+            "executor_wedged": True,
+            "recovery": "Altium's script executor is now blocked: stop the paused script "
+                        "(script editor, Ctrl+F3) or restart Altium before running anything else.",
+            "steps": steps,
+            "dialogs_dismissed": dialogs}, indent=2)
+
+    return json.dumps({
+        "success": False,
+        "error": "script never started",
+        "diagnosis": "Usually a COMPILE error in the script, or a previously paused "
+                     "script blocking execution.",
+        "executor_wedged": True,
+        "recovery": "Check Altium's script editor for a paused line; stop it (Ctrl+F3) "
+                    "or restart Altium.",
+        "dialogs_dismissed": dialogs}, indent=2)
+
+
+@mcp.tool()
+async def ensure_altium_script_skill(ctx: Context, install: bool = False) -> str:
+    """
+    Check whether the "altium-script" skill is installed, and optionally
+    install it.
+
+    That skill documents the Altium DelphiScript API - interfaces, object
+    models, worked examples, conventions, and how to discover undocumented
+    processes - and is the reference to consult before writing scripts for
+    run_altium_script or debugging Altium API calls.
+
+    Source: https://github.com/coffeenmusic/altium-scripts-skill
+
+    Installing writes into the user's skills directory, so it only happens when
+    install=True is passed explicitly. Skills load at client startup, so a
+    newly installed skill becomes available after restarting the client.
+
+    Args:
+        install (bool): Install the skill if missing (requires git on PATH).
+
+    Returns:
+        str: JSON with installed (bool), the path checked, and the next step.
+    """
+    skill_dir = Path.home() / ".claude" / "skills" / "altium-script"
+    repo = "https://github.com/coffeenmusic/altium-scripts-skill"
+
+    if (skill_dir / "SKILL.md").exists():
+        return json.dumps({"installed": True, "path": str(skill_dir),
+                           "note": "Use the altium-script skill for API guidance."},
+                          indent=2)
+
+    if not install:
+        return json.dumps({
+            "installed": False,
+            "path": str(skill_dir),
+            "source": repo,
+            "next_step": "Call again with install=true to clone it, or install manually "
+                         "into the path above."}, indent=2)
+
+    try:
+        skill_dir.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(["git", "clone", "--depth", "1", repo, str(skill_dir)],
+                              capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            return json.dumps({
+                "installed": False, "path": str(skill_dir),
+                "error": (proc.stderr or proc.stdout)[:400],
+                "hint": f"Requires git on PATH; otherwise download {repo} and extract "
+                        "to the path above."}, indent=2)
+        return json.dumps({"installed": True, "path": str(skill_dir), "source": repo,
+                           "next_step": "Restart the client so the skill is loaded."},
+                          indent=2)
+    except Exception as e:
+        return json.dumps({"installed": False, "path": str(skill_dir),
+                           "error": str(e)[:300]}, indent=2)
+
 
 @mcp.tool()
 async def get_footprint_primitives(ctx: Context, library_path: str = "", footprint_name: str = "") -> str:

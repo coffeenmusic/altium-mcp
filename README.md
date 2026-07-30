@@ -190,6 +190,10 @@ The cool thing about layout duplication this way as opposed to with Altium's bui
 ### Both
 - `get_screenshot`: Take a screenshot of the Altium PCB window or Schematic Window that is the current view, returned as a proper image the agent can see. For PCB views, an optional `zoom_to` list of designators makes Altium zoom to those components before capture so they fill the frame. It should auto focus either document type if it is open but a different document type is focused.
 
+### Scripting / Development
+- `run_altium_script`: Run a DelphiScript snippet in an **isolated sandbox script project** and get back a step-by-step log, the script's result, and - when a script dies - the exact statement that killed it. Altium has no headless test mode: a runtime error leaves the script paused in the debugger with no dialog, after which every later run silently does nothing until the debugger is stopped (Ctrl+F3) or Altium restarts. This tool detects that state and reports it. Because the sandbox is a separate script project, a crash can never break the other MCP tools. Useful for developing and verifying new Altium API code before building a tool around it.
+- `ensure_altium_script_skill`: Check whether the [altium-script skill](https://github.com/coffeenmusic/altium-scripts-skill) (Altium DelphiScript API reference, examples, and conventions) is installed, and install it on request. Skills load at client startup, so a newly installed skill appears after a restart.
+
 ### Server Status
 - `get_server_status`: Check the status of the MCP server, including paths to Altium and script files
 
