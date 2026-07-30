@@ -48,95 +48,113 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by dev/sandbox_runner.py) ===
-        // DECISIVE TEST: place an identity-only part, then run the process
-        // Sch:UpdatePartDatabaseLinks (0 parameters) and see whether Altium populates
-        // the parameters and model by itself.
+        // Test the update processes against a REAL database-linked part that the user
+        // selected and whose parameters they modified.
+        //
+        // Deliberately does NOT create documents or open libraries - that would steal
+        // focus, and these processes act on the focused document / current selection.
 
-        SandboxLog('opening symbol library');
-        Obj2 := Client.OpenDocument('SchLib',
-            'N:\IT\Neoventus_Altium_CAD\Altium_Libraries\Altium_Symbols\Passives.SchLib');
-        Client.ShowDocument(Obj2);
-        Sleep(1500);
         Obj1 := SchServer.GetCurrentSchDocument;
-
-        Obj2 := Obj1.SchLibIterator_Create;
-        Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
-        Obj3 := Obj2.FirstSchObject;
-        S1 := '';
-        while (Obj3 <> nil) do
+        if (Obj1 = nil) then
         begin
-            if (Obj3.LibReference = 'RES-DISCRETE') then begin S1 := 'found'; Break; end;
-            Obj3 := Obj2.NextSchObject;
-        end;
-        SandboxLog('symbol ' + S1);
-        Obj3 := Obj3.Replicate;
-
-        SandboxLog('creating target schematic');
-        GetWorkSpace.DM_CreateNewDocument('SCH');
-        Obj1 := SchServer.GetCurrentSchDocument;
-        SandboxLog('target: ' + Obj1.DocumentName + ' objectID=' + IntToStr(Obj1.ObjectID));
-
-        if (Obj1.ObjectID <> 32) then
-            ResultText := '{"error": "target not a schematic"}'
+            ResultText := '{"error": "no current schematic"}';
+            SandboxLog('no current sch doc');
+        end
         else
         begin
-            Obj3.Designator.Text := 'R931';
-            Obj3.DesignItemID := '1112-0003';
-            SandboxLog('identity set: R930 / 1112-0003 (NO parameters, NO model)');
+            SandboxLog('doc: ' + Obj1.DocumentName);
 
-            Obj1.RegisterSchObjectInContainer(Obj3);
-            SchServer.RobotManager.SendMessage(Obj1.I_ObjectAddress, c_BroadCast,
-                SCHM_PrimitiveRegistration, Obj3.I_ObjectAddress);
-            Obj3.Selection := True;
-            SandboxLog('registered and selected');
-
-            SandboxLog('params BEFORE update:');
+            // --- find the selected component
+            Obj3 := nil;
+            Obj2 := Obj1.SchIterator_Create;
+            Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
+            Obj4 := Obj2.FirstSchObject;
             I1 := 0;
-            Obj2 := Obj3.SchIterator_Create;
-            Obj2.AddFilter_ObjectSet(MkSet(eParameter));
-            Obj4 := Obj2.FirstSchObject;
             while (Obj4 <> nil) do
             begin
-                I1 := I1 + 1;
-                SandboxLog('    ' + Obj4.Name + ' = ' + Obj4.Text);
+                if (Obj4.Selection) then
+                begin
+                    I1 := I1 + 1;
+                    if (Obj3 = nil) then Obj3 := Obj4;
+                end;
                 Obj4 := Obj2.NextSchObject;
             end;
-            Obj3.SchIterator_Destroy(Obj2);
+            Obj1.SchIterator_Destroy(Obj2);
+            SandboxLog('selected components = ' + IntToStr(I1));
 
-            SandboxLog('>>> running Sch:UpdatePartsFromLibraryList (may open the update wizard)');
-            ResetParameters;
-            RunProcess('Sch:UpdatePartsFromLibraryList');
-            SandboxLog('>>> process returned');
-            Sleep(2000);
-
-            SandboxLog('params AFTER update:');
-            I2 := 0;
-            Obj2 := Obj3.SchIterator_Create;
-            Obj2.AddFilter_ObjectSet(MkSet(eParameter));
-            Obj4 := Obj2.FirstSchObject;
-            while (Obj4 <> nil) do
+            if (Obj3 = nil) then
+                ResultText := '{"error": "no component is selected on the focused schematic"}'
+            else
             begin
-                I2 := I2 + 1;
-                SandboxLog('    ' + Obj4.Name + ' = ' + Obj4.Text);
-                Obj4 := Obj2.NextSchObject;
-            end;
-            Obj3.SchIterator_Destroy(Obj2);
+                SandboxLog('target: ' + Obj3.Designator.Text +
+                           ' designItemID=' + Obj3.DesignItemID +
+                           ' dbTable=' + Obj3.DatabaseTableName +
+                           ' dbLib=' + Obj3.DatabaseLibraryName);
 
-            I3 := 0;
-            Obj2 := Obj3.SchIterator_Create;
-            Obj2.AddFilter_ObjectSet(MkSet(eImplementation));
-            Obj4 := Obj2.FirstSchObject;
-            while (Obj4 <> nil) do
-            begin
-                I3 := I3 + 1;
-                SandboxLog('    MODEL ' + Obj4.ModelType + '/' + Obj4.ModelName);
-                Obj4 := Obj2.NextSchObject;
-            end;
-            Obj3.SchIterator_Destroy(Obj2);
+                List1 := TStringList.Create;
+                SandboxLog('--- parameters BEFORE update ---');
+                Obj2 := Obj3.SchIterator_Create;
+                Obj2.AddFilter_ObjectSet(MkSet(eParameter));
+                Obj4 := Obj2.FirstSchObject;
+                while (Obj4 <> nil) do
+                begin
+                    SandboxLog('  ' + Obj4.Name + ' = ' + Obj4.Text);
+                    List1.Add('BEFORE|' + Obj4.Name + '|' + Obj4.Text);
+                    Obj4 := Obj2.NextSchObject;
+                end;
+                Obj3.SchIterator_Destroy(Obj2);
 
-            SandboxLog('dbTable now = ' + Obj3.DatabaseTableName + ' dbLib = ' + Obj3.DatabaseLibraryName);
-            ResultText := '{"params_before": ' + IntToStr(I1) + ', "params_after": ' + IntToStr(I2) +
-                          ', "models_after": ' + IntToStr(I3) + ', "dbTable": "' + Obj3.DatabaseTableName + '"}';
+                // --- attempt 1
+                SandboxLog('>>> RunProcess Sch:UpdatePartDatabaseLinks');
+                ResetParameters;
+                RunProcess('Sch:UpdatePartDatabaseLinks');
+                SandboxLog('>>> returned');
+                Sleep(2000);
+
+                SandboxLog('--- parameters AFTER attempt 1 ---');
+                S1 := '';
+                Obj2 := Obj3.SchIterator_Create;
+                Obj2.AddFilter_ObjectSet(MkSet(eParameter));
+                Obj4 := Obj2.FirstSchObject;
+                while (Obj4 <> nil) do
+                begin
+                    SandboxLog('  ' + Obj4.Name + ' = ' + Obj4.Text);
+                    List1.Add('AFTER1|' + Obj4.Name + '|' + Obj4.Text);
+                    S1 := S1 + Obj4.Name + '=' + Obj4.Text + ';';
+                    Obj4 := Obj2.NextSchObject;
+                end;
+                Obj3.SchIterator_Destroy(Obj2);
+
+                // --- attempt 2 (only informative if attempt 1 changed nothing)
+                SandboxLog('>>> RunProcess Sch:UpdatePartsFromLibraryList');
+                ResetParameters;
+                RunProcess('Sch:UpdatePartsFromLibraryList');
+                SandboxLog('>>> returned');
+                Sleep(2000);
+
+                SandboxLog('--- parameters AFTER attempt 2 ---');
+                S2 := '';
+                Obj2 := Obj3.SchIterator_Create;
+                Obj2.AddFilter_ObjectSet(MkSet(eParameter));
+                Obj4 := Obj2.FirstSchObject;
+                while (Obj4 <> nil) do
+                begin
+                    SandboxLog('  ' + Obj4.Name + ' = ' + Obj4.Text);
+                    List1.Add('AFTER2|' + Obj4.Name + '|' + Obj4.Text);
+                    S2 := S2 + Obj4.Name + '=' + Obj4.Text + ';';
+                    Obj4 := Obj2.NextSchObject;
+                end;
+                Obj3.SchIterator_Destroy(Obj2);
+
+                List1.SaveToFile('C:\Users\Public\altium_mcp\update_selected_test.txt');
+                List1.Free;
+
+                Obj1.GraphicallyInvalidate;
+                ResultText := '{"designator": "' + Obj3.Designator.Text +
+                              '", "designItemID": "' + Obj3.DesignItemID +
+                              '", "dbTable": "' + Obj3.DatabaseTableName +
+                              '", "changed_by_attempt1": ' + BoolToStr(S1 <> S2, True) + '}';
+            end;
         end;
         // === END EXPERIMENT ===
     except

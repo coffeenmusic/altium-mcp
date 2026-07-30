@@ -319,11 +319,17 @@ identity-only part placed and selected on the focused schematic:
 | `Sch:UpdatePartDatabaseLinks` | ran cleanly, changed nothing (6 params before and after, no model, `DatabaseTableName` still empty) |
 | `Sch:UpdatePartsFromLibraryList` | same - no change, and no wizard dialog appeared |
 
+A stronger second test removed the obvious objection to the first. The initial
+test used a bare identity-only part, so "nothing to update" was a plausible
+explanation. It was repeated on a **real, database-linked production part**
+(`DatabaseTableName = INTEGRATED_CIRCUITS_Query`) whose parameters had been
+deliberately edited to `TEST1`..`TEST9` and `TEST-COMMENT`, selected in the
+focused schematic - exactly the situation where the GUI action restores
+database values. Both processes ran and **left every parameter unchanged**.
+
 So the process registry contains no working programmatic equivalent of
-"Update From Libraries / Database". Likely reasons: `UpdatePartDatabaseLinks`
-appears to refresh links on parts that *already* have them (chicken-and-egg
-for a newly constructed part), and the GUI action runs through the ECO engine
-rather than a directly invokable process.
+"Update From Libraries / Database"; the GUI action evidently runs through the
+ECO engine rather than a directly invokable process.
 
 **This does not block the workflow**, because the construction pipeline already
 produces parts that match GUI-placed references field-by-field without needing
