@@ -80,7 +80,7 @@ begin
             ResultText := '{"error": "target not a schematic"}'
         else
         begin
-            Obj3.Designator.Text := 'R930';
+            Obj3.Designator.Text := 'R931';
             Obj3.DesignItemID := '1112-0003';
             SandboxLog('identity set: R930 / 1112-0003 (NO parameters, NO model)');
 
@@ -103,9 +103,9 @@ begin
             end;
             Obj3.SchIterator_Destroy(Obj2);
 
-            SandboxLog('>>> running Sch:UpdatePartDatabaseLinks');
+            SandboxLog('>>> running Sch:UpdatePartsFromLibraryList (may open the update wizard)');
             ResetParameters;
-            RunProcess('Sch:UpdatePartDatabaseLinks');
+            RunProcess('Sch:UpdatePartsFromLibraryList');
             SandboxLog('>>> process returned');
             Sleep(2000);
 

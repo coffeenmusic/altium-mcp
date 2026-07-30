@@ -309,10 +309,26 @@ Dumping it yields **1029 processes across 86 modules** (saved as
 | `Sch:UpdateComponentsFromLibraryEditor` | Update components in all opened schematic documents | 0 |
 | `Sch:UpdatePartFromLibraryEditor` | Update part from library editor | 0 |
 
-All take **no parameters**, so they act on the focused document/selection -
-meaning `RunProcess('Sch:UpdatePartDatabaseLinks')` should be callable directly
-after placing and selecting parts. **Not yet verified**: the test run was
-blocked by a wedged executor.
+All take **no parameters**, so they act on the focused document/selection.
+
+**Both plausible candidates were tested and neither works.** With a bare
+identity-only part placed and selected on the focused schematic:
+
+| process | result |
+|---|---|
+| `Sch:UpdatePartDatabaseLinks` | ran cleanly, changed nothing (6 params before and after, no model, `DatabaseTableName` still empty) |
+| `Sch:UpdatePartsFromLibraryList` | same - no change, and no wizard dialog appeared |
+
+So the process registry contains no working programmatic equivalent of
+"Update From Libraries / Database". Likely reasons: `UpdatePartDatabaseLinks`
+appears to refresh links on parts that *already* have them (chicken-and-egg
+for a newly constructed part), and the GUI action runs through the ECO engine
+rather than a directly invokable process.
+
+**This does not block the workflow**, because the construction pipeline already
+produces parts that match GUI-placed references field-by-field without needing
+an update. The update remains relevant only for establishing true database
+*linkage* (`DatabaseTableName`), which stays unreachable from script.
 
 This enumeration technique is generally useful: any undocumented Altium
 command can be found this way rather than guessed.
