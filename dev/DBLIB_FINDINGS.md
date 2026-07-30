@@ -111,16 +111,37 @@ back from the objects afterwards confirmed real data
 (`PWR_RATING=1/20W`, `VALUE=200`, `TOLERANCE=1%`, `PKG_STYLE=0201`), and the
 component `Comment` was set from the DB `Description`.
 
+## Full component construction (verified)
+
+Matching what Altium's own DbLib placement produces requires three things
+beyond replicating the symbol. Read back off the placed component:
+
+1. **Fill existing placeholder parameters** - iterate `eParameter` children and
+   assign `.Text` from the same-named database column.
+2. **Add the database columns the symbol does not carry** - for each remaining
+   non-null column, `SchServer.SchObjectFactory(eParameter, eCreate_Default)`,
+   set `Name`/`Text`/`ParamType`/`ReadOnlyState`/`IsHidden`, then
+   `Component.AddSchObject(param)` plus a `SCHM_PrimitiveRegistration` robot
+   message. Reference placements show these as hidden, database-sourced
+   parameters.
+3. **Attach the footprint model** - `Component.AddSchImplementation`, then
+   `ClearAllDatafileLinks`, `ModelName` (from `Altium_Footprint`),
+   `ModelType := 'PCBLIB'`, `IsCurrent := True`,
+   `UseComponentLibrary := True`.
+
+Verified result on the placed part: 17 parameters (5 symbol + 11 database +
+Comment) and 1 `PCBLIB` model `RESC0603X03N` marked current, with
+`LibReference=RES-DISCRETE`, `DesignItemID=1102-0001`, and Comment from the
+database Description.
+
+Ordering note: register the component on the sheet *before* adding parameters
+and the model.
+
 ## Still open
 
-- Attaching the footprint model (`[Footprint Ref]` -> an `eImplementation`
-  child) so the part is PCB-ready. Not yet attempted.
 - Full database linkage so Altium's own "Update from Database" recognises the
   part. `DesignItemID` is settable, but `DatabaseLibraryName`/
   `DatabaseTableName` are read-only, so the component is currently populated
   from the DB rather than *linked* to it.
-- Adding parameters that the symbol does not already carry (the fill step only
-  updates existing parameters; extra DB columns need new `ISch_Parameter`
-  objects).
 - Placing onto an existing project sheet rather than a scratch document, and
   confirming placement coordinates (the test part landed at the sheet corner).
