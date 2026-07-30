@@ -14,19 +14,20 @@ SandboxLog('spec lines: ' + IntToStr(List1.Count));
 
 // --- pull the header fields out of the spec
 S1 := ''; S2 := ''; S3 := '';
+LibPathFromSpec := '';
 I1 := 3000; I2 := 3000;
 for I3 := 0 to List1.Count - 1 do
 begin
     Obj5 := nil;
     if (Copy(List1[I3], 1, 7) = 'SYMBOL|') then S1 := Copy(List1[I3], 8, Length(List1[I3]))
     else if (Copy(List1[I3], 1, 11) = 'DESIGNATOR|') then S2 := Copy(List1[I3], 12, Length(List1[I3]))
-    else if (Copy(List1[I3], 1, 13) = 'DESIGNITEMID|') then S3 := Copy(List1[I3], 14, Length(List1[I3]));
+    else if (Copy(List1[I3], 1, 13) = 'DESIGNITEMID|') then S3 := Copy(List1[I3], 14, Length(List1[I3]))
+    else if (Copy(List1[I3], 1, 10) = 'SYMBOLLIB|') then LibPathFromSpec := Copy(List1[I3], 11, Length(List1[I3]));
 end;
 SandboxLog('symbol=' + S1 + ' designator=' + S2 + ' designItemID=' + S3);
 
-SandboxLog('opening symbol library');
-Obj2 := Client.OpenDocument('SchLib',
-    'N:\IT\Neoventus_Altium_CAD\Altium_Libraries\Altium_Symbols\Passives.SchLib');
+SandboxLog('opening symbol library: ' + LibPathFromSpec);
+Obj2 := Client.OpenDocument('SchLib', LibPathFromSpec);
 Client.ShowDocument(Obj2);
 Sleep(1500);
 Obj1 := SchServer.GetCurrentSchDocument;
@@ -46,11 +47,26 @@ if not B1 then
     ResultText := '{"error": "symbol not found"}'
 else
 begin
-    SandboxLog('replicating and creating target sheet');
+    SandboxLog('replicating');
     Obj3 := Obj3.Replicate;
+
+    // SAFETY: after opening the symbol library, THAT document is current.
+    // Placing into it would modify a shared library (this happened once and
+    // put stray components into three libraries on the N: share). So always
+    // create a fresh schematic here, and refuse to continue unless the target
+    // really is a schematic document.
+    SandboxLog('creating a new target schematic');
     GetWorkSpace.DM_CreateNewDocument('SCH');
     Obj1 := SchServer.GetCurrentSchDocument;
-    SandboxLog('target: ' + Obj1.DocumentName);
+    SandboxLog('target: ' + Obj1.DocumentName + ' objectID=' + IntToStr(Obj1.ObjectID));
+
+    if (Obj1.ObjectID <> eSchDoc) then
+    begin
+        SandboxLog('ABORT: target is not a schematic (eSchDoc=32); refusing to place');
+        ResultText := '{"error": "target document is not a schematic - refusing to place", "objectID": ' +
+                      IntToStr(Obj1.ObjectID) + '}';
+        Exit;
+    end;
 
     Obj3.Designator.Text := S2;
     Obj3.DesignItemID := S3;

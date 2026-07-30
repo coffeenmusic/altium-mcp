@@ -1,5 +1,15 @@
 # Development harness
 
+## Safety rules
+
+- **Never save anything on the N: drive.** It hosts the shared corporate
+  symbol/footprint libraries and the component database. Reading is fine
+  (config, symbol scans, SELECT queries); writing is not.
+- A script that opens a library to read a symbol makes that library the
+  *current document*. Never register or add objects while a library is
+  current - verify the target is a schematic (`ObjectID` 32 = `eSchDoc`;
+  33 = `eSchLib`) and abort otherwise. `place_part_from_spec.pas` does this.
+
 Tools for developing new Altium API functionality. Not part of the MCP server.
 
 ## Why

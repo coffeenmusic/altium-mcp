@@ -83,7 +83,36 @@ def find_part(part_number):
     return None, None
 
 
-def build_spec(part_number, designator, x=3000, y=3000):
+_SYMBOL_INDEX = None
+
+
+def symbol_library_for(symbol_name, search_paths):
+    """Find which .SchLib under the DbLib search paths defines a symbol.
+
+    Component names appear inside the binaries as plain and UTF-16 text, so a
+    byte scan is reliable and needs no Altium. The index is built once.
+    """
+    global _SYMBOL_INDEX
+    if _SYMBOL_INDEX is None:
+        _SYMBOL_INDEX = []
+        for root in search_paths:
+            root = root.strip()
+            if not root or not Path(root).is_dir():
+                continue
+            for f in Path(root).rglob("*.SchLib"):
+                try:
+                    _SYMBOL_INDEX.append((f, f.read_bytes()))
+                except OSError:
+                    pass
+    needle = symbol_name.encode("ascii", "ignore")
+    needle16 = symbol_name.encode("utf-16-le")
+    # Prefer libraries not in an "Imported"/archive subfolder
+    hits = [f for f, data in _SYMBOL_INDEX if needle in data or needle16 in data]
+    hits.sort(key=lambda f: ("import" in str(f).lower(), len(str(f))))
+    return str(hits[0]) if hits else None
+
+
+def build_spec(part_number, designator, x=3000, y=3000, new_sheet=True):
     table, row = find_part(part_number)
     if not row:
         raise SystemExit(f"part {part_number} not found in any enabled *_Query view")
@@ -109,7 +138,13 @@ def build_spec(part_number, designator, x=3000, y=3000):
     if not symbol:
         raise SystemExit(f"no Altium_Symbol for {part_number}")
 
+    _, _, search = dblib_config()
+    sym_lib = symbol_library_for(symbol, search.split(";"))
+    if not sym_lib:
+        raise SystemExit(f"could not locate a .SchLib containing symbol {symbol}")
+
     lines = [
+        f"SYMBOLLIB|{sym_lib}",
         f"SYMBOL|{symbol}",
         f"DESIGNATOR|{designator}",
         f"DESIGNITEMID|{part_number}",
@@ -117,6 +152,7 @@ def build_spec(part_number, designator, x=3000, y=3000):
         f"COMMENT|{symbol}",
         f"TABLE|{table}",
         f"LOCATION|{x}|{y}",
+        f"NEWSHEET|{1 if new_sheet else 0}",
     ]
     if footprint:
         lines.append(f"FOOTPRINT|{footprint}")
@@ -127,6 +163,7 @@ def build_spec(part_number, designator, x=3000, y=3000):
 
     SPEC_OUT.write_text("\n".join(lines) + "\n", encoding="cp1252", errors="replace")
     print(f"table   : {table}")
+    print(f"symlib  : {sym_lib}")
     print(f"symbol  : {symbol}")
     print(f"footprint: {footprint}")
     print(f"params  : {len(params)}")
