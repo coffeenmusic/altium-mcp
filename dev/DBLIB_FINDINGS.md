@@ -257,10 +257,36 @@ to a Comment parameter, so this is not database-driven - the IC's empty comment
 was most likely cleared by hand. The spec's `COMMENT|` record is optional:
 omit it to leave whatever the symbol defines.
 
+## Techniques from the existing BatchUpdateFromLibraries script
+
+Stephen's own `BatchUpdateFromLibraries` script (Macros\Altium\Altium-ScriptsDbLib\) swaps `DesignItemID` for parts listed in a CSV, then **selects** them so
+the user can finish with `Right click > Part Actions > Update Selected From
+Libraries`. It confirms the architecture used here (set `DesignItemID`, let
+Altium update from the library/database) and it does **not** trigger the update
+programmatically - so no process name for that is known from this source
+either.
+
+Three techniques worth adopting:
+
+1. `SchServer.GetSchDocumentByPath(Doc.DM_FullPath)` - the correct way to target
+   a specific schematic instead of relying on whichever document is current.
+   This is what the MCP tool should use rather than scratch sheets.
+2. `SchServer.ProcessControl.PreProcess(doc, '')` / `PostProcess(doc, '')`
+   around modifications, giving proper undo support.
+3. `Component.Selection := True` on placed parts, so the user can run
+   "Update Selected From Libraries" in one gesture immediately afterwards.
+
+On `Comment`: Stephen reports the symbol database generally leaves it empty,
+yet placed parts show the symbol name in the schematic - consistent with the
+current default (Comment = LibReference) and with 3 of the 4 references
+checked. The IC's empty comment looks like the outlier.
+
 ## Still open
 
-- Making placement GUI-identical (see paths above) - the current construction
-  approach cannot set the linkage fields.
+- Triggering "Update from Database / Update From Libraries" programmatically.
+  No process name found in the Altium API references or in the existing
+  BatchUpdateFromLibraries script; both rely on the user running the menu
+  action. Selecting the placed parts makes that a single gesture.
 - Deriving parameters dynamically per table instead of hardcoding columns:
   query the part's `*_Query` view and use its non-null columns, so every
   category works without table-specific code. (Only relevant if construction
