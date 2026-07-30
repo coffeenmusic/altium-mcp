@@ -47,93 +47,82 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by dev/sandbox_runner.py) ===
-        // Deterministic placement: replicate the symbol from its source SchLib into a
-        // schematic, then attach DbLib linkage fields so the part is database-linked.
-        //   symbol RES-DISCRETE lives in N:\...\Altium_Symbols\Passives.SchLib
-        //   DbLib key: Corp_Part_Number 1102-0001, table RESISTORS
+        // Prove parameter population: replicate the symbol AND fill its parameters
+        // from the database row, so the placed part carries real values instead of
+        // placeholders (TOL, PKG_STL, VALUE...).
+        //
+        // Row for Corp_Part_Number 1102-0001 from RESISTORS_Query:
+        //   Value=200  Tolerance=1%  Pkg_Style=0201  Pwr_Rating=1/20W
+        //   Description=RES, 0201, 1%, 1/20W, 200   Altium_Footprint=RESC0603X03N
 
-        SandboxLog('opening source symbol library');
+        SandboxLog('opening symbol library');
         Obj2 := Client.OpenDocument('SchLib',
             'N:\IT\Neoventus_Altium_CAD\Altium_Libraries\Altium_Symbols\Passives.SchLib');
-        SandboxLog('server doc nil? ' + BoolToStr(Obj2 = nil, True));
         Client.ShowDocument(Obj2);
         Sleep(1500);
-
-        SandboxLog('getting the SchLib document');
         Obj1 := SchServer.GetCurrentSchDocument;
-        SandboxLog('lib doc nil? ' + BoolToStr(Obj1 = nil, True));
-        SandboxLog('lib doc name: ' + Obj1.DocumentName);
 
-        SandboxLog('searching for RES-DISCRETE in the library');
-        Obj3 := nil;
+        SandboxLog('finding RES-DISCRETE');
         Obj2 := Obj1.SchLibIterator_Create;
         Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
         Obj3 := Obj2.FirstSchObject;
         S1 := '';
         while (Obj3 <> nil) do
         begin
-            if (Obj3.LibReference = 'RES-DISCRETE') then
-            begin
-                SandboxLog('  found RES-DISCRETE');
-                S1 := 'found';
-                Break;
-            end;
+            if (Obj3.LibReference = 'RES-DISCRETE') then begin S1 := 'found'; Break; end;
             Obj3 := Obj2.NextSchObject;
         end;
 
         if (S1 <> 'found') then
-        begin
-            Obj1.SchIterator_Destroy(Obj2);
-            ResultText := '{"error": "RES-DISCRETE not found in Passives.SchLib"}';
-            SandboxLog('symbol not found');
-        end
+            ResultText := '{"error": "symbol not found"}'
         else
         begin
-            SandboxLog('replicating the library component');
+            SandboxLog('replicating');
             Obj3 := Obj3.Replicate;
             Obj1.SchIterator_Destroy(Obj2);
-            SandboxLog('replicate returned nil? ' + BoolToStr(Obj3 = nil, True));
 
-            SandboxLog('creating target schematic');
+            SandboxLog('creating target sheet');
             S2 := GetWorkSpace.DM_CreateNewDocument('SCH');
-            SandboxLog('target doc: ' + S2);
             Obj1 := SchServer.GetCurrentSchDocument;
-            SandboxLog('target nil? ' + BoolToStr(Obj1 = nil, True) + ' name: ' + Obj1.DocumentName);
+            SandboxLog('target: ' + Obj1.DocumentName);
 
-            SandboxLog('setting component fields');
-            Obj3.Designator.Text := 'R900';
-            Obj3.Location := Point(MilsToCoord(1000), MilsToCoord(2000));
-            SandboxLog('  designator/location set');
-
+            Obj3.Designator.Text := 'R901';
+            Obj3.Location := Point(MilsToCoord(2000), MilsToCoord(3000));
             Obj3.DesignItemID := '1102-0001';
-            SandboxLog('  DesignItemID set');
-            // DatabaseLibraryName/DatabaseTableName are NOT writable on
-            // ISch_Component - assigning them kills the script (pinpointed by the
-            // sandbox step log). Skipped; DB linkage handled separately.
+            SandboxLog('designator/location/DesignItemID set');
 
-            SandboxLog('registering component in the schematic');
+            SandboxLog('setting Comment to the DB description');
+            Obj3.Comment.Text := 'RES, 0201, 1%, 1/20W, 200';
+            SandboxLog('comment set');
+
+            SandboxLog('filling parameters from the DB row');
+            Obj2 := Obj3.SchIterator_Create;
+            Obj2.AddFilter_ObjectSet(MkSet(eParameter));
+            Obj1 := Obj2.FirstSchObject;   // reuse Obj1 as the parameter cursor
+            I1 := 0;
+            while (Obj1 <> nil) do
+            begin
+                S3 := UpperCase(Obj1.Name);
+                if (S3 = 'VALUE') then begin Obj1.Text := '200'; I1 := I1 + 1; end
+                else if (S3 = 'TOLERANCE') then begin Obj1.Text := '1%'; I1 := I1 + 1; end
+                else if (S3 = 'PKG_STYLE') then begin Obj1.Text := '0201'; I1 := I1 + 1; end
+                else if (S3 = 'PWR_RATING') then begin Obj1.Text := '1/20W'; I1 := I1 + 1; end;
+                SandboxLog('  param ' + Obj1.Name + ' now = ' + Obj1.Text);
+                Obj1 := Obj2.NextSchObject;
+            end;
+            Obj3.SchIterator_Destroy(Obj2);
+            SandboxLog('filled ' + IntToStr(I1) + ' parameters');
+
+            SandboxLog('registering on the sheet');
+            Obj1 := SchServer.GetCurrentSchDocument;
             Obj1.RegisterSchObjectInContainer(Obj3);
             SchServer.RobotManager.SendMessage(Obj1.I_ObjectAddress, c_BroadCast,
                 SCHM_PrimitiveRegistration, Obj3.I_ObjectAddress);
+            Obj1.GraphicallyInvalidate;
             SandboxLog('registered');
 
-            I1 := 0;
-            S3 := '';
-            Obj2 := Obj1.SchIterator_Create;
-            Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
-            Obj3 := Obj2.FirstSchObject;
-            while (Obj3 <> nil) do
-            begin
-                I1 := I1 + 1;
-                S3 := S3 + Obj3.LibReference + '/' + Obj3.Designator.Text + ';';
-                Obj3 := Obj2.NextSchObject;
-            end;
-            Obj1.SchIterator_Destroy(Obj2);
-            SandboxLog('components on target = ' + IntToStr(I1) + ' -> ' + S3);
-
-            Obj1.GraphicallyInvalidate;
-            ResultText := '{"placed_count": ' + IntToStr(I1) + ', "components": "' + S3 +
-                          '", "target": "' + Obj1.DocumentName + '"}';
+            ResultText := '{"filled": ' + IntToStr(I1) + ', "designator": "R901", "target": "' +
+                          Obj1.DocumentName + '"}';
         end;
         // === END EXPERIMENT ===
     except

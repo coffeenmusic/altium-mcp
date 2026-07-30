@@ -58,19 +58,69 @@ Replicate the symbol out of its source `.SchLib` and register it:
    SCHM_PrimitiveRegistration, replica.I_ObjectAddress)`
 7. `TargetDoc.GraphicallyInvalidate`
 
-Result: component count went 0 -> 1, reported as `RES-DISCRETE/R900`, and a
-window capture confirmed the symbol is fully drawn with its parameter text
-(not an empty placeholder).
+Result: component count went 0 -> 1, reported as `RES-DISCRETE/R900`, drawn
+with its graphics.
+
+**Important correction:** this alone produces an *unlinked shell*. The symbol
+carries its library placeholder parameter values (`TOLERANCE=TOL`,
+`PKG_STYLE=PKG_STL`, `VALUE=VALUE`) - none of the database values are pulled
+in, because this path bypasses Altium's DbLib machinery entirely. Populating
+them is a separate step (below).
 
 Symbol location: the DbLib's `LibrarySearchPath` lists the symbol folders;
 the `.SchLib` containing a given `Symbol_Name` can be found by scanning those
 files (component names appear as plain and UTF-16 text inside the binaries).
 
+## How the DbLib mapping is actually defined
+
+The `.DbLib` has no `Symbol`/`Footprint`/`Param` keys; the mapping lives in 81
+`Options=` lines, one per mapped field, e.g.
+
+```
+Options=FieldName=RESISTORS_Query.Altium_Footprint|TableNameOnly=RESISTORS_Query|
+        FieldNameOnly=Altium_Footprint|FieldType=1|ParameterName=[Footprint Ref]|...
+```
+
+Only *system* fields are mapped explicitly (bracketed parameter names):
+`Description -> [Description]`, `Altium_Symbol -> [Library Ref]`,
+`Altium_Footprint -> [Footprint Ref]`, `Altium_3DModel -> [PCB3D Ref]`, plus
+`Corp_Part_Number` as a normal parameter. Everything else is matched
+**implicitly by name**: a symbol parameter is filled from the database column
+of the same name, case-insensitively.
+
+Worked example (`RES-DISCRETE`, part `1102-0001`, table `RESISTORS_Query`):
+
+| symbol parameter | placeholder | DB column | DB value |
+|---|---|---|---|
+| `VALUE` | `VALUE` | `Value` | `200` |
+| `TOLERANCE` | `TOL` | `Tolerance` | `1%` |
+| `PKG_STYLE` | `PKG_STL` | `Pkg_Style` | `0201` |
+| `PWR_RATING` | `PWR` | `Pwr_Rating` | `1/20W` |
+| `Comment` | (empty) | `Description` | `RES, 0201, 1%, 1/20W, 200` |
+
+Note the enabled table is the `*_Query` view, not the base table, and the two
+disagree: `RESISTORS.Footprint_Name = R0201A` but
+`RESISTORS_Query.Altium_Footprint = RESC0603X03N`. The `*_Query` view is what
+Altium uses, so it is authoritative.
+
+## Parameter population (verified)
+
+Iterate the replicated component's `eParameter` children and assign
+`.Text` from the matching database column before registering it. Values read
+back from the objects afterwards confirmed real data
+(`PWR_RATING=1/20W`, `VALUE=200`, `TOLERANCE=1%`, `PKG_STYLE=0201`), and the
+component `Comment` was set from the DB `Description`.
+
 ## Still open
 
-- Attaching full database linkage (so "Update from Database" recognises the
-  part) - `DesignItemID` alone is set; the read-only `DatabaseLibraryName`/
-  `DatabaseTableName` must come from somewhere else (likely component
-  parameters, or a different creation route).
-- Adding the footprint model to the placed component.
-- Placing onto an existing project sheet rather than a scratch document.
+- Attaching the footprint model (`[Footprint Ref]` -> an `eImplementation`
+  child) so the part is PCB-ready. Not yet attempted.
+- Full database linkage so Altium's own "Update from Database" recognises the
+  part. `DesignItemID` is settable, but `DatabaseLibraryName`/
+  `DatabaseTableName` are read-only, so the component is currently populated
+  from the DB rather than *linked* to it.
+- Adding parameters that the symbol does not already carry (the fill step only
+  updates existing parameters; extra DB columns need new `ISch_Parameter`
+  objects).
+- Placing onto an existing project sheet rather than a scratch document, and
+  confirming placement coordinates (the test part landed at the sheet corner).
