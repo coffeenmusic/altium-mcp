@@ -47,62 +47,61 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by dev/sandbox_runner.py) ===
-        // Read back everything on R902 exactly as stored, to compare against the
-        // reference component placed by Altium's own DbLib flow.
+        // Crux test: can DatabaseLibraryName / DatabaseTableName be set AFTER the
+        // component is registered on a sheet? (The earlier crash happened while the
+        // replica was still unregistered.) If yes, a scripted part can be genuinely
+        // database-linked and "Update from Database" should recognise it.
+
+        SandboxLog('opening symbol library');
+        Obj2 := Client.OpenDocument('SchLib',
+            'N:\IT\Neoventus_Altium_CAD\Altium_Libraries\Altium_Symbols\Passives.SchLib');
+        Client.ShowDocument(Obj2);
+        Sleep(1500);
         Obj1 := SchServer.GetCurrentSchDocument;
-        SandboxLog('doc: ' + Obj1.DocumentName);
-        Obj2 := Obj1.SchIterator_Create;
+
+        Obj2 := Obj1.SchLibIterator_Create;
         Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
         Obj3 := Obj2.FirstSchObject;
         S1 := '';
         while (Obj3 <> nil) do
         begin
-            if (Obj3.Designator.Text = 'R902') then begin S1 := 'found'; Break; end;
+            if (Obj3.LibReference = 'RES-DISCRETE') then begin S1 := 'found'; Break; end;
             Obj3 := Obj2.NextSchObject;
         end;
         Obj1.SchIterator_Destroy(Obj2);
+        SandboxLog('symbol ' + S1);
 
-        if (S1 <> 'found') then
-            ResultText := '{"error": "R902 not found on current sheet"}'
-        else
-        begin
-            SandboxLog('R902 found; LibReference=' + Obj3.LibReference +
-                       ' DesignItemID=' + Obj3.DesignItemID +
-                       ' Comment=' + Obj3.Comment.Text);
-            List1 := TStringList.Create;
-            List1.Add('COMPONENT|' + Obj3.LibReference + '|' + Obj3.DesignItemID + '|' + Obj3.Comment.Text);
+        Obj3 := Obj3.Replicate;
+        S2 := GetWorkSpace.DM_CreateNewDocument('SCH');
+        Obj1 := SchServer.GetCurrentSchDocument;
+        SandboxLog('target sheet: ' + Obj1.DocumentName);
 
-            Obj2 := Obj3.SchIterator_Create;
-            Obj2.AddFilter_ObjectSet(MkSet(eParameter));
-            Obj4 := Obj2.FirstSchObject;
-            I1 := 0;
-            while (Obj4 <> nil) do
-            begin
-                I1 := I1 + 1;
-                SandboxLog('  PARAM ' + Obj4.Name + ' = ' + Obj4.Text);
-                List1.Add('PARAM|' + Obj4.Name + '|' + Obj4.Text);
-                Obj4 := Obj2.NextSchObject;
-            end;
-            Obj3.SchIterator_Destroy(Obj2);
+        Obj3.Designator.Text := 'R903';
+        Obj3.DesignItemID := '1102-0001';
+        Obj3.Comment.Text := 'RES-DISCRETE';
+        SandboxLog('identity set (Comment = LibReference, matching real DB parts)');
 
-            I2 := 0;
-            Obj2 := Obj3.SchIterator_Create;
-            Obj2.AddFilter_ObjectSet(MkSet(eImplementation));
-            Obj4 := Obj2.FirstSchObject;
-            while (Obj4 <> nil) do
-            begin
-                I2 := I2 + 1;
-                SandboxLog('  MODEL type=' + Obj4.ModelType + ' name=' + Obj4.ModelName +
-                           ' current=' + BoolToStr(Obj4.IsCurrent, True));
-                List1.Add('MODEL|' + Obj4.ModelType + '|' + Obj4.ModelName);
-                Obj4 := Obj2.NextSchObject;
-            end;
-            Obj3.SchIterator_Destroy(Obj2);
+        SandboxLog('registering FIRST');
+        Obj1.RegisterSchObjectInContainer(Obj3);
+        SchServer.RobotManager.SendMessage(Obj1.I_ObjectAddress, c_BroadCast,
+            SCHM_PrimitiveRegistration, Obj3.I_ObjectAddress);
+        SandboxLog('registered');
 
-            List1.SaveToFile('C:\Users\Public\altium_mcp\sandbox_r902.txt');
-            List1.Free;
-            ResultText := '{"params": ' + IntToStr(I1) + ', "models": ' + IntToStr(I2) + '}';
-        end;
+        SandboxLog('NOW attempting DatabaseLibraryName assignment (crashed pre-registration)');
+        Obj3.DatabaseLibraryName := 'Neoventus_Components.DbLib';
+        SandboxLog('SUCCESS: DatabaseLibraryName set');
+
+        SandboxLog('attempting DatabaseTableName assignment');
+        Obj3.DatabaseTableName := 'RESISTORS_Query';
+        SandboxLog('SUCCESS: DatabaseTableName set');
+
+        SandboxLog('reading back: dbLib=' + Obj3.DatabaseLibraryName +
+                   ' dbTable=' + Obj3.DatabaseTableName);
+
+        Obj1.GraphicallyInvalidate;
+        ResultText := '{"db_lib": "' + Obj3.DatabaseLibraryName + '", "db_table": "' +
+                      Obj3.DatabaseTableName + '", "designator": "R903", "sheet": "' +
+                      Obj1.DocumentName + '"}';
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the experiment body');

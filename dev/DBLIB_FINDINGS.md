@@ -137,11 +137,63 @@ database Description.
 Ordering note: register the component on the sheet *before* adding parameters
 and the model.
 
+## What a genuine GUI/database-placed component stores
+
+Read off a production part (C17) placed through Altium's own DbLib flow:
+
+| field | value |
+|---|---|
+| `LibReference` | `CAP-NP` |
+| `DesignItemID` | `2104-0017` (the corporate part number) |
+| `DatabaseTableName` | `CAPACITORS_Query` (the *_Query view) |
+| `DatabaseLibraryName` | `Neoventus_Components.DbLib` (**file name only**, no path) |
+| `SourceLibraryName` | `Neoventus_Components.DbLib` |
+| `LibraryPath` | `*` |
+| `Comment` | `CAP-NP` (the **LibReference**, not the description) |
+| parameters | 18, all `hidden=True`, `readonly=0`, `paramtype=0` |
+| model | one `PCBLIB`, `IsCurrent=True`, `UseComponentLibrary=True`, **1 datafile link** |
+
+Two corrections to earlier work this implies: `Comment` should be the
+LibReference (not the DB description), and the model needs a datafile link.
+The per-parameter flags carry no special "database" marker - the linkage lives
+on the component (`DatabaseTableName`/`DatabaseLibraryName`).
+
+## The blocker for true database linkage
+
+`DatabaseLibraryName` and `DatabaseTableName` are **read-only**. Assigning them
+kills the script both before *and* after the component is registered on a
+sheet (verified separately). A constructed component can therefore be
+*populated from* the database but not *linked to* it, so Altium's
+"Update from Database" will not treat it like a GUI-placed part.
+
+Native placement APIs that would do this correctly are no-ops in the scripting
+context, retried with the exact identity values above (file-name-only library,
+`*_Query` table): both `Sch:PlaceIntegratedComponentFromDB` and
+`IntegratedLibraryManager.PlaceLibraryComponent` return without error and place
+nothing.
+
+## Viable paths to GUI-identical placement (untested)
+
+1. **Replicate a donor component that is already database-linked.**
+   `Replicate` copies the read-only linkage fields, so a replica of an existing
+   linked part should stay linked; then set `DesignItemID` to the target part
+   and let Altium's own "Update from Database" refresh the parameters. This
+   also removes the need to know each table's columns - Altium fills them.
+   Requires a donor per table (a template sheet, or an existing part of the
+   same category).
+2. **Drive the GUI** (Components panel / Place) via UI automation, which is
+   authentic by construction but fragile.
+
+Approach 1 is the more promising and should be tried first; it needs a process
+or API for "Update from Database" to be identified.
+
 ## Still open
 
-- Full database linkage so Altium's own "Update from Database" recognises the
-  part. `DesignItemID` is settable, but `DatabaseLibraryName`/
-  `DatabaseTableName` are read-only, so the component is currently populated
-  from the DB rather than *linked* to it.
+- Making placement GUI-identical (see paths above) - the current construction
+  approach cannot set the linkage fields.
+- Deriving parameters dynamically per table instead of hardcoding columns:
+  query the part's `*_Query` view and use its non-null columns, so every
+  category works without table-specific code. (Only relevant if construction
+  remains the approach; path 1 above makes Altium do it.)
 - Placing onto an existing project sheet rather than a scratch document, and
   confirming placement coordinates (the test part landed at the sheet corner).
