@@ -48,32 +48,46 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by dev/sandbox_runner.py) ===
-        // READ-ONLY damage assessment: is the current document a library, and does it
-        // contain stray components with our test designators?
+        // Append the newly placed R921 to the placed dump for verification
+        List1 := TStringList.Create;
+        List1.LoadFromFile('C:\Users\Public\altium_mcp\placed_components.txt');
         Obj1 := SchServer.GetCurrentSchDocument;
-        SandboxLog('current doc: ' + Obj1.DocumentName);
-        SandboxLog('objectID = ' + IntToStr(Obj1.ObjectID) + '  (eSchLib=continue, eSchDoc=32)');
-
-        I1 := 0; I2 := 0; S1 := '';
+        SandboxLog('doc: ' + Obj1.DocumentName);
         Obj2 := Obj1.SchIterator_Create;
         Obj2.AddFilter_ObjectSet(MkSet(eSchComponent));
         Obj3 := Obj2.FirstSchObject;
+        I1 := 0;
         while (Obj3 <> nil) do
         begin
             I1 := I1 + 1;
-            S2 := Obj3.Designator.Text;
-            if (S2 = 'R920') or (S2 = 'FB900') or (S2 = 'U900') or (S2 = 'F900') or (S2 = 'J900') or (S2 = 'C900') then
+            SandboxLog('  COMP ' + Obj3.Designator.Text);
+            List1.Add('COMP|' + Obj3.Designator.Text + '|' + Obj3.DesignItemID + '|' +
+                      Obj3.LibReference + '|' + Obj3.DatabaseTableName + '|' +
+                      Obj3.DatabaseLibraryName + '|' + Obj3.Comment.Text);
+            Obj4 := Obj3.SchIterator_Create;
+            Obj4.AddFilter_ObjectSet(MkSet(eParameter));
+            Obj5 := Obj4.FirstSchObject;
+            while (Obj5 <> nil) do
             begin
-                I2 := I2 + 1;
-                S1 := S1 + S2 + ';';
-                SandboxLog('  STRAY test component found: ' + S2 + ' libref=' + Obj3.LibReference);
+                List1.Add('  PARAM|' + Obj3.Designator.Text + '|' + Obj5.Name + '|' + Obj5.Text);
+                Obj5 := Obj4.NextSchObject;
             end;
+            Obj3.SchIterator_Destroy(Obj4);
+            Obj4 := Obj3.SchIterator_Create;
+            Obj4.AddFilter_ObjectSet(MkSet(eImplementation));
+            Obj5 := Obj4.FirstSchObject;
+            while (Obj5 <> nil) do
+            begin
+                List1.Add('  MODEL|' + Obj3.Designator.Text + '|' + Obj5.ModelType + '|' + Obj5.ModelName);
+                Obj5 := Obj4.NextSchObject;
+            end;
+            Obj3.SchIterator_Destroy(Obj4);
             Obj3 := Obj2.NextSchObject;
         end;
         Obj1.SchIterator_Destroy(Obj2);
-        SandboxLog('components on this document = ' + IntToStr(I1) + ', stray test parts = ' + IntToStr(I2));
-        ResultText := '{"doc": "' + Obj1.DocumentName + '", "objectID": ' + IntToStr(Obj1.ObjectID) +
-                      ', "components": ' + IntToStr(I1) + ', "stray": "' + S1 + '"}';
+        List1.SaveToFile('C:\Users\Public\altium_mcp\placed_components.txt');
+        List1.Free;
+        ResultText := '{"appended": ' + IntToStr(I1) + '}';
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the experiment body');

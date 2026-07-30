@@ -25,8 +25,9 @@ SYSTEM_COLUMNS = {
     "altium_3dmodel": "model3d",
     "description": "description",
 }
-# Columns that exist for other CAD tools and are not Altium parameters
-IGNORE_COLUMNS = {"dxdesigner_symbol", "dxdesigner_3dmodel"}
+# Columns to skip are NOT hardcoded: the .DbLib maps them to an empty
+# ParameterName, which is how it says "do not create a parameter for this"
+# (e.g. PKG_TYPE, DxDesigner_*). See field_mappings().
 
 
 def dblib_config():
@@ -41,6 +42,32 @@ def dblib_config():
         if name and enabled and enabled.group(1).strip().lower() == "true":
             tables.append(name.group(1).strip())
     return conn, tables, (search.group(1) if search else "")
+
+
+def field_mappings(table):
+    """Return (excluded_columns, system_columns) for a table from the .DbLib.
+
+    Each mapped field appears as an "Options=" line. A bracketed
+    ParameterName marks a system field ([Description], [Library Ref], ...);
+    an EMPTY ParameterName means the column must not become a parameter.
+    """
+    txt = DBLIB.read_text(errors="replace")
+    excluded, system = set(), {}
+    for line in txt.splitlines():
+        if not line.startswith("Options="):
+            continue
+        d = dict(kv.split("=", 1) for kv in line[len("Options="):].split("|") if "=" in kv)
+        if d.get("TableNameOnly", "").lower() != table.lower():
+            continue
+        col = (d.get("FieldNameOnly") or "").lower()
+        param = (d.get("ParameterName") or "").strip()
+        if not col:
+            continue
+        if not param:
+            excluded.add(col)
+        elif param.startswith("[") and param.endswith("]"):
+            system[col] = param.strip("[]").lower()
+    return excluded, system
 
 
 def query(conn_str, sql):
@@ -117,11 +144,12 @@ def build_spec(part_number, designator, x=3000, y=3000, new_sheet=True):
     if not row:
         raise SystemExit(f"part {part_number} not found in any enabled *_Query view")
 
+    excluded, _system_from_dblib = field_mappings(table)
     symbol = footprint = description = None
     params = []
     for col, val in row.items():
         key = col.lower()
-        if key in IGNORE_COLUMNS or val == "":
+        if key in excluded or val == "":
             continue
         role = SYSTEM_COLUMNS.get(key)
         if role == "symbol":
@@ -166,6 +194,7 @@ def build_spec(part_number, designator, x=3000, y=3000, new_sheet=True):
     print(f"symlib  : {sym_lib}")
     print(f"symbol  : {symbol}")
     print(f"footprint: {footprint}")
+    print(f"excluded: {sorted(excluded)}")
     print(f"params  : {len(params)}")
     print(f"spec    : {SPEC_OUT}")
     return SPEC_OUT

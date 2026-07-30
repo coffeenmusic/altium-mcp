@@ -60,9 +60,12 @@ begin
     Obj1 := SchServer.GetCurrentSchDocument;
     SandboxLog('target: ' + Obj1.DocumentName + ' objectID=' + IntToStr(Obj1.ObjectID));
 
-    if (Obj1.ObjectID <> eSchDoc) then
+    // NOTE: eSchDoc is NOT a defined constant in DelphiScript (eSchLib is).
+    // Use the empirically verified ObjectID values: 32 = schematic document,
+    // 33 = symbol library.
+    if (Obj1.ObjectID <> 32) then
     begin
-        SandboxLog('ABORT: target is not a schematic (eSchDoc=32); refusing to place');
+        SandboxLog('ABORT: target document is not a schematic; refusing to place');
         ResultText := '{"error": "target document is not a schematic - refusing to place", "objectID": ' +
                       IntToStr(Obj1.ObjectID) + '}';
         Exit;

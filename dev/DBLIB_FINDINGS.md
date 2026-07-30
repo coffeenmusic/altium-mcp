@@ -217,6 +217,46 @@ part fully indistinguishable from a GUI placement - worth testing next.
 Fallback if the update cannot be triggered programmatically: drive the GUI via
 UI automation, which is authentic by construction but fragile.
 
+## Verification against real database-placed parts
+
+`dev/verify_placement.py` places a part with the same part number as an existing
+GUI/database-placed component and diffs **every** parameter, the model, symbol
+and comment. Six parts were tested, one per enabled table (capacitor, resistor,
+ferrite, IC, fuse, connector).
+
+Results:
+
+| part | table | verdict |
+|---|---|---|
+| J900 | CONNECTORS_Query | **exact match** |
+| R921 | RESISTORS_Query | **exact match** (after the PKG_TYPE fix) |
+| C900, F900, FB900, R920 | various | one extra `PKG_TYPE` parameter (placed before the fix) |
+| U900 | INTEGRATED_CIRCUITS_Query | `Comment` differs (see below) |
+
+Two real findings came out of it:
+
+1. **Defect found and fixed - `PKG_TYPE` must be excluded.** The `.DbLib` maps
+   it (and the `DxDesigner_*` columns) to an **empty** `ParameterName`, which is
+   how it says "do not create a parameter". Exclusions are now derived from the
+   `.DbLib` itself rather than hardcoded, so this generalises to any table.
+   R921, placed after the fix, matches its reference exactly.
+
+2. **Some reference components are stale, not wrong.** Where values differed,
+   the verifier now queries the current database: e.g. reference
+   `Mfgr1_Part_Number='ERJ-2RKF1002'` vs placed `'ERJ-2RKF1002-'`, and reference
+   `Status_Database=2` vs placed `3` - in both cases the placed value matches
+   the database *today*, and the reference component is a snapshot from when it
+   was last updated. These are reported separately from real defects.
+
+### Known remaining difference: Comment
+
+For the IC the reference has an empty `Comment`, while the pipeline sets it to
+the LibReference; for the passives and the connector the references *do* carry
+the LibReference, so the current default matches 3 of 4. No table maps anything
+to a Comment parameter, so this is not database-driven - the IC's empty comment
+was most likely cleared by hand. The spec's `COMMENT|` record is optional:
+omit it to leave whatever the symbol defines.
+
 ## Still open
 
 - Making placement GUI-identical (see paths above) - the current construction

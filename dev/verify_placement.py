@@ -43,9 +43,21 @@ def parse_dump(path):
     return comps
 
 
-def compare(ref, got, label):
+def db_row_for(part_number):
+    """Current database row for a part, used to tell a defect apart from a
+    stale reference component (placed before the database changed)."""
+    try:
+        sys.path.insert(0, str(DEV))
+        import make_part_spec as mps
+        _table, row = mps.find_part(part_number)
+        return {k.lower(): v for k, v in (row or {}).items()}
+    except Exception:
+        return {}
+
+
+def compare(ref, got, label, db=None):
     """Compare one reference component against its scripted counterpart."""
-    issues = []
+    issues, stale = [], []
     if ref["sym"] != got["sym"]:
         issues.append(f"symbol: reference={ref['sym']!r} placed={got['sym']!r}")
     if ref["comment"] != got["comment"]:
@@ -65,14 +77,25 @@ def compare(ref, got, label):
         elif key not in rp:
             issues.append(f"EXTRA param {gp[key][0]!r} = {gp[key][1]!r}")
         elif rp[key][1] != gp[key][1]:
-            issues.append(f"param {rp[key][0]!r}: reference={rp[key][1]!r} placed={gp[key][1]!r}")
+            dbval = (db or {}).get(key)
+            if dbval is not None and dbval == gp[key][1]:
+                stale.append(f"param {rp[key][0]!r}: reference={rp[key][1]!r} is STALE; "
+                             f"placed={gp[key][1]!r} matches the current database")
+            else:
+                issues.append(f"param {rp[key][0]!r}: reference={rp[key][1]!r} "
+                              f"placed={gp[key][1]!r} db={dbval!r}")
 
-    status = "MATCH" if not issues else f"{len(issues)} difference(s)"
+    if not issues:
+        status = "MATCH" if not stale else f"MATCH (+{len(stale)} stale reference field(s))"
+    else:
+        status = f"{len(issues)} difference(s)"
     print(f"\n=== {label}: {status}")
     print(f"    part {ref['pn']}  table {ref['table']}  "
           f"params ref={len(ref['params'])} placed={len(got['params'])}")
     for i in issues:
-        print(f"    - {i}")
+        print(f"    - DIFF  {i}")
+    for i in stale:
+        print(f"    - stale {i}")
     return not issues
 
 
@@ -97,7 +120,7 @@ def main():
             fail += 1
             continue
         rdes, r = pair
-        if compare(r, g, f"{des} vs reference {rdes}"):
+        if compare(r, g, f"{des} vs reference {rdes}", db_row_for(g["pn"])):
             ok += 1
         else:
             fail += 1
