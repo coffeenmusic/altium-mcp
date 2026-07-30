@@ -35,7 +35,12 @@ def close_dialogs():
 def stop_debugger():
     """Send Ctrl+F3 (Stop Debugging) to an Altium script-project window."""
     hits = find_windows(lambda h: "Altium Designer" in _title(h))
-    hits.sort(key=lambda h: ".PrjScr" not in _title(h))
+    # Ctrl+F3 only reaches the script editor, whose window title is the open
+    # script file (e.g. "Sandbox.pas - Altium Designer") or the project
+    def rank(h):
+        t = _title(h)
+        return (0 if ".pas" in t else 1 if ".PrjScr" in t else 2)
+    hits.sort(key=rank)
     if not hits:
         return False, "no Altium window found"
 

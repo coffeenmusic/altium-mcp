@@ -158,13 +158,47 @@ LibReference (not the DB description), and the model needs a datafile link.
 The per-parameter flags carry no special "database" marker - the linkage lives
 on the component (`DatabaseTableName`/`DatabaseLibraryName`).
 
-## The blocker for true database linkage
+## Update from Database works on constructed parts (user-verified)
 
-`DatabaseLibraryName` and `DatabaseTableName` are **read-only**. Assigning them
-kills the script both before *and* after the component is registered on a
-sheet (verified separately). A constructed component can therefore be
-*populated from* the database but not *linked to* it, so Altium's
-"Update from Database" will not treat it like a GUI-placed part.
+Running Altium's **Update from Database** on a scripted component populated it
+correctly. So Altium matches the part by `DesignItemID` (which *is* writable)
+and does not require the script to stamp `DatabaseLibraryName`/
+`DatabaseTableName` itself.
+
+This changes the architecture substantially - and removes the need for
+per-table column knowledge:
+
+1. place the symbol (replicate from the source `.SchLib`)
+2. set `Designator`, `DesignItemID` (the corporate part number), `Comment`
+3. let Altium's Update from Database fill every parameter and model natively
+
+Nothing about the placement needs to be table-specific, because Altium does the
+mapping. Remaining task: identify the process name so the tool can trigger the
+update programmatically instead of relying on the user running the menu item.
+
+## Known bug: parameter text left behind when positioning
+
+Symptom (observed after Update from Database): the component body moves to the
+requested location but its parameter/designator text stays where the part
+originally sat.
+
+Cause: assigning `Component.Location` moves the component origin and its
+graphical primitives, but child text objects (`Designator`, each
+`ISch_Parameter`) carry their own absolute coordinates and are left behind at
+the library symbol's coordinates.
+
+Fix: do not assign `Location` on a replica. Register the component, then use
+`Component.MoveByXY(dx, dy)`, which translates the component together with its
+children. (Alternatively, offset every child's `Location` by the same delta.)
+This also explains why the earlier test parts appeared at the sheet corner.
+
+## Historical note: the read-only linkage fields
+
+`DatabaseLibraryName` and `DatabaseTableName` are **read-only** - assigning
+them kills the script both before *and* after registration (verified
+separately). This was originally thought to be a blocker, but it is not: write
+access is unnecessary because Update from Database resolves the part from
+`DesignItemID` (see above). Do not attempt to set these fields.
 
 Native placement APIs that would do this correctly are no-ops in the scripting
 context, retried with the exact identity values above (file-name-only library,
@@ -172,20 +206,16 @@ context, retried with the exact identity values above (file-name-only library,
 `IntegratedLibraryManager.PlaceLibraryComponent` return without error and place
 nothing.
 
-## Viable paths to GUI-identical placement (untested)
+## Path to GUI-identical placement
 
-1. **Replicate a donor component that is already database-linked.**
-   `Replicate` copies the read-only linkage fields, so a replica of an existing
-   linked part should stay linked; then set `DesignItemID` to the target part
-   and let Altium's own "Update from Database" refresh the parameters. This
-   also removes the need to know each table's columns - Altium fills them.
-   Requires a donor per table (a template sheet, or an existing part of the
-   same category).
-2. **Drive the GUI** (Components panel / Place) via UI automation, which is
-   authentic by construction but fragile.
+Since Update from Database works on constructed parts, the plan is: replicate
+the symbol, set the identity fields, position with `MoveByXY`, then trigger the
+update. If a replica of an **already database-linked donor** component also
+carries the linkage fields (they are copied, not assigned), that would make the
+part fully indistinguishable from a GUI placement - worth testing next.
 
-Approach 1 is the more promising and should be tried first; it needs a process
-or API for "Update from Database" to be identified.
+Fallback if the update cannot be triggered programmatically: drive the GUI via
+UI automation, which is authentic by construction but fragile.
 
 ## Still open
 
