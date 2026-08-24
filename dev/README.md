@@ -51,6 +51,20 @@ Experiments cannot use constants/helpers defined in the production units
 what you need in `Sandbox.pas`. An undefined constant compiles fine and then
 kills the script at runtime.
 
+## Gotcha: the editor buffer wins over the file
+
+`RunScript` compiles the copy of `Sandbox.pas` that Altium's script editor
+holds in memory, not the file on disk. The document stays open after a run, so
+rewriting the file externally changes nothing: the **previously loaded**
+experiment runs again and its result is reported as a fresh success.
+
+Both the runner and the `run_altium_script` MCP tool therefore call
+`Sandbox>ReloadSelf` (a procedure outside the EXPERIMENT markers) in its own
+`RunScript` invocation before each run, and wait for
+`C:\Users\Public\altium_mcp\sandbox_reload_done.txt`. `ReloadSelf` must never
+be called from `Run` - reloading the unit that is currently executing is
+undefined behaviour.
+
 ## sandbox_runner.py
 
 Runs an experiment body inside `dev/sandbox/`, a **standalone script project**

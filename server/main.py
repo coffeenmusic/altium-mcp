@@ -1058,6 +1058,8 @@ SANDBOX_PAS = SANDBOX_DIR / "Sandbox.pas"
 SANDBOX_PRJ = SANDBOX_DIR / "Sandbox.PrjScr"
 SANDBOX_LOG = EXCHANGE_DIR / "sandbox_log.txt"
 SANDBOX_RESULT = EXCHANGE_DIR / "sandbox_result.json"
+SANDBOX_RELOAD_MARKER = EXCHANGE_DIR / "sandbox_reload_done.txt"
+SANDBOX_RELOAD_TIMEOUT = 15
 SANDBOX_BEGIN = "// === BEGIN EXPERIMENT"
 SANDBOX_END = "// === END EXPERIMENT"
 
@@ -1096,6 +1098,38 @@ def _dismiss_altium_dialogs():
     for h in found:
         user32.PostMessageW(h, 0x0010, 0, 0)
     return len(found)
+
+
+def _sandbox_cmd(proc_name: str) -> str:
+    return (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScript('
+            f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>{proc_name}")')
+
+
+async def _reload_sandbox_document() -> str:
+    """Make Altium re-read Sandbox.pas from disk, and report what happened.
+
+    RunScript compiles the copy of Sandbox.pas that Altium's script editor
+    holds in memory. That document stays open between runs, so without this
+    the freshly injected script body is ignored and the PREVIOUS script runs
+    again - returning a stale result that looks like a success.
+
+    Deliberately a separate RunScript invocation: a unit cannot reload itself
+    while it is executing. Never fatal - if the document is not open there is
+    no cached copy to begin with, and the run below reads the file anyway.
+    """
+    try:
+        SANDBOX_RELOAD_MARKER.unlink()
+    except OSError:
+        pass
+
+    subprocess.Popen(_sandbox_cmd("ReloadSelf"), shell=True)
+    start = time.time()
+    while not SANDBOX_RELOAD_MARKER.exists() and time.time() - start < SANDBOX_RELOAD_TIMEOUT:
+        await asyncio.sleep(0.25)
+
+    if not SANDBOX_RELOAD_MARKER.exists():
+        return f"no response after {SANDBOX_RELOAD_TIMEOUT}s (Altium starting up, or busy)"
+    return SANDBOX_RELOAD_MARKER.read_text(encoding="utf-8", errors="replace").strip()
 
 
 @mcp.tool()
@@ -1153,8 +1187,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         pre, rest = src.split(SANDBOX_BEGIN, 1)
         marker_line, rest = rest.split("\n", 1)
         _, post = rest.split(SANDBOX_END, 1)
-        body = "\n".join("        " + ln if ln.strip() else ln
-                          for ln in script.strip("\n").splitlines())
+        # Tags this run in the step log so a stale copy of the script - one
+        # Altium compiled from its editor buffer instead of the file - is
+        # reported as such instead of passing for a fresh success.
+        run_token = os.urandom(4).hex()
+        lines = [f"SandboxLog('script-id {run_token}');"] + script.strip("\n").splitlines()
+        body = "\n".join("        " + ln if ln.strip() else ln for ln in lines)
         SANDBOX_PAS.write_text(
             pre + SANDBOX_BEGIN + marker_line + "\n" + body + "\n        " + SANDBOX_END + post,
             encoding="utf-8")
@@ -1168,9 +1206,10 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             except OSError:
                 pass
 
-    cmd = (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScript('
-           f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
-    subprocess.Popen(cmd, shell=True)
+    reload_status = await _reload_sandbox_document()
+    logger.info(f"sandbox reload: {reload_status}")
+
+    subprocess.Popen(_sandbox_cmd("Run"), shell=True)
 
     start = time.time()
     dialogs = 0
@@ -1185,7 +1224,19 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     if SANDBOX_RESULT.exists():
         result_text = SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace").strip()
+        if not any(run_token in step for step in steps):
+            return json.dumps({
+                "success": False,
+                "error": "stale result: Altium ran a previously loaded copy of the script",
+                "diagnosis": "Sandbox.pas was not re-read from disk, so this result belongs "
+                             "to an earlier call, not to the script just submitted.",
+                "recovery": "Close the Sandbox.pas tab in Altium's script editor and retry.",
+                "reload": reload_status,
+                "stale_result": result_text,
+                "steps": steps,
+                "dialogs_dismissed": dialogs}, indent=2)
         return json.dumps({"success": True, "result": result_text, "steps": steps,
+                           "reload": reload_status,
                            "dialogs_dismissed": dialogs}, indent=2)
 
     if steps:
@@ -1198,6 +1249,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             "recovery": "Altium's script executor is now blocked: stop the paused script "
                         "(script editor, Ctrl+F3) or restart Altium before running anything else.",
             "steps": steps,
+            "reload": reload_status,
             "dialogs_dismissed": dialogs}, indent=2)
 
     return json.dumps({
@@ -1208,6 +1260,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         "executor_wedged": True,
         "recovery": "Check Altium's script editor for a paused line; stop it (Ctrl+F3) "
                     "or restart Altium.",
+        "reload": reload_status,
         "dialogs_dismissed": dialogs}, indent=2)
 
 

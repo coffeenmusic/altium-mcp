@@ -10,6 +10,10 @@
 
 const
     REPLACEALL = 1;
+    // Used by ReloadSelf to locate this unit on disk (see bottom of file).
+    SANDBOX_PROJECT = 'Sandbox.PrjScr';
+    SANDBOX_UNIT = 'Sandbox.pas';
+    SANDBOX_RELOAD_MARKER = 'C:\Users\Public\altium_mcp\sandbox_reload_done.txt';
 
 var
     LogLines : TStringList;
@@ -59,5 +63,79 @@ begin
         OutLines.SaveToFile(OutPath);
     finally
         OutLines.Free;
+    end;
+end;
+
+// --- Stale editor buffer workaround ------------------------------------------
+//
+// RunScript compiles the copy of Sandbox.pas that Altium's script editor holds
+// in memory, NOT the file on disk. The document stays open between runs, so an
+// externally rewritten script body is ignored and the previously loaded script
+// runs again - producing a stale result that looks like a fresh success.
+//
+// ReloadSelf forces the open document to re-read the file. It is invoked in its
+// own RunScript call before every run, and must never be called from Run:
+// reloading the unit that is currently executing is undefined behaviour.
+
+// Absolute path of this unit. DelphiScript has no "path of the running script",
+// so find our own project among the open ones and derive the folder from it -
+// the same approach ScriptProjectPath() uses in AltiumScript/other_utils.pas.
+function SandboxUnitPath : String;
+var
+    Prj       : IProject;
+    Candidate : String;
+    i         : Integer;
+begin
+    result := '';
+    if (GetWorkspace = nil) then exit;
+
+    for i := 0 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        Prj := GetWorkspace.DM_Projects(i);
+        if (Prj <> nil) and (AnsiPos(SANDBOX_PROJECT, Prj.DM_ProjectFullPath) > 0) then
+        begin
+            // Altium can keep stale copies of a project open; accept only the
+            // one whose folder really holds the unit.
+            Candidate := ExtractFilePath(Prj.DM_ProjectFullPath) + SANDBOX_UNIT;
+            if FileExists(Candidate) then
+            begin
+                result := Candidate;
+                exit;
+            end;
+        end;
+    end;
+end;
+
+procedure ReloadSelf;
+var
+    Doc     : IServerDocument;
+    PasPath : String;
+    Status  : String;
+    Marker  : TStringList;
+begin
+    Doc := nil;
+    PasPath := SandboxUnitPath;
+
+    if (PasPath = '') then
+        Status := 'ERROR: no open project matching ' + SANDBOX_PROJECT
+    else
+    begin
+        Doc := Client.GetDocumentByPath(PasPath);
+        if (Doc = nil) then
+            // Not open in the IDE, so nothing is cached: the run reads disk.
+            Status := 'not open: ' + PasPath
+        else
+        begin
+            Doc.DoFileLoad;
+            Status := 'reloaded: ' + PasPath;
+        end;
+    end;
+
+    Marker := TStringList.Create;
+    try
+        Marker.Text := Status;
+        Marker.SaveToFile(SANDBOX_RELOAD_MARKER);
+    finally
+        Marker.Free;
     end;
 end;
