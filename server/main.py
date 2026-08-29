@@ -1098,6 +1098,62 @@ def _dismiss_altium_dialogs():
     return len(found)
 
 
+_UNSAFE_CALLS = {
+    "LibraryIterator_Create":
+        "hangs the executor every time. Use PCBServer.GetCurrentPCBLibrary."
+        "CurrentComponent to get the focused component, and "
+        "Component.GroupIterator_Create to walk its primitives.",
+    "GetDocumentCount":
+        "does not exist on IClient and crashes the executor. Enumerate via "
+        "Client.GetDocumentByPath / the workspace manager instead.",
+}
+
+
+def _preflight_script(script: str):
+    """Return an error dict if the script contains a known-hanging call.
+
+    Cheaper than recovering afterwards: these calls wedge the script executor
+    on every run, so refusing before Altium is touched keeps it healthy.
+    """
+    for needle, advice in _UNSAFE_CALLS.items():
+        if needle in script:
+            return {
+                "success": False,
+                "error": f"refused before execution: {needle} {advice}",
+                "blocked_call": needle,
+                "executor_wedged": False,
+                "diagnosis": "Preflight check. Altium was not touched, so the "
+                             "script executor is still healthy.",
+            }
+    return None
+
+
+async def _unwedge_script_executor():
+    """Stop a script paused in Altium's debugger, without a human pressing Ctrl+F3.
+
+    EditScript:Stop is what Ctrl+F3 is bound to (declared in
+    <AltiumInstall>\\System\\EditScript.rcs), so this is the scripted
+    equivalent of the manual recovery the user would otherwise do by hand.
+
+    Dialogs are dismissed FIRST: while a modal box is up, Altium accepts
+    -RScriptingSystem / -REditScript invocations but never executes them, so
+    the recovery command itself would be swallowed.
+    """
+    _dismiss_altium_dialogs()
+    await asyncio.sleep(0.5)
+    try:
+        cmd = f'"{altium_bridge.config.altium_exe_path}" -REditScript:Stop'
+        subprocess.Popen(cmd, shell=True)
+    except Exception as e:
+        logger.warning(f"unwedge: could not launch EditScript:Stop: {e}")
+        return False
+    for _ in range(6):
+        await asyncio.sleep(0.5)
+        _dismiss_altium_dialogs()
+    logger.info("unwedge: fired EditScript:Stop")
+    return True
+
+
 @mcp.tool()
 async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
     """
@@ -1108,8 +1164,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     Altium has no headless test mode and its failure modes are hostile: a
     runtime error leaves the script PAUSED IN THE DEBUGGER with no dialog,
     after which every later script run silently does nothing until the
-    debugger is stopped (Ctrl+F3) or Altium is restarted. This tool detects
-    that state and reports exactly which statement died.
+    debugger is stopped. This tool refuses calls known to wedge the executor,
+    detects the wedged state, stops the paused script itself, and reports
+    exactly which statement died.
 
     The script runs in a SEPARATE script project, so a crash here can never
     break the other MCP tools.
@@ -1147,6 +1204,11 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     if not SANDBOX_PAS.exists() or not SANDBOX_PRJ.exists():
         return json.dumps({"success": False,
                            "error": f"sandbox project missing at {SANDBOX_DIR}"})
+
+    blocked = _preflight_script(script)
+    if blocked:
+        logger.info(f"run_altium_script: {blocked['blocked_call']} refused by preflight")
+        return json.dumps(blocked, indent=2)
 
     try:
         src = SANDBOX_PAS.read_text(encoding="utf-8")
@@ -1189,25 +1251,36 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                            "dialogs_dismissed": dialogs}, indent=2)
 
     if steps:
+        recovered = await _unwedge_script_executor()
         return json.dumps({
             "success": False,
             "error": "script started but did not finish",
             "last_step_reached": steps[-1],
             "diagnosis": "The statement AFTER the last step is what crashed or paused the script.",
-            "executor_wedged": True,
-            "recovery": "Altium's script executor is now blocked: stop the paused script "
-                        "(script editor, Ctrl+F3) or restart Altium before running anything else.",
+            "executor_wedged": not recovered,
+            "auto_recovery_attempted": True,
+            "recovery": ("The paused script was stopped automatically (EditScript:Stop); "
+                         "the executor should accept the next run."
+                         if recovered else
+                         "Automatic recovery could not be launched: stop the paused script "
+                         "manually (script editor, Ctrl+F3) or restart Altium before "
+                         "running anything else."),
             "steps": steps,
             "dialogs_dismissed": dialogs}, indent=2)
 
+    recovered = await _unwedge_script_executor()
     return json.dumps({
         "success": False,
         "error": "script never started",
         "diagnosis": "Usually a COMPILE error in the script, or a previously paused "
                      "script blocking execution.",
-        "executor_wedged": True,
-        "recovery": "Check Altium's script editor for a paused line; stop it (Ctrl+F3) "
-                    "or restart Altium.",
+        "executor_wedged": not recovered,
+        "auto_recovery_attempted": True,
+        "recovery": ("Any paused script was stopped automatically (EditScript:Stop). "
+                     "If this repeats, the script failed to COMPILE - check the syntax."
+                     if recovered else
+                     "Automatic recovery could not be launched: check Altium's script "
+                     "editor for a paused line and stop it (Ctrl+F3), or restart Altium."),
         "dialogs_dismissed": dialogs}, indent=2)
 
 
