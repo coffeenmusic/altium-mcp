@@ -13,7 +13,9 @@ How it works:
 - The experiment body is injected between the BEGIN/END EXPERIMENT markers of
   dev/sandbox/Sandbox.pas, a STANDALONE script project. A broken experiment
   can never break the production Altium_API tooling.
-- Altium recompiles scripts on every invocation, so no restart between runs.
+- Altium recompiles from the script editor's in-memory copy of Sandbox.pas,
+  not from disk, so each run first calls Sandbox>ReloadSelf to re-read the
+  file. Without it the previously loaded experiment runs again.
 - SandboxLog() flushes after every call: if the log stops mid-experiment, the
   statement after the last logged line is what crashed.
 - Dialogs are read (not just dismissed) so compile/runtime error text is
@@ -40,6 +42,8 @@ SANDBOX_PRJ = REPO / "dev" / "sandbox" / "Sandbox.PrjScr"
 EXCHANGE = Path("C:/Users/Public/altium_mcp")
 SANDBOX_LOG = EXCHANGE / "sandbox_log.txt"
 SANDBOX_RESULT = EXCHANGE / "sandbox_result.json"
+RELOAD_MARKER = EXCHANGE / "sandbox_reload_done.txt"
+RELOAD_TIMEOUT = 15
 BEGIN = "// === BEGIN EXPERIMENT"
 END = "// === END EXPERIMENT"
 
@@ -172,14 +176,41 @@ def inject(body: str):
         encoding="utf-8")
 
 
+def sandbox_cmd(proc_name):
+    return (f'"{config["altium_exe_path"]}" -RScriptingSystem:RunScript('
+            f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>{proc_name}")')
+
+
+def reload_sandbox():
+    """Force Altium to re-read Sandbox.pas from disk; return what it reported.
+
+    RunScript compiles the copy the script editor holds in memory, and the
+    document stays open between runs - so without this the body just injected
+    is ignored and the previous experiment runs again, reporting a stale
+    result as a success. Separate invocation on purpose: a unit cannot reload
+    itself while it is executing.
+    """
+    if RELOAD_MARKER.exists():
+        RELOAD_MARKER.unlink()
+    subprocess.Popen(sandbox_cmd("ReloadSelf"), shell=True)
+    start = time.time()
+    while not RELOAD_MARKER.exists() and time.time() - start < RELOAD_TIMEOUT:
+        time.sleep(0.25)
+    if not RELOAD_MARKER.exists():
+        return f"no response after {RELOAD_TIMEOUT}s (Altium starting up, or busy)"
+    return RELOAD_MARKER.read_text(encoding="utf-8", errors="replace").strip()
+
+
 def run(timeout=120, quiet=False):
     for f in (SANDBOX_LOG, SANDBOX_RESULT):
         if f.exists():
             f.unlink()
 
-    cmd = (f'"{config["altium_exe_path"]}" -RScriptingSystem:RunScript('
-           f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
-    subprocess.Popen(cmd, shell=True)
+    status = reload_sandbox()
+    if not quiet:
+        print(f"  [reload] {status}")
+
+    subprocess.Popen(sandbox_cmd("Run"), shell=True)
 
     start = time.time()
     dialogs = []
