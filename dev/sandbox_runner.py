@@ -28,6 +28,7 @@ Experiment body rules:
 """
 import ctypes
 import json
+import os
 import subprocess
 import sys
 import time
@@ -43,7 +44,16 @@ SANDBOX_RESULT = EXCHANGE / "sandbox_result.json"
 BEGIN = "// === BEGIN EXPERIMENT"
 END = "// === END EXPERIMENT"
 
-config = json.load(open(REPO / "server" / "config.json"))
+def _config_path():
+    # Same resolution as server/main.py; falls back to the pre-relocation file.
+    home = os.environ.get("ALTIUM_MCP_HOME") or (
+        os.path.join(os.environ["LOCALAPPDATA"], "altium-mcp")
+        if os.environ.get("LOCALAPPDATA") else "")
+    new = Path(home) / "config.json" if home else None
+    return new if new and new.exists() else REPO / "server" / "config.json"
+
+
+config = json.load(open(_config_path()))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unwedge import unwedge  # noqa: E402

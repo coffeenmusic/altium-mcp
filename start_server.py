@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import subprocess
@@ -6,16 +7,40 @@ import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
-VENV_DIR = SCRIPT_DIR / "server" / ".venv"
-PYTHON_EXE = VENV_DIR / "Scripts" / "python.exe"
-MARKER = VENV_DIR / ".requirements-installed"
-LOCK = VENV_DIR.parent / ".venv.lock"
 
 REQUIREMENTS = [
     "mcp[cli]==1.5.0",
     "pillow>=11.1.0",
     "pywin32>=310",
 ]
+
+
+def _data_dir():
+    # Per-user and OUTSIDE the extension folder: Claude Desktop replaces that
+    # folder on every extension update, which used to throw the venv away and
+    # put the slow first-launch build back inside the client's 60 s startup
+    # timeout. ALTIUM_MCP_HOME overrides the location (tests, odd installs).
+    override = os.environ.get("ALTIUM_MCP_HOME")
+    if override:
+        return Path(override)
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        return Path(local) / "altium-mcp"
+    return SCRIPT_DIR / "server"
+
+
+def _venv_key():
+    # One venv per (requirements, interpreter version). Changing either gets a
+    # fresh directory instead of mutating one another process may be using.
+    text = "|".join(REQUIREMENTS) + "|py%d.%d" % sys.version_info[:2]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+VENVS_DIR = _data_dir() / "venvs"
+VENV_DIR = VENVS_DIR / _venv_key()
+PYTHON_EXE = VENV_DIR / "Scripts" / "python.exe"
+MARKER = VENV_DIR / ".requirements-installed"
+LOCK = VENVS_DIR / (VENV_DIR.name + ".lock")
 
 # A lock this old belongs to a build that died. Take it over.
 STALE_LOCK_SECONDS = 300
@@ -96,6 +121,15 @@ def _build_venv():
         [str(VENV_DIR / "Scripts" / "pip.exe"), "install", "--quiet"] + REQUIREMENTS
     )
     MARKER.write_text(_marker_payload(), encoding="utf-8")
+    _prune_old_venvs()
+
+
+def _prune_old_venvs():
+    # Venvs keyed to an older requirement list or interpreter. Best effort: one
+    # still in use by a running server has locked files and simply stays.
+    for child in VENVS_DIR.iterdir():
+        if child.is_dir() and child != VENV_DIR:
+            shutil.rmtree(child, ignore_errors=True)
 
 
 def ensure_venv():
@@ -137,4 +171,7 @@ def ensure_venv():
 if __name__ == "__main__":
     venv_python = ensure_venv()
     server_path = str(SCRIPT_DIR / "server" / "main.py")
-    sys.exit(subprocess.call([venv_python, server_path]))
+    # main.py keeps config.json in the same per-user folder; hand it the
+    # resolved location so the two can never disagree.
+    env = dict(os.environ, ALTIUM_MCP_HOME=str(_data_dir()))
+    sys.exit(subprocess.call([venv_python, server_path], env=env))

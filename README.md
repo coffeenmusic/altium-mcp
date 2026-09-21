@@ -42,10 +42,14 @@ The older approach of bundling pre-compiled packages in `server/lib/` is no long
 
 **How it works:**
 
-1. `start_server.py` (at the repo root) checks for `server/.venv/Scripts/python.exe`
-2. If the venv doesn't exist, it creates one and pip-installs the pinned dependencies
+1. `start_server.py` (at the repo root) looks for a ready virtual environment in `%LOCALAPPDATA%\altium-mcp\venvs\<key>`, where `<key>` is a hash of the pinned requirements and the Python version
+2. If it isn't ready, one process builds it under a lock file and pip-installs the pinned dependencies; any other process started at the same time waits for that build instead of racing it
 3. It then launches `server/main.py` using the venv's Python
 4. First launch takes ~20-30 seconds; subsequent launches are instant
+
+The venv and `config.json` live in `%LOCALAPPDATA%\altium-mcp`, not in the extension folder, because Claude Desktop replaces the extension folder on every update. The slow build therefore happens once per machine (and again only when the requirements or Python version change), and a hand-picked Altium path survives updates. Set the `ALTIUM_MCP_HOME` environment variable to use a different folder. A `config.json` left beside `server/main.py` by an older version is migrated automatically on first start.
+
+On a slow network the first build can exceed the client's 60-second startup timeout. The build keeps going after the client gives up, so restarting the extension once is enough.
 
 **Build steps:**
 
@@ -60,35 +64,7 @@ Rename-Item altium-mcp.zip altium-mcp.dxt
 
 **Do NOT include `server/lib/` or `server/.venv/` in the .dxt.** The whole point is that these are created on the user's machine.
 
-**`start_server.py`:**
-```python
-import subprocess
-import sys
-from pathlib import Path
-
-SCRIPT_DIR = Path(__file__).parent
-VENV_DIR = SCRIPT_DIR / "server" / ".venv"
-REQUIREMENTS = [
-    "mcp[cli]==1.5.0",
-    "pillow>=11.1.0",
-    "pywin32>=310",
-]
-
-def ensure_venv():
-    python_exe = VENV_DIR / "Scripts" / "python.exe"
-    if python_exe.exists():
-        return str(python_exe)
-
-    subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
-    pip_exe = str(VENV_DIR / "Scripts" / "pip.exe")
-    subprocess.check_call([pip_exe, "install", "--quiet"] + REQUIREMENTS)
-    return str(python_exe)
-
-if __name__ == "__main__":
-    venv_python = ensure_venv()
-    server_path = str(SCRIPT_DIR / "server" / "main.py")
-    sys.exit(subprocess.call([venv_python, server_path]))
-```
+**`start_server.py`:** use the file at the repo root as is. It is no longer reproduced here, so the two cannot drift apart.
 
 **`manifest.json` server section:**
 ```json
