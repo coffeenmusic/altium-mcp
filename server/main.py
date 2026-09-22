@@ -2205,18 +2205,16 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                     })
                     return
                 
-                # Use the first matching window
-                window = altium_windows[0]
+                # Altium owns several top-level windows with its name in the
+                # title, and while it switches documents a small transient one
+                # can come first. Take the largest window that is not
+                # minimized: that is the main frame.
+                def area(w):
+                    l, t, r, b = w["rect"]
+                    return max(0, r - l) * max(0, b - t)
+                candidates = [w for w in altium_windows if not win32gui.IsIconic(w["handle"])]
+                window = max(candidates or altium_windows, key=area)
                 hwnd = window["handle"]
-                
-                # Get window dimensions
-                left, top, right, bottom = window["rect"]
-                width = right - left
-                height = bottom - top
-                
-                if width <= 0 or height <= 0:
-                    result_queue.put({"success": False, "error": f"Invalid window dimensions: {width}x{height}"})
-                    return
                 
                 # Bring Altium to the front and let it paint. Altium only
                 # renders a schematic view once it has actually been shown on
@@ -2258,6 +2256,15 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                     logger.warning("Altium is not the foreground window; the capture may show an unpainted view")
                 # A freshly switched-to document needs a moment to render.
                 time.sleep(1.0)
+
+                # Measure AFTER activation: restoring or switching can change
+                # the frame's size.
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                width = right - left
+                height = bottom - top
+                if width < 200 or height < 150:
+                    result_queue.put({"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"})
+                    return
                 
                 # Take screenshot using GDI functions instead of ImageGrab
                 try:
