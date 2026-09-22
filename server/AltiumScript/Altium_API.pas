@@ -75,7 +75,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No designators found for get_component_pins');
+            LogScriptError('Error: No designators found for get_component_pins');
             Result := '';
         end;
     finally
@@ -286,7 +286,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No component name provided');
+            LogScriptError('Error: No component name provided');
             Result := '';
         end;
     finally
@@ -413,7 +413,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No designator found for set_component_position');
+            LogScriptError('Error: No designator found for set_component_position');
             Result := '';
         end;
     finally
@@ -491,7 +491,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No designators found for move_components');
+            LogScriptError('Error: No designators found for move_components');
             Result := '';
         end;
     finally
@@ -819,7 +819,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: Source or destination lists are empty');
+            LogScriptError('Error: Source or destination lists are empty');
             Result := '{"success": false, "error": "Source or destination lists are empty"}';
         end;
     finally
@@ -894,7 +894,7 @@ begin
         end
         else
         begin
-            ShowMessage('Error: No container names specified');
+            LogScriptError('Error: No container names specified');
             Result := '{"success": false, "error": "No container names specified"}';
         end;
     finally
@@ -1038,7 +1038,13 @@ begin
         end;
     end;
 
-    EnsureDocumentFocused(CommandName, ViewHint);
+    // A focus failure is an answer, not a dialog: WriteResponse turns the
+    // 'ERROR: ' prefix into success=false with this message.
+    if not EnsureDocumentFocused(CommandName, ViewHint) then
+    begin
+        Result := 'ERROR: ' + FocusFailure;
+        Exit;
+    end;
 
     // Direct command execution based on the command name
     case CommandName of
@@ -1102,7 +1108,7 @@ begin
         'create_pcb_footprint':
             Result := ExecuteCreatePCBFootprint(RequestData);
     else
-        ShowMessage('Error: Unknown command: ' + CommandName);
+        LogScriptError('Error: Unknown command: ' + CommandName);
     end;
 end;
 
@@ -1202,7 +1208,7 @@ begin
     // Check if request file exists
     if not FileExists(REQUEST_FILE) then
     begin
-        ShowMessage('Error: No request file found at ' + REQUEST_FILE);
+        LogScriptError('Error: No request file found at ' + REQUEST_FILE);
         Exit;
     end;
 
@@ -1250,13 +1256,13 @@ begin
                 else
                 begin
                     WriteResponse(False, '', 'Command execution failed');
-                    ShowMessage('Error: Command execution failed');
+                    LogScriptError('Error: Command execution failed');
                 end;
             end
             else
             begin
                 WriteResponse(False, '', 'No command specified');
-                ShowMessage('Error: No command specified');
+                LogScriptError('Error: No command specified');
             end;
         finally
             RequestData.Free;
@@ -1265,7 +1271,7 @@ begin
     except
         // Simple exception handling without the specific exception type
         WriteResponse(False, '', 'Exception occurred during script execution');
-        ShowMessage('Error: Exception occurred during script execution');
+        LogScriptError('Error: Exception occurred during script execution');
     end;
 end;
 

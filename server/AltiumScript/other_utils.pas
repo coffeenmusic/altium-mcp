@@ -1,5 +1,28 @@
 const
     DEFAULT = 'Blank';
+    SCRIPT_ERROR_LOG = 'C:\Users\Public\altium_mcp\script_errors.log';
+
+var
+    // Why the last EnsureDocumentFocused call failed; reported to the server.
+    FocusFailure : String;
+
+// Errors must never be modal. The server is driven by an agent with no hands:
+// a ShowMessage box blocks this script before it writes its response, every
+// later request then times out, and Altium reports "another instance is
+// busy" until a human clicks OK. Log instead; the caller returns the error.
+procedure LogScriptError(Msg: String);
+var
+    L : TStringList;
+begin
+    L := TStringList.Create;
+    try
+        if FileExists(SCRIPT_ERROR_LOG) then L.LoadFromFile(SCRIPT_ERROR_LOG);
+        L.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + '  ' + Msg);
+        while L.Count > 500 do L.Delete(0);
+        L.SaveToFile(SCRIPT_ERROR_LOG);
+    except
+    end;
+end;
 
 {..............................................................................}
 { Get path of this script project.                                             }
@@ -115,6 +138,7 @@ end;
 function EnsureDocumentFocused(CommandName: String; ViewTypeHint: String): Boolean;
 var
     I           : Integer;
+    P           : Integer;
     Project     : IProject;
     Doc         : IDocument;
     DocFound    : Boolean;
@@ -214,11 +238,12 @@ begin
     
     // ShowMessage(LogMessage); // For debugging
     
+    FocusFailure := '';
     // Retrieve the current project
     Project := GetWorkspace.DM_FocusedProject;
     If Project = Nil Then
     begin
-        // No project is open
+        FocusFailure := 'No project is open';
         Exit;
     end;
 
@@ -267,9 +292,21 @@ begin
         end;
     end;
 
-    // Try to find and focus the required document type
-    For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
+    // Try to find and focus the required document type. The focused project
+    // is searched first, then every other open project: after a script run
+    // the focused project is often the script project itself, which has no
+    // design documents at all.
+    For P := -1 to GetWorkspace.DM_ProjectCount - 1 Do
     Begin
+      if P < 0 then
+        Project := GetWorkspace.DM_FocusedProject
+      else
+      begin
+        Project := GetWorkspace.DM_Projects(P);
+        if (Project = Nil) or (Project = GetWorkspace.DM_FocusedProject) then Continue;
+      end;
+      For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
+      Begin
         Doc := Project.DM_LogicalDocuments(I);
         If Doc.DM_DocumentKind = DocumentKind Then
         Begin
@@ -327,6 +364,7 @@ begin
                 end;
             end;
         End;
+      End;
     End;
 
     // TODO: Do I want to iterate through all workspace projects to find valid document if it is not current document?
@@ -334,13 +372,10 @@ begin
 
     // No matching document found or couldn't be focused
     if not DocFound then
-    begin
-        ShowMessage('Error: No ' + DocumentKind + ' document found in the project.');
-    end
+        FocusFailure := 'No ' + DocumentKind + ' document found in any open project'
     else
-    begin
-        ShowMessage('Error: Found ' + DocumentKind + ' document but could not focus it.');
-    end;
+        FocusFailure := 'Found a ' + DocumentKind + ' document but could not focus it';
+    LogScriptError('EnsureDocumentFocused(' + CommandName + '): ' + FocusFailure);
     
     Result := False;
 end;
@@ -415,6 +450,8 @@ var
     DocType        : String;
     WindowFound    : Boolean;
     ZoomedCount    : Integer;
+    FocusedKind    : String;
+    FocusedName    : String;
 
     // For screenshot thread
     ThreadStarted  : Boolean;
@@ -445,15 +482,26 @@ begin
     if (DocType = 'PCB') and (DesignatorsList <> nil) and (DesignatorsList.Count > 0) then
         ZoomedCount := ZoomToComponents(DesignatorsList);
 
-    // Build the command to call the external screenshot utility
-    // This part depends on how your C# server calls Altium for screenshots
-    
+    // Report what is ACTUALLY focused now that EnsureDocumentFocused has run.
+    // The server compares this against the requested view: if no document of
+    // the requested kind is open, the focus stays where it was and the
+    // capture would otherwise silently show the wrong editor.
+    FocusedKind := '';
+    FocusedName := '';
+    if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+    begin
+        FocusedKind := Client.CurrentView.OwnerDocument.Kind;
+        FocusedName := ExtractFileName(Client.CurrentView.OwnerDocument.FileName);
+    end;
+
     // Create result JSON
     ResultProps := TStringList.Create;
     try
         // Add successful result properties
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONProperty(ResultProps, 'view_type', ViewType);
+        AddJSONProperty(ResultProps, 'focused_kind', FocusedKind);
+        AddJSONProperty(ResultProps, 'focused_document', FocusedName);
         AddJSONProperty(ResultProps, 'class_filter', ClassName);
         AddJSONBoolean(ResultProps, 'window_found', WindowFound);
         AddJSONInteger(ResultProps, 'zoomed_component_count', ZoomedCount);
