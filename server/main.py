@@ -34,7 +34,18 @@ logger = logging.getLogger("AltiumMCPServer")
 
 # Set MCP_DIR to the directory of the current Python file
 MCP_DIR = Path(__file__).parent
-CONFIG_FILE = MCP_DIR / "config.json"
+# config.json lives in a per-user folder OUTSIDE the install directory and
+# outside AppData. Claude Desktop replaces the extension folder on every
+# update, which used to reset a hand-picked Altium path; and being an MSIX
+# package it redirects its child processes' AppData writes into its own
+# LocalCache. start_server.py passes the folder it chose in ALTIUM_MCP_HOME.
+# LEGACY_CONFIG_FILE is read once to migrate.
+def _data_dir() -> Path:
+    override = os.environ.get("ALTIUM_MCP_HOME")
+    return Path(override) if override else Path.home() / ".altium-mcp"
+
+LEGACY_CONFIG_FILE = MCP_DIR / "config.json"
+CONFIG_FILE = _data_dir() / "config.json"
 DEFAULT_SCRIPT_PATH = MCP_DIR / "AltiumScript" / "Altium_API.PrjScr"
 
 # Use a fixed exchange directory for request/response JSON files.
@@ -57,21 +68,31 @@ class AltiumConfig:
         self.load_config()
     
     def load_config(self):
-        """Load configuration from file or create default if it doesn't exist"""
-        if CONFIG_FILE.exists():
+        """Load configuration, migrating a pre-relocation config.json once."""
+        source = CONFIG_FILE if CONFIG_FILE.exists() else LEGACY_CONFIG_FILE
+        if source.exists():
             try:
-                with open(CONFIG_FILE, "r") as f:
+                with open(source, "r") as f:
                     config = json.load(f)
-                    self.altium_exe_path = config.get("altium_exe_path", "")
-                    self.script_path = config.get("script_path", str(DEFAULT_SCRIPT_PATH))
-                logger.info(f"Loaded configuration from {CONFIG_FILE}")
+                self.altium_exe_path = config.get("altium_exe_path", "")
+                # Only a hand-picked script project is persisted. A saved path
+                # that no longer exists (old install folder) falls back to the
+                # project shipped beside this file instead of prompting.
+                saved_script = config.get("script_path", "")
+                if saved_script and os.path.exists(saved_script):
+                    self.script_path = saved_script
+                logger.info(f"Loaded configuration from {source}")
+                if source is LEGACY_CONFIG_FILE:
+                    self.save_config()
+                else:
+                    self._saved = self._as_dict()
             except Exception as e:
                 logger.error(f"Error loading configuration: {e}")
                 self._create_default_config()
         else:
             logger.info("No configuration file found, creating default")
             self._create_default_config()
-    
+
     def _create_default_config(self):
         """Create a default configuration file with improved Altium executable discovery"""
         
@@ -107,20 +128,30 @@ class AltiumConfig:
         # Save the configuration
         self.save_config()
     
+    def _as_dict(self):
+        config = {"altium_exe_path": self.altium_exe_path}
+        # The default script project belongs to whichever install is running
+        # (extension folder or a dev checkout), so it is never written down:
+        # both share this file and must not steal each other's scripts.
+        if Path(self.script_path) != DEFAULT_SCRIPT_PATH:
+            config["script_path"] = self.script_path
+        return config
+
     def save_config(self):
-        """Save configuration to file"""
-        config = {
-            "altium_exe_path": self.altium_exe_path,
-            "script_path": self.script_path
-        }
-        
+        """Save configuration to file, only when something changed"""
+        config = self._as_dict()
+        if config == getattr(self, "_saved", None) and CONFIG_FILE.exists():
+            return
+
         try:
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_FILE, "w") as f:
                 json.dump(config, f, indent=2)
+            self._saved = config
             logger.info(f"Saved configuration to {CONFIG_FILE}")
         except Exception as e:
             logger.error(f"Error saving configuration: {e}")
-    
+
     def verify_paths(self):
         """Verify that the paths in the configuration exist, prompt for input if they don't"""
 
@@ -635,7 +666,7 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
 
 @mcp.tool()
 async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1, graphics: list = None) -> str:
-    """
+    r"""
     Before executing, run get_symbol_placement_rules first.
 
     For Altium API guidance while scripting, use the "altium-script" skill

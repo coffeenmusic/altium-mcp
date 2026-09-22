@@ -1,0 +1,129 @@
+{
+  "manifest_version": "0.3",
+  "name": "altium-mcp",
+  "version": "0.4.5",
+  "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
+  "author": {
+    "name": "Stephen Thompson"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "start_server.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["${__dirname}/start_server.py"]
+    }
+  },
+  "tools": [
+    {
+      "name": "get_all_component_property_names",
+      "description": "Get all available component property names (JSON keys) from all components"
+    },
+    {
+      "name": "get_component_property_values",
+      "description": "Get values of a specific property for all components"
+    },
+    {
+      "name": "get_symbol_placement_rules",
+      "description": "Get schematic symbol placement rules from a local configuration file"
+    },
+    {
+      "name": "get_library_symbol_reference",
+      "description": "Get the currently open symbol from a schematic library to use as reference for creating a new symbol"
+    },
+    {
+      "name": "search_library_symbol",
+      "description": "Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching; opens the library file if a path is provided or shows a file picker if not"
+    },
+    {
+      "name": "create_schematic_symbol",
+      "description": "Create a new schematic symbol in the current library with the specified pins. Supports multi-part symbols via part_count and per-pin owner_part_id, plus active-low pin name overbar notation"
+    },
+    {
+      "name": "get_schematic_data",
+      "description": "Get schematic data for components in Altium"
+    },
+    {
+      "name": "get_pcb_layers",
+      "description": "Get detailed information about all layers in the current Altium PCB"
+    },
+    {
+      "name": "set_pcb_layer_visibility",
+      "description": "Set visibility for specified PCB layers"
+    },
+    {
+      "name": "get_component_data",
+      "description": "Get all data for components in Altium"
+    },
+    {
+      "name": "get_selected_components_coordinates",
+      "description": "Get coordinates and positioning information for selected components in Altium layout"
+    },
+    {
+      "name": "get_all_designators",
+      "description": "Get all component designators from the current Altium board"
+    },
+    {
+      "name": "get_component_pins",
+      "description": "Get pin data for components in Altium"
+    },
+    {
+      "name": "get_all_nets",
+      "description": "Return every unique net name in the active PCB document"
+    },
+    {
+      "name": "create_net_class",
+      "description": "Create a new net class and add specified nets to it"
+    },
+    {
+      "name": "set_component_position",
+      "description": "Set a component's absolute position (X, Y, rotation) in the PCB layout"
+    },
+    {
+      "name": "move_components",
+      "description": "Move selected components by specified X and Y offsets in the PCB layout"
+    },
+    {
+      "name": "get_screenshot",
+      "description": "Take a screenshot of the Altium window"
+    },
+    {
+      "name": "layout_duplicator",
+      "description": "First step of layout duplication. Selects source components and returns data to match with destination components"
+    },
+    {
+      "name": "layout_duplicator_apply",
+      "description": "Second step of layout duplication. Applies the layout of source components to destination components"
+    },
+    {
+      "name": "get_pcb_rules",
+      "description": "Get all design rules from the current Altium PCB"
+    },
+    {
+      "name": "get_pcb_layer_stackup",
+      "description": "Get the detailed layer stackup information from the current Altium PCB including copper thickness, dielectric materials, constants, and heights"
+    },
+    {
+      "name": "get_output_job_containers",
+      "description": "Get all available output job containers from a specified OutJob file"
+    },
+    {
+      "name": "run_output_jobs",
+      "description": "Run specified output job containers"
+    },
+    {
+      "name": "create_pcb_footprint",
+      "description": "Create a new PCB footprint in the currently active PcbLib document with SMD pads, auto-generated courtyard, and silkscreen with pin 1 indicator"
+    },
+    {
+      "name": "get_server_status",
+      "description": "Get the current status of the Altium MCP server"
+    }
+  ],
+  "compatibility": {
+    "platforms": ["win32"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}
