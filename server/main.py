@@ -34,15 +34,15 @@ logger = logging.getLogger("AltiumMCPServer")
 
 # Set MCP_DIR to the directory of the current Python file
 MCP_DIR = Path(__file__).parent
-# config.json lives in a per-user folder OUTSIDE the install directory. Claude
-# Desktop replaces the extension folder on every update, which used to reset a
-# hand-picked Altium path. LEGACY_CONFIG_FILE is read once to migrate.
+# config.json lives in a per-user folder OUTSIDE the install directory and
+# outside AppData. Claude Desktop replaces the extension folder on every
+# update, which used to reset a hand-picked Altium path; and being an MSIX
+# package it redirects its child processes' AppData writes into its own
+# LocalCache. start_server.py passes the folder it chose in ALTIUM_MCP_HOME.
+# LEGACY_CONFIG_FILE is read once to migrate.
 def _data_dir() -> Path:
     override = os.environ.get("ALTIUM_MCP_HOME")
-    if override:
-        return Path(override)
-    local = os.environ.get("LOCALAPPDATA")
-    return Path(local) / "altium-mcp" if local else MCP_DIR
+    return Path(override) if override else Path.home() / ".altium-mcp"
 
 LEGACY_CONFIG_FILE = MCP_DIR / "config.json"
 CONFIG_FILE = _data_dir() / "config.json"

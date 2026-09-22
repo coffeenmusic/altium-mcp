@@ -46,11 +46,9 @@ END = "// === END EXPERIMENT"
 
 def _config_path():
     # Same resolution as server/main.py; falls back to the pre-relocation file.
-    home = os.environ.get("ALTIUM_MCP_HOME") or (
-        os.path.join(os.environ["LOCALAPPDATA"], "altium-mcp")
-        if os.environ.get("LOCALAPPDATA") else "")
-    new = Path(home) / "config.json" if home else None
-    return new if new and new.exists() else REPO / "server" / "config.json"
+    home = Path(os.environ.get("ALTIUM_MCP_HOME") or Path.home() / ".altium-mcp")
+    new = home / "config.json"
+    return new if new.exists() else REPO / "server" / "config.json"
 
 
 config = json.load(open(_config_path()))

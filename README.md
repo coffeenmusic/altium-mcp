@@ -42,14 +42,15 @@ The older approach of bundling pre-compiled packages in `server/lib/` is no long
 
 **How it works:**
 
-1. `start_server.py` (at the repo root) looks for a ready virtual environment in `%LOCALAPPDATA%\altium-mcp\venvs\<key>`, where `<key>` is a hash of the pinned requirements and the Python version
-2. If it isn't ready, one process builds it under a lock file and pip-installs the pinned dependencies; any other process started at the same time waits for that build instead of racing it
-3. It then launches `server/main.py` using the venv's Python
-4. First launch takes ~20-30 seconds; subsequent launches are instant
+1. `start_server.py` (at the repo root) looks for a ready virtual environment in `%USERPROFILE%\.altium-mcpenvs\<key>`, where `<key>` is a hash of the pinned requirements and the Python version
+2. If it isn't ready, it starts a **detached** builder process (`start_server.py --build`) that creates the venv and pip-installs the pinned dependencies, then waits for it. Claude Desktop kills a server that has not answered within about 60 seconds, and restarts servers freely; a build that ran inside the launcher died with it. The detached builder finishes regardless, so a restarted launcher finds the venv ready or a build still in progress.
+3. A lock file (holding the builder's PID) makes sure only one build runs at a time; other launchers wait for it. A lock whose owner has exited is taken over immediately.
+4. It then launches `server/main.py` using the venv's Python
+5. First launch takes ~20-30 seconds; subsequent launches are instant
 
-The venv and `config.json` live in `%LOCALAPPDATA%\altium-mcp`, not in the extension folder, because Claude Desktop replaces the extension folder on every update. The slow build therefore happens once per machine (and again only when the requirements or Python version change), and a hand-picked Altium path survives updates. Set the `ALTIUM_MCP_HOME` environment variable to use a different folder. A `config.json` left beside `server/main.py` by an older version is migrated automatically on first start.
+The venv, `config.json` and `build.log` live in `%USERPROFILE%\.altium-mcp`, not in the extension folder, because Claude Desktop replaces the extension folder on every update. The slow build therefore happens once per machine (and again only when the requirements or Python version change), and a hand-picked Altium path survives updates. AppData is deliberately avoided: Claude Desktop is an MSIX package, and writes its child processes make under AppData are redirected into `...\Packages\Claude_...\LocalCache`, so a venv built from a terminal and one built by the server would end up in different places. Set the `ALTIUM_MCP_HOME` environment variable to use a different folder. A `config.json` left beside `server/main.py` by an older version is migrated automatically on first start.
 
-On a slow network the first build can exceed the client's 60-second startup timeout. The build keeps going after the client gives up, so restarting the extension once is enough.
+On a slow network the first build can exceed the client's 60-second startup timeout. The build carries on in the background, so restarting the extension once it has finished is enough; `build.log` shows progress.
 
 **Build steps:**
 
