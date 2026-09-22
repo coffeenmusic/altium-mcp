@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "altium-mcp",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
   "author": {
     "name": "Stephen Thompson"
