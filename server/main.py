@@ -15,6 +15,7 @@ import win32gui
 import win32ui
 import win32con
 import win32api
+import win32process
 from PIL import Image
 import io
 import base64
@@ -2134,7 +2135,27 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
             error_msg = response.get("error", "Unknown error")
             logger.error(f"Error focusing {view_type} document: {error_msg}")
             return json.dumps({"success": False, "error": f"Failed to focus the correct document type: {error_msg}"})
-        
+
+        # Altium reports which document ended up focused. If it is not the
+        # kind that was asked for (typically: no document of that kind is
+        # open), say so instead of returning the wrong editor labelled as
+        # the requested view.
+        focus_info = response.get("result", {})
+        focus_info = focus_info if isinstance(focus_info, dict) else {}
+        focused_kind = str(focus_info.get("focused_kind", "") or "").upper()
+        focused_document = focus_info.get("focused_document", "")
+        wanted_kind = {"pcb": "PCB", "sch": "SCH"}.get(view_type.lower())
+        if wanted_kind and focused_kind and focused_kind != wanted_kind:
+            logger.error(f"Requested {view_type} view but {focused_kind} document is focused")
+            return json.dumps({
+                "success": False,
+                "error": f"Requested a '{view_type}' view but Altium has a {focused_kind} "
+                         f"document focused ({focused_document}). Is a "
+                         f"{wanted_kind} document open in the active project?",
+                "requested_view_type": view_type,
+                "focused_kind": focused_kind,
+                "focused_document": focused_document})
+
         # Run the screenshot capture in a separate thread
         import threading
         import queue
@@ -2197,12 +2218,46 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                     result_queue.put({"success": False, "error": f"Invalid window dimensions: {width}x{height}"})
                     return
                 
-                # Try to activate the window
+                # Bring Altium to the front and let it paint. Altium only
+                # renders a schematic view once it has actually been shown on
+                # screen, so a capture taken while it sits behind another
+                # window comes back with a blank canvas. Windows may refuse
+                # SetForegroundWindow from a process that neither is nor was
+                # started by the foreground process; a synthetic Alt press
+                # before the call is the standard unlock and is harmless.
+                activated = False
+                altium_pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+
+                def altium_is_foreground():
+                    # Altium owns several top-level windows; any of them
+                    # being foreground means Altium is in front.
+                    fg = win32gui.GetForegroundWindow()
+                    return bool(fg) and win32process.GetWindowThreadProcessId(fg)[1] == altium_pid
+
                 try:
-                    win32gui.SetForegroundWindow(hwnd)
-                    time.sleep(0.5)
+                    for attempt in range(2):
+                        if attempt:
+                            import ctypes
+                            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
+                            ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
+                        try:
+                            win32gui.SetForegroundWindow(hwnd)
+                        except Exception:
+                            pass
+                        deadline = time.time() + 1.5
+                        while time.time() < deadline:
+                            time.sleep(0.1)
+                            if altium_is_foreground():
+                                activated = True
+                                break
+                        if activated:
+                            break
                 except Exception as e:
                     logger.warning(f"Could not bring window to foreground: {e}")
+                if not activated:
+                    logger.warning("Altium is not the foreground window; the capture may show an unpainted view")
+                # A freshly switched-to document needs a moment to render.
+                time.sleep(1.0)
                 
                 # Take screenshot using GDI functions instead of ImageGrab
                 try:
@@ -2256,6 +2311,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                         "window_title": window["title"],
                         "window_class": window["class_name"],
                         "view_type": view_type,
+                        "foreground_confirmed": activated,
                         "image_format": "PNG",
                         "encoding": "base64",
                         "debug_file": debug_filename,
@@ -2315,6 +2371,9 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         zoom_info = response.get("result", {})
         if isinstance(zoom_info, dict) and "zoomed_component_count" in zoom_info:
             result["zoomed_component_count"] = zoom_info["zoomed_component_count"]
+        # What was actually captured, as opposed to what was requested
+        result["captured_kind"] = focused_kind or None
+        result["captured_document"] = focused_document or None
         return [
             json.dumps(result),
             MCPImage(data=base64.b64decode(image_base64), format="png"),
