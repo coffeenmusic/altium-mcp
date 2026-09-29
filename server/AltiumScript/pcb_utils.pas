@@ -2617,3 +2617,648 @@ begin
         PlacedArray.Free;
     end;
 end;
+
+// ---------------------------------------------------------------------------
+// Silkscreen designator placement
+//
+// The placement itself is solved in Python (server/silkscreen.py) from a
+// geometry dump. These routines export that geometry, apply the solved
+// designator positions, and verify the result with Altium's own silk rules.
+// ---------------------------------------------------------------------------
+
+// Locale-safe mils string (3 decimals) for the silk dump
+function SilkNum(Value: Double): String;
+begin
+    Result := StringReplace(FloatToStr(Round(Value * 1000) / 1000), ',', '.', REPLACEALL);
+end;
+
+function SilkLen(C: Integer): String;
+begin
+    Result := SilkNum(CoordToMils(C));
+end;
+
+// 'T' / 'B' for an overlay or solder mask layer, '' for any other layer
+function SilkSideOfLayer(Layer: Integer): String;
+begin
+    Result := '';
+    if (Layer = eTopOverlay) or (Layer = eTopSolder) then
+        Result := 'T'
+    else if (Layer = eBottomOverlay) or (Layer = eBottomSolder) then
+        Result := 'B';
+end;
+
+function SilkRectStr(R: TCoordRect; XO, YO: Integer): String;
+begin
+    Result := SilkLen(R.Left - XO) + '|' + SilkLen(R.Bottom - YO) + '|' +
+              SilkLen(R.Right - XO) + '|' + SilkLen(R.Top - YO);
+end;
+
+// True for designator/comment strings that are switched off on the component
+function SilkTextHidden(Txt: IPCB_Text): Boolean;
+begin
+    Result := False;
+    if Txt.IsDesignator then
+    begin
+        if (Txt.Component <> nil) then
+            Result := not Txt.Component.NameOn;
+    end
+    else if Txt.IsComment then
+    begin
+        if (Txt.Component <> nil) then
+            Result := not Txt.Component.CommentOn;
+    end;
+end;
+
+// Export everything the silkscreen solver needs to ROOT_DIR\silk_data.txt,
+// one pipe-delimited line per object, mils relative to the board origin:
+//   RULE|S2S|clearance, RULE|S2M|clearance   largest enabled silk rules
+//   O|kind|vx|vy|cx|cy|radius|a1|a2          board outline (kind 0 line, 1 arc)
+//   K|x1|y1|x2|y2|...                        board cutout contour
+//   C|des|side|x|y|rot|nameon|l|b|r|t|tl|tb|tr|tt|trot|size|width|autopos|mirror|pattern
+//                                            component (bbox without name/comment,
+//                                            then the designator text box)
+//   Y|owner|l|b|r|t                          3D body extent
+//   ST|side|owner|x1|y1|x2|y2|w              silk track
+//   SA|side|owner|cx|cy|r|a1|a2|w            silk arc
+//   SX|side|owner|kind|l|b|r|t               silk text (D designator, C comment, F free)
+//   SB|side|owner|l|b|r|t                    silk fill / region extent
+//   MP|side|owner|pin|x|y|rot|shape|xs|ys|l|b|r|t   pad solder mask opening
+//   MV|side|owner|x|y|diameter               untented via opening
+//   MT|side|owner|x1|y1|x2|y2|w, MB|side|owner|l|b|r|t   solder mask layer objects
+function ExportSilkscreenData(ROOT_DIR: String): String;
+var
+    Board     : IPCB_Board;
+    Iterator  : IPCB_BoardIterator;
+    Prim      : IPCB_Primitive;
+    Comp      : IPCB_Component;
+    Lines     : TStringList;
+    R, T      : TCoordRect;
+    XO, YO    : Integer;
+    I         : Integer;
+    Side      : String;
+    Owner     : String;
+    Kind      : String;
+    Flag      : String;
+    FileName  : String;
+    S2S, S2M  : Double;
+    IsSilk    : Boolean;
+    IsMask    : Boolean;
+    Diameter  : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    S2S := -1;
+    S2M := -1;
+    Lines := TStringList.Create;
+
+    try
+        Lines.Add('V|1');
+
+        // Design rules: the largest enabled silk clearances
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while (Prim <> nil) do
+        begin
+            if Prim.Enabled then
+            begin
+                if (Prim.RuleKind = eRule_SilkToSilkClearance) then
+                begin
+                    if (CoordToMils(Prim.SilkToSilkClearance) > S2S) then
+                        S2S := CoordToMils(Prim.SilkToSilkClearance);
+                end
+                else if (Prim.RuleKind = eRule_SilkToSolderMaskClearance) then
+                begin
+                    if (CoordToMils(Prim.SilkToMaskGap) > S2M) then
+                        S2M := CoordToMils(Prim.SilkToMaskGap);
+                end;
+            end;
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        Lines.Add('RULE|S2S|' + SilkNum(S2S));
+        Lines.Add('RULE|S2M|' + SilkNum(S2M));
+
+        // Board outline, vertex by vertex (arcs start at their vertex)
+        for I := 0 to Board.BoardOutline.PointCount - 1 do
+            Lines.Add('O|' + IntToStr(Board.BoardOutline.Segments[I].Kind) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].vx - XO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].vy - YO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].cx - XO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].cy - YO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].Radius) + '|' +
+                SilkNum(Board.BoardOutline.Segments[I].Angle1) + '|' +
+                SilkNum(Board.BoardOutline.Segments[I].Angle2));
+
+        // Components and their designator text boxes
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Comp := Iterator.FirstPCBObject;
+        while (Comp <> nil) do
+        begin
+            R := Comp.BoundingRectangleNoNameComment;
+            T := Comp.Name.BoundingRectangle;
+            if Comp.NameOn then Flag := '1' else Flag := '0';
+            Kind := '0';
+            if Comp.Name.MirrorFlag then Kind := '1';
+            Lines.Add('C|' + Comp.Name.Text + '|' + SilkSideOfLayer(Comp.Name.Layer) + '|' +
+                SilkLen(Comp.x - XO) + '|' + SilkLen(Comp.y - YO) + '|' +
+                SilkNum(Comp.Rotation) + '|' + Flag + '|' +
+                SilkRectStr(R, XO, YO) + '|' + SilkRectStr(T, XO, YO) + '|' +
+                SilkNum(Comp.Name.Rotation) + '|' + SilkLen(Comp.Name.Size) + '|' +
+                SilkLen(Comp.Name.Width) + '|' + IntToStr(Comp.NameAutoPosition) + '|' +
+                Kind + '|' + Comp.Pattern);
+            Comp := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        // One pass over every other primitive kind the solver cares about
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject, eFillObject,
+                                           eRegionObject, ePadObject, eViaObject, eComponentBodyObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while (Prim <> nil) do
+        begin
+            Owner := '';
+            if Prim.InComponent then
+                if (Prim.Component <> nil) then
+                    Owner := Prim.Component.Name.Text;
+
+            Side := SilkSideOfLayer(Prim.Layer);
+            IsSilk := (Prim.Layer = eTopOverlay) or (Prim.Layer = eBottomOverlay);
+            IsMask := (Prim.Layer = eTopSolder) or (Prim.Layer = eBottomSolder);
+
+            if (Prim.ObjectId = eTrackObject) then
+            begin
+                if IsSilk or IsMask then
+                begin
+                    if IsSilk then Kind := 'ST' else Kind := 'MT';
+                    Lines.Add(Kind + '|' + Side + '|' + Owner + '|' +
+                        SilkLen(Prim.X1 - XO) + '|' + SilkLen(Prim.Y1 - YO) + '|' +
+                        SilkLen(Prim.X2 - XO) + '|' + SilkLen(Prim.Y2 - YO) + '|' +
+                        SilkLen(Prim.Width));
+                end;
+            end
+            else if (Prim.ObjectId = eArcObject) then
+            begin
+                if IsSilk then
+                    Lines.Add('SA|' + Side + '|' + Owner + '|' +
+                        SilkLen(Prim.XCenter - XO) + '|' + SilkLen(Prim.YCenter - YO) + '|' +
+                        SilkLen(Prim.Radius) + '|' + SilkNum(Prim.StartAngle) + '|' +
+                        SilkNum(Prim.EndAngle) + '|' + SilkLen(Prim.LineWidth))
+                else if IsMask then
+                    Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end
+            else if (Prim.ObjectId = eTextObject) then
+            begin
+                if IsSilk then
+                begin
+                    if (not SilkTextHidden(Prim)) then
+                    begin
+                        if Prim.IsDesignator then Kind := 'D'
+                        else if Prim.IsComment then Kind := 'C'
+                        else Kind := 'F';
+                        Lines.Add('SX|' + Side + '|' + Owner + '|' + Kind + '|' +
+                            SilkRectStr(Prim.BoundingRectangle, XO, YO));
+                    end;
+                end;
+            end
+            else if (Prim.ObjectId = eFillObject) then
+            begin
+                if IsSilk then
+                    Lines.Add('SB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO))
+                else if IsMask then
+                    Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end
+            else if (Prim.ObjectId = eRegionObject) then
+            begin
+                if (Prim.Kind = eRegionKind_BoardCutout) then
+                begin
+                    // Contour vertices; a 'Layer Stack Region' also reports this
+                    // kind and spans the whole board - the solver drops those
+                    Kind := 'K';
+                    for I := 0 to Prim.MainContour.Count - 1 do
+                        Kind := Kind + '|' + SilkLen(Prim.MainContour.x[I] - XO) + '|' +
+                                SilkLen(Prim.MainContour.y[I] - YO);
+                    Lines.Add(Kind);
+                end
+                else if IsSilk then
+                    Lines.Add('SB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO))
+                else if IsMask then
+                    Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end
+            else if (Prim.ObjectId = ePadObject) then
+            begin
+                // Mask opening per side: the rectangle Altium reports on the
+                // solder layer already includes the mask expansion
+                if ((Prim.Layer = eTopLayer) or (Prim.Layer = eMultiLayer)) and (not Prim.IsTenting_Top) then
+                begin
+                    R := Prim.BoundingRectangleOnLayer(eTopSolder);
+                    if (R.Right > R.Left) then
+                        Lines.Add('MP|T|' + Owner + '|' + Prim.Name + '|' +
+                            SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                            SilkNum(Prim.Rotation) + '|' + IntToStr(Prim.TopShape) + '|' +
+                            SilkLen(Prim.TopXSize) + '|' + SilkLen(Prim.TopYSize) + '|' +
+                            SilkRectStr(R, XO, YO));
+                end;
+                if ((Prim.Layer = eBottomLayer) or (Prim.Layer = eMultiLayer)) and (not Prim.IsTenting_Bottom) then
+                begin
+                    R := Prim.BoundingRectangleOnLayer(eBottomSolder);
+                    if (R.Right > R.Left) then
+                        Lines.Add('MP|B|' + Owner + '|' + Prim.Name + '|' +
+                            SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                            SilkNum(Prim.Rotation) + '|' + IntToStr(Prim.BotShape) + '|' +
+                            SilkLen(Prim.BotXSize) + '|' + SilkLen(Prim.BotYSize) + '|' +
+                            SilkRectStr(R, XO, YO));
+                end;
+            end
+            else if (Prim.ObjectId = eViaObject) then
+            begin
+                Diameter := Prim.Size;
+                if (Prim.SolderMaskExpansion > 0) then
+                    Diameter := Diameter + 2 * Prim.SolderMaskExpansion;
+                if Prim.IntersectLayer(eTopLayer) and (not Prim.IsTenting_Top) then
+                    Lines.Add('MV|T|' + Owner + '|' + SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                        SilkLen(Diameter));
+                if Prim.IntersectLayer(eBottomLayer) and (not Prim.IsTenting_Bottom) then
+                    Lines.Add('MV|B|' + Owner + '|' + SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                        SilkLen(Diameter));
+            end
+            else if (Prim.ObjectId = eComponentBodyObject) then
+            begin
+                if (Owner <> '') then
+                    Lines.Add('Y|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end;
+
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        FileName := ROOT_DIR + 'silk_data.txt';
+        Lines.SaveToFile(FileName);
+        Result := '{"file": "' + JSONEscapeString(FileName) + '", "line_count": ' + IntToStr(Lines.Count) + '}';
+    finally
+        Lines.Free;
+    end;
+end;
+
+// Move designators so their text box is centred on a given point.
+// Each entry is 'Designator|CX|CY|Rotation|Height|StrokeWidth|Visible' in
+// mils relative to the board origin; an empty field keeps the current value
+// (Visible is 1 or 0). Positioning by box centre makes the result independent
+// of the text anchor, justification and bottom-side mirroring. The whole
+// batch is one undo step.
+function PlaceDesignatorsFromList(EntriesList: TStringList): String;
+var
+    Board        : IPCB_Board;
+    Comp         : IPCB_Component;
+    Txt          : IPCB_Text;
+    R            : TCoordRect;
+    Entry        : String;
+    Designator   : String;
+    FieldValue   : String;
+    ResultProps  : TStringList;
+    MissingArray : TStringList;
+    PlacedArray  : TStringList;
+    TextProps    : TStringList;
+    XO, YO       : Integer;
+    TargetX      : Integer;
+    TargetY      : Integer;
+    DX, DY       : Integer;
+    Pass         : Integer;
+    i            : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    ResultProps := TStringList.Create;
+    MissingArray := TStringList.Create;
+    PlacedArray := TStringList.Create;
+
+    try
+        PCBServer.PreProcess;
+
+        for i := 0 to EntriesList.Count - 1 do
+        begin
+            Entry := Trim(EntriesList[i]);
+            if (Entry <> '') then
+            begin
+                Designator := Trim(GetFieldFromPipeString(Entry, 0));
+                Comp := Board.GetPcbComponentByRefDes(Designator);
+
+                if (Comp = nil) then
+                    MissingArray.Add('"' + JSONEscapeString(Designator) + '"')
+                else
+                begin
+                    Txt := Comp.Name;
+                    PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 6));
+                    if (FieldValue = '0') then
+                        Comp.NameOn := False
+                    else if (FieldValue = '1') then
+                        Comp.NameOn := True;
+
+                    // Manual, or Altium re-autopositions the text on the next move
+                    Comp.NameAutoPosition := eAutoPos_Manual;
+
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 4));
+                    if (FieldValue <> '') then
+                        Txt.Size := MilsToCoord(SafeStrToFloat(FieldValue));
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 5));
+                    if (FieldValue <> '') then
+                        Txt.Width := MilsToCoord(SafeStrToFloat(FieldValue));
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 3));
+                    if (FieldValue <> '') then
+                        Txt.Rotation := SafeStrToFloat(FieldValue);
+
+                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                    // Move only after the rotation is committed: mid-modify the
+                    // box turns about its centre, but Altium can commit the
+                    // turn about another pivot, so measure the committed box.
+                    // A second pass corrects any residual shift.
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 1));
+                    if (FieldValue <> '') and (Trim(GetFieldFromPipeString(Entry, 2)) <> '') then
+                    begin
+                        TargetX := MilsToCoord(SafeStrToFloat(FieldValue)) + XO;
+                        TargetY := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + YO;
+                        for Pass := 1 to 2 do
+                        begin
+                            R := Txt.BoundingRectangle;
+                            DX := TargetX - (R.Left + (R.Right - R.Left) div 2);
+                            DY := TargetY - (R.Bottom + (R.Top - R.Bottom) div 2);
+                            if (Abs(DX) > 1) or (Abs(DY) > 1) then
+                            begin
+                                PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                Txt.MoveByXY(DX, DY);
+                                PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                            end;
+                        end;
+                    end;
+
+                    // Report the final text box as Altium sees it
+                    R := Txt.BoundingRectangle;
+                    TextProps := TStringList.Create;
+                    try
+                        AddJSONProperty(TextProps, 'designator', Comp.Name.Text);
+                        AddJSONNumber(TextProps, 'cx', CoordToMils(R.Left + (R.Right - R.Left) div 2 - XO));
+                        AddJSONNumber(TextProps, 'cy', CoordToMils(R.Bottom + (R.Top - R.Bottom) div 2 - YO));
+                        AddJSONNumber(TextProps, 'width', CoordToMils(R.Right - R.Left));
+                        AddJSONNumber(TextProps, 'height', CoordToMils(R.Top - R.Bottom));
+                        AddJSONNumber(TextProps, 'rotation', Txt.Rotation);
+                        AddJSONBoolean(TextProps, 'visible', Comp.NameOn);
+                        PlacedArray.Add(BuildJSONObject(TextProps, 2));
+                    finally
+                        TextProps.Free;
+                    end;
+                end;
+            end;
+        end;
+
+        PCBServer.PostProcess;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONInteger(ResultProps, 'placed_count', PlacedArray.Count);
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'missing_designators'))
+        else
+            ResultProps.Add('"missing_designators": []');
+        if (PlacedArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(PlacedArray, 'designators', 1))
+        else
+            ResultProps.Add('"designators": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        ResultProps.Free;
+        MissingArray.Free;
+        PlacedArray.Free;
+    end;
+end;
+
+// Verify designator silkscreen with Altium's own rule engine. Each visible
+// designator in the list (all visible designators when the list is empty) is
+// tested against nearby silk with the Silk To Silk Clearance rule and against
+// pads, vias and solder mask objects with the Silk To Solder Mask Clearance
+// rule, through Rule.ActualCheck - the same test a batch DRC runs.
+function CheckSilkscreen(DesignatorsList: TStringList): String;
+var
+    Board           : IPCB_Board;
+    Iterator        : IPCB_BoardIterator;
+    SIter           : IPCB_SpatialIterator;
+    Comp            : IPCB_Component;
+    Txt             : IPCB_Text;
+    Prim            : IPCB_Primitive;
+    Rule            : IPCB_Rule;
+    Targets         : TStringList;
+    MissingArray    : TStringList;
+    ViolationsArray : TStringList;
+    VProps          : TStringList;
+    ResultProps     : TStringList;
+    R, PR           : TCoordRect;
+    XO, YO          : Integer;
+    Margin          : Integer;
+    SilkLayer       : Integer;
+    MaskLayer       : Integer;
+    CopperLayer     : Integer;
+    i               : Integer;
+    RuleName        : String;
+    Detail          : String;
+    Owner           : String;
+    HiddenCount     : Integer;
+    CheckedCount    : Integer;
+    DirtyCount      : Integer;
+    Dirty           : Boolean;
+    Skip            : Boolean;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    // Search radius around each text box; larger than any sane silk clearance
+    Margin := MilsToCoord(30);
+    HiddenCount := 0;
+    CheckedCount := 0;
+    DirtyCount := 0;
+
+    Targets := TStringList.Create;
+    MissingArray := TStringList.Create;
+    ViolationsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+
+    try
+        if (DesignatorsList.Count > 0) then
+        begin
+            for i := 0 to DesignatorsList.Count - 1 do
+            begin
+                if (Board.GetPcbComponentByRefDes(Trim(DesignatorsList[i])) <> nil) then
+                    Targets.Add(Trim(DesignatorsList[i]))
+                else
+                    MissingArray.Add('"' + JSONEscapeString(Trim(DesignatorsList[i])) + '"');
+            end;
+        end
+        else
+        begin
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Comp := Iterator.FirstPCBObject;
+            while (Comp <> nil) do
+            begin
+                Targets.Add(Comp.Name.Text);
+                Comp := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        end;
+
+        for i := 0 to Targets.Count - 1 do
+        begin
+            Comp := Board.GetPcbComponentByRefDes(Targets[i]);
+            Txt := Comp.Name;
+            SilkLayer := Txt.Layer;
+
+            if (not Comp.NameOn) or ((SilkLayer <> eTopOverlay) and (SilkLayer <> eBottomOverlay)) then
+                HiddenCount := HiddenCount + 1
+            else
+            begin
+                CheckedCount := CheckedCount + 1;
+                Dirty := False;
+                if (SilkLayer = eTopOverlay) then
+                begin
+                    MaskLayer := eTopSolder;
+                    CopperLayer := eTopLayer;
+                end
+                else
+                begin
+                    MaskLayer := eBottomSolder;
+                    CopperLayer := eBottomLayer;
+                end;
+
+                R := Txt.BoundingRectangle;
+                SIter := Board.SpatialIterator_Create;
+                SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject, eFillObject,
+                                                eRegionObject, ePadObject, eViaObject));
+                SIter.AddFilter_LayerSet(AllLayers);
+                SIter.AddFilter_Area(R.Left - Margin, R.Bottom - Margin, R.Right + Margin, R.Top + Margin);
+
+                Prim := SIter.FirstPCBObject;
+                while (Prim <> nil) do
+                begin
+                    RuleName := '';
+                    if (Prim.I_ObjectAddress <> Txt.I_ObjectAddress) then
+                    begin
+                        if (Prim.Layer = SilkLayer) then
+                        begin
+                            // No short-circuit evaluation in DelphiScript:
+                            // only ask text objects whether they are hidden
+                            Skip := False;
+                            if (Prim.ObjectId = eTextObject) then
+                                Skip := SilkTextHidden(Prim);
+                            if not Skip then
+                            begin
+                                Rule := Board.FindDominantRuleForObjectPair(Txt, Prim, eRule_SilkToSilkClearance);
+                                if (Rule <> nil) then
+                                    if (Rule.ActualCheck(Txt, Prim) <> nil) then
+                                        RuleName := 'silk_to_silk';
+                            end;
+                        end
+                        else if (((Prim.ObjectId = ePadObject) and
+                                  ((Prim.Layer = CopperLayer) or (Prim.Layer = eMultiLayer))) or
+                                 (Prim.ObjectId = eViaObject) or (Prim.Layer = MaskLayer)) then
+                        begin
+                            Rule := Board.FindDominantRuleForObjectPair(Txt, Prim, eRule_SilkToSolderMaskClearance);
+                            if (Rule <> nil) then
+                                if (Rule.ActualCheck(Txt, Prim) <> nil) or (Rule.ActualCheck(Prim, Txt) <> nil) then
+                                    RuleName := 'silk_to_mask';
+                        end;
+                    end;
+
+                    if (RuleName <> '') then
+                    begin
+                        Dirty := True;
+                        Owner := '';
+                        if Prim.InComponent then
+                            if (Prim.Component <> nil) then
+                                Owner := Prim.Component.Name.Text;
+                        Detail := '';
+                        if (Prim.ObjectId = ePadObject) then
+                            Detail := Prim.Name
+                        else if (Prim.ObjectId = eTextObject) then
+                            Detail := Prim.Text;
+
+                        PR := Prim.BoundingRectangle;
+                        VProps := TStringList.Create;
+                        try
+                            AddJSONProperty(VProps, 'designator', Comp.Name.Text);
+                            AddJSONProperty(VProps, 'rule', RuleName);
+                            AddJSONProperty(VProps, 'object', Prim.ObjectIDString);
+                            AddJSONProperty(VProps, 'owner', Owner);
+                            AddJSONProperty(VProps, 'detail', Detail);
+                            if (RuleName = 'silk_to_silk') then
+                                AddJSONNumber(VProps, 'distance_mils', Round(CoordToMils(Board.PrimPrimDistance(Txt, Prim)) * 100) / 100);
+                            AddJSONNumber(VProps, 'object_x', CoordToMils(PR.Left + (PR.Right - PR.Left) div 2 - XO));
+                            AddJSONNumber(VProps, 'object_y', CoordToMils(PR.Bottom + (PR.Top - PR.Bottom) div 2 - YO));
+                            ViolationsArray.Add(BuildJSONObject(VProps, 2));
+                        finally
+                            VProps.Free;
+                        end;
+                    end;
+
+                    Prim := SIter.NextPCBObject;
+                end;
+                Board.SpatialIterator_Destroy(SIter);
+
+                if Dirty then
+                    DirtyCount := DirtyCount + 1;
+            end;
+        end;
+
+        AddJSONInteger(ResultProps, 'checked_count', CheckedCount);
+        AddJSONInteger(ResultProps, 'hidden_count', HiddenCount);
+        AddJSONInteger(ResultProps, 'designators_with_violations', DirtyCount);
+        AddJSONInteger(ResultProps, 'violation_count', ViolationsArray.Count);
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'missing_designators'))
+        else
+            ResultProps.Add('"missing_designators": []');
+        if (ViolationsArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(ViolationsArray, 'violations', 1))
+        else
+            ResultProps.Add('"violations": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Targets.Free;
+        MissingArray.Free;
+        ViolationsArray.Free;
+        ResultProps.Free;
+    end;
+end;

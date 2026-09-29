@@ -756,6 +756,66 @@ begin
     end;
 end;
 
+// Collect a string array parameter into OutList. json.dump(indent=2) writes
+// '"key": [' then one value per line then ']'; an empty array is '"key": []'.
+procedure ExtractRequestArray(RequestData: TStringList; Key: String; OutList: TStringList);
+var
+    i: Integer;
+    Value: String;
+begin
+    i := 0;
+    while (i < RequestData.Count) do
+    begin
+        if (Pos('"' + Key + '"', RequestData[i]) > 0) and (Pos('[]', RequestData[i]) = 0) then
+        begin
+            i := i + 1;
+            while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+            begin
+                Value := RequestData[i];
+                Value := StringReplace(Value, '"', '', REPLACEALL);
+                Value := StringReplace(Value, ',', '', REPLACEALL);
+                Value := Trim(Value);
+                if (Value <> '') and (Value <> '[') then
+                    OutList.Add(Value);
+                i := i + 1;
+            end;
+        end;
+        i := i + 1;
+    end;
+end;
+
+// Designator placements arrive as pipe-delimited strings
+// ('Designator|CX|CY|Rotation|Height|StrokeWidth|Visible')
+function ExecutePlaceDesignators(RequestData: TStringList): String;
+var
+    EntriesList: TStringList;
+begin
+    EntriesList := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'placements', EntriesList);
+        if (EntriesList.Count > 0) then
+            Result := PlaceDesignatorsFromList(EntriesList)
+        else
+            Result := 'ERROR: No placements provided for place_designators';
+    finally
+        EntriesList.Free;
+    end;
+end;
+
+// Designators to check (optional - empty means every visible designator)
+function ExecuteCheckSilkscreen(RequestData: TStringList): String;
+var
+    DesignatorsList: TStringList;
+begin
+    DesignatorsList := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'designators', DesignatorsList);
+        Result := CheckSilkscreen(DesignatorsList);
+    finally
+        DesignatorsList.Free;
+    end;
+end;
+
 // Extract the layout duplicator apply logic
 function ExecuteLayoutDuplicatorApply(RequestData: TStringList): String;
 var
@@ -1082,6 +1142,12 @@ begin
             Result := ExecuteCheckPlacement(RequestData);
         'get_net_connections':
             Result := ExecuteGetNetConnections(RequestData);
+        'export_silkscreen_data':
+            Result := ExportSilkscreenData(ROOT_DIR);
+        'place_designators':
+            Result := ExecutePlaceDesignators(RequestData);
+        'check_silkscreen':
+            Result := ExecuteCheckSilkscreen(RequestData);
         'get_symbol_primitives':
             Result := ExecuteGetSymbolPrimitives(RequestData);
         'create_symbols_batch':
