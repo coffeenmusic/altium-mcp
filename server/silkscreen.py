@@ -1,15 +1,20 @@
-"""Silkscreen designator placement: geometry model, candidate search, solver.
+"""Silkscreen designator placement support for an agent.
 
 The DelphiScript side exports the board (export_silkscreen_data) as one
-pipe-delimited line per object; this module parses it, finds a legal spot for
-every designator and renders previews. Pure Python (no numpy) so it runs in
-the MCP server's minimal environment.
+pipe-delimited line per object; this module parses it and answers the
+questions an agent asks while placing designators by hand: what is wrong,
+what does this area look like, where could this designator legally go, and
+would this spot work. Pure Python (no numpy) so it runs in the MCP server's
+minimal environment.
 
 Conventions:
 - All coordinates are mils relative to the board origin.
 - A designator position is the CENTRE of the text box Altium reports. That
   makes placement independent of text anchors, justification and bottom-side
   mirroring: the Altium side rotates the text, then moves its box centre.
+- Clearances are measured to the INK box. Altium's box for stroke text runs
+  half a stroke beyond the ink on every side, and its silk rules check the
+  strokes (PrimPrimDistance uses the box and would report false overlaps).
 - Readable rotations are 0/90 on the top overlay. Bottom text is mirrored
   (mirror, then rotate CCW), so its readable rotations are 0/270.
 """
@@ -249,7 +254,7 @@ def designator_prefix(designator):
 class Component:
     __slots__ = ("designator", "side", "x", "y", "rotation", "visible", "bbox",
                  "text_box", "text_rotation", "text_height", "stroke", "autopos",
-                 "mirrored", "pattern", "bodies", "extent", "prefix", "skeleton")
+                 "mirrored", "pattern", "bodies", "extent", "prefix", "skeleton", "truetype")
 
     def text_size0(self):
         """(width, height) of the text box in the text's own rotation-0 frame."""
@@ -269,6 +274,14 @@ class Component:
 
 def _f(s):
     return float(s) if s else 0.0
+
+
+def ink_box(altium_box, stroke, truetype=False):
+    """The ink of a designator from the box Altium reports: stroke text's box
+    runs half a stroke beyond its strokes on every side. TrueType boxes are
+    kept as they are (conservative)."""
+    k = 0.0 if truetype else stroke / 2
+    return (altium_box[0] + k, altium_box[1] + k, altium_box[2] - k, altium_box[3] - k)
 
 
 class Board:
@@ -315,13 +328,14 @@ class Board:
                 c.x, c.y, c.rotation = _f(f[3]), _f(f[4]), _f(f[5])
                 c.visible = f[6] == "1"
                 c.bbox = tuple(_f(v) for v in f[7:11])
-                c.text_box = tuple(_f(v) for v in f[11:15])
                 c.text_rotation = _f(f[15])
                 c.text_height = _f(f[16])
                 c.stroke = _f(f[17])
                 c.autopos = int(f[18] or 0)
                 c.mirrored = f[19] == "1"
                 c.pattern = f[20] if len(f) > 20 else ""
+                c.truetype = len(f) > 21 and f[21] == "1"
+                c.text_box = ink_box(tuple(_f(v) for v in f[11:15]), c.stroke, c.truetype)
                 c.bodies = []
                 c.extent = None
                 c.prefix = designator_prefix(c.designator)
@@ -338,7 +352,11 @@ class Board:
                 for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
                     self.silk.append((f[1], _seg_obstacle(xa, ya, xb, yb, w / 2 + sag, SILK, f[2], "silk arc"), "", f[2]))
             elif tag == "SX":
+                if f[3] == "D":
+                    continue    # designators: obstacles come from Component.text_box
                 r = tuple(_f(v) for v in f[4:8])
+                if len(f) > 9:
+                    r = ink_box(r, _f(f[8]), f[9] == "1")
                 label = {"D": "designator", "C": "comment"}.get(f[3], "silk text")
                 self.silk.append((f[1], _rect_obstacle(r, SILK, f[2], label), f[3], f[2]))
             elif tag == "SB":
@@ -439,6 +457,24 @@ class Board:
 # Candidate search
 # ---------------------------------------------------------------------------
 
+def ambiguity_band(d_own):
+    """How much closer another part may come before a label reads as a toss-up."""
+    return max(AMBIGUITY_MARGIN, AMBIGUITY_RATIO * d_own)
+
+
+def text_dims(comp, height=None):
+    """(w0, h0, height, stroke) of a designator's text box at rotation 0,
+    optionally scaled to a new text height (stroke scaled, never below 3)."""
+    w0, h0 = comp.text_size0()
+    if not height or abs(height - comp.text_height) < 1e-6 or comp.text_height <= 0:
+        return w0, h0, comp.text_height, comp.stroke
+    k = height / comp.text_height
+    stroke = max(3.0, round(comp.stroke * k * 2) / 2)
+    pad = h0 - comp.text_height            # box margin from the stroke width
+    pad_new = pad * (stroke / comp.stroke) if comp.stroke else pad
+    return (w0 - pad) * k + pad_new, height + pad_new, height, stroke
+
+
 class Candidate:
     __slots__ = ("designator", "rect", "rotation", "cost", "side_name", "height", "stroke", "note")
 
@@ -458,11 +494,10 @@ class Candidate:
 
 
 class Options:
-    def __init__(self, max_gap=50.0, orientation="auto", keep_valid=True, avoid_vias=True,
+    def __init__(self, max_gap=50.0, orientation="auto", avoid_vias=True,
                  edge_margin=10.0, extra_clearance=0.5, min_height=None, per_group=10):
         self.max_gap = max_gap
         self.orientation = orientation
-        self.keep_valid = keep_valid
         self.avoid_vias = avoid_vias
         self.edge_margin = edge_margin
         self.extra_clearance = extra_clearance
@@ -477,10 +512,11 @@ SIDE_COST = {"N": 0.0, "W": 4.0, "E": 4.0, "S": 7.0, "IN": 60.0}
 W_AMBIGUITY = 4.0      # per mil a same-type part is closer than (own + margin)
 W_CROSS_AMBIGUITY = 1.0  # the same for parts of another type (R label by a C)
 AMBIGUITY_MARGIN = 5.0
-FAR_GAP = 15.0         # mils: beyond this a label must be nearest its own part
+AMBIGUITY_RATIO = 0.25   # ...or this fraction of the distance, whichever is larger
+FAR_GAP = 15.0         # mils: beyond this a label must be nearest its own part...
+SIMILAR_LABEL = 1.4    # ...among parts whose labels are no more than this much smaller
 W_OTHER_BODY = 80.0    # x fraction of the text box over another part's body
 W_OWN_BODY = 25.0      # x fraction over its own body (hidden after assembly)
-KEEP_BONUS = 15.0      # current position is preferred when it is legal
 CROWDED = 10           # fewer legal spots than this: offer smaller text too
 DIVERSITY = 12.0       # mils: min spacing between picks in one side/rotation group
 
@@ -505,12 +541,14 @@ class Placer:
     def _build(self):
         b = self.board
         for side, ob, kind, owner in b.silk:
-            # Designators being placed are not obstacles - their new boxes are
-            # handled by the solver's conflict check instead
-            if kind == "D" and owner in self.scope:
-                continue
             if side in self.obstacles:
                 self.obstacles[side].add(ob.bbox, ob)
+        # Other designators where they are now; the ones being placed are not
+        # obstacles to themselves
+        for c in b.components.values():
+            if c.visible and c.side in self.obstacles and c.designator not in self.scope:
+                ob = _rect_obstacle(c.text_box, SILK, c.designator, "designator " + c.designator)
+                self.obstacles[c.side].add(ob.bbox, ob)
         for side, ob in b.mask:
             if ob.label == "via" and not self.opt.avoid_vias:
                 continue
@@ -568,7 +606,7 @@ class Placer:
         d_own = _point_rect_dist(cx, cy, comp.skeleton)
         other = same = None
         d_other = d_same = float("inf")
-        reach = d_own + AMBIGUITY_MARGIN + 1
+        reach = d_own + ambiguity_band(d_own) + 1
         for o in self.extents[comp.side].query((cx - reach, cy - reach, cx + reach, cy + reach)):
             if o is comp:
                 continue
@@ -580,17 +618,20 @@ class Placer:
         return gap, d_own, other, d_other, same, d_same
 
     @staticmethod
-    def misleading(gap, d_own, d_other, d_same):
+    def misleading(comp, gap, d_own, other, d_other, d_same):
         """A same-type part clearly closer to the label than its own part -
-        or, once the label sits away from its part, any other part."""
+        or, once the label sits away from its part, any other part whose
+        label is about as big (a 100 mil J10 never reads as a capacitor's)."""
         if d_same < d_own - 1.0:
             return True
-        return gap > FAR_GAP and d_other < d_own - 1.0
+        return (gap > FAR_GAP and other is not None and d_other < d_own - 1.0
+                and comp.text_height <= SIMILAR_LABEL * other.text_height)
 
     def soft_penalty(self, comp, rect):
         _, d_own, _, d_other, _, d_same = self.association(comp, rect)
-        pen = (W_AMBIGUITY * max(0.0, d_own + AMBIGUITY_MARGIN - d_same) +
-               W_CROSS_AMBIGUITY * max(0.0, d_own + AMBIGUITY_MARGIN - d_other))
+        band = ambiguity_band(d_own)
+        pen = (W_AMBIGUITY * max(0.0, d_own + band - d_same) +
+               W_CROSS_AMBIGUITY * max(0.0, d_own + band - d_other))
         area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
         for owner, body in self.bodies[comp.side].query(rect):
             frac = rect_overlap_area(rect, body) / area
@@ -617,21 +658,9 @@ class Placer:
             return 0.0 if vertical_text else 8.0
         return 12.0 if vertical_text else 0.0
 
-    def text_dims(self, comp, height=None):
-        """(w0, h0, height, stroke) of the text box at rotation 0, optionally
-        scaled to a new text height."""
-        w0, h0 = comp.text_size0()
-        if not height or abs(height - comp.text_height) < 1e-6 or comp.text_height <= 0:
-            return w0, h0, comp.text_height, comp.stroke
-        k = height / comp.text_height
-        stroke = max(3.0, round(comp.stroke * k * 2) / 2)
-        pad = h0 - comp.text_height            # box margin from the stroke width
-        pad_new = pad * (stroke / comp.stroke) if comp.stroke else pad
-        return (w0 - pad) * k + pad_new, height + pad_new, height, stroke
-
     def raw_candidates(self, comp, height=None):
         """Every candidate box around the part with its static cost."""
-        w0, h0, height, stroke = self.text_dims(comp, height)
+        w0, h0, height, stroke = text_dims(comp, height)
         e = comp.extent
         ecx, ecy = (e[0] + e[2]) / 2, (e[1] + e[3]) / 2
         ew, eh = e[2] - e[0], e[3] - e[1]
@@ -684,34 +713,9 @@ class Placer:
         e = comp.extent
         return tw < (e[2] - e[0]) - 10 and th < (e[3] - e[1]) - 10
 
-    def current_candidate(self, comp):
-        """The designator's present position, if it is legal, readable and
-        clearly belongs to its part."""
-        rot = round(comp.text_rotation) % 360
-        if rot not in READABLE_ROTATIONS.get(comp.side, ()):
-            return None
-        rect = comp.text_box
-        if self.blockers(rect, comp.side):
-            return None
-        tw, th = rect[2] - rect[0], rect[3] - rect[1]
-        inside = self._fits_inside(comp, tw, th) and rect_overlap_area(rect, comp.extent) >= 0.99 * tw * th
-        gap, d_own, _, _, _, d_same = self.association(comp, rect)
-        if not inside and (gap > self.opt.max_gap or d_same < d_own + AMBIGUITY_MARGIN):
-            return None
-        area = max(1e-9, tw * th)
-        for owner, body in self.bodies[comp.side].query(rect):
-            frac = rect_overlap_area(rect, body) / area
-            if owner != comp.designator and frac > 0.02:
-                return None          # over another part
-            if owner == comp.designator and frac > 0.25 and not inside:
-                return None          # under its own (small) part
-        cost = self.soft_penalty(comp, rect) + (SIDE_COST["IN"] if inside else 0.0) - KEEP_BONUS
-        return Candidate(comp.designator, rect, rot, cost, "KEEP",
-                         comp.text_height, comp.stroke, "kept")
-
     def candidates(self, comp, height=None):
-        """Best legal candidates, a few per (rotation, side) group so the
-        solver has real alternatives when neighbours compete."""
+        """Best legal candidates, a few per (rotation, side) group, spread
+        over the free space so they are real alternatives."""
         raw = self.raw_candidates(comp, height)
         raw.sort(key=lambda c: c.cost)
         groups = {}
@@ -729,8 +733,8 @@ class Placer:
                 continue
             if self.blockers(cand.rect, comp.side):
                 continue
-            gap, d_own, _, d_other, _, d_same = self.association(comp, cand.rect)
-            if self.misleading(gap, d_own, d_other, d_same):
+            gap, d_own, other, d_other, _, d_same = self.association(comp, cand.rect)
+            if self.misleading(comp, gap, d_own, other, d_other, d_same):
                 continue
             cand.cost += self.soft_penalty(comp, cand.rect)
             legal.append(cand)
@@ -754,238 +758,230 @@ class Placer:
 
 
 # ---------------------------------------------------------------------------
-# Solver
+# Agent API: options, evaluation, relative placement
 # ---------------------------------------------------------------------------
 
-class _Placed:
-    """Placed designator boxes with a spatial index for conflict checks."""
-
-    def __init__(self, gap):
-        self.gap = gap
-        self.hash = SpatialHash(60.0)
-        self.by_des = {}
-
-    def conflicts(self, rect, ignore=()):
-        out = []
-        for cand in self.hash.query(_inflate(rect, self.gap)):
-            if cand.designator in ignore:
-                continue
-            if _rect_rect_dist(rect, cand.rect) < self.gap:
-                out.append(cand.designator)
-        return out
-
-    def put(self, cand):
-        self.by_des[cand.designator] = cand
-        self.hash.add(cand.rect, cand)
-
-    def take(self, des):
-        cand = self.by_des.pop(des)
-        self.hash.remove(cand.rect, cand)
-        return cand
+SIDE_ALIASES = {"above": "N", "top": "N", "n": "N", "below": "S", "bottom": "S", "s": "S",
+                "left": "W", "w": "W", "right": "E", "e": "E", "center": "IN", "centre": "IN",
+                "inside": "IN", "in": "IN"}
+SIDE_NAMES = {"N": "above", "S": "below", "W": "left", "E": "right", "IN": "inside"}
 
 
-EVICT_COST = 50.0      # displacing a placed designator...
-EVICT_HISTORY = 30.0   # ...and more each time it has been displaced before
-
-
-def solve(cands, gap, iterations=3000, top=40):
-    """Choose one candidate per designator with no two boxes closer than gap.
-
-    1. Greedy: most-constrained designators first, cheapest free candidate.
-    2. Ejection chains: an unplaced designator takes the spot that is
-       cheapest counting the neighbours it would displace; those are evicted
-       and immediately retry their own free alternatives, or queue up to
-       evict in turn. A per-designator eviction history makes repeat
-       evictions expensive, so the search does not cycle. The best state
-       seen (fewest unplaced, then lowest cost) wins.
-    3. Polish: every designator moves to a cheaper spot that has opened up.
-    Returns (placed {des: Candidate}, unplaced [des]).
-    """
-    placed = _Placed(gap)
-    order = sorted(cands, key=lambda d: (len(cands[d]), cands[d][0].cost if cands[d] else 0))
-    queue = []
-    for des in order:
-        free = next((c for c in cands[des] if not placed.conflicts(c.rect)), None)
-        if free is not None:
-            placed.put(free)
+def split_scope(board, designators):
+    """(designators that can be placed, {designator: why not} for the rest)."""
+    ok, skipped = [], {}
+    for d in designators:
+        c = board.components.get(d)
+        if c is None:
+            skipped[d] = "not on board"
+        elif not c.visible:
+            skipped[d] = "designator hidden - pass visible: true to show it"
+        elif c.side not in ("T", "B"):
+            skipped[d] = "designator not on an overlay layer"
         else:
-            queue.append(des)
-
-    def score():
-        return (len(queue), sum(c.cost for c in placed.by_des.values()))
-
-    best = (score(), dict(placed.by_des), list(queue))
-    history = {}
-    steps = 0
-    while queue and steps < iterations:
-        steps += 1
-        des = queue.pop(0)
-        choice, choice_cost, choice_blockers = None, float("inf"), ()
-        for cand in cands[des][:top]:
-            blockers = placed.conflicts(cand.rect)
-            total = cand.cost + sum(EVICT_COST + EVICT_HISTORY * history.get(b, 0) for b in blockers)
-            if total < choice_cost:
-                choice, choice_cost, choice_blockers = cand, total, blockers
-        if choice is None:
-            continue
-        for b in choice_blockers:
-            placed.take(b)
-            history[b] = history.get(b, 0) + 1
-        placed.put(choice)
-        for b in choice_blockers:
-            free = next((c for c in cands[b] if not placed.conflicts(c.rect)), None)
-            if free is not None:
-                placed.put(free)
-            else:
-                queue.append(b)
-        sc = score()
-        if sc < best[0]:
-            best = (sc, dict(placed.by_des), list(queue))
-
-    # Restore the best state seen
-    placed = _Placed(gap)
-    for cand in best[1].values():
-        placed.put(cand)
-    unplaced = best[2]
-
-    for _ in range(3):
-        moved = False
-        for des in list(placed.by_des):
-            cur = placed.by_des[des]
-            for cand in cands[des]:
-                if cand.cost >= cur.cost - 1e-9:
-                    break
-                if not placed.conflicts(cand.rect, ignore=(des,)):
-                    placed.take(des)
-                    placed.put(cand)
-                    moved = True
-                    break
-        for des in list(unplaced):
-            free = next((c for c in cands[des] if not placed.conflicts(c.rect)), None)
-            if free is not None:
-                placed.put(free)
-                unplaced.remove(des)
-                moved = True
-        if not moved:
-            break
-    return dict(placed.by_des), unplaced
+            ok.append(d)
+    return ok, skipped
 
 
-def plan_silkscreen(board, designators=None, options=None):
-    """Plan designator positions. Returns a dict with 'placements'
-    (designator -> Candidate), 'kept', 'unplaced' ({des: reason}) and 'skipped'."""
+def options_for(board, designators, count=5, options=None):
+    """Ranked legal spots for each designator. Every other designator is an
+    obstacle where it is now; the designators asked about are not obstacles
+    to each other, so check picks for neighbours together (dry run).
+
+    Returns {des: {"options": [Candidate], "blocked_by": [labels]}}; blocked_by
+    is filled when there is no legal spot."""
     opt = options or Options()
-    comps = board.components
-    skipped = {}
-    if designators:
-        scope = []
-        for d in designators:
-            c = comps.get(d)
-            if c is None:
-                skipped[d] = "not on board"
-            elif not c.visible:
-                skipped[d] = "designator hidden"
-            elif c.side not in ("T", "B"):
-                skipped[d] = "designator not on an overlay layer"
-            else:
-                scope.append(d)
-    else:
-        scope = [d for d, c in comps.items() if c.visible and c.side in ("T", "B")]
-
-    placer = Placer(board, scope, opt)
-    cands = {}
-    for des in scope:
-        comp = comps[des]
+    placer = Placer(board, designators, opt)
+    out = {}
+    for des in designators:
+        comp = board.components[des]
         lst = placer.candidates(comp)
-        if opt.keep_valid:
-            cur = placer.current_candidate(comp)
-            if cur is not None:
-                lst.append(cur)
-                lst.sort(key=lambda c: c.cost)
-        # Crowded parts also get smaller-text alternatives (when allowed):
-        # each 5 mil step down costs like 50 mil of distance
-        if len(lst) < CROWDED and opt.min_height and opt.min_height < comp.text_height:
+        if opt.min_height and opt.min_height < comp.text_height:
             h = comp.text_height - 5
             while h >= opt.min_height - 1e-6:
-                smaller = placer.candidates(comp, h)
-                for c in smaller:
+                for c in placer.candidates(comp, h):
                     c.cost += 10.0 * (comp.text_height - h)
                     c.note = "reduced height"
-                lst += smaller
-                if len(smaller) >= CROWDED:
-                    break
+                    lst.append(c)
                 h -= 5
-            lst.sort(key=lambda c: c.cost)
-        cands[des] = lst
-
-    gap = placer.clearance[SILK]
-    placed, unplaced = solve({d: l for d, l in cands.items() if l}, gap)
-    reasons = {}
-    for des in scope:
-        if des in placed:
-            continue
-        if not cands[des]:
-            blocked = placer.diagnose(comps[des])
-            reasons[des] = "no legal spot within max_gap" + (": blocked by " + ", ".join(blocked) if blocked else "")
-        else:
-            reasons[des] = "every legal spot collides with another designator"
-    kept = sorted(d for d, c in placed.items() if c.side_name == "KEEP")
-    return {"placer": placer, "placements": placed, "kept": kept,
-            "unplaced": reasons, "skipped": skipped, "scope": scope}
-
-
-# ---------------------------------------------------------------------------
-# Quality report for the CURRENT designator positions
-# ---------------------------------------------------------------------------
-
-def assess_current(board, designators=None, options=None):
-    """Geometric quality issues that Altium's DRC does not report: text far
-    from or ambiguous between parts, over another part's body, outside the
-    board, or rotated to read upside down."""
-    opt = options or Options()
-    comps = board.components
-    scope = [d for d in (designators or comps) if d in comps and comps[d].visible
-             and comps[d].side in ("T", "B")]
-    placer = Placer(board, scope, opt)
-    issues = []
-    for des in scope:
-        c = comps[des]
-        rect = c.text_box
-        gap, d_own, _, _, same, d_same = placer.association(c, rect)
-        found = []
-        if gap > opt.max_gap:
-            found.append(f"{gap:.0f} mil from its part")
-        if same is not None and d_same < d_own + AMBIGUITY_MARGIN:
-            found.append(f"ambiguous: {same.designator} is as close ({d_same:.0f} vs {d_own:.0f} mil)")
-        area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
-        for owner, body in placer.bodies[c.side].query(rect):
-            frac = rect_overlap_area(rect, body) / area
-            if frac > 0.25:
-                found.append("under its own part" if owner == des else f"over part {owner}")
+        lst.sort(key=lambda c: c.cost)
+        picked = []
+        for cand in lst:
+            # Distinct spots only, so numbered boxes do not pile up
+            area = (cand.rect[2] - cand.rect[0]) * (cand.rect[3] - cand.rect[1])
+            if any(rect_overlap_area(cand.rect, p.rect) > 0.3 * area for p in picked):
+                continue
+            picked.append(cand)
+            if len(picked) >= count:
                 break
-        if any(ob.cls == EDGE for ob in placer.blockers(rect, c.side, first_only=False)):
-            found.append("outside or too close to the board edge")
-        if round(c.text_rotation) % 360 not in READABLE_ROTATIONS.get(c.side, ()):
-            found.append(f"rotation {c.text_rotation:g} reads upside down")
-        if found:
-            issues.append({"designator": des, "issues": found})
-    return issues
+        out[des] = {"options": picked, "blocked_by": [] if picked else placer.diagnose(comp)}
+    return out
+
+
+def _describe(ob, rect, clearance):
+    if ob.label == "outside board":
+        return "outside the board outline"
+    what = ob.label + (f" ({ob.owner})" if ob.owner and ob.owner not in ob.label else "")
+    d = ob.distance(rect)
+    if d <= 0:
+        return f"overlaps {what}"
+    return f"{d:.1f} mil from {what} (needs {clearance:.1f})"
+
+
+def evaluate(board, proposals, options=None, geometry=True):
+    """Problems with designator boxes {des: (rect, rotation)}: clearance to
+    silk, mask openings, the board edge and other designators (current
+    positions, or the other proposals), plus placement quality - far from its
+    part, closer to another part, over a part body, upside down. With
+    geometry=False only quality is checked (Altium's DRC covers the rest),
+    plus text over open vias, which pad-only silk-to-mask rules miss.
+    Clearances are the board's rules exactly - no placement safety margin.
+    Returns {des: [problem, ...]}; an empty list means the spot is good."""
+    opt = options or Options(extra_clearance=0.0)
+    placer = Placer(board, list(proposals), opt)
+    gap_clear = placer.clearance[SILK]
+    others = SpatialHash(60.0)
+    for des, (rect, _) in proposals.items():
+        others.add(rect, (des, rect))
+    result = {}
+    for des, (rect, rot) in proposals.items():
+        comp = board.components[des]
+        found = []
+        if geometry:
+            for ob in placer.blockers(rect, comp.side, first_only=False):
+                found.append(_describe(ob, rect, placer.clearance[ob.cls]))
+            for other, orect in others.query(_inflate(rect, gap_clear)):
+                if other != des and board.components[other].side == comp.side:
+                    d = _rect_rect_dist(rect, orect)
+                    if d < gap_clear:
+                        found.append(f"{d:.1f} mil from designator {other} (needs {gap_clear:.1f})"
+                                     if d > 0 else f"overlaps designator {other}")
+        elif opt.avoid_vias:
+            vias = [ob for ob in placer.blockers(rect, comp.side, first_only=False)
+                    if ob.label == "via" and ob.distance(rect) <= 0]
+            if vias:
+                found.append(f"over {len(vias)} open via{'s' if len(vias) > 1 else ''}")
+        gap, d_own, other, d_other, same, d_same = placer.association(comp, rect)
+        area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
+        inside = rect_overlap_area(rect, comp.extent) > 0.99 * area
+        if gap > opt.max_gap:
+            # Say whether it still lines up with its part - a label block
+            # under an array of parts reads fine when every label does
+            e, lx, ly = comp.extent, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+            aligned = ", in line with it" if (e[0] <= lx <= e[2] or e[1] <= ly <= e[3]) else ""
+            found.append(f"{gap:.0f} mil from its part{aligned}")
+        # Readers pair labels by elimination: when the nearer same-type part
+        # has its own label even closer to it, this one cannot be taken for it
+        band = ambiguity_band(d_own)
+        if same is not None and d_same < d_own + band:
+            srect = proposals[same.designator][0] if same.designator in proposals else (
+                same.text_box if same.visible else None)
+            if srect is not None and _point_rect_dist((srect[0] + srect[2]) / 2, (srect[1] + srect[3]) / 2,
+                                                      same.skeleton) < d_same:
+                same = None
+        if same is not None and d_same < d_own - band:
+            found.append(f"reads as {same.designator}'s label: {same.designator} is closer")
+        elif same is not None and d_same < d_own + band:
+            found.append(f"ambiguous: {same.designator} is about as close")
+        elif not inside and placer.misleading(comp, gap, d_own, other, d_other, float("inf")):
+            found.append(f"away from its part and closer to {other.designator}")
+        for owner, body in placer.bodies[comp.side].query(rect):
+            if rect_overlap_area(rect, body) / area > 0.25:
+                found.append("under its own part (hidden after assembly)" if owner == des
+                             else f"over part {owner}")
+                break
+        if round(rot) % 360 not in READABLE_ROTATIONS.get(comp.side, ()):
+            readable = " or ".join(str(r) for r in READABLE_ROTATIONS.get(comp.side, ()))
+            found.append(f"rotation {rot:g} reads upside down (use {readable})")
+        result[des] = found
+    return result
+
+
+def resolve_placement(board, spec):
+    """Turn a placement request into (rect, rotation, height, stroke).
+
+    spec: designator plus either x/y (box centre) or side ("above", "below",
+    "left", "right", "inside") with optional gap (mils from the part's pads
+    and silk; default just clear of them) and offset (slide along the side,
+    +x or +y). rotation/height/stroke_width optional; neither x/y nor side
+    keeps the current centre."""
+    comp = board.components[spec["designator"]]
+    rot = spec.get("rotation")
+    if rot is None:
+        cur = round(comp.text_rotation) % 360
+        rot = cur if cur in READABLE_ROTATIONS.get(comp.side, (0,)) else 0
+    rot = float(rot) % 360
+    w0, h0, height, stroke = text_dims(comp, spec.get("height"))
+    if spec.get("stroke_width") is not None:
+        pad_old = h0 - height
+        stroke_new = float(spec["stroke_width"])
+        pad_new = pad_old * stroke_new / stroke if stroke else pad_old
+        w0, h0, stroke = w0 - pad_old + pad_new, h0 - pad_old + pad_new, stroke_new
+    tw, th = (h0, w0) if round(rot) % 180 == 90 else (w0, h0)
+    e = comp.extent
+    if spec.get("x") is not None and spec.get("y") is not None:
+        cx, cy = float(spec["x"]), float(spec["y"])
+    elif spec.get("side"):
+        side = SIDE_ALIASES.get(str(spec["side"]).lower())
+        if side is None:
+            raise ValueError(f"side must be above, below, left, right or inside, not {spec['side']!r}")
+        gap = spec.get("gap")
+        gap = max(board.s2s, board.s2m) + 0.5 if gap is None else float(gap)
+        off = float(spec.get("offset") or 0)
+        ecx, ecy = (e[0] + e[2]) / 2, (e[1] + e[3]) / 2
+        if side == "N":
+            cx, cy = ecx + off, e[3] + gap + th / 2
+        elif side == "S":
+            cx, cy = ecx + off, e[1] - gap - th / 2
+        elif side == "W":
+            cx, cy = e[0] - gap - tw / 2, ecy + off
+        elif side == "E":
+            cx, cy = e[2] + gap + tw / 2, ecy + off
+        else:
+            cx, cy = ecx + off, ecy
+    else:
+        cx, cy = comp.text_center()
+    return (cx - tw / 2, cy - th / 2, cx + tw / 2, cy + th / 2), rot, height, stroke
+
+
+def focus_box(board, designators, side="T"):
+    """Bounding box of the given parts on one side (None if there are none)."""
+    bb = None
+    for d in designators:
+        c = board.components.get(d)
+        if c is not None and c.side == side:
+            bb = _union(bb, c.extent)
+    return bb
 
 
 # ---------------------------------------------------------------------------
-# Preview rendering
+# Rendering
 # ---------------------------------------------------------------------------
 
-def render_preview(board, boxes, focus=None, side="T", highlight=(), max_px=1600, margin=120.0):
-    """PNG of one board side: mask openings, silk, board edge and the given
-    designator boxes ({designator: (rect, rotation)}). Designators in
-    highlight are drawn in red. focus is a bbox to zoom to (None = board)."""
+def _nice_step(span, lines=10):
+    for step in (5, 10, 25, 50, 100, 250, 500, 1000, 2500):
+        if span / step <= lines:
+            return step
+    return 5000
+
+
+def render_view(board, boxes, focus=None, side="T", targets=(), problems=(), options=None,
+                max_px=1400, margin=100.0, grid=None):
+    """PNG of one board side for an agent to read and pick coordinates from.
+
+    Drawn: board edge, part bodies (dim), solder mask openings (copper), silk
+    (white), part names at their centres (grey), designator boxes from boxes
+    {des: (rect, rotation)} (yellow; problems red; targets cyan with a line to
+    their part) and numbered option boxes {des: [Candidate]} (green). A grid
+    with labelled lines (mils) lets positions be read off directly. focus is
+    the area to show (None = whole board)."""
     from PIL import Image, ImageDraw, ImageFont
 
     if focus is None:
         xs = [p[0] for p in board.outline] or [0.0, 1000.0]
         ys = [p[1] for p in board.outline] or [0.0, 1000.0]
         focus = (min(xs), min(ys), max(xs), max(ys))
+        margin = min(margin, 40.0)
     fx0, fy0, fx1, fy1 = _inflate(focus, margin)
     scale = max_px / max(fx1 - fx0, fy1 - fy0)
     W, H = int((fx1 - fx0) * scale) + 1, int((fy1 - fy0) * scale) + 1
@@ -997,10 +993,22 @@ def render_preview(board, boxes, focus=None, side="T", highlight=(), max_px=1600
         (x0, y0), (x1, y1) = pt(r[0], r[3]), pt(r[2], r[1])
         return [x0, y0, max(x1, x0 + 1), max(y1, y0 + 1)]
 
+    font_cache = {}
+
+    def font(px):
+        px = max(8, int(px))
+        if px not in font_cache:
+            try:
+                font_cache[px] = ImageFont.load_default(size=px)
+            except TypeError:
+                font_cache[px] = ImageFont.load_default()
+        return font_cache[px]
+
     img = Image.new("RGB", (W, H), (18, 22, 28))
     dr = ImageDraw.Draw(img)
     if board.outline:
         dr.polygon([pt(x, y) for x, y in board.outline], fill=(20, 52, 34), outline=(150, 150, 150))
+
     view = (fx0, fy0, fx1, fy1)
 
     def visible(bb):
@@ -1024,11 +1032,8 @@ def render_preview(board, boxes, focus=None, side="T", highlight=(), max_px=1600
             dr.polygon([pt(x, y) for x, y in ob.geom], fill=col)
         else:
             dr.rectangle(box(ob.geom), fill=col)
-    moving = set(boxes)
     for s, ob, kind, owner in board.silk:
         if s != side or not visible(ob.bbox):
-            continue
-        if kind == "D" and owner in moving:
             continue
         if ob.shape == SEG:
             x1, y1, x2, y2, hw = ob.geom
@@ -1036,50 +1041,74 @@ def render_preview(board, boxes, focus=None, side="T", highlight=(), max_px=1600
         else:
             dr.rectangle(box(ob.geom), outline=(200, 200, 200))
 
-    font_cache = {}
+    # Grid over the copper, under the labels: read coordinates off the image
+    step = grid or _nice_step(max(fx1 - fx0, fy1 - fy0))
+    gf = font(12)
+    gx = math.ceil(fx0 / step) * step
+    while gx <= fx1:
+        px, _ = pt(gx, 0)
+        dr.line([(px, 0), (px, H)], fill=(70, 100, 130), width=1)
+        dr.text((px + 2, 1), f"{gx:g}", font=gf, fill=(150, 190, 230))
+        gx += step
+    gy = math.ceil(fy0 / step) * step
+    while gy <= fy1:
+        _, py = pt(0, gy)
+        dr.line([(0, py), (W, py)], fill=(70, 100, 130), width=1)
+        dr.text((2, py + 1), f"{gy:g}", font=gf, fill=(150, 190, 230))
+        gy += step
 
-    def font(px):
-        px = max(8, int(px))
-        if px not in font_cache:
-            try:
-                font_cache[px] = ImageFont.load_default(size=px)
-            except TypeError:
-                font_cache[px] = ImageFont.load_default()
-        return font_cache[px]
+    # Part names at part centres, so a part can be identified even when its
+    # designator is somewhere else
+    name_px = min(14.0, 30 * scale)
+    if name_px >= 8:
+        nf = font(name_px)
+        for c in board.components.values():
+            if c.side == side and visible(c.extent):
+                cx, cy = pt((c.extent[0] + c.extent[2]) / 2, (c.extent[1] + c.extent[3]) / 2)
+                tw = dr.textlength(c.designator, font=nf)
+                dr.text((cx - tw / 2, cy - name_px / 2), c.designator, font=nf, fill=(165, 165, 190))
 
-    for des, (rect, rot) in boxes.items():
-        if not visible(rect):
-            continue
-        col = (255, 80, 80) if des in highlight else (250, 220, 60)
+    def label_box(rect, rot, text, col, width=1):
         b = box(rect)
-        dr.rectangle(b, outline=col, width=2 if des in highlight else 1)
-        vertical = rot % 180 == 90
+        dr.rectangle(b, outline=col, width=width)
+        vertical = round(rot) % 180 == 90
         bw, bh = b[2] - b[0], b[3] - b[1]
         length, thick = (bh, bw) if vertical else (bw, bh)
-        f = font(min(thick * 0.8, length / max(1, len(des)) * 1.6))
-        tw = int(dr.textlength(des, font=f)) + 2
+        f = font(min(thick * 0.8, length / max(1, len(text)) * 1.6))
+        tw = int(dr.textlength(text, font=f)) + 2
         th = int(f.size * 1.3) if hasattr(f, "size") else 12
         tile = Image.new("RGBA", (max(1, tw), max(1, th)), (0, 0, 0, 0))
-        ImageDraw.Draw(tile).text((1, 0), des, font=f, fill=col + (255,))
+        ImageDraw.Draw(tile).text((1, 0), text, font=f, fill=col + (255,))
         if vertical:
-            tile = tile.rotate(90 if rot % 360 == 90 else -90, expand=True)
+            tile = tile.rotate(90 if round(rot) % 360 == 90 else -90, expand=True)
         img.paste(tile, (int(b[0] + (bw - tile.width) / 2), int(b[1] + (bh - tile.height) / 2)), tile)
 
-    for des in highlight:
+    targets, problems = set(targets), set(problems)
+    for des, (rect, rot) in boxes.items():
+        if visible(rect) and des not in targets:
+            label_box(rect, rot, des, (255, 80, 80) if des in problems else (250, 220, 60),
+                      2 if des in problems else 1)
+
+    for des in targets:
         c = board.components.get(des)
-        if c is not None and c.side == side and des not in boxes and visible(c.extent):
-            dr.rectangle(box(c.extent), outline=(255, 60, 60), width=2)
+        if c is None or c.side != side:
+            continue
+        dr.rectangle(box(c.extent), outline=(60, 220, 255), width=2)
+        if des in boxes:
+            rect, rot = boxes[des]
+            ax, ay = pt((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
+            bx, by = pt((c.extent[0] + c.extent[2]) / 2, (c.extent[1] + c.extent[3]) / 2)
+            dr.line([(ax, ay), (bx, by)], fill=(60, 220, 255), width=1)
+            label_box(rect, rot, des, (60, 220, 255), 2)
+
+    many = len(options or {}) > 1
+    of = font(13)
+    for des, cands in (options or {}).items():
+        for i, cand in enumerate(cands, 1):
+            b = box(cand.rect)
+            dr.rectangle(b, outline=(90, 240, 110), width=2)
+            dr.text((b[0] + 2, b[1] + 1), f"{des}#{i}" if many else str(i), font=of, fill=(90, 240, 110))
 
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
-
-
-def focus_box(board, designators, side="T"):
-    """Bounding box of the given parts' extents on one side (None if empty)."""
-    bb = None
-    for d in designators:
-        c = board.components.get(d)
-        if c is not None and c.side == side:
-            bb = _union(bb, c.extent)
-    return bb

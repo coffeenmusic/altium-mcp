@@ -2102,16 +2102,27 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     logger.info(f"Placement check complete: {result.get('violation_count', '?')} violations")
     return json.dumps(result, indent=2)
 
-async def _load_silk_board():
-    """Export the board's silkscreen geometry from Altium and parse it."""
-    response = await altium_bridge.execute_command("export_silkscreen_data", {})
-    if not response.get("success", False):
-        raise RuntimeError(response.get("error", "Unknown error"))
-    result = response.get("result", {})
-    if isinstance(result, str):
-        result = json.loads(result)
-    text = Path(result["file"]).read_text(encoding="utf-8-sig", errors="replace")
-    return silkscreen.Board(text)
+# Board snapshot for the silkscreen tools. An export takes a few seconds, so
+# views and option queries reuse it. Moves made through
+# set_designator_positions are written into it, check_silkscreen always
+# refreshes it, and it is re-exported once older than SILK_SNAPSHOT_SECONDS.
+# Edits made by hand in Altium are seen after that, or with refresh=True.
+SILK_SNAPSHOT_SECONDS = 300
+_silk_snapshot = {"board": None, "time": 0.0}
+
+async def _silk_board(refresh: bool = False):
+    """The board's silkscreen geometry, exported from Altium when needed."""
+    snap = _silk_snapshot
+    if refresh or snap["board"] is None or time.time() - snap["time"] > SILK_SNAPSHOT_SECONDS:
+        response = await altium_bridge.execute_command("export_silkscreen_data", {})
+        if not response.get("success", False):
+            raise RuntimeError(response.get("error", "Unknown error"))
+        result = response.get("result", {})
+        if isinstance(result, str):
+            result = json.loads(result)
+        text = Path(result["file"]).read_text(encoding="utf-8-sig", errors="replace")
+        snap["board"], snap["time"] = silkscreen.Board(text), time.time()
+    return snap["board"]
 
 async def _check_silk_drc(designators: list = None) -> dict:
     params = {"designators": designators} if designators else {}
@@ -2121,8 +2132,8 @@ async def _check_silk_drc(designators: list = None) -> dict:
     result = response.get("result", {})
     return json.loads(result) if isinstance(result, str) else result
 
-def _summarize_silk_violations(drc: dict, limit: int = 60) -> dict:
-    """Group Altium's per-object silk violations by designator."""
+def _group_silk_violations(drc: dict) -> dict:
+    """Altium's per-object silk violations as {designator: [description]}."""
     grouped = {}
     for v in drc.get("violations", []):
         what = v.get("object", "")
@@ -2133,274 +2144,388 @@ def _summarize_silk_violations(drc: dict, limit: int = 60) -> dict:
         if "distance_mils" in v:
             what += f" ({v['distance_mils']} mil)"
         grouped.setdefault(v["designator"], []).append(f"{v['rule']}: {what}")
-    items = sorted(grouped.items())
-    out = {
-        "checked_count": drc.get("checked_count"),
-        "designators_with_violations": len(grouped),
-        "violation_count": drc.get("violation_count"),
-        "violations": dict(items[:limit]),
-    }
-    if len(items) > limit:
-        out["violations_truncated"] = len(items) - limit
-    return out
+    return dict(sorted(grouped.items()))
 
-def _silk_preview(board, boxes: dict, designators: list, highlight) -> list:
-    """Preview images of the sides that have designators to show."""
-    images = []
-    for side in ("T", "B"):
-        side_boxes = {d: b for d, b in boxes.items() if board.components[d].side == side}
-        if not side_boxes:
-            continue
-        focus = silkscreen.focus_box(board, designators, side) if designators else None
-        png = silkscreen.render_preview(board, side_boxes, focus=focus, side=side,
-                                        highlight=set(highlight), max_px=1600)
-        images.append(MCPImage(data=png, format="png"))
-    return images
+def _silk_side(side, designators, board) -> str:
+    """'T' or 'B' from a side argument, else from the first designator."""
+    if side:
+        s = str(side).strip().lower()
+        if s in ("top", "t"):
+            return "T"
+        if s in ("bottom", "b", "bot"):
+            return "B"
+        raise ValueError("side must be 'top' or 'bottom'")
+    for d in designators or ():
+        c = board.components.get(d)
+        if c is not None and c.side in ("T", "B"):
+            return c.side
+    return "T"
 
-@mcp.tool()
-async def place_silkscreen(ctx: Context, designators: list = None, apply: bool = True,
-                           keep_valid: bool = True, orientation: str = "auto",
-                           max_gap_mils: float = 50, min_height_mils: float = 0,
-                           avoid_vias: bool = True, edge_margin_mils: float = 10,
-                           preview: bool = True):
-    """
-    Automatically place component designators on the silkscreen so they
-    clear silk, solder mask openings, the board edge and each other.
+def _current_boxes(board, side=None) -> dict:
+    return {d: (c.text_box, c.text_rotation) for d, c in board.components.items()
+            if c.visible and c.side in ("T", "B") and (side is None or c.side == side)}
 
-    Use this instead of moving designators one by one. It exports the board's
-    silk/mask geometry once, searches positions around every part (four sides,
-    several gaps and slides, readable rotations only), scores them, and solves
-    all designators together so neighbours do not collide. Then it applies
-    every move in one undo step and verifies the result with Altium's own
-    Silk To Silk and Silk To Solder Mask rules (Rule.ActualCheck - the same
-    test a batch DRC runs). A preview image of the result is returned.
+def _focus_around(board, designators, side, min_size=300.0):
+    """Area showing the parts, their current labels, and some surroundings."""
+    bb = silkscreen.focus_box(board, designators, side)
+    if bb is None:
+        return None
+    for d in designators:
+        c = board.components.get(d)
+        if c is not None and c.side == side and c.visible:
+            bb = silkscreen._union(bb, c.text_box)
+    cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+    hw, hh = max((bb[2] - bb[0]) / 2, min_size / 2), max((bb[3] - bb[1]) / 2, min_size / 2)
+    return (cx - hw, cy - hh, cx + hw, cy + hh)
 
-    Scoring prefers, in order: legal positions (hard constraint), text close
-    to its part and closer to it than to any other part (unambiguous), not
-    over another part's body, above > left/right > below, text parallel to
-    the part's long axis, centred along the side. Designators already in a
-    legal, unambiguous spot are kept when keep_valid is on. Large parts may
-    carry the text inside their own outline as a last resort.
+def _box_info(rect, rotation) -> dict:
+    return {"x": round((rect[0] + rect[2]) / 2, 2), "y": round((rect[1] + rect[3]) / 2, 2),
+            "rotation": round(rotation) % 360,
+            "width": round(rect[2] - rect[0], 1), "height": round(rect[3] - rect[1], 1)}
 
-    Workflow: run with apply=False to review the plan and preview, then
-    apply=True. Designators that cannot be placed are reported with what
-    blocks them - fix those by hand with set_designator_positions, retry with
-    min_height_mils (smaller text) or max_gap_mils (search further), or hide
-    them. Finish with check_silkscreen.
-
-    Args:
-        designators (list, optional): Designators to place (e.g. ["R1", "C5"]).
-            Omit to place every visible designator on the board. Designators
-            outside this list stay where they are and act as obstacles.
-        apply (bool): Move the designators in Altium (default True). False
-            only plans and previews.
-        keep_valid (bool): Leave designators that are already legal, readable
-            and clearly next to their part where they are (default True).
-        orientation (str): "auto" (text parallel to the part's long axis),
-            "horizontal" (prefer 0 degrees, vertical only as a fallback) or
-            "horizontal_only".
-        max_gap_mils (float): Furthest the text box may sit from its part's
-            pads/silk (default 50).
-        min_height_mils (float): If set below the current text height,
-            designators with no legal spot are retried at smaller heights
-            (5 mil steps, stroke width scaled, never below 3 mil). 0 = never
-            shrink.
-        avoid_vias (bool): Treat untented via openings as mask obstacles
-            (default True - silk over an open via gets clipped).
-        edge_margin_mils (float): Minimum distance from the board edge and
-            cutouts (default 10).
-        preview (bool): Return a preview image of the result (default True).
-
-    Returns:
-        JSON summary (placed, kept, unplaced with reasons, Altium DRC result
-        after applying) plus preview image(s): mask openings copper-coloured,
-        silk white, designator boxes yellow, problem parts red.
-    """
-    logger.info(f"place_silkscreen (designators={designators}, apply={apply})")
-    try:
-        board = await _load_silk_board()
-    except Exception as e:
-        return json.dumps({"success": False, "error": f"Failed to export silkscreen data: {e}"})
-
-    opts = silkscreen.Options(
-        max_gap=max_gap_mils, orientation=orientation, keep_valid=keep_valid,
-        avoid_vias=avoid_vias, edge_margin=edge_margin_mils,
-        min_height=min_height_mils or None)
-    start = time.time()
-    plan = silkscreen.plan_silkscreen(board, designators, opts)
-    solve_seconds = round(time.time() - start, 2)
-    placements = plan["placements"]
-
-    moves = {d: c for d, c in placements.items() if c.side_name != "KEEP"}
-    summary = {
-        "success": True,
-        "applied": False,
-        "rules": {"silk_to_silk_mils": board.s2s, "silk_to_mask_mils": board.s2m},
-        "in_scope": len(plan["scope"]),
-        "placed_count": len(moves),
-        "kept_count": len(plan["kept"]),
-        "unplaced_count": len(plan["unplaced"]),
-        "solve_seconds": solve_seconds,
-        "unplaced": plan["unplaced"],
-        "kept": plan["kept"],
-    }
-    if plan["skipped"]:
-        summary["skipped"] = plan["skipped"]
-    reduced = sorted(d for d, c in moves.items() if c.note == "reduced height")
-    if reduced:
-        summary["reduced_height"] = {d: moves[d].height for d in reduced}
-
-    violators = set(plan["unplaced"])
-    if apply and moves:
-        entries = []
-        for d, c in sorted(moves.items()):
-            cx, cy = c.center
-            size = f"{c.height:g}" if c.note == "reduced height" else ""
-            stroke = f"{c.stroke:g}" if c.note == "reduced height" else ""
-            entries.append(f"{d}|{cx:.3f}|{cy:.3f}|{c.rotation:g}|{size}|{stroke}|")
-        response = await altium_bridge.execute_command("place_designators", {"placements": entries})
-        if not response.get("success", False):
-            summary["success"] = False
-            summary["error"] = f"Failed to move designators: {response.get('error', 'Unknown error')}"
-            return json.dumps(summary, indent=2)
-        summary["applied"] = True
-        try:
-            drc = await _check_silk_drc(sorted(placements))
-            # Unplaced designators are still at their old positions; hits on
-            # them go away once they are placed or hidden, so count apart
-            unplaced = set(plan["unplaced"])
-            stale = [v for v in drc.get("violations", [])
-                     if v.get("object") == "Text" and v.get("detail") in unplaced]
-            drc["violations"] = [v for v in drc.get("violations", []) if v not in stale]
-            drc["violation_count"] = len(drc["violations"])
-            summary["drc"] = _summarize_silk_violations(drc)
-            summary["drc"]["hits_on_unplaced_designators"] = len(stale)
-            violators |= set(summary["drc"]["violations"])
-        except Exception as e:
-            summary["drc"] = {"error": str(e)}
-    elif not apply:
-        summary["planned"] = {
-            d: {"x": round(c.center[0], 2), "y": round(c.center[1], 2), "rotation": c.rotation}
-            for d, c in sorted(moves.items())
-        }
-
-    logger.info(f"place_silkscreen: {len(moves)} moved, {len(plan['unplaced'])} unplaced")
-    text = json.dumps(summary, indent=2)
-    if not preview:
-        return text
-    boxes = {d: (c.rect, c.rotation) for d, c in placements.items()}
-    for d in plan["unplaced"]:
-        comp = board.components[d]
-        boxes[d] = (comp.text_box, comp.text_rotation)   # still at its old spot
-    return [text] + _silk_preview(board, boxes, designators, violators)
-
-@mcp.tool()
-async def set_designator_positions(ctx: Context, placements: list) -> str:
-    """
-    Move designator text to exact positions, in one undo step.
-
-    Positions are the CENTRE of the designator's text box, in mils relative
-    to the board origin, so they do not depend on text justification or
-    bottom-side mirroring. Use this for hand fixes after place_silkscreen,
-    then run check_silkscreen.
-
-    Readable rotations: 0 or 90 on the top overlay, 0 or 270 on the bottom
-    (bottom text is mirrored).
-
-    Args:
-        placements (list): One dict per designator:
-            - designator (str, required)
-            - x, y (float, optional): text box centre; omit both to keep
-            - rotation (float, optional): text rotation in degrees
-            - height (float, optional): text height in mils
-            - stroke_width (float, optional): stroke width in mils
-            - visible (bool, optional): show or hide the designator
-
-    Returns:
-        str: JSON with placed_count, missing_designators, and each
-             designator's final box centre, size and rotation.
-    """
-    entries, errors = [], []
-    for idx, p in enumerate(placements):
-        if not isinstance(p, dict) or not str(p.get("designator", "")).strip():
-            errors.append(f"placements[{idx}] needs a designator")
-            continue
-        des = str(p["designator"]).strip()
-        if "|" in des:
-            errors.append(f"placements[{idx}] designator must not contain '|'")
-            continue
-        if ("x" in p) != ("y" in p):
-            errors.append(f"placements[{idx}] needs both x and y, or neither")
-            continue
-        try:
-            fields = [des]
-            for key in ("x", "y", "rotation", "height", "stroke_width"):
-                fields.append(f"{float(p[key]):g}" if p.get(key) is not None else "")
-        except (TypeError, ValueError):
-            errors.append(f"placements[{idx}] values must be numbers")
-            continue
-        visible = p.get("visible")
-        fields.append("" if visible is None else ("1" if visible else "0"))
-        entries.append("|".join(fields))
-    if errors:
-        return json.dumps({"success": False, "error": "; ".join(errors)})
-    if not entries:
-        return json.dumps({"success": False, "error": "No placements provided"})
-
-    response = await altium_bridge.execute_command("place_designators", {"placements": entries})
-    if not response.get("success", False):
-        return json.dumps({"success": False, "error": f"Failed to move designators: {response.get('error', 'Unknown error')}"})
-    result = response.get("result", {})
-    return json.dumps(json.loads(result) if isinstance(result, str) else result, indent=2)
+SILK_VIEW_LEGEND = ("grid lines labelled in mils (board origin); copper = solder mask openings "
+                    "(dark = vias); white = silk; grey names = part centres; yellow = designators; "
+                    "red = designators with problems; cyan = the designators asked about, with a line "
+                    "to their part; green numbered = options")
 
 @mcp.tool()
 async def check_silkscreen(ctx: Context, designators: list = None, preview: bool = False):
     """
-    Verify designator silkscreen: Altium DRC plus placement quality.
+    Find the designators that need work. Start and finish silkscreen cleanup
+    with this.
 
     Two parts:
     - drc: each designator is tested with Altium's own Silk To Silk Clearance
       and Silk To Solder Mask Clearance rules (Rule.ActualCheck, the test a
-      batch DRC runs) against nearby silk, pads, vias and mask objects. This
-      is ground truth for fabrication.
-    - quality: problems DRC does not flag - text far from its part or as
-      close to another part (ambiguous), text over another part's body or
-      under its own, outside/too near the board edge, or rotated to read
-      upside down.
+      batch DRC runs) against nearby silk, pads, vias and mask objects.
+      Ground truth for fabrication.
+    - quality: problems DRC does not flag - text far from its part or closer
+      to another part of the same type, over another part's body or under its
+      own (e.g. left on top of its part by an auto-placer), off the board, or
+      rotated to read upside down.
+    needs_attention lists every designator with either kind of problem;
+    hidden lists designators whose display is turned off.
 
     Args:
-        designators (list, optional): Designators to check. Omit to check
-            every visible designator.
-        preview (bool): Also return preview image(s) with problem
+        designators (list, optional): Designators to check. Omit for all.
+        preview (bool): Also return a whole-board view with the problem
             designators in red (default False).
 
     Returns:
-        JSON with drc (violations grouped by designator) and quality issues,
-        plus optional preview image(s).
+        JSON with needs_attention, drc and quality (both grouped by
+        designator), hidden, plus optional view image(s).
     """
     try:
         drc = await _check_silk_drc(designators)
-        board = await _load_silk_board()
+        board = await _silk_board(refresh=True)
     except Exception as e:
         return json.dumps({"success": False, "error": f"Failed to check silkscreen: {e}"})
 
-    quality = silkscreen.assess_current(board, designators)
+    scope = designators or list(board.components)
+    boxes = {d: b for d, b in _current_boxes(board).items() if d in scope}
+    quality = {d: p for d, p in silkscreen.evaluate(board, boxes, geometry=False).items() if p}
+    grouped = _group_silk_violations(drc)
+    attention = sorted(set(grouped) | set(quality))
     summary = {
-        "drc": _summarize_silk_violations(drc),
-        "quality_issue_count": len(quality),
-        "quality_issues": {q["designator"]: q["issues"] for q in quality},
+        "checked_count": drc.get("checked_count"),
+        "needs_attention_count": len(attention),
+        "needs_attention": attention,
+        "drc_violation_count": drc.get("violation_count"),
+        "drc": grouped,
+        "quality": quality,
+        "hidden": sorted(d for d in scope if d in board.components and not board.components[d].visible),
     }
     if drc.get("missing_designators"):
         summary["missing_designators"] = drc["missing_designators"]
     text = json.dumps(summary, indent=2)
     if not preview:
         return text
-    scope = designators or [d for d, c in board.components.items() if c.visible]
-    boxes = {d: (board.components[d].text_box, board.components[d].text_rotation)
-             for d in scope if d in board.components and board.components[d].visible
-             and board.components[d].side in ("T", "B")}
-    bad = set(summary["drc"]["violations"]) | set(summary["quality_issues"])
-    return [text] + _silk_preview(board, boxes, designators, bad)
+    images = []
+    for side in ("T", "B"):
+        side_boxes = {d: b for d, b in boxes.items() if board.components[d].side == side}
+        if side_boxes:
+            images.append(MCPImage(data=silkscreen.render_view(
+                board, side_boxes, side=side, problems=attention, max_px=1600), format="png"))
+    return [text] + images
+
+@mcp.tool()
+async def view_silkscreen(ctx: Context, designators: list = None, region: list = None,
+                          side: str = None, grid_mils: float = 0, refresh: bool = False):
+    """
+    Look at the silkscreen around some designators or in a region.
+
+    Renders one board side cleanly - no Altium UI, no copper clutter - with a
+    grid labelled in mils (board-origin coordinates, the same ones
+    set_designator_positions takes), so a free spot can be read straight off
+    the image. Shows solder mask openings, silk, part names at their centres,
+    every designator box, and marks designators whose current spot has a
+    problem in red. The designators asked about are cyan with a line to
+    their part.
+
+    Uses the board snapshot (refreshed by check_silkscreen, updated by
+    set_designator_positions, at most 5 minutes old). Pass refresh=True after
+    editing the board by hand in Altium.
+
+    Args:
+        designators (list, optional): Zoom to these parts and highlight them.
+        region (list, optional): [x_min, y_min, x_max, y_max] in mils to show
+            instead. Omit both for the whole board.
+        side (str, optional): "top" or "bottom". Default: the side of the
+            first designator, else top.
+        grid_mils (float): Grid spacing; 0 picks one to suit the zoom.
+        refresh (bool): Re-export the board from Altium first.
+
+    Returns:
+        JSON (view bounds, grid, legend, problems of the designators in view)
+        plus the image.
+    """
+    try:
+        board = await _silk_board(refresh)
+        s = _silk_side(side, designators, board)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    if region:
+        if len(region) != 4:
+            return json.dumps({"success": False, "error": "region must be [x_min, y_min, x_max, y_max]"})
+        x0, y0, x1, y1 = (float(v) for v in region)
+        focus, margin = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)), 0.0
+    elif designators:
+        focus, margin = _focus_around(board, designators, s), 60.0
+        if focus is None:
+            return json.dumps({"success": False, "error": f"none of {designators} is on the {s} side"})
+    else:
+        focus, margin = None, 40.0
+
+    boxes = _current_boxes(board, s)
+    if focus is not None:
+        view = (focus[0] - margin, focus[1] - margin, focus[2] + margin, focus[3] + margin)
+        boxes = {d: b for d, b in boxes.items()
+                 if not (b[0][2] < view[0] or b[0][0] > view[2] or b[0][3] < view[1] or b[0][1] > view[3])}
+    problems = {d: p for d, p in silkscreen.evaluate(board, boxes).items() if p}
+    png = silkscreen.render_view(board, _current_boxes(board, s), focus=focus, side=s,
+                                 targets=designators or (), problems=problems,
+                                 margin=margin, grid=grid_mils or None)
+    info = {
+        "side": "top" if s == "T" else "bottom",
+        "designators_in_view": len(boxes),
+        "legend": SILK_VIEW_LEGEND,
+        "problems": problems,
+    }
+    if focus is not None:
+        info["view_mils"] = [round(v, 1) for v in view]
+    return [json.dumps(info, indent=2), MCPImage(data=png, format="png")]
+
+@mcp.tool()
+async def get_designator_options(ctx: Context, designators: list, count: int = 5,
+                                 max_gap_mils: float = 50, min_height_mils: float = 0,
+                                 refresh: bool = False):
+    """
+    Legal spots for designators, ranked, drawn as numbered boxes.
+
+    For each designator: its current spot and what is wrong with it, then up
+    to `count` distinct legal positions around its part - clear of silk, solder
+    mask openings, untented vias, the board edge and every other designator
+    where it is now, readable, and nearer its own part than any other part of
+    the same type. Ranked by: close to the part, above > left/right > below,
+    text along the part's long axis, centred. Pick one (or use the image to
+    judge a better spot) and apply it with set_designator_positions using the
+    option's x, y and rotation.
+
+    The designators asked about are not obstacles to each other: when placing
+    neighbours, check the chosen spots together with
+    set_designator_positions(dry_run=True) first. When a designator has no
+    legal spot, blocked_by says what is in the way - consider moving a
+    neighbour's designator, allowing smaller text (min_height_mils), or
+    hiding it.
+
+    Args:
+        designators (list): Designators to find spots for.
+        count (int): Options per designator (default 5).
+        max_gap_mils (float): Furthest the text may sit from its part's pads
+            and silk (default 50).
+        min_height_mils (float): Also offer smaller text, down to this height,
+            in 5 mil steps (0 = current size only).
+        refresh (bool): Re-export the board from Altium first.
+
+    Returns:
+        JSON per designator (current spot + problems, options with n, x, y,
+        rotation, side, gap_mils and height when reduced, or blocked_by) plus
+        an image per board side with the options numbered.
+    """
+    try:
+        board = await _silk_board(refresh)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"Failed to export silkscreen data: {e}"})
+    scope, skipped = silkscreen.split_scope(board, designators or [])
+    if not scope:
+        return json.dumps({"success": False, "error": "no placeable designators", "skipped": skipped})
+
+    opts = silkscreen.Options(max_gap=max_gap_mils, min_height=min_height_mils or None)
+    found = silkscreen.options_for(board, scope, count=max(1, count), options=opts)
+    current = silkscreen.evaluate(board, {d: (board.components[d].text_box,
+                                              board.components[d].text_rotation) for d in scope})
+    result = {}
+    for d in scope:
+        c = board.components[d]
+        entry = {"current": dict(_box_info(c.text_box, c.text_rotation), problems=current[d])}
+        entry["options"] = []
+        for i, cand in enumerate(found[d]["options"], 1):
+            o = {"n": i, "x": round(cand.center[0], 2), "y": round(cand.center[1], 2),
+                 "rotation": round(cand.rotation) % 360,
+                 "side": silkscreen.SIDE_NAMES.get(cand.side_name, cand.side_name),
+                 "gap_mils": round(silkscreen._rect_rect_dist(cand.rect, c.extent), 1)}
+            if cand.note == "reduced height":
+                o["height"] = cand.height
+                o["stroke_width"] = cand.stroke
+            entry["options"].append(o)
+        if found[d]["blocked_by"]:
+            entry["blocked_by"] = found[d]["blocked_by"]
+        result[d] = entry
+    out = {"designators": result, "legend": SILK_VIEW_LEGEND}
+    if skipped:
+        out["skipped"] = skipped
+    images = []
+    for side in ("T", "B"):
+        on_side = [d for d in scope if board.components[d].side == side]
+        if not on_side:
+            continue
+        png = silkscreen.render_view(board, _current_boxes(board, side),
+                                     focus=_focus_around(board, on_side, side), margin=60.0, side=side,
+                                     targets=on_side, problems=[d for d in on_side if current[d]],
+                                     options={d: found[d]["options"] for d in on_side})
+        images.append(MCPImage(data=png, format="png"))
+    return [json.dumps(out, indent=2)] + images
+
+@mcp.tool()
+async def set_designator_positions(ctx: Context, placements: list, dry_run: bool = False,
+                                   verify: bool = True) -> str:
+    """
+    Place designators - by coordinates or relative to their part - and get a
+    verdict for each.
+
+    Each placement is either
+    - absolute: x, y = centre of the text box in mils (board origin), as read
+      off view_silkscreen or taken from get_designator_options, or
+    - relative: side = "above" | "below" | "left" | "right" | "inside" of its
+      own part, with gap (mils from the part's pads/silk; default just clear
+      of them) and offset (slide along that side, +x or +y).
+    Optional on both: rotation (0/90 top, 0/270 bottom read correctly;
+    default keeps a readable current rotation), height and stroke_width
+    (mils), visible (show/hide). A placement with only visible (or only
+    rotation/height) keeps the current centre.
+
+    dry_run=True changes nothing: every placement is checked against silk,
+    mask openings, the board edge, other designators where they are now and
+    each other, plus placement quality. Use it to test a set of neighbours
+    together before applying.
+
+    Otherwise all moves are one undo step, and with verify (default) each
+    moved designator is then checked with Altium's own silk rules and for
+    quality. ok=true means clean.
+
+    Args:
+        placements (list): Dicts with designator plus x/y or side (gap,
+            offset), and optional rotation, height, stroke_width, visible.
+        dry_run (bool): Only check the placements.
+        verify (bool): After moving, run Altium's silk DRC on the moved
+            designators (default True).
+
+    Returns:
+        str: JSON with one verdict per designator: final x, y, rotation,
+             ok and problems.
+    """
+    try:
+        board = await _silk_board()
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"Failed to export silkscreen data: {e}"})
+
+    errors, resolved, entries = [], {}, []
+    for idx, p in enumerate(placements or []):
+        des = str(p.get("designator", "")).strip() if isinstance(p, dict) else ""
+        if not des or des not in board.components:
+            errors.append(f"placements[{idx}]: unknown designator {des!r}")
+            continue
+        if "|" in des:
+            errors.append(f"placements[{idx}]: designator must not contain '|'")
+            continue
+        if ("x" in p) != ("y" in p):
+            errors.append(f"placements[{idx}]: give both x and y, or neither")
+            continue
+        try:
+            rect, rot, height, stroke = silkscreen.resolve_placement(board, p)
+        except (TypeError, ValueError) as e:
+            errors.append(f"placements[{idx}]: {e}")
+            continue
+        visible = p.get("visible")
+        resolved[des] = (rect, rot, visible)
+        cx, cy = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+        size = f"{height:g}" if p.get("height") is not None else ""
+        width = f"{stroke:g}" if p.get("height") is not None or p.get("stroke_width") is not None else ""
+        vis = "" if visible is None else ("1" if visible else "0")
+        entries.append(f"{des}|{cx:.3f}|{cy:.3f}|{rot:g}|{size}|{width}|{vis}")
+    if errors:
+        return json.dumps({"success": False, "error": "; ".join(errors)})
+    if not entries:
+        return json.dumps({"success": False, "error": "No placements provided"})
+
+    shown = {d: (r, rot) for d, (r, rot, vis) in resolved.items()
+             if vis is not False and (vis or board.components[d].visible)}
+    if dry_run:
+        problems = silkscreen.evaluate(board, shown)
+        verdicts = {d: dict(_box_info(r, rot), ok=not problems.get(d), problems=problems.get(d, []))
+                    for d, (r, rot) in shown.items()}
+        for d in set(resolved) - set(shown):
+            verdicts[d] = {"hidden": True}
+        return json.dumps({"dry_run": True, "all_ok": all(v.get("ok", True) for v in verdicts.values()),
+                           "designators": verdicts}, indent=2)
+
+    response = await altium_bridge.execute_command("place_designators", {"placements": entries})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": f"Failed to move designators: {response.get('error', 'Unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result)
+
+    # Keep the snapshot in step with what Altium reports
+    final = {}
+    for item in result.get("designators", []):
+        c = board.components.get(item["designator"])
+        if c is None:
+            continue
+        cx, cy, w, h = item["cx"], item["cy"], item["width"], item["height"]
+        c.text_rotation = item["rotation"]
+        c.text_height = item.get("text_height", c.text_height)
+        c.stroke = item.get("stroke_width", c.stroke)
+        c.text_box = silkscreen.ink_box((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2),
+                                        c.stroke, c.truetype)
+        c.visible = item.get("visible", c.visible)
+        c.autopos = 0
+        final[c.designator] = c
+
+    verdicts = {}
+    moved = sorted(d for d, c in final.items() if c.visible)
+    grouped = {}
+    if verify and moved:
+        try:
+            grouped = _group_silk_violations(await _check_silk_drc(moved))
+        except Exception as e:
+            grouped = {d: [f"DRC check failed: {e}"] for d in moved}
+    quality = silkscreen.evaluate(board, {d: (final[d].text_box, final[d].text_rotation) for d in moved},
+                                  geometry=False)
+    for d, c in sorted(final.items()):
+        if not c.visible:
+            verdicts[d] = {"hidden": True}
+            continue
+        problems = grouped.get(d, []) + quality.get(d, [])
+        verdicts[d] = dict(_box_info(c.text_box, c.text_rotation), ok=not problems, problems=problems)
+        if c.text_height:
+            verdicts[d]["text_height"] = c.text_height
+    out = {"moved_count": len(final), "verified": bool(verify),
+           "all_ok": all(v.get("ok", True) for v in verdicts.values()), "designators": verdicts}
+    if result.get("missing_designators"):
+        out["missing_designators"] = result["missing_designators"]
+    return json.dumps(out, indent=2)
 
 @mcp.tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):

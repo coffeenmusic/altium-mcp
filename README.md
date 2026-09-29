@@ -16,7 +16,7 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
 - Place the selected parts on my pcb with best practices for a switching regulator, then verify clearances and show me a screenshot of the result
-- Place all the designators on my silkscreen so nothing overlaps silk or solder mask, then check it with the silk DRC rules
+- Check my silkscreen and fix the designators the auto-placer script left on top of parts or far from them
 - Give me a list of all IC designators in my design
 - Get me all length matching rules
 
@@ -161,13 +161,13 @@ The cool thing about layout duplication this way as opposed to with Altium's bui
 ![Placement Duplicator](assets/placement_duplicator.gif)
 
 ### Silkscreen
-- `place_silkscreen`: Place every designator (or a list) automatically. Exports the board's silk, solder mask openings (pads, untented vias, mask-layer objects), 3D bodies, board outline and silk rules in one call, searches positions around each part (four sides, several gaps and slides, readable rotations only: 0/90 top, 0/270 mirrored bottom), and solves all designators together so they clear silk, mask, the board edge and each other. Labels must be nearest their own part (a same-type part may never be closer; beyond 15 mil from the part, no part may be). Applies every move in one undo step, verifies with Altium's own silk rules, and returns a preview image. Unplaceable designators are reported with what blocks them; retry those with `min_height_mils` to allow smaller text. Designators outside the list stay put as obstacles, and designators already in a good spot are kept.
-- `set_designator_positions`: Move designators to exact positions in one undo step - positions are the centre of the text box, so they are independent of text justification and bottom-side mirroring. Can also set rotation, height, stroke width and visibility. For hand fixes.
-- `check_silkscreen`: Verify designators with Altium's own Silk To Silk and Silk To Solder Mask rules (`Rule.ActualCheck`, the same test a batch DRC runs), plus quality issues DRC does not flag: text far from or ambiguous between parts, over another part's body, off the board, or upside down. Optional preview image.
+Tools for an agent to clean up designators by hand - typically after a bulk auto-placer script has done most of the work. The loop is: find what needs work, look at it, pick a spot, apply, and get Altium's verdict.
+- `check_silkscreen`: What needs work. Each designator is tested with Altium's own Silk To Silk and Silk To Solder Mask rules (`Rule.ActualCheck`, the same test a batch DRC runs), plus quality problems DRC does not flag: text far from its part (noting when it is still in line with it, as in a label block), reading as another same-type part's label, over a part body or left on top of its own part, over open vias, off the board, or upside down. Lists hidden designators too. Optional whole-board view.
+- `view_silkscreen`: Look at an area - designators or a mil region - rendered cleanly (mask openings, silk, part names, designator boxes) with a grid labelled in board coordinates, so a free spot can be read straight off the image. Independent of Altium's window and zoom.
+- `get_designator_options`: Ranked legal spots for designators, drawn as numbered boxes, each clear of silk, mask openings, open vias, the board edge and every other designator, readable, and nearer its own part than any same-type part. When there is none, says what blocks it. Can include smaller-text options (`min_height_mils`).
+- `set_designator_positions`: Place designators by coordinates (text-box centre) or relative to their part (`side` = above/below/left/right/inside, `gap`, `offset`), with optional rotation, height, stroke width and visibility. `dry_run` checks a set of neighbours together without touching the board; otherwise all moves are one undo step and each moved designator comes back with Altium's DRC verdict.
 
-Typical flow: `place_silkscreen()` places most designators at full size; `place_silkscreen(designators=<unplaced>, min_height_mils=25)` fits more with smaller text; fix or hide the rest by hand; finish with `check_silkscreen()`. On a 390-part board (375 visible designators, scattered at random first), the first pass placed 303 at full size in about 21 s, all DRC-clean; the second added 22 at reduced size; 50 in over-packed passive clusters were left for a human.
-
-The solver lives in `server/silkscreen.py` (pure Python; unit tests in `server/tests/test_silkscreen.py` run without Altium).
+The geometry model lives in `server/silkscreen.py` (pure Python; unit tests in `server/tests/test_silkscreen.py` run without Altium). It measures stroke text by its ink: Altium's bounding box runs half a stroke beyond the strokes, and its silk rules check the strokes.
 
 ### PCB Footprint Library
 - `create_pcb_footprint`: Create a new PCB footprint in the currently active .PcbLib document. Supports SMD pads (Rect, Round, Oval shapes) defined in mm relative to the component origin. Auto-generates a courtyard on Mech 15 and silkscreen with a pin 1 indicator (gap in the top-left corner), or accepts explicit courtyard dimensions. Contributed by [coffeedust](https://github.com/coffeedust) ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7)).

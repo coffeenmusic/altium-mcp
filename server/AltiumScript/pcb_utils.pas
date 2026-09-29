@@ -2674,13 +2674,13 @@ end;
 //   RULE|S2S|clearance, RULE|S2M|clearance   largest enabled silk rules
 //   O|kind|vx|vy|cx|cy|radius|a1|a2          board outline (kind 0 line, 1 arc)
 //   K|x1|y1|x2|y2|...                        board cutout contour
-//   C|des|side|x|y|rot|nameon|l|b|r|t|tl|tb|tr|tt|trot|size|width|autopos|mirror|pattern
+//   C|des|side|x|y|rot|nameon|l|b|r|t|tl|tb|tr|tt|trot|size|width|autopos|mirror|pattern|truetype
 //                                            component (bbox without name/comment,
 //                                            then the designator text box)
 //   Y|owner|l|b|r|t                          3D body extent
 //   ST|side|owner|x1|y1|x2|y2|w              silk track
 //   SA|side|owner|cx|cy|r|a1|a2|w            silk arc
-//   SX|side|owner|kind|l|b|r|t               silk text (D designator, C comment, F free)
+//   SX|side|owner|kind|l|b|r|t|stroke|tt     silk text (D designator, C comment, F free)
 //   SB|side|owner|l|b|r|t                    silk fill / region extent
 //   MP|side|owner|pin|x|y|rot|shape|xs|ys|l|b|r|t   pad solder mask opening
 //   MV|side|owner|x|y|diameter               untented via opening
@@ -2699,6 +2699,7 @@ var
     Owner     : String;
     Kind      : String;
     Flag      : String;
+    Flag2     : String;
     FileName  : String;
     S2S, S2M  : Double;
     IsSilk    : Boolean;
@@ -2772,13 +2773,15 @@ begin
             if Comp.NameOn then Flag := '1' else Flag := '0';
             Kind := '0';
             if Comp.Name.MirrorFlag then Kind := '1';
+            Flag2 := '0';
+            if Comp.Name.UseTTFonts then Flag2 := '1';
             Lines.Add('C|' + Comp.Name.Text + '|' + SilkSideOfLayer(Comp.Name.Layer) + '|' +
                 SilkLen(Comp.x - XO) + '|' + SilkLen(Comp.y - YO) + '|' +
                 SilkNum(Comp.Rotation) + '|' + Flag + '|' +
                 SilkRectStr(R, XO, YO) + '|' + SilkRectStr(T, XO, YO) + '|' +
                 SilkNum(Comp.Name.Rotation) + '|' + SilkLen(Comp.Name.Size) + '|' +
                 SilkLen(Comp.Name.Width) + '|' + IntToStr(Comp.NameAutoPosition) + '|' +
-                Kind + '|' + Comp.Pattern);
+                Kind + '|' + Comp.Pattern + '|' + Flag2);
             Comp := Iterator.NextPCBObject;
         end;
         Board.BoardIterator_Destroy(Iterator);
@@ -2831,8 +2834,11 @@ begin
                         if Prim.IsDesignator then Kind := 'D'
                         else if Prim.IsComment then Kind := 'C'
                         else Kind := 'F';
+                        Flag := '0';
+                        if Prim.UseTTFonts then Flag := '1';
                         Lines.Add('SX|' + Side + '|' + Owner + '|' + Kind + '|' +
-                            SilkRectStr(Prim.BoundingRectangle, XO, YO));
+                            SilkRectStr(Prim.BoundingRectangle, XO, YO) + '|' +
+                            SilkLen(Prim.Width) + '|' + Flag);
                     end;
                 end;
             end
@@ -3028,6 +3034,8 @@ begin
                         AddJSONNumber(TextProps, 'width', CoordToMils(R.Right - R.Left));
                         AddJSONNumber(TextProps, 'height', CoordToMils(R.Top - R.Bottom));
                         AddJSONNumber(TextProps, 'rotation', Txt.Rotation);
+                        AddJSONNumber(TextProps, 'text_height', CoordToMils(Txt.Size));
+                        AddJSONNumber(TextProps, 'stroke_width', CoordToMils(Txt.Width));
                         AddJSONBoolean(TextProps, 'visible', Comp.NameOn);
                         PlacedArray.Add(BuildJSONObject(TextProps, 2));
                     finally
