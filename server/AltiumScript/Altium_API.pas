@@ -816,6 +816,52 @@ begin
     end;
 end;
 
+// A scalar request parameter ("key": value), or Default when absent
+function RequestParam(Name: String; Default: String): String;
+begin
+    if (Params.IndexOfName(Name) >= 0) then
+        Result := Params.Values[Name]
+    else
+        Result := Default;
+end;
+
+// Run the ported Silkscreen Auto Placer (silk_autoplacer.pas)
+function ExecuteAutoPlaceSilkscreen(RequestData: TStringList): String;
+var
+    Scope, Positions, AutoHide, AllowUnder: TStringList;
+begin
+    Scope := TStringList.Create;
+    Positions := TStringList.Create;
+    AutoHide := TStringList.Create;
+    AllowUnder := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'designators', Scope);
+        ExtractRequestArray(RequestData, 'positions', Positions);
+        ExtractRequestArray(RequestData, 'auto_hide', AutoHide);
+        ExtractRequestArray(RequestData, 'allow_under', AllowUnder);
+        if (Positions.Count = 0) then
+            Result := 'ERROR: No autopositions enabled for auto_place_silkscreen'
+        else
+            Result := APS_Run(Scope, RequestParam('selected_only', 'false') = 'true', Positions,
+                RequestParam('failed_action', 'center'),
+                RequestParam('avoid_vias', 'true') = 'true',
+                StrToInt(RequestParam('rotation_strategy', '5')),
+                RequestParam('try_altered_rotation', 'true') = 'true',
+                RequestParam('second_pass', 'true') = 'true',
+                RequestParam('unhide_all', 'false') = 'true',
+                AutoHide, AllowUnder,
+                SafeStrToFloat(RequestParam('fixed_size_mils', '0')),
+                SafeStrToFloat(RequestParam('fixed_width_mils', '0')),
+                SafeStrToFloat(RequestParam('position_delta_mils', '16.535')),
+                RequestParam('outline_layer', ''));
+    finally
+        Scope.Free;
+        Positions.Free;
+        AutoHide.Free;
+        AllowUnder.Free;
+    end;
+end;
+
 // Extract the layout duplicator apply logic
 function ExecuteLayoutDuplicatorApply(RequestData: TStringList): String;
 var
@@ -1148,6 +1194,8 @@ begin
             Result := ExecutePlaceDesignators(RequestData);
         'check_silkscreen':
             Result := ExecuteCheckSilkscreen(RequestData);
+        'auto_place_silkscreen':
+            Result := ExecuteAutoPlaceSilkscreen(RequestData);
         'get_symbol_primitives':
             Result := ExecuteGetSymbolPrimitives(RequestData);
         'create_symbols_batch':

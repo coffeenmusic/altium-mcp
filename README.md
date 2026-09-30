@@ -16,7 +16,7 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
 - Place the selected parts on my pcb with best practices for a switching regulator, then verify clearances and show me a screenshot of the result
-- Check my silkscreen and fix the designators the auto-placer script left on top of parts or far from them
+- Auto-place my silkscreen, then fix the designators the placer left on top of parts or far from them
 - Give me a list of all IC designators in my design
 - Get me all length matching rules
 
@@ -161,11 +161,14 @@ The cool thing about layout duplication this way as opposed to with Altium's bui
 ![Placement Duplicator](assets/placement_duplicator.gif)
 
 ### Silkscreen
-Tools for an agent to clean up designators by hand - typically after a bulk auto-placer script has done most of the work. The loop is: find what needs work, look at it, pick a spot, apply, and get Altium's verdict.
+Bulk placement with the Silkscreen Auto Placer script, then an agent cleans up what it leaves. The loop is: auto-place, find what needs work, look at it, pick a spot, apply, and get Altium's verdict.
+- `auto_place_silkscreen`: Run the [Silkscreen Auto Placer](https://github.com/coffeenmusic/Silkscreen_Auto_Placer) headless inside Altium (`server/AltiumScript/silk_autoplacer.pas`, a port of the GUI script): autopositions on an offset grid with shrinking text, a retry pass and a 2nd-pass wiggle search, avoiding pads, bodies, silk and optionally vias. Options default to the settings last saved by the script's GUI (`AutoPlaceSilkscreen.ini`); any argument overrides them. Failures are centred on their part (or hidden/restored). One undo step. The port also fixes the GUI script's "try altered rotation" on the bottom layer, which turned mirrored text to 90/180 degrees (upside down).
 - `check_silkscreen`: What needs work. Each designator is tested with Altium's own Silk To Silk and Silk To Solder Mask rules (`Rule.ActualCheck`, the same test a batch DRC runs), plus quality problems DRC does not flag: text far from its part (noting when it is still in line with it, as in a label block), reading as another same-type part's label, over a part body or left on top of its own part, over open vias, off the board, or upside down. Lists hidden designators too. Optional whole-board view.
 - `view_silkscreen`: Look at an area - designators or a mil region - rendered cleanly (mask openings, silk, part names, designator boxes) with a grid labelled in board coordinates, so a free spot can be read straight off the image. Independent of Altium's window and zoom.
 - `get_designator_options`: Ranked legal spots for designators, drawn as numbered boxes, each clear of silk, mask openings, open vias, the board edge and every other designator, readable, and nearer its own part than any same-type part. When there is none, says what blocks it. Can include smaller-text options (`min_height_mils`).
 - `set_designator_positions`: Place designators by coordinates (text-box centre) or relative to their part (`side` = above/below/left/right/inside, `gap`, `offset`), with optional rotation, height, stroke width and visibility. `dry_run` checks a set of neighbours together without touching the board; otherwise all moves are one undo step and each moved designator comes back with Altium's DRC verdict.
+
+Typical run on a dense two-sided board (845 parts, 804 visible designators): the auto placer placed 725 in about 7 minutes. Many of its labels still touched each other, because the script tolerates a 4 mil designator overlap, or sat far from their part. Agent rounds of `check_silkscreen` → `get_designator_options` → `set_designator_positions` (dry run, then apply), allowing 25 mil text, took the board from 637 silk DRC violations to 367. The rest are designators with no legal spot in the densest passive fields, which need a human call: hide them, use smaller text, or group them in a label block.
 
 The geometry model lives in `server/silkscreen.py` (pure Python; unit tests in `server/tests/test_silkscreen.py` run without Altium). It measures stroke text by its ink: Altium's bounding box runs half a stroke beyond the strokes, and its silk rules check the strokes.
 

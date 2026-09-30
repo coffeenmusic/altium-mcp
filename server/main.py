@@ -266,12 +266,12 @@ class AltiumBridge:
         # concurrent tool calls must be serialized or they clobber each other
         self._command_lock = asyncio.Lock()
 
-    async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = 120) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
         async with self._command_lock:
-            return await self._execute_command_locked(command, params)
+            return await self._execute_command_locked(command, params, timeout)
 
-    async def _execute_command_locked(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = 120) -> Dict[str, Any]:
         try:
             # Clean up any existing response file
             if RESPONSE_FILE.exists():
@@ -293,7 +293,6 @@ class AltiumBridge:
             
             # Wait for the response file
             logger.info(f"Waiting for response file to appear...")
-            timeout = 120  # seconds
             start_time = time.time()
             while not RESPONSE_FILE.exists() and time.time() - start_time < timeout:
                 await asyncio.sleep(0.5)
@@ -2187,6 +2186,188 @@ SILK_VIEW_LEGEND = ("grid lines labelled in mils (board origin); copper = solder
                     "(dark = vias); white = silk; grey names = part centres; yellow = designators; "
                     "red = designators with problems; cyan = the designators asked about, with a line "
                     "to their part; green numbered = options")
+
+AUTOPLACE_POSITIONS = ["TopCenter", "CenterRight", "BottomCenter", "CenterLeft",
+                       "TopLeft", "TopRight", "BottomLeft", "BottomRight"]
+AUTOPLACE_ROTATIONS = {"component": 0, "horizontal": 1, "along_side": 2,
+                       "along_axis": 3, "along_pins": 4, "klc": 5}
+# The script's GUI defaults, used when there is no saved settings file
+AUTOPLACE_DEFAULTS = {
+    "failed_action": "center", "avoid_vias": True, "rotation_strategy": 5,
+    "try_altered_rotation": True, "second_pass": True, "unhide_all": False,
+    "auto_hide": [], "text_height_mils": 31.496, "stroke_width_mils": 5.906,
+    "position_delta_mils": 16.535, "positions": AUTOPLACE_POSITIONS[:4],
+}
+
+def _to_mils(text: str):
+    """'30mil', '0.8mm', '0.05in' or a bare number (mils) -> mils."""
+    m = re.match(r"\s*([-+]?\d*\.?\d+)\s*(mil|mm|in)?\s*$", str(text), re.I)
+    if not m:
+        return None
+    value, unit = float(m.group(1)), (m.group(2) or "mil").lower()
+    return value * {"mil": 1.0, "mm": 1000 / 25.4, "in": 1000.0}[unit]
+
+def _saved_autoplacer_settings() -> dict:
+    """Options saved by the AutoPlaceSilkscreen GUI (AutoPlaceSilkscreen.ini in
+    Altium's application data folder), in this tool's terms. Empty if none."""
+    import configparser
+    files = glob.glob(os.path.join(os.environ.get("APPDATA", ""), "Altium", "*", "AutoPlaceSilkscreen.ini"))
+    if not files:
+        return {}
+    ini = configparser.ConfigParser()
+    try:
+        ini.read(max(files, key=os.path.getmtime))
+        g = ini["General"]
+    except (configparser.Error, KeyError):
+        return {}
+    flag = lambda key, default: g.get(key, "1" if default else "0").strip() in ("1", "true", "True")
+    out = {
+        "failed_action": {"0": "center", "1": "hide", "2": "restore"}.get(g.get("FailedPlacementOptions", "0"), "center"),
+        "avoid_vias": flag("AvoidVias", True),
+        "rotation_strategy": int(g.get("RotationStrategy", "5")),
+        "try_altered_rotation": flag("TryAlteredRotation", True),
+        "second_pass": flag("WiggleEnabled", True),
+        "unhide_all": flag("UnhideAllDesignators", False),
+        "auto_hide": [x.strip() for x in g.get("AutoHideList", "").split(",") if x.strip()]
+                     if flag("AutoHideEnabled", False) else [],
+        "text_height_mils": (_to_mils(g.get("FixedSize", "")) or 0) if flag("FixedSizeEnabled", True) else 0,
+        "stroke_width_mils": (_to_mils(g.get("FixedWidth", "")) or 0) if flag("FixedWidthEnabled", True) else 0,
+        "position_delta_mils": _to_mils(g.get("PositionDelta", "")) or AUTOPLACE_DEFAULTS["position_delta_mils"],
+        "positions": [p for i, p in enumerate(AUTOPLACE_POSITIONS, 1) if flag(f"Position{i}", i <= 4)],
+    }
+    return out
+
+@mcp.tool()
+async def auto_place_silkscreen(ctx: Context, designators: list = None, selected_only: bool = False,
+                                failed_action: str = None, avoid_vias: bool = None,
+                                rotation_strategy: str = None, positions: list = None,
+                                try_altered_rotation: bool = None, second_pass: bool = None,
+                                unhide_all: bool = None, auto_hide: list = None,
+                                allow_under: list = None, text_height_mils: float = None,
+                                stroke_width_mils: float = None, position_delta_mils: float = None,
+                                component_outline_layer: str = None,
+                                use_saved_settings: bool = True) -> str:
+    """
+    Bulk-place designators with the Silkscreen Auto Placer script - step 1 of
+    silkscreen cleanup. Then finish by hand with the other silkscreen tools.
+
+    Runs a headless port of the AutoPlaceSilkscreen script inside Altium. For
+    every part, smallest first, it tries the enabled autopositions on an
+    offset grid with shrinking text, then a retry pass (rotation flip, wider
+    grid) and a 2nd-pass "wiggle" search up to 100 mil out. It avoids pads,
+    component bodies, other silk and (optionally) vias, and stays on the
+    board. Typically 80-95% of designators end up placed; the rest are
+    handled per failed_action. Everything is one undo step.
+
+    It is fast and good at the bulk, but it does not judge readability:
+    labels can land far from their part (2nd-pass label blocks), next to a
+    neighbour, or over open vias when avoid_vias is off. Always follow up:
+    1. check_silkscreen - lists what needs work (failed designators, DRC,
+       ambiguous or distant labels).
+    2. view_silkscreen / get_designator_options - look at each problem area
+       and find legal spots.
+    3. set_designator_positions - place them (dry_run first for neighbours).
+
+    Options default to the settings last saved by the script's GUI
+    (AutoPlaceSilkscreen.ini) when use_saved_settings is on, else the GUI's
+    defaults. Any argument given here overrides them.
+
+    Args:
+        designators (list, optional): Only place these designators. Omit for
+            the whole board (or the selection with selected_only).
+        selected_only (bool): Place only the components selected in Altium.
+        failed_action (str): What to do with designators that could not be
+            placed: "center" (centre them on their part, where
+            check_silkscreen flags them), "hide", or "restore" (put them back
+            where they were).
+        avoid_vias (bool): Treat vias as obstacles.
+        rotation_strategy (str): "component", "horizontal", "along_side",
+            "along_axis", "along_pins" or "klc" (KLC style).
+        positions (list): Autopositions to try, in order: TopCenter,
+            CenterRight, BottomCenter, CenterLeft, TopLeft, TopRight,
+            BottomLeft, BottomRight.
+        try_altered_rotation (bool): Also try the text turned 90 degrees.
+        second_pass (bool): Run the wider "wiggle" search for failures.
+        unhide_all (bool): Show hidden designators first so they get placed.
+        auto_hide (list): Designator prefixes to hide instead of placing,
+            e.g. ["TP", "MT", "FID"]; [] hides none.
+        allow_under (list): Designators whose bodies silk may cover.
+        text_height_mils (float): Fixed text height; 0 = size from the part
+            (shrinks to 25 mil when needed).
+        stroke_width_mils (float): Fixed stroke width; 0 = from the height.
+        position_delta_mils (float): Extra gap between autoposition and part.
+        component_outline_layer (str): Mechanical layer holding component
+            bodies (default "Mechanical 13" or a "Component Outline" layer).
+        use_saved_settings (bool): Start from the GUI's saved settings.
+
+    Returns:
+        str: JSON with placed/failed counts per pass, the failed designators,
+             the settings used and the next step.
+    """
+    settings = dict(AUTOPLACE_DEFAULTS)
+    source = "script defaults"
+    if use_saved_settings:
+        saved = _saved_autoplacer_settings()
+        if saved:
+            settings.update(saved)
+            source = "saved GUI settings (AutoPlaceSilkscreen.ini)"
+    overrides = {"failed_action": failed_action, "avoid_vias": avoid_vias,
+                 "try_altered_rotation": try_altered_rotation, "second_pass": second_pass,
+                 "unhide_all": unhide_all, "auto_hide": auto_hide,
+                 "text_height_mils": text_height_mils, "stroke_width_mils": stroke_width_mils,
+                 "position_delta_mils": position_delta_mils, "positions": positions}
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    if rotation_strategy is not None:
+        key = str(rotation_strategy).strip().lower().replace(" ", "_")
+        if key.isdigit() and 0 <= int(key) <= 5:
+            settings["rotation_strategy"] = int(key)
+        elif key in AUTOPLACE_ROTATIONS:
+            settings["rotation_strategy"] = AUTOPLACE_ROTATIONS[key]
+        else:
+            return json.dumps({"success": False, "error": f"rotation_strategy must be one of {list(AUTOPLACE_ROTATIONS)}"})
+    if settings["failed_action"] not in ("center", "hide", "restore"):
+        return json.dumps({"success": False, "error": "failed_action must be center, hide or restore"})
+    order = {p.lower(): p for p in AUTOPLACE_POSITIONS}
+    try:
+        settings["positions"] = [order[str(p).strip().lower()] for p in settings["positions"]]
+    except KeyError as e:
+        return json.dumps({"success": False, "error": f"unknown position {e}; use {AUTOPLACE_POSITIONS}"})
+    if not settings["positions"]:
+        return json.dumps({"success": False, "error": "enable at least one position"})
+
+    params = {k: v for k, v in settings.items() if k not in ("auto_hide", "positions",
+                                                             "text_height_mils", "stroke_width_mils")}
+    params.update({
+        "positions": settings["positions"],
+        "fixed_size_mils": float(settings["text_height_mils"] or 0),
+        "fixed_width_mils": float(settings["stroke_width_mils"] or 0),
+        "selected_only": bool(selected_only),
+    })
+    # Arrays are only sent when non-empty: the script reads '"key": []' as absent
+    for key, value in (("designators", designators), ("auto_hide", settings["auto_hide"]),
+                       ("allow_under", allow_under)):
+        if value:
+            params[key] = [str(v) for v in value]
+    if component_outline_layer:
+        params["outline_layer"] = component_outline_layer
+
+    logger.info(f"auto_place_silkscreen ({source}): {params}")
+    response = await altium_bridge.execute_command("auto_place_silkscreen", params, timeout=1800)
+    _silk_snapshot["board"] = None      # every designator may have moved
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": f"Auto placer failed: {response.get('error', 'Unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result)
+    if not result.get("outline_layer_found"):
+        result["warning"] = ("no component outline layer found - component bodies were not treated "
+                             "as obstacles; pass component_outline_layer")
+    result.pop("outline_layer_found", None)
+    names = {v: k for k, v in AUTOPLACE_ROTATIONS.items()}
+    result["settings"] = dict(settings, rotation_strategy=names[settings["rotation_strategy"]], source=source)
+    result["next"] = ("Run check_silkscreen, then fix what it lists with view_silkscreen, "
+                      "get_designator_options and set_designator_positions.")
+    return json.dumps(result, indent=2)
 
 @mcp.tool()
 async def check_silkscreen(ctx: Context, designators: list = None, preview: bool = False):

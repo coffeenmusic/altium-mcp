@@ -182,6 +182,7 @@ begin
        (CommandName = 'export_silkscreen_data')              or
        (CommandName = 'place_designators')                   or
        (CommandName = 'check_silkscreen')                    or
+       (CommandName = 'auto_place_silkscreen')               or
        (CommandName = 'set_component_position')              or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'get_pcb_layer_stackup')               then

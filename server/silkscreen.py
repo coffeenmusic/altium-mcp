@@ -807,6 +807,9 @@ def options_for(board, designators, count=5, options=None):
         lst.sort(key=lambda c: c.cost)
         picked = []
         for cand in lst:
+            # Only spots check_silkscreen would call good
+            if quality_problems(placer, comp, cand.rect, cand.rotation, {}, opt.max_gap):
+                continue
             # Distinct spots only, so numbered boxes do not pile up
             area = (cand.rect[2] - cand.rect[0]) * (cand.rect[3] - cand.rect[1])
             if any(rect_overlap_area(cand.rect, p.rect) > 0.3 * area for p in picked):
@@ -826,6 +829,47 @@ def _describe(ob, rect, clearance):
     if d <= 0:
         return f"overlaps {what}"
     return f"{d:.1f} mil from {what} (needs {clearance:.1f})"
+
+
+def quality_problems(placer, comp, rect, rot, proposals, max_gap):
+    """How a label at rect reads, apart from clearances: far from its part,
+    taken for another part's label, over a part body, upside down.
+    proposals are other labels' new boxes ({des: (rect, rotation)});
+    labels not in it are where they are now."""
+    found = []
+    gap, d_own, other, d_other, same, d_same = placer.association(comp, rect)
+    area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
+    inside = rect_overlap_area(rect, comp.extent) > 0.99 * area
+    if gap > max_gap:
+        # Say whether it still lines up with its part - a label block
+        # under an array of parts reads fine when every label does
+        e, lx, ly = comp.extent, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+        aligned = ", in line with it" if (e[0] <= lx <= e[2] or e[1] <= ly <= e[3]) else ""
+        found.append(f"{gap:.0f} mil from its part{aligned}")
+    # Readers pair labels by elimination: when the nearer same-type part
+    # has its own label even closer to it, this one cannot be taken for it
+    band = ambiguity_band(d_own)
+    if same is not None and d_same < d_own + band:
+        srect = proposals[same.designator][0] if same.designator in proposals else (
+            same.text_box if same.visible else None)
+        if srect is not None and _point_rect_dist((srect[0] + srect[2]) / 2, (srect[1] + srect[3]) / 2,
+                                                  same.skeleton) < d_same:
+            same = None
+    if same is not None and d_same < d_own - band:
+        found.append(f"reads as {same.designator}'s label: {same.designator} is closer")
+    elif same is not None and d_same < d_own + band:
+        found.append(f"ambiguous: {same.designator} is about as close")
+    elif not inside and placer.misleading(comp, gap, d_own, other, d_other, float("inf")):
+        found.append(f"away from its part and closer to {other.designator}")
+    for owner, body in placer.bodies[comp.side].query(rect):
+        if rect_overlap_area(rect, body) / area > 0.25:
+            found.append("under its own part (hidden after assembly)" if owner == comp.designator
+                         else f"over part {owner}")
+            break
+    if round(rot) % 360 not in READABLE_ROTATIONS.get(comp.side, ()):
+        readable = " or ".join(str(r) for r in READABLE_ROTATIONS.get(comp.side, ()))
+        found.append(f"rotation {rot:g} reads upside down (use {readable})")
+    return found
 
 
 def evaluate(board, proposals, options=None, geometry=True):
@@ -861,38 +905,7 @@ def evaluate(board, proposals, options=None, geometry=True):
                     if ob.label == "via" and ob.distance(rect) <= 0]
             if vias:
                 found.append(f"over {len(vias)} open via{'s' if len(vias) > 1 else ''}")
-        gap, d_own, other, d_other, same, d_same = placer.association(comp, rect)
-        area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
-        inside = rect_overlap_area(rect, comp.extent) > 0.99 * area
-        if gap > opt.max_gap:
-            # Say whether it still lines up with its part - a label block
-            # under an array of parts reads fine when every label does
-            e, lx, ly = comp.extent, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
-            aligned = ", in line with it" if (e[0] <= lx <= e[2] or e[1] <= ly <= e[3]) else ""
-            found.append(f"{gap:.0f} mil from its part{aligned}")
-        # Readers pair labels by elimination: when the nearer same-type part
-        # has its own label even closer to it, this one cannot be taken for it
-        band = ambiguity_band(d_own)
-        if same is not None and d_same < d_own + band:
-            srect = proposals[same.designator][0] if same.designator in proposals else (
-                same.text_box if same.visible else None)
-            if srect is not None and _point_rect_dist((srect[0] + srect[2]) / 2, (srect[1] + srect[3]) / 2,
-                                                      same.skeleton) < d_same:
-                same = None
-        if same is not None and d_same < d_own - band:
-            found.append(f"reads as {same.designator}'s label: {same.designator} is closer")
-        elif same is not None and d_same < d_own + band:
-            found.append(f"ambiguous: {same.designator} is about as close")
-        elif not inside and placer.misleading(comp, gap, d_own, other, d_other, float("inf")):
-            found.append(f"away from its part and closer to {other.designator}")
-        for owner, body in placer.bodies[comp.side].query(rect):
-            if rect_overlap_area(rect, body) / area > 0.25:
-                found.append("under its own part (hidden after assembly)" if owner == des
-                             else f"over part {owner}")
-                break
-        if round(rot) % 360 not in READABLE_ROTATIONS.get(comp.side, ()):
-            readable = " or ".join(str(r) for r in READABLE_ROTATIONS.get(comp.side, ()))
-            found.append(f"rotation {rot:g} reads upside down (use {readable})")
+        found += quality_problems(placer, comp, rect, rot, proposals, opt.max_gap)
         result[des] = found
     return result
 
