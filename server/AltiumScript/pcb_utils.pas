@@ -2617,3 +2617,319 @@ begin
         PlacedArray.Free;
     end;
 end;
+
+// ---------------------------------------------------------------------------
+// Board-level read-only queries (get_board_summary, get_component_primitives).
+// Coordinates are millimetres relative to the board origin.
+// ---------------------------------------------------------------------------
+
+// Increment the counter kept for Key in two parallel lists (Keys / Counts).
+// TStringList.Values is avoided on purpose: it is unreliable in DelphiScript.
+procedure TallyKey(Keys: TStringList; Counts: TStringList; Key: String);
+var
+    Idx: Integer;
+begin
+    Idx := Keys.IndexOf(Key);
+    if Idx < 0 then
+    begin
+        Keys.Add(Key);
+        Counts.Add('1');
+    end
+    else
+        Counts[Idx] := IntToStr(StrToInt(Counts[Idx]) + 1);
+end;
+
+function PrimitiveTypeName(ObjectId: Integer): String;
+begin
+    if ObjectId = eArcObject then Result := 'arc'
+    else if ObjectId = ePadObject then Result := 'pad'
+    else if ObjectId = eViaObject then Result := 'via'
+    else if ObjectId = eTrackObject then Result := 'track'
+    else if ObjectId = eTextObject then Result := 'text'
+    else if ObjectId = eFillObject then Result := 'fill'
+    else if ObjectId = eRegionObject then Result := 'region'
+    else Result := 'object_' + IntToStr(ObjectId);
+end;
+
+// Outline, origin, dimensions, vias by hole size, component sides, primitive
+// counts per layer and the free texts on both overlays.
+function GetBoardSummary(ROOT_DIR: String): String;
+var
+    Board        : IPCB_Board;
+    Outline      : IPCB_BoardOutline;
+    Iterator     : IPCB_BoardIterator;
+    Obj          : IPCB_Primitive;
+    Comp         : IPCB_Component;
+    OX, OY       : Integer;
+    I, TopCount, BottomCount, ViaCount : Integer;
+    ResultProps  : TStringList;
+    Props        : TStringList;
+    DimArray     : TStringList;
+    TextArray    : TStringList;
+    HoleKeys, HoleCounts   : TStringList;
+    LayerKeys, LayerCounts : TStringList;
+    Items        : TStringList;
+    OutputLines  : TStringList;
+    LayerName    : String;
+begin
+    Board := GetBoardSafe(0);
+    if Board = Nil then
+    begin
+        Result := 'ERROR: No PCB document focused';
+        Exit;
+    end;
+    OX := Board.XOrigin;
+    OY := Board.YOrigin;
+
+    ResultProps := TStringList.Create;
+    DimArray := TStringList.Create;
+    TextArray := TStringList.Create;
+    HoleKeys := TStringList.Create;
+    HoleCounts := TStringList.Create;
+    LayerKeys := TStringList.Create;
+    LayerCounts := TStringList.Create;
+    Items := TStringList.Create;
+    try
+        AddJSONProperty(ResultProps, 'pcb_path', Board.FileName);
+        AddJSONNumber(ResultProps, 'origin_abs_x_mm', CoordToMMs(OX));
+        AddJSONNumber(ResultProps, 'origin_abs_y_mm', CoordToMMs(OY));
+
+        Outline := Board.BoardOutline;
+        Props := TStringList.Create;
+        try
+            AddJSONNumber(Props, 'x1_mm', CoordToMMs(Outline.BoundingRectangle.Left - OX));
+            AddJSONNumber(Props, 'y1_mm', CoordToMMs(Outline.BoundingRectangle.Bottom - OY));
+            AddJSONNumber(Props, 'x2_mm', CoordToMMs(Outline.BoundingRectangle.Right - OX));
+            AddJSONNumber(Props, 'y2_mm', CoordToMMs(Outline.BoundingRectangle.Top - OY));
+            AddJSONNumber(Props, 'width_mm', CoordToMMs(Outline.BoundingRectangle.Right - Outline.BoundingRectangle.Left));
+            AddJSONNumber(Props, 'height_mm', CoordToMMs(Outline.BoundingRectangle.Top - Outline.BoundingRectangle.Bottom));
+            AddJSONInteger(Props, 'vertex_count', Outline.PointCount);
+            ResultProps.Add('"board_outline": ' + Trim(BuildJSONObject(Props, 1)));
+        finally
+            Props.Free;
+        end;
+
+        // Dimensions (cotas)
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eDimensionObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Obj := Iterator.FirstPCBObject;
+        while Obj <> Nil do
+        begin
+            Props := TStringList.Create;
+            try
+                AddJSONProperty(Props, 'layer', Layer2String(Obj.Layer));
+                AddJSONNumber(Props, 'x1_mm', CoordToMMs(Obj.BoundingRectangle.Left - OX));
+                AddJSONNumber(Props, 'y1_mm', CoordToMMs(Obj.BoundingRectangle.Bottom - OY));
+                AddJSONNumber(Props, 'x2_mm', CoordToMMs(Obj.BoundingRectangle.Right - OX));
+                AddJSONNumber(Props, 'y2_mm', CoordToMMs(Obj.BoundingRectangle.Top - OY));
+                DimArray.Add(BuildJSONObject(Props, 1));
+            finally
+                Props.Free;
+            end;
+            Obj := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        // Vias by hole size
+        ViaCount := 0;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Obj := Iterator.FirstPCBObject;
+        while Obj <> Nil do
+        begin
+            Inc(ViaCount);
+            TallyKey(HoleKeys, HoleCounts, StringReplace(FloatToStr(CoordToMMs(Obj.HoleSize)), ',', '.', REPLACEALL));
+            Obj := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        // Components per side
+        TopCount := 0;
+        BottomCount := 0;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Comp := Iterator.FirstPCBObject;
+        while Comp <> Nil do
+        begin
+            if Comp.Layer = eBottomLayer then Inc(BottomCount) else Inc(TopCount);
+            Comp := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        // Primitive counts per layer, and free overlay texts
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject, eFillObject, eRegionObject, ePadObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Obj := Iterator.FirstPCBObject;
+        while Obj <> Nil do
+        begin
+            LayerName := Layer2String(Obj.Layer);
+            if Obj.InComponent then
+                TallyKey(LayerKeys, LayerCounts, LayerName + '|component')
+            else
+                TallyKey(LayerKeys, LayerCounts, LayerName + '|free');
+            if (Obj.ObjectId = eTextObject) and (not Obj.InComponent) and
+               ((Obj.Layer = eTopOverlay) or (Obj.Layer = eBottomOverlay)) then
+                TextArray.Add('{"layer": "' + JSONEscapeString(LayerName) + '", "text": "' + JSONEscapeString(Obj.Text) + '"}');
+            Obj := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        ResultProps.Add(BuildJSONArray(DimArray, 'dimensions'));
+        AddJSONInteger(ResultProps, 'via_count', ViaCount);
+        Items.Clear;
+        for I := 0 to HoleKeys.Count - 1 do
+            Items.Add('{"hole_mm": ' + HoleKeys[I] + ', "count": ' + HoleCounts[I] + '}');
+        ResultProps.Add(BuildJSONArray(Items, 'vias_by_hole'));
+        AddJSONInteger(ResultProps, 'components_top', TopCount);
+        AddJSONInteger(ResultProps, 'components_bottom', BottomCount);
+        Items.Clear;
+        for I := 0 to LayerKeys.Count - 1 do
+            Items.Add('{"layer": "' + JSONEscapeString(GetFieldFromPipeString(LayerKeys[I], 0)) +
+                '", "owner": "' + GetFieldFromPipeString(LayerKeys[I], 1) +
+                '", "count": ' + LayerCounts[I] + '}');
+        ResultProps.Add(BuildJSONArray(Items, 'layer_contents'));
+        ResultProps.Add(BuildJSONArray(TextArray, 'overlay_texts'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_board_summary.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        DimArray.Free;
+        TextArray.Free;
+        HoleKeys.Free;
+        HoleCounts.Free;
+        LayerKeys.Free;
+        LayerCounts.Free;
+        Items.Free;
+    end;
+end;
+
+// Layer of every primitive of the given components (e.g. to check that a
+// flipped fiducial has its copper and its solder-mask pad on the same side).
+function GetComponentPrimitivesFromList(ROOT_DIR: String; DesignatorsList: TStringList): String;
+var
+    Board       : IPCB_Board;
+    Iterator    : IPCB_BoardIterator;
+    GroupIter   : IPCB_GroupIterator;
+    Comp        : IPCB_Component;
+    Prim        : IPCB_Primitive;
+    OX, OY      : Integer;
+    CompArray   : TStringList;
+    PrimArray   : TStringList;
+    CompProps   : TStringList;
+    PrimProps   : TStringList;
+    Missing     : TStringList;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+    Found       : TStringList;
+    I           : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = Nil then
+    begin
+        Result := 'ERROR: No PCB document focused';
+        Exit;
+    end;
+    OX := Board.XOrigin;
+    OY := Board.YOrigin;
+
+    CompArray := TStringList.Create;
+    Found := TStringList.Create;
+    Missing := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Comp := Iterator.FirstPCBObject;
+        while Comp <> Nil do
+        begin
+            if DesignatorsList.IndexOf(Comp.Name.Text) >= 0 then
+            begin
+                Found.Add(Comp.Name.Text);
+                PrimArray := TStringList.Create;
+                CompProps := TStringList.Create;
+                try
+                    GroupIter := Comp.GroupIterator_Create;
+                    GroupIter.AddFilter_ObjectSet(MkSet(ePadObject, eTrackObject, eArcObject, eFillObject, eRegionObject, eTextObject));
+                    Prim := GroupIter.FirstPCBObject;
+                    while Prim <> Nil do
+                    begin
+                        PrimProps := TStringList.Create;
+                        try
+                            AddJSONProperty(PrimProps, 'type', PrimitiveTypeName(Prim.ObjectId));
+                            AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                            if Prim.ObjectId = ePadObject then
+                            begin
+                                AddJSONProperty(PrimProps, 'name', Prim.Name);
+                                AddJSONNumber(PrimProps, 'size_x_mm', CoordToMMs(Prim.TopXSize));
+                                AddJSONNumber(PrimProps, 'size_y_mm', CoordToMMs(Prim.TopYSize));
+                                AddJSONNumber(PrimProps, 'solder_mask_expansion_mm', CoordToMMs(Prim.SolderMaskExpansion));
+                                AddJSONNumber(PrimProps, 'paste_mask_expansion_mm', CoordToMMs(Prim.PasteMaskExpansion));
+                            end;
+                            if Prim.ObjectId = eArcObject then
+                            begin
+                                AddJSONNumber(PrimProps, 'radius_mm', CoordToMMs(Prim.Radius));
+                                AddJSONNumber(PrimProps, 'width_mm', CoordToMMs(Prim.LineWidth));
+                            end;
+                            if Prim.ObjectId = eTrackObject then
+                                AddJSONNumber(PrimProps, 'width_mm', CoordToMMs(Prim.Width));
+                            PrimArray.Add(BuildJSONObject(PrimProps, 2));
+                        finally
+                            PrimProps.Free;
+                        end;
+                        Prim := GroupIter.NextPCBObject;
+                    end;
+                    Comp.GroupIterator_Destroy(GroupIter);
+
+                    AddJSONProperty(CompProps, 'designator', Comp.Name.Text);
+                    AddJSONProperty(CompProps, 'footprint', Comp.Pattern);
+                    AddJSONProperty(CompProps, 'layer', Layer2String(Comp.Layer));
+                    AddJSONNumber(CompProps, 'x_mm', CoordToMMs(Comp.X - OX));
+                    AddJSONNumber(CompProps, 'y_mm', CoordToMMs(Comp.Y - OY));
+                    AddJSONNumber(CompProps, 'rotation', Comp.Rotation);
+                    CompProps.Add(BuildJSONArray(PrimArray, 'primitives', 1));
+                    CompArray.Add(BuildJSONObject(CompProps, 1));
+                finally
+                    PrimArray.Free;
+                    CompProps.Free;
+                end;
+            end;
+            Comp := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        for I := 0 to DesignatorsList.Count - 1 do
+            if Found.IndexOf(DesignatorsList[I]) < 0 then
+                Missing.Add('"' + JSONEscapeString(DesignatorsList[I]) + '"');
+
+        ResultProps.Add(BuildJSONArray(CompArray, 'components'));
+        ResultProps.Add(BuildJSONArray(Missing, 'missing_designators'));
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_component_primitives.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        CompArray.Free;
+        Found.Free;
+        Missing.Free;
+        ResultProps.Free;
+    end;
+end;

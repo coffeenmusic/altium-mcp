@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "altium-mcp",
-  "version": "0.4.6",
+  "version": "0.5.0",
   "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
   "author": {
     "name": "Stephen Thompson"
@@ -118,10 +118,36 @@
     {
       "name": "get_server_status",
       "description": "Get the current status of the Altium MCP server"
+    },
+    {
+      "name": "get_outjob_settings",
+      "description": "Read an .OutJob file from disk and return containers, outputs and decoded fabrication settings (Gerber layers, NC Drill, IPC-D-356, pick and place)"
+    },
+    {
+      "name": "get_project_info",
+      "description": "Get the focused project's parameters, documents with unsaved-changes state, sheet count and variants"
+    },
+    {
+      "name": "get_project_components",
+      "description": "List every component of the compiled project with comment, footprint, library reference, sheet and optional parameters"
+    },
+    {
+      "name": "get_erc_violations",
+      "description": "Compile the focused project in memory and list ERC/compiler violations by level"
+    },
+    {
+      "name": "get_board_summary",
+      "description": "Summarise the focused PCB: outline, origin, dimensions, vias by hole size, components per side, primitives per layer and overlay texts"
+    },
+    {
+      "name": "get_component_primitives",
+      "description": "List the primitives of PCB components with their layers and pad mask expansions"
     }
   ],
   "compatibility": {
-    "platforms": ["win32"],
+    "platforms": [
+      "win32"
+    ],
     "runtimes": {
       "python": ">=3.10"
     }
