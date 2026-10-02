@@ -276,6 +276,33 @@ def _f(s):
     return float(s) if s else 0.0
 
 
+def _rotated_text_polygon(box, rotation):
+    """The text's own rectangle when it is turned off-axis, from its
+    axis-aligned box (None when the box itself is exact). For angle a the
+    box is w = L|cos a| + H|sin a| by h = L|sin a| + H|cos a|."""
+    a = math.radians(rotation % 180)
+    c, s = abs(math.cos(a)), abs(math.sin(a))
+    if min(c, s) < 0.02 or abs(c - s) < 0.05:     # orthogonal, or 45 deg (unsolvable)
+        return None
+    w, h = box[2] - box[0], box[3] - box[1]
+    det = c * c - s * s
+    length, height = (w * c - h * s) / det, (h * c - w * s) / det
+    if length <= 0 or height <= 0:
+        return None
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    ux, uy = math.cos(math.radians(rotation)), math.sin(math.radians(rotation))
+    vx, vy = -uy, ux
+    hl, hh = length / 2, height / 2
+    return [(cx + sx * hl * ux + sy * hh * vx, cy + sx * hl * uy + sy * hh * vy)
+            for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+
+
+def _covers(body, extent, fraction=0.5):
+    """Does body cover most of a part's extent (a part under a module)?"""
+    area = (extent[2] - extent[0]) * (extent[3] - extent[1])
+    return area > 0 and rect_overlap_area(extent, body) > fraction * area
+
+
 def ink_box(altium_box, stroke, truetype=False):
     """The ink of a designator from the box Altium reports: stroke text's box
     runs half a stroke beyond its strokes on every side. TrueType boxes are
@@ -290,6 +317,8 @@ class Board:
     def __init__(self, text):
         self.s2s = 0.0
         self.s2m = 0.0
+        self.edge = None      # Board Outline Clearance for text (outline, cutout)
+        self.edge_cut = None
         self.outline_raw = []
         self.cutouts = []
         self.components = {}
@@ -315,6 +344,9 @@ class Board:
                     self.s2s = max(0.0, _f(f[2]))
                 elif f[1] == "S2M":
                     self.s2m = max(0.0, _f(f[2]))
+                elif f[1] == "EDGE":
+                    self.edge = max(0.0, _f(f[2]))
+                    self.edge_cut = max(0.0, _f(f[3])) if len(f) > 3 else self.edge
             elif tag == "O":
                 self.outline_raw.append((int(f[1]), _f(f[2]), _f(f[3]), _f(f[4]), _f(f[5]),
                                          _f(f[6]), _f(f[7]), _f(f[8])))
@@ -358,7 +390,10 @@ class Board:
                 if len(f) > 9:
                     r = ink_box(r, _f(f[8]), f[9] == "1")
                 label = {"D": "designator", "C": "comment"}.get(f[3], "silk text")
-                self.silk.append((f[1], _rect_obstacle(r, SILK, f[2], label), f[3], f[2]))
+                poly = _rotated_text_polygon(r, _f(f[10])) if len(f) > 10 else None
+                ob = (Obstacle(r, POLY, poly, SILK, f[2], label) if poly
+                      else _rect_obstacle(r, SILK, f[2], label))
+                self.silk.append((f[1], ob, f[3], f[2]))
             elif tag == "SB":
                 r = tuple(_f(v) for v in f[3:7])
                 self.silk.append((f[1], _rect_obstacle(r, SILK, f[2], "silk fill"), "", f[2]))
@@ -384,6 +419,10 @@ class Board:
         xs, ys = _f(f[8]), _f(f[9])
         mb = tuple(_f(v) for v in f[10:14])
         label = f"pad {owner}-{pin}" if owner else "pad"
+        if len(f) > 14 and f[14] == "1":
+            # Altium's mask rectangle disagreed with the pad's own: the export
+            # sent their union, so do not derive a shape from it
+            return _rect_obstacle(mb, MASK, owner, label)
         mw, mh = mb[2] - mb[0], mb[3] - mb[1]
         rad = math.radians(rot)
         c, s = abs(math.cos(rad)), abs(math.sin(rad))
@@ -529,7 +568,14 @@ class Placer:
         self.opt = options
         self.scope = set(scope)
         clr = options.extra_clearance
-        self.clearance = {SILK: board.s2s + clr, MASK: board.s2m + clr, EDGE: options.edge_margin}
+        edge = options.edge_margin
+        if board.edge is not None:
+            # Altium measures this rule from the text's bounding box: the ink
+            # box plus half a stroke
+            stroke = max((c.stroke for c in board.components.values() if c.visible and not c.truetype),
+                         default=0.0)
+            edge = max(edge, max(board.edge, board.edge_cut or 0.0) + stroke / 2 + clr)
+        self.clearance = {SILK: board.s2s + clr, MASK: board.s2m + clr, EDGE: edge}
         self.max_clear = max(self.clearance.values())
         self.obstacles = {"T": SpatialHash(), "B": SpatialHash()}
         self.extents = {"T": SpatialHash(80.0), "B": SpatialHash(80.0)}
@@ -634,6 +680,8 @@ class Placer:
                W_CROSS_AMBIGUITY * max(0.0, d_own + band - d_other))
         area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
         for owner, body in self.bodies[comp.side].query(rect):
+            if owner != comp.designator and _covers(body, comp.extent):
+                continue        # the part itself sits under this one (e.g. a SOM)
             frac = rect_overlap_area(rect, body) / area
             if frac > 0:
                 pen += (W_OWN_BODY if owner == comp.designator else W_OTHER_BODY) * frac
@@ -862,6 +910,8 @@ def quality_problems(placer, comp, rect, rot, proposals, max_gap):
     elif not inside and placer.misleading(comp, gap, d_own, other, d_other, float("inf")):
         found.append(f"away from its part and closer to {other.designator}")
     for owner, body in placer.bodies[comp.side].query(rect):
+        if owner != comp.designator and _covers(body, comp.extent):
+            continue            # the part itself sits under this one (e.g. a SOM)
         if rect_overlap_area(rect, body) / area > 0.25:
             found.append("under its own part (hidden after assembly)" if owner == comp.designator
                          else f"over part {owner}")
@@ -879,9 +929,10 @@ def evaluate(board, proposals, options=None, geometry=True):
     part, closer to another part, over a part body, upside down. With
     geometry=False only quality is checked (Altium's DRC covers the rest),
     plus text over open vias, which pad-only silk-to-mask rules miss.
-    Clearances are the board's rules exactly - no placement safety margin.
+    Clearances are the board's rules plus 0.1 mil, so a spot exactly at the
+    rule (which Altium can fail on rounding) is not passed.
     Returns {des: [problem, ...]}; an empty list means the spot is good."""
-    opt = options or Options(extra_clearance=0.0)
+    opt = options or Options(extra_clearance=0.1)
     placer = Placer(board, list(proposals), opt)
     gap_clear = placer.clearance[SILK]
     others = SpatialHash(60.0)
@@ -1051,6 +1102,8 @@ def render_view(board, boxes, focus=None, side="T", targets=(), problems=(), opt
         if ob.shape == SEG:
             x1, y1, x2, y2, hw = ob.geom
             dr.line([pt(x1, y1), pt(x2, y2)], fill=(235, 235, 235), width=max(1, int(2 * hw * scale)))
+        elif ob.shape == POLY:
+            dr.polygon([pt(x, y) for x, y in ob.geom], outline=(200, 200, 200))
         else:
             dr.rectangle(box(ob.geom), outline=(200, 200, 200))
 

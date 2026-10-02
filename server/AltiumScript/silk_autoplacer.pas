@@ -14,6 +14,9 @@
 //   Unhide-all and auto-hide only touch components in scope.
 // - "Try altered rotation" on the bottom layer now flips 0 <-> 270; the
 //   original's 90 - Rotation left mirrored text at 90/180 (upside down).
+// - Each placed designator's stroke geometry is rebuilt at the end. Batch DRC
+//   checks a cached copy that scripted moves and resizes leave stale, so
+//   without this it reports collisions at old positions.
 
 const
   APS_SLKPAD = 40000; // Allowed silk-to-silk designator overlap = 4 mil
@@ -56,6 +59,10 @@ var
   APS_BodyRectCnt: Integer;
   APS_BoardRect: TCoordRect;
   APS_BoardIsRectangular: Boolean;
+  // Board Outline Clearance for text, and the outline vertices (biased) for
+  // testing it on shaped boards
+  APS_EdgeGap: TCoord;
+  APS_OutlineX, APS_OutlineY: TList;
 
 function APS_GetObjRect(Obj: IPCB_ObjectClass): TCoordRect;
 var
@@ -266,8 +273,9 @@ var
 begin
   result := False;
 
-  if (L < APS_BoardRect.Left) or (R > APS_BoardRect.Right) or
-    (B < APS_BoardRect.Bottom) or (T > APS_BoardRect.Top) then
+  // Keep the Board Outline Clearance rule's distance from the edge
+  if (L - APS_EdgeGap < APS_BoardRect.Left) or (R + APS_EdgeGap > APS_BoardRect.Right) or
+    (B - APS_EdgeGap < APS_BoardRect.Bottom) or (T + APS_EdgeGap > APS_BoardRect.Top) then
     Exit;
 
   Lb := L + APS_COORD_BIAS;
@@ -295,10 +303,25 @@ begin
 
   if not APS_BoardIsRectangular then
   begin
-    if not APS_Board.BoardOutline.PointInPolygon(L, B) then Exit;
-    if not APS_Board.BoardOutline.PointInPolygon(L, T) then Exit;
-    if not APS_Board.BoardOutline.PointInPolygon(R, B) then Exit;
-    if not APS_Board.BoardOutline.PointInPolygon(R, T) then Exit;
+    Ls := L - APS_EdgeGap;
+    Bs := B - APS_EdgeGap;
+    Rs := R + APS_EdgeGap;
+    Ts := T + APS_EdgeGap;
+    if not APS_Board.BoardOutline.PointInPolygon(Ls, Bs) then Exit;
+    if not APS_Board.BoardOutline.PointInPolygon(Ls, Ts) then Exit;
+    if not APS_Board.BoardOutline.PointInPolygon(Rs, Bs) then Exit;
+    if not APS_Board.BoardOutline.PointInPolygon(Rs, Ts) then Exit;
+    // A notch can reach in between the corners
+    Ls := Ls + APS_COORD_BIAS;
+    Bs := Bs + APS_COORD_BIAS;
+    Rs := Rs + APS_COORD_BIAS;
+    Ts := Ts + APS_COORD_BIAS;
+    for i := 0 to APS_OutlineX.Count - 1 do
+    begin
+      if (APS_OutlineX.Items[i] > Ls) and (APS_OutlineX.Items[i] < Rs) and
+        (APS_OutlineY.Items[i] > Bs) and (APS_OutlineY.Items[i] < Ts) then
+        Exit;
+    end;
   end;
 
   result := True;
@@ -1294,6 +1317,7 @@ var
   CmpRect: TCoordRect;
   SizeKey: Integer;
   Outline: IPCB_BoardOutline;
+  Rule: IPCB_Rule;
   vx, vy: TCoord;
   PCBSystemOptions: IPCB_SystemOptions;
   DRCSetting: Boolean;
@@ -1368,6 +1392,30 @@ begin
           APS_BoardIsRectangular := False;
       end;
     end;
+  APS_OutlineX := TList.Create;
+  APS_OutlineY := TList.Create;
+  for i := 0 to Outline.PointCount - 1 do
+  begin
+    APS_OutlineX.Add(Outline.Segments[i].vx + APS_COORD_BIAS);
+    APS_OutlineY.Add(Outline.Segments[i].vy + APS_COORD_BIAS);
+  end;
+
+  // The original script ignores the Board Outline Clearance rule; honour the
+  // largest text-to-outline clearance
+  APS_EdgeGap := 0;
+  Iterator := APS_Board.BoardIterator_Create;
+  Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+  Iterator.AddFilter_LayerSet(AllLayers);
+  Iterator.AddFilter_Method(eProcessAll);
+  Rule := Iterator.FirstPCBObject;
+  while Rule <> nil do
+  begin
+    if Rule.Enabled and (Rule.RuleKind = eRule_BoardOutlineClearance) then
+      if Rule.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge) > APS_EdgeGap then
+        APS_EdgeGap := Rule.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge);
+    Rule := Iterator.NextPCBObject;
+  end;
+  APS_Board.BoardIterator_Destroy(Iterator);
 
   if APS_UnhideAll then
     APS_UnhideAllDesignators(0);
@@ -1445,6 +1493,18 @@ begin
   else
     APS_MoveSilkOverComp(StillFailed);
 
+  // Rebuild every touched designator's stroke geometry: batch DRC checks a
+  // cached copy that scripted moves and resizes leave stale
+  for i := 0 to SortedComps.Count - 1 do
+  begin
+    Cmp := SortedComps.Objects[i];
+    Silkscreen := Cmp.Name;
+    Silkscreen.BeginModify;
+    Silkscreen.SetState_XSizeYSize;
+    Silkscreen.EndModify;
+    Silkscreen.GraphicallyInvalidate;
+  end;
+
   if PCBSystemOptions <> nil then
     PCBSystemOptions.DoOnlineDRC := DRCSetting;
   PCBServer.PostProcess;
@@ -1473,4 +1533,5 @@ begin
   APS_ObsBL.Free; APS_ObsBB.Free; APS_ObsBR.Free; APS_ObsBT.Free;
   APS_BaseL.Free; APS_BaseB.Free; APS_BaseR.Free; APS_BaseT.Free;
   APS_BaseX.Free; APS_BaseY.Free; APS_BaseIdx.Free;
+  APS_OutlineX.Free; APS_OutlineY.Free;
 end;

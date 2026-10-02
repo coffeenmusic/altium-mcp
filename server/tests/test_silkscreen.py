@@ -3,6 +3,7 @@
 Run: python -m unittest discover -s server/tests -p "test_silkscreen.py"
 """
 
+import math
 import os
 import sys
 import unittest
@@ -153,6 +154,17 @@ class OptionTests(unittest.TestCase):
         b = ss.Board(board_text(*resistor("R1", 40, 1000, vertical=True)))
         self.assertGreaterEqual(best(b, "R1").rect[0], 10.0)
 
+    def test_board_outline_clearance_rule(self):
+        # 25 mil text-to-edge rule, measured by Altium from the text's bounding
+        # box (ink box + half the 5 mil stroke)
+        b = ss.Board(board_text("RULE|EDGE|25|25", *resistor("R1", 40, 1000, vertical=True)))
+        self.assertEqual((b.edge, b.edge_cut), (25.0, 25.0))
+        placer = ss.Placer(b, ["R1"], ss.Options(extra_clearance=0.1))
+        self.assertAlmostEqual(placer.clearance[ss.EDGE], 27.6)
+        self.assertGreaterEqual(best(b, "R1").rect[0], 27.5)
+        problems = ss.evaluate(b, {"R1": ((15, 960, 50, 1040), 90)})["R1"]
+        self.assertTrue(any("board edge" in p for p in problems), problems)
+
     def test_boxed_in_part_reports_blockers(self):
         lines = resistor("R1", 1000, 1000)
         for y in (955, 1045):
@@ -227,6 +239,31 @@ class ResolveTests(unittest.TestCase):
         b = ss.Board(board_text(*resistor("R1", 1000, 1000)))
         with self.assertRaises(ValueError):
             ss.resolve_placement(b, {"designator": "R1", "side": "diagonal"})
+
+
+class ModuleAndRotatedTextTests(unittest.TestCase):
+    def test_parts_under_a_module_are_not_flagged_for_it(self):
+        # A big module body (a SOM) covers R1: R1's label may sit under it too
+        lines = resistor("R1", 1000, 1000) + [
+            "C|U9|T|1000|1000|0|1|600|600|1400|1400|500|500|560|540|0|60|6|5|0|SOM",
+            "Y|U9|600|600|1400|1400"]
+        b = ss.Board(board_text(*lines))
+        cand = best(b, "R1")
+        self.assertEqual(ss.evaluate(b, {"R1": (cand.rect, cand.rotation)}, geometry=False)["R1"], [])
+
+    def test_rotated_text_is_a_rotated_rectangle(self):
+        # 300 x 35 mil text at 320 deg: its axis-aligned box is mostly empty
+        a = math.radians(320)
+        c, s = abs(math.cos(a)), abs(math.sin(a))
+        w, h = 300 * c + 35 * s, 300 * s + 35 * c
+        box = (1000 - w / 2, 1000 - h / 2, 1000 + w / 2, 1000 + h / 2)
+        poly = ss._rotated_text_polygon(box, 320)
+        self.assertIsNotNone(poly)
+        ob = ss.Obstacle(box, ss.POLY, poly, ss.SILK, "", "silk text")
+        corner = (box[0], box[1], box[0] + 20, box[1] + 20)     # empty corner of the box
+        self.assertGreater(ob.distance(corner), 20)
+        self.assertEqual(ob.distance((990, 990, 1010, 1010)), 0.0)   # the text itself
+        self.assertIsNone(ss._rotated_text_polygon((0, 0, 100, 30), 0))
 
 
 class RenderTests(unittest.TestCase):

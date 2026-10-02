@@ -2255,9 +2255,11 @@ async def auto_place_silkscreen(ctx: Context, designators: list = None, selected
     every part, smallest first, it tries the enabled autopositions on an
     offset grid with shrinking text, then a retry pass (rotation flip, wider
     grid) and a 2nd-pass "wiggle" search up to 100 mil out. It avoids pads,
-    component bodies, other silk and (optionally) vias, and stays on the
-    board. Typically 80-95% of designators end up placed; the rest are
-    handled per failed_action. Everything is one undo step.
+    component bodies, other silk and (optionally) vias, and keeps the Board
+    Outline Clearance rule's distance from the board edge. Typically 80-95%
+    of designators end up placed; the rest are handled per failed_action.
+    Everything is one undo step. A whole-board run moves every designator:
+    ask the user to save the board first.
 
     It is fast and good at the bulk, but it does not judge readability:
     labels can land far from their part (2nd-pass label blocks), next to a
@@ -2376,10 +2378,11 @@ async def check_silkscreen(ctx: Context, designators: list = None, preview: bool
     with this.
 
     Two parts:
-    - drc: each designator is tested with Altium's own Silk To Silk Clearance
-      and Silk To Solder Mask Clearance rules (Rule.ActualCheck, the test a
-      batch DRC runs) against nearby silk, pads, vias and mask objects.
-      Ground truth for fabrication.
+    - drc: each designator is tested with Altium's own Silk To Silk
+      Clearance, Silk To Solder Mask Clearance and Board Outline Clearance
+      rules (Rule.ActualCheck, the test a batch DRC runs) against nearby
+      silk, pads, vias, mask objects and the board edge. Ground truth for
+      fabrication.
     - quality: problems DRC does not flag - text far from its part or closer
       to another part of the same type, over another part's body or under its
       own (e.g. left on top of its part by an auto-placer), off the board, or

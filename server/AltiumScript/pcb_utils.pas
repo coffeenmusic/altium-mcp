@@ -2669,9 +2669,40 @@ begin
     end;
 end;
 
+// A pad's solder mask opening on MaskLayer as 'l|b|r|t|flag', or '' when it
+// has none there. BoundingRectangleOnLayer can come back shifted from the pad
+// for some shapes (seen on an offset SOT-89 tab, TopShape 10, 55 mil off), so
+// the result is its union with the pad's own rectangle. flag 1 marks pads
+// where the two disagree; the solver treats those as plain rectangles.
+function SilkPadMaskStr(Pad: IPCB_Pad; MaskLayer: Integer; XO, YO: Integer): String;
+var
+    R, C        : TCoordRect;
+    L, B, Rt, T : Integer;
+    Flag        : String;
+begin
+    Result := '';
+    R := Pad.BoundingRectangleOnLayer(MaskLayer);
+    if (R.Right <= R.Left) then
+        Exit;
+    C := Pad.BoundingRectangle;
+    L := R.Left;
+    B := R.Bottom;
+    Rt := R.Right;
+    T := R.Top;
+    Flag := '0';
+    if (C.Left < L) then begin L := C.Left; Flag := '1'; end;
+    if (C.Bottom < B) then begin B := C.Bottom; Flag := '1'; end;
+    if (C.Right > Rt) then begin Rt := C.Right; Flag := '1'; end;
+    if (C.Top > T) then begin T := C.Top; Flag := '1'; end;
+    Result := SilkLen(L - XO) + '|' + SilkLen(B - YO) + '|' + SilkLen(Rt - XO) + '|' +
+              SilkLen(T - YO) + '|' + Flag;
+end;
+
 // Export everything the silkscreen solver needs to ROOT_DIR\silk_data.txt,
 // one pipe-delimited line per object, mils relative to the board origin:
 //   RULE|S2S|clearance, RULE|S2M|clearance   largest enabled silk rules
+//   RULE|EDGE|outline|cutout                 largest text-to-board-edge
+//                                            clearances (Board Outline Clearance)
 //   O|kind|vx|vy|cx|cy|radius|a1|a2          board outline (kind 0 line, 1 arc)
 //   K|x1|y1|x2|y2|...                        board cutout contour
 //   C|des|side|x|y|rot|nameon|l|b|r|t|tl|tb|tr|tt|trot|size|width|autopos|mirror|pattern|truetype
@@ -2680,9 +2711,9 @@ end;
 //   Y|owner|l|b|r|t                          3D body extent
 //   ST|side|owner|x1|y1|x2|y2|w              silk track
 //   SA|side|owner|cx|cy|r|a1|a2|w            silk arc
-//   SX|side|owner|kind|l|b|r|t|stroke|tt     silk text (D designator, C comment, F free)
+//   SX|side|owner|kind|l|b|r|t|stroke|tt|rot silk text (D designator, C comment, F free)
 //   SB|side|owner|l|b|r|t                    silk fill / region extent
-//   MP|side|owner|pin|x|y|rot|shape|xs|ys|l|b|r|t   pad solder mask opening
+//   MP|side|owner|pin|x|y|rot|shape|xs|ys|l|b|r|t|shifted   pad solder mask opening
 //   MV|side|owner|x|y|diameter               untented via opening
 //   MT|side|owner|x1|y1|x2|y2|w, MB|side|owner|l|b|r|t   solder mask layer objects
 function ExportSilkscreenData(ROOT_DIR: String): String;
@@ -2702,6 +2733,8 @@ var
     Flag2     : String;
     FileName  : String;
     S2S, S2M  : Double;
+    EdgeOut   : Double;
+    EdgeCut   : Double;
     IsSilk    : Boolean;
     IsMask    : Boolean;
     Diameter  : Integer;
@@ -2717,6 +2750,8 @@ begin
     YO := Board.YOrigin;
     S2S := -1;
     S2M := -1;
+    EdgeOut := -1;
+    EdgeCut := -1;
     Lines := TStringList.Create;
 
     try
@@ -2741,6 +2776,14 @@ begin
                 begin
                     if (CoordToMils(Prim.SilkToMaskGap) > S2M) then
                         S2M := CoordToMils(Prim.SilkToMaskGap);
+                end
+                else if (Prim.RuleKind = eRule_BoardOutlineClearance) then
+                begin
+                    // Per-object table; the rule's Gap is only the generic value
+                    if (CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge)) > EdgeOut) then
+                        EdgeOut := CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge));
+                    if (CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_CutoutEdge)) > EdgeCut) then
+                        EdgeCut := CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_CutoutEdge));
                 end;
             end;
             Prim := Iterator.NextPCBObject;
@@ -2748,6 +2791,8 @@ begin
         Board.BoardIterator_Destroy(Iterator);
         Lines.Add('RULE|S2S|' + SilkNum(S2S));
         Lines.Add('RULE|S2M|' + SilkNum(S2M));
+        if (EdgeOut >= 0) then
+            Lines.Add('RULE|EDGE|' + SilkNum(EdgeOut) + '|' + SilkNum(EdgeCut));
 
         // Board outline, vertex by vertex (arcs start at their vertex)
         for I := 0 to Board.BoardOutline.PointCount - 1 do
@@ -2838,7 +2883,7 @@ begin
                         if Prim.UseTTFonts then Flag := '1';
                         Lines.Add('SX|' + Side + '|' + Owner + '|' + Kind + '|' +
                             SilkRectStr(Prim.BoundingRectangle, XO, YO) + '|' +
-                            SilkLen(Prim.Width) + '|' + Flag);
+                            SilkLen(Prim.Width) + '|' + Flag + '|' + SilkNum(Prim.Rotation));
                     end;
                 end;
             end
@@ -2868,27 +2913,24 @@ begin
             end
             else if (Prim.ObjectId = ePadObject) then
             begin
-                // Mask opening per side: the rectangle Altium reports on the
-                // solder layer already includes the mask expansion
+                // Mask opening per side (see SilkPadMaskStr)
                 if ((Prim.Layer = eTopLayer) or (Prim.Layer = eMultiLayer)) and (not Prim.IsTenting_Top) then
                 begin
-                    R := Prim.BoundingRectangleOnLayer(eTopSolder);
-                    if (R.Right > R.Left) then
+                    Kind := SilkPadMaskStr(Prim, eTopSolder, XO, YO);
+                    if (Kind <> '') then
                         Lines.Add('MP|T|' + Owner + '|' + Prim.Name + '|' +
                             SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
                             SilkNum(Prim.Rotation) + '|' + IntToStr(Prim.TopShape) + '|' +
-                            SilkLen(Prim.TopXSize) + '|' + SilkLen(Prim.TopYSize) + '|' +
-                            SilkRectStr(R, XO, YO));
+                            SilkLen(Prim.TopXSize) + '|' + SilkLen(Prim.TopYSize) + '|' + Kind);
                 end;
                 if ((Prim.Layer = eBottomLayer) or (Prim.Layer = eMultiLayer)) and (not Prim.IsTenting_Bottom) then
                 begin
-                    R := Prim.BoundingRectangleOnLayer(eBottomSolder);
-                    if (R.Right > R.Left) then
+                    Kind := SilkPadMaskStr(Prim, eBottomSolder, XO, YO);
+                    if (Kind <> '') then
                         Lines.Add('MP|B|' + Owner + '|' + Prim.Name + '|' +
                             SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
                             SilkNum(Prim.Rotation) + '|' + IntToStr(Prim.BotShape) + '|' +
-                            SilkLen(Prim.BotXSize) + '|' + SilkLen(Prim.BotYSize) + '|' +
-                            SilkRectStr(R, XO, YO));
+                            SilkLen(Prim.BotXSize) + '|' + SilkLen(Prim.BotYSize) + '|' + Kind);
                 end;
             end
             else if (Prim.ObjectId = eViaObject) then
@@ -3024,6 +3066,15 @@ begin
                         end;
                     end;
 
+                    // Rebuild the text's stroke geometry: batch DRC checks a
+                    // cached copy that scripted moves and resizes leave stale,
+                    // reporting collisions (and missing real ones) at the old
+                    // spot until something regenerates it
+                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    Txt.SetState_XSizeYSize;
+                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    Txt.GraphicallyInvalidate;
+
                     // Report the final text box as Altium sees it
                     R := Txt.BoundingRectangle;
                     TextProps := TStringList.Create;
@@ -3070,7 +3121,8 @@ end;
 // designator in the list (all visible designators when the list is empty) is
 // tested against nearby silk with the Silk To Silk Clearance rule and against
 // pads, vias and solder mask objects with the Silk To Solder Mask Clearance
-// rule, through Rule.ActualCheck - the same test a batch DRC runs.
+// rule, and against the board edge with the Board Outline Clearance rule,
+// through Rule.ActualCheck - the same test a batch DRC runs.
 function CheckSilkscreen(DesignatorsList: TStringList): String;
 var
     Board           : IPCB_Board;
@@ -3243,6 +3295,27 @@ begin
                     Prim := SIter.NextPCBObject;
                 end;
                 Board.SpatialIterator_Destroy(SIter);
+
+                // Board Outline Clearance: text to the board edge and cutouts,
+                // measured from the text's bounding box
+                Rule := Board.FindDominantRuleForObject(Txt, eRule_BoardOutlineClearance);
+                if (Rule <> nil) then
+                    if (Rule.ActualCheck(Txt, Board.BoardOutline) <> nil) then
+                    begin
+                        Dirty := True;
+                        VProps := TStringList.Create;
+                        try
+                            AddJSONProperty(VProps, 'designator', Comp.Name.Text);
+                            AddJSONProperty(VProps, 'rule', 'board_edge');
+                            AddJSONProperty(VProps, 'object', 'Board outline');
+                            AddJSONProperty(VProps, 'owner', '');
+                            AddJSONProperty(VProps, 'detail', '');
+                            AddJSONNumber(VProps, 'distance_mils', Round(CoordToMils(Board.PrimPrimDistance(Txt, Board.BoardOutline)) * 100) / 100);
+                            ViolationsArray.Add(BuildJSONObject(VProps, 2));
+                        finally
+                            VProps.Free;
+                        end;
+                    end;
 
                 if Dirty then
                     DirtyCount := DirtyCount + 1;
