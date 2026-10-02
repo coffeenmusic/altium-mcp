@@ -786,10 +786,35 @@ end;
 
 // Designator placements arrive as pipe-delimited strings
 // ('Designator|CX|CY|Rotation|Height|StrokeWidth|Visible')
+// Same board file? Paths arrive with forward slashes and without commas (the
+// request parser strips them)
+function SameBoardFile(PathA: String; PathB: String): Boolean;
+var
+    A, B: String;
+begin
+    A := LowerCase(RemoveChar(StringReplace(PathA, '/', '\', REPLACEALL), ','));
+    B := LowerCase(RemoveChar(StringReplace(PathB, '/', '\', REPLACEALL), ','));
+    Result := (A = B);
+end;
+
 function ExecutePlaceDesignators(RequestData: TStringList): String;
 var
     EntriesList: TStringList;
+    Expected: String;
+    Board: IPCB_Board;
 begin
+    // The placements were computed for one board: refuse to move anything on
+    // another one (focus can change between the snapshot and this call)
+    Expected := RequestParam('board', '');
+    Board := GetBoardSafe(0);
+    if (Expected <> '') and (Board <> nil) then
+        if not SameBoardFile(Board.FileName, Expected) then
+        begin
+            Result := 'ERROR: The focused PCB is ' + Board.FileName + ', not ' + Expected +
+                      ', the board these placements were computed for. Nothing was moved.';
+            Exit;
+        end;
+
     EntriesList := TStringList.Create;
     try
         ExtractRequestArray(RequestData, 'placements', EntriesList);

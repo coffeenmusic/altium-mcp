@@ -315,6 +315,7 @@ class Board:
     """Everything parsed from an export_silkscreen_data dump."""
 
     def __init__(self, text):
+        self.file = ""        # the board's file path
         self.s2s = 0.0
         self.s2m = 0.0
         self.edge = None      # Board Outline Clearance for text (outline, cutout)
@@ -339,7 +340,9 @@ class Board:
         for line in text.splitlines():
             f = line.rstrip("\r").split("|")
             tag = f[0]
-            if tag == "RULE":
+            if tag == "B":
+                self.file = f[1]
+            elif tag == "RULE":
                 if f[1] == "S2S":
                     self.s2s = max(0.0, _f(f[2]))
                 elif f[1] == "S2M":

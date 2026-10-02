@@ -2700,6 +2700,7 @@ end;
 
 // Export everything the silkscreen solver needs to ROOT_DIR\silk_data.txt,
 // one pipe-delimited line per object, mils relative to the board origin:
+//   B|file                                   the board's file path
 //   RULE|S2S|clearance, RULE|S2M|clearance   largest enabled silk rules
 //   RULE|EDGE|outline|cutout                 largest text-to-board-edge
 //                                            clearances (Board Outline Clearance)
@@ -2756,6 +2757,7 @@ begin
 
     try
         Lines.Add('V|1');
+        Lines.Add('B|' + Board.FileName);
 
         // Design rules: the largest enabled silk clearances
         Iterator := Board.BoardIterator_Create;

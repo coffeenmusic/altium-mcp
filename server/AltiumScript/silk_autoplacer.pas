@@ -1521,6 +1521,7 @@ begin
   Props.Add('"auto_hidden": ' + APS_Quoted(APS_AutoHidden));
   AddJSONInteger(Props, 'outline_layer_found', APS_CmpOutlineLayerID);
   AddJSONNumber(Props, 'seconds', Round((Now() - StartTime) * 86400 * 10) / 10);
+  AddJSONProperty(Props, 'board', APS_Board.FileName);
   result := BuildJSONObject(Props);
 
   APS_DictionaryCache.Free;

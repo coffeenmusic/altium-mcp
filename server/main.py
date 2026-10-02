@@ -22,6 +22,7 @@ import base64
 import glob
 import re
 import silkscreen
+import script_bundle
 
 # Configure logging
 logging.basicConfig(
@@ -446,8 +447,17 @@ class AltiumBridge:
             # outside the MSIX sandbox) can find the script files
             script_path = self._resolve_msix_path(self.config.script_path)
 
-            # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
-            command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
+            # Run the units merged into one script FILE: running the script
+            # project leaks window handles in Altium (see script_bundle.py).
+            # The project stays the source, and the fallback.
+            try:
+                bundle = script_bundle.ensure_bundle(script_path, EXCHANGE_DIR / "Altium_API_bundle.pas")
+                command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScriptFile('
+                           f'FileName={bundle}^|ProcName=Run)')
+            except (OSError, ValueError) as e:
+                logger.warning(f"Could not build the script bundle ({e}); running the project")
+                command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript('
+                           f'ProjectName="{script_path}"^|ProcName="Altium_API>Run")')
             
             logger.info(f"Running command: {command}")
             
@@ -1133,6 +1143,7 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
 SANDBOX_DIR = MCP_DIR / "SandboxScript"
 SANDBOX_PAS = SANDBOX_DIR / "Sandbox.pas"
 SANDBOX_PRJ = SANDBOX_DIR / "Sandbox.PrjScr"
+SANDBOX_RUN = EXCHANGE_DIR / "sandbox_run.pas"     # Sandbox.pas with the experiment injected
 SANDBOX_LOG = EXCHANGE_DIR / "sandbox_log.txt"
 SANDBOX_RESULT = EXCHANGE_DIR / "sandbox_result.json"
 SANDBOX_BEGIN = "// === BEGIN EXPERIMENT"
@@ -1188,7 +1199,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     debugger is stopped (Ctrl+F3) or Altium is restarted. This tool detects
     that state and reports exactly which statement died.
 
-    The script runs in a SEPARATE script project, so a crash here can never
+    The script runs as a SEPARATE script file, so a crash here can never
     break the other MCP tools.
 
     Writing the script:
@@ -1221,9 +1232,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     """
     logger.info(f"run_altium_script: {len(script.splitlines())} lines")
 
-    if not SANDBOX_PAS.exists() or not SANDBOX_PRJ.exists():
+    if not SANDBOX_PAS.exists():
         return json.dumps({"success": False,
-                           "error": f"sandbox project missing at {SANDBOX_DIR}"})
+                           "error": f"sandbox script missing at {SANDBOX_PAS}"})
 
     usage = altium_user_objects()
     if usage and usage[0] > usage[1] - USER_OBJECT_RESERVE:
@@ -1238,7 +1249,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         _, post = rest.split(SANDBOX_END, 1)
         body = "\n".join("        " + ln if ln.strip() else ln
                           for ln in script.strip("\n").splitlines())
-        SANDBOX_PAS.write_text(
+        SANDBOX_RUN.write_text(
             pre + SANDBOX_BEGIN + marker_line + "\n" + body + "\n        " + SANDBOX_END + post,
             encoding="utf-8")
     except Exception as e:
@@ -1251,8 +1262,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             except OSError:
                 pass
 
-    cmd = (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScript('
-           f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
+    # A script file, not the project: running a project leaks window handles
+    cmd = (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScriptFile('
+           f'FileName={SANDBOX_RUN}^|ProcName=Run)')
     subprocess.Popen(cmd, shell=True)
 
     start = time.time()
@@ -2462,6 +2474,7 @@ async def check_silkscreen(ctx: Context, designators: list = None, preview: bool
     grouped = _group_silk_violations(drc)
     attention = sorted(set(grouped) | set(quality))
     summary = {
+        "board": board.file,
         "checked_count": drc.get("checked_count"),
         "needs_attention_count": len(attention),
         "needs_attention": attention,
@@ -2657,7 +2670,9 @@ async def set_designator_positions(ctx: Context, placements: list, dry_run: bool
 
     Otherwise all moves are one undo step, and with verify (default) each
     moved designator is then checked with Altium's own silk rules and for
-    quality. ok=true means clean.
+    quality. ok=true means clean. The moves only go to the board the
+    snapshot was read from: if another PCB has been focused since, nothing
+    moves and the error names both boards.
 
     Args:
         placements (list): Dicts with designator plus x/y or side (gap,
@@ -2715,7 +2730,11 @@ async def set_designator_positions(ctx: Context, placements: list, dry_run: bool
         return json.dumps({"dry_run": True, "all_ok": all(v.get("ok", True) for v in verdicts.values()),
                            "designators": verdicts}, indent=2)
 
-    response = await altium_bridge.execute_command("place_designators", {"placements": entries})
+    params = {"placements": entries}
+    if board.file:
+        # Altium refuses the moves if another PCB is focused by now
+        params["board"] = board.file.replace("\\", "/")
+    response = await altium_bridge.execute_command("place_designators", params)
     if not response.get("success", False):
         return json.dumps({"success": False, "error": f"Failed to move designators: {response.get('error', 'Unknown error')}"})
     result = response.get("result", {})
