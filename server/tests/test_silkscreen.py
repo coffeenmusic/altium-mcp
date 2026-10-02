@@ -197,6 +197,15 @@ class EvaluateTests(unittest.TestCase):
         quality = ss.evaluate(b, {"R1": (box, 0)}, geometry=False)["R1"]
         self.assertFalse(any("pad" in p for p in quality))
 
+    def test_designators_hidden_in_the_same_step_are_not_obstacles(self):
+        # R2's label sits where R1's label is proposed; hiding R2 frees it
+        lines = resistor("R1", 1000, 1000) + resistor("R2", 1000, 1150)
+        b = ss.Board(board_text(*lines))
+        spot = b.components["R2"].text_box
+        self.assertTrue(ss.evaluate(b, {"R1": (spot, 0)})["R1"])
+        problems = ss.evaluate(b, {"R1": (spot, 0)}, hiding={"R2"})["R1"]
+        self.assertFalse([p for p in problems if "designator R2" in p], problems)
+
     def test_proposals_are_checked_against_each_other(self):
         b = ss.Board(board_text(*(resistor("R1", 1000, 1000) + resistor("R2", 1000, 1150))))
         same = (955, 1017, 1045, 1057)

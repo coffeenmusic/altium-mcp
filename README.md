@@ -200,6 +200,8 @@ The server communicates with Altium Designer using a scripting bridge:
 3. The script processes the request and writes results to `workspace\response.json`
 4. The server reads and returns the response
 
+**Window-handle leak (long sessions).** Each script launch makes Altium create a hidden copy of every form in the script projects registered on the user's menus, and never free it. On one machine with 14 such forms that was about 100 Windows USER objects per call. Windows caps a process at 10,000 (`USERProcessHandleQuota`). Near the cap Altium shows errors such as "System Error. Code: 1158 ... used all of its system allowance of handles for Window Manager objects" and then crashes, losing unsaved work; there it took about 90 calls. The server now checks Altium's count before every call and refuses once fewer than 1,000 remain, asking for a save and restart. To find the culprits, count Altium's top-level `TScriptForm` windows by caption.
+
 ## References
 - Get scripts' project path from Jeff Collins and William Kitchen's stripped down version
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp

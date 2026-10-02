@@ -922,7 +922,7 @@ def quality_problems(placer, comp, rect, rot, proposals, max_gap):
     return found
 
 
-def evaluate(board, proposals, options=None, geometry=True):
+def evaluate(board, proposals, options=None, geometry=True, hiding=()):
     """Problems with designator boxes {des: (rect, rotation)}: clearance to
     silk, mask openings, the board edge and other designators (current
     positions, or the other proposals), plus placement quality - far from its
@@ -931,9 +931,11 @@ def evaluate(board, proposals, options=None, geometry=True):
     plus text over open vias, which pad-only silk-to-mask rules miss.
     Clearances are the board's rules plus 0.1 mil, so a spot exactly at the
     rule (which Altium can fail on rounding) is not passed.
+    Designators in hiding are being hidden in the same step and are no
+    obstacles.
     Returns {des: [problem, ...]}; an empty list means the spot is good."""
     opt = options or Options(extra_clearance=0.1)
-    placer = Placer(board, list(proposals), opt)
+    placer = Placer(board, list(proposals) + list(hiding), opt)
     gap_clear = placer.clearance[SILK]
     others = SpatialHash(60.0)
     for des, (rect, _) in proposals.items():

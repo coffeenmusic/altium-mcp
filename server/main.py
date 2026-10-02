@@ -253,6 +253,44 @@ class AltiumConfig:
         
         return paths_verified
 
+# Windows caps each process's USER objects (windows, menus...) at a quota,
+# 10,000 by default. Every bridge call makes Altium create a hidden copy of
+# each form in the script projects on the user's menus and never free it
+# (measured on one machine: 14 forms, about 110 USER objects per call). At
+# the cap Altium shows errors and then crashes, losing unsaved work, so calls
+# stop while there is still room to save.
+USER_OBJECT_RESERVE = 1000
+
+def altium_user_objects() -> Optional[tuple]:
+    """(USER objects in use, quota) for the running Altium, or None."""
+    import ctypes
+    from ctypes import wintypes
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows") as key:
+            quota = int(winreg.QueryValueEx(key, "USERProcessHandleQuota")[0])
+    except OSError:
+        quota = 10000
+    kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    used = None
+    for pid in win32process.EnumProcesses():
+        handle = kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            continue
+        try:
+            name = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if (kernel32.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(size))
+                    and os.path.basename(name.value).upper() == "X2.EXE"):
+                # Launcher instances are short-lived; the main one has the most
+                count = user32.GetGuiResources(handle, 1)    # GR_USEROBJECTS
+                used = count if used is None else max(used, count)
+        finally:
+            kernel32.CloseHandle(handle)
+    return None if used is None else (used, quota)
+
 class AltiumBridge:
     def __init__(self):
         # Ensure the MCP directory exists
@@ -273,6 +311,13 @@ class AltiumBridge:
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = 120) -> Dict[str, Any]:
         try:
+            usage = altium_user_objects()
+            if usage and usage[0] > usage[1] - USER_OBJECT_RESERVE:
+                return {"success": False, "error": (
+                    f"Altium is using {usage[0]} of its {usage[1]} window handles and will start "
+                    "failing, then crash, near the limit (each script call leaks some). Not running "
+                    f"'{command}'. Ask the user to save their work in Altium and restart it.")}
+
             # Clean up any existing response file
             if RESPONSE_FILE.exists():
                 RESPONSE_FILE.unlink()
@@ -1179,6 +1224,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     if not SANDBOX_PAS.exists() or not SANDBOX_PRJ.exists():
         return json.dumps({"success": False,
                            "error": f"sandbox project missing at {SANDBOX_DIR}"})
+
+    usage = altium_user_objects()
+    if usage and usage[0] > usage[1] - USER_OBJECT_RESERVE:
+        return json.dumps({"success": False, "error": (
+            f"Altium is using {usage[0]} of its {usage[1]} window handles and will crash near "
+            "the limit. Ask the user to save their work in Altium and restart it.")})
 
     try:
         src = SANDBOX_PAS.read_text(encoding="utf-8")
@@ -2656,7 +2707,7 @@ async def set_designator_positions(ctx: Context, placements: list, dry_run: bool
     shown = {d: (r, rot) for d, (r, rot, vis) in resolved.items()
              if vis is not False and (vis or board.components[d].visible)}
     if dry_run:
-        problems = silkscreen.evaluate(board, shown)
+        problems = silkscreen.evaluate(board, shown, hiding=set(resolved) - set(shown))
         verdicts = {d: dict(_box_info(r, rot), ok=not problems.get(d), problems=problems.get(d, []))
                     for d, (r, rot) in shown.items()}
         for d in set(resolved) - set(shown):
