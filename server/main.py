@@ -22,6 +22,7 @@ import base64
 import glob
 import re
 import silkscreen
+import label_blocks
 import script_bundle
 
 # Configure logging
@@ -2471,6 +2472,25 @@ async def check_silkscreen(ctx: Context, designators: list = None, preview: bool
     scope = designators or list(board.components)
     boxes = {d: b for d, b in _current_boxes(board).items() if d in scope}
     quality = {d: p for d, p in silkscreen.evaluate(board, boxes, geometry=False).items() if p}
+    # Labels in an intact label block are linked to their parts: distance and
+    # "reads as" problems do not apply. A disturbed block is a problem itself.
+    blocks = []
+    for rec in _load_blocks(board.file):
+        broken = label_blocks.check_record(board, rec)
+        blocks.append({"parts": rec["members"], "link": rec["link"], "intact": not broken,
+                       **({"marker": rec["marker"]} if rec.get("marker") else {}),
+                       **({"problems": broken} if broken else {})})
+        for d in rec["members"]:
+            if d not in scope:
+                continue
+            if broken:
+                quality.setdefault(d, []).append("label block broken: " + "; ".join(broken))
+            elif d in quality:
+                keep = [p for p in quality[d] if not label_blocks.is_association_problem(p)]
+                if keep:
+                    quality[d] = keep
+                else:
+                    del quality[d]
     grouped = _group_silk_violations(drc)
     attention = sorted(set(grouped) | set(quality))
     summary = {
@@ -2483,6 +2503,8 @@ async def check_silkscreen(ctx: Context, designators: list = None, preview: bool
         "quality": quality,
         "hidden": sorted(d for d in scope if d in board.components and not board.components[d].visible),
     }
+    if blocks:
+        summary["label_blocks"] = blocks
     if drc.get("missing_designators"):
         summary["missing_designators"] = drc["missing_designators"]
     text = json.dumps(summary, indent=2)
@@ -2550,7 +2572,7 @@ async def view_silkscreen(ctx: Context, designators: list = None, region: list =
         view = (focus[0] - margin, focus[1] - margin, focus[2] + margin, focus[3] + margin)
         boxes = {d: b for d, b in boxes.items()
                  if not (b[0][2] < view[0] or b[0][0] > view[2] or b[0][3] < view[1] or b[0][1] > view[3])}
-    problems = {d: p for d, p in silkscreen.evaluate(board, boxes).items() if p}
+    problems = _block_exempt(board, {d: p for d, p in silkscreen.evaluate(board, boxes).items() if p})
     png = silkscreen.render_view(board, _current_boxes(board, s), focus=focus, side=s,
                                  targets=designators or (), problems=problems,
                                  margin=margin, grid=grid_mils or None)
@@ -2583,9 +2605,11 @@ async def get_designator_options(ctx: Context, designators: list, count: int = 5
     The designators asked about are not obstacles to each other: when placing
     neighbours, check the chosen spots together with
     set_designator_positions(dry_run=True) first. When a designator has no
-    legal spot, blocked_by says what is in the way - consider moving a
-    neighbour's designator, allowing smaller text (min_height_mils), or
-    hiding it.
+    legal spot, blocked_by says what is in the way: ask again together with
+    the neighbouring designators (so they can move to make room), allow
+    smaller text (min_height_mils), or place its row's designators as a
+    block with get_label_block_options. Do not hide designators to get rid
+    of problems; only mounting holes and fiducials go without one.
 
     Args:
         designators (list): Designators to find spots for.
@@ -2660,7 +2684,9 @@ async def set_designator_positions(ctx: Context, placements: list, dry_run: bool
       of them) and offset (slide along that side, +x or +y).
     Optional on both: rotation (0/90 top, 0/270 bottom read correctly;
     default keeps a readable current rotation), height and stroke_width
-    (mils), visible (show/hide). A placement with only visible (or only
+    (mils), visible (show/hide - hide only mounting holes and fiducials;
+    designators with no room go in a label block, see
+    get_label_block_options). A placement with only visible (or only
     rotation/height) keeps the current centre.
 
     dry_run=True changes nothing: every placement is checked against silk,
@@ -2780,6 +2806,241 @@ async def set_designator_positions(ctx: Context, placements: list, dry_run: bool
     if result.get("missing_designators"):
         out["missing_designators"] = result["missing_designators"]
     return json.dumps(out, indent=2)
+
+# Label blocks applied with place_label_block, per board file, so that
+# check_silkscreen can tell a block's labels from labels that wandered off.
+# Kept in the exchange folder, never next to the board.
+SILK_BLOCKS_FILE = EXCHANGE_DIR / "silk_label_blocks.json"
+_block_options_cache = {}
+
+def _load_blocks(board_file: str) -> list:
+    try:
+        data = json.loads(SILK_BLOCKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return data.get(board_file.lower(), [])
+
+def _save_blocks(board_file: str, records: list):
+    try:
+        data = json.loads(SILK_BLOCKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data[board_file.lower()] = records
+    SILK_BLOCKS_FILE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+
+def _replaced_graphics(records: list, members: list) -> list:
+    """Link graphics of earlier blocks of these parts (placing replaces them)."""
+    return [g for r in records if set(r["members"]) & set(members) for g in r["graphics"]]
+
+def _block_members(board, designators: list) -> list:
+    """The parts of a block: one designator stands for its whole row."""
+    names = [str(d).strip() for d in designators or []]
+    missing = [d for d in names if d not in board.components]
+    if missing:
+        raise ValueError(f"not on the board: {missing}")
+    if len(names) == 1:
+        return label_blocks.find_row(board, names[0])[1]
+    return names
+
+def _block_exempt(board, problems: dict) -> dict:
+    """problems without the distance and "reads as" problems of labels in
+    intact label blocks (their link answers those)."""
+    out = dict(problems)
+    for rec in _load_blocks(board.file):
+        if label_blocks.check_record(board, rec):
+            continue
+        for d in rec["members"]:
+            if d in out:
+                keep = [p for p in out[d] if not label_blocks.is_association_problem(p)]
+                if keep:
+                    out[d] = keep
+                else:
+                    del out[d]
+    return out
+
+def _block_image(board, option) -> bytes:
+    side = option.side
+    boxes = {d: b for d, b in _current_boxes(board, side).items() if d not in option.members}
+    for d, (rect, rot, _, _) in option.labels.items():
+        boxes[d] = (rect, rot)
+    focus = label_blocks._bounds(
+        [label_blocks._bounds(board.components[d].extent for d in option.members), option.rect] +
+        [r for g in option.graphics for r in label_blocks._graphic_rects(g)])
+    return silkscreen.render_view(board, boxes, focus=focus, side=side, targets=option.members,
+                                  margin=60.0, graphics=option.graphics)
+
+@mcp.tool()
+async def get_label_block_options(ctx: Context, designators: list, count: int = 3,
+                                  min_height_mils: float = 25, max_distance_mils: float = 500,
+                                  link: str = "auto", refresh: bool = False):
+    """
+    Place a row of parts' designators together as a block, when they do not
+    fit next to their parts one by one. Use this instead of hiding
+    designators (only mounting holes and fiducials go without one).
+
+    Parts in a row get their designators in a row too, in the same order,
+    even some way off. Give one designator to use the whole row it belongs
+    to (parts side by side along x or y, similar size across the row, gaps
+    up to 50 mil), or list the parts yourself; a single part works too.
+
+    Each option is a block of labels - across the row (in line with each
+    part when the pitch allows, else side by side) or end to end along it -
+    clear of silk, mask openings, the board edge, other designators and part
+    bodies, plus a link when it is not right against the row:
+    - leader: a silk line with an arrowhead from the block to the parts;
+    - index: matching markers - a capital letter in a circle (then square,
+      then triangle) - next to the block and next to the parts.
+    Ranked: no link, then leader, then index; nearer and larger text first.
+    Apply one with place_label_block.
+
+    Args:
+        designators (list): One designator (its row is used) or the block's parts.
+        count (int): Options to return (default 3).
+        min_height_mils (float): Smallest text allowed (default 25).
+        max_distance_mils (float): Furthest the block may sit from the parts (default 500).
+        link (str): "auto" (cheapest), "none", "leader" or "index".
+        refresh (bool): Re-export the board from Altium first.
+
+    Returns:
+        JSON with the parts in order and the numbered options, plus an image
+        per option (block labels cyan with lines to their parts, link magenta).
+    """
+    if link not in ("auto", "none", "leader", "index"):
+        return json.dumps({"success": False, "error": "link must be auto, none, leader or index"})
+    try:
+        board = await _silk_board(refresh)
+        members = _block_members(board, designators)
+        records = _load_blocks(board.file)
+        used = label_blocks.used_markers(board, records)
+        axis, members, options = label_blocks.block_options(
+            board, members, count=max(1, count), min_height=min_height_mils,
+            max_distance=max_distance_mils, link=link, used_markers=used,
+            ignore=_replaced_graphics(records, members))
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    _block_options_cache[(board.file.lower(), tuple(members))] = {
+        "time": _silk_snapshot["time"], "options": options,
+        "params": dict(min_height=min_height_mils, max_distance=max_distance_mils, link=link)}
+    out = {"parts": members, "row_axis": axis,
+           "options": [o.to_dict(i) for i, o in enumerate(options, 1)]}
+    if not options:
+        out["note"] = ("no block fits; allow a longer max_distance_mils or smaller text, or move "
+                       "other designators out of the way first")
+    return [json.dumps(out, indent=2)] + [MCPImage(data=_block_image(board, o), format="png") for o in options]
+
+@mcp.tool()
+async def place_label_block(ctx: Context, designators: list, option: int = 1) -> str:
+    """
+    Apply a label block from get_label_block_options: move the parts'
+    designators into the block (shown, at the block's text size) and draw
+    its link on the silkscreen, then check both with Altium's rules. An
+    earlier block of any of these parts is replaced (its link removed).
+
+    Args:
+        designators (list): The same designators given to get_label_block_options.
+        option (int): Which option (default 1).
+
+    Returns:
+        JSON: the block's parts, link and marker, ok, and any Altium
+        violations of the labels or the link graphics.
+    """
+    try:
+        board = await _silk_board()
+        members = _block_members(board, designators)
+        axis = label_blocks.row_axis(board, members)
+        members = sorted(members, key=lambda d: label_blocks._reading_key(board.components[d], axis))
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    records = _load_blocks(board.file)
+    key = (board.file.lower(), tuple(members))
+    cached = _block_options_cache.get(key)
+    note = None
+    if cached is None or cached["time"] != _silk_snapshot["time"]:
+        params = cached["params"] if cached else {}
+        _, _, options = label_blocks.block_options(
+            board, members, count=max(3, option), used_markers=label_blocks.used_markers(board, records),
+            ignore=_replaced_graphics(records, members), **params)
+        note = "board changed since the options were listed - recomputed them"
+    else:
+        options = cached["options"]
+    if not 1 <= option <= len(options):
+        return json.dumps({"success": False, "error": f"option {option} does not exist ({len(options)} options)",
+                           "note": note})
+    opt = options[option - 1]
+
+    old = [r for r in records if set(r["members"]) & set(members)]
+    items = []
+    for r in old:
+        items += label_blocks.to_items(r["side"], r["graphics"], "-")
+    items += label_blocks.to_items(opt.side, opt.graphics, "+")
+
+    moved = json.loads(await set_designator_positions(ctx, opt.placements(), verify=False))
+    if "designators" not in moved:
+        return json.dumps({"success": False, "error": moved.get("error", "moving the labels failed")})
+    graphic_problems = []
+    if items:
+        response = await altium_bridge.execute_command(
+            "edit_silk_graphics", {"items": items, "board": board.file.replace("\\", "/")})
+        _silk_snapshot["board"] = None
+        if not response.get("success", False):
+            return json.dumps({"success": False, "error": f"labels moved, but drawing the link failed: "
+                                                          f"{response.get('error', 'Unknown error')}"})
+        result = response.get("result", {})
+        if isinstance(result, str):
+            result = json.loads(result)
+        graphic_problems = [f"{v['rule']}: {v['object']} {v.get('owner', '')} {v.get('detail', '')}".strip()
+                            for v in result.get("violations", [])]
+        if result.get("not_found"):
+            graphic_problems.append(f"old link graphics not found: {result['not_found']}")
+    try:
+        label_problems = _group_silk_violations(await _check_silk_drc(list(members)))
+    except Exception as e:
+        label_problems = {d: [f"DRC check failed: {e}"] for d in members}
+
+    records = [r for r in records if r not in old] + [label_blocks.record(opt)]
+    _save_blocks(board.file, records)
+    out = {"parts": members, "summary": opt.summary, "link": opt.link,
+           "ok": not label_problems and not graphic_problems,
+           "label_problems": label_problems, "link_problems": graphic_problems}
+    if opt.marker:
+        out["marker"] = {"letter": opt.marker[0], "shape": opt.marker[1]}
+    if old:
+        out["replaced_blocks"] = [r["members"] for r in old]
+    if note:
+        out["note"] = note
+    return json.dumps(out, indent=2)
+
+@mcp.tool()
+async def remove_label_block(ctx: Context, designators: list) -> str:
+    """
+    Remove the label block of these parts: its link graphics (leader or
+    index markers) are deleted; the designators stay where they are, ready
+    to be placed again.
+
+    Args:
+        designators (list): Any of the block's parts.
+
+    Returns:
+        JSON with the removed block's parts and link.
+    """
+    try:
+        board = await _silk_board()
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    records = _load_blocks(board.file)
+    names = {str(d).strip() for d in designators or []}
+    old = [r for r in records if names & set(r["members"])]
+    if not old:
+        return json.dumps({"success": False, "error": f"no label block holds any of {sorted(names)}"})
+    items = [i for r in old for i in label_blocks.to_items(r["side"], r["graphics"], "-")]
+    if items:
+        response = await altium_bridge.execute_command(
+            "edit_silk_graphics", {"items": items, "board": board.file.replace("\\", "/")})
+        _silk_snapshot["board"] = None
+        if not response.get("success", False):
+            return json.dumps({"success": False, "error": response.get("error", "Unknown error")})
+    _save_blocks(board.file, [r for r in records if r not in old])
+    return json.dumps({"removed": [{"parts": r["members"], "link": r["link"]} for r in old]}, indent=2)
 
 @mcp.tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):

@@ -2713,6 +2713,7 @@ end;
 //   ST|side|owner|x1|y1|x2|y2|w              silk track
 //   SA|side|owner|cx|cy|r|a1|a2|w            silk arc
 //   SX|side|owner|kind|l|b|r|t|stroke|tt|rot silk text (D designator, C comment, F free)
+//                                            free text adds |text
 //   SB|side|owner|l|b|r|t                    silk fill / region extent
 //   MP|side|owner|pin|x|y|rot|shape|xs|ys|l|b|r|t|shifted   pad solder mask opening
 //   MV|side|owner|x|y|diameter               untented via opening
@@ -2732,6 +2733,7 @@ var
     Kind      : String;
     Flag      : String;
     Flag2     : String;
+    Detail    : String;
     FileName  : String;
     S2S, S2M  : Double;
     EdgeOut   : Double;
@@ -2883,9 +2885,12 @@ begin
                         else Kind := 'F';
                         Flag := '0';
                         if Prim.UseTTFonts then Flag := '1';
+                        Detail := '';
+                        if (Kind = 'F') then
+                            Detail := '|' + StringReplace(Prim.Text, '|', '/', REPLACEALL);
                         Lines.Add('SX|' + Side + '|' + Owner + '|' + Kind + '|' +
                             SilkRectStr(Prim.BoundingRectangle, XO, YO) + '|' +
-                            SilkLen(Prim.Width) + '|' + Flag + '|' + SilkNum(Prim.Rotation));
+                            SilkLen(Prim.Width) + '|' + Flag + '|' + SilkNum(Prim.Rotation) + Detail);
                     end;
                 end;
             end
@@ -3340,6 +3345,359 @@ begin
         Result := BuildJSONObject(ResultProps);
     finally
         Targets.Free;
+        MissingArray.Free;
+        ViolationsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// Check one free silk primitive (a label-block link) with Altium's silk
+// rules, as CheckSilkscreen does for designators: one JSON violation per
+// problem, tagged with the request item it came from.
+procedure SilkGraphicViolations(Board: IPCB_Board; Prim: IPCB_Primitive; ItemIndex: Integer; ViolationsArray: TStringList);
+var
+    SIter       : IPCB_SpatialIterator;
+    Other       : IPCB_Primitive;
+    Rule        : IPCB_Rule;
+    R           : TCoordRect;
+    Margin      : Integer;
+    MaskLayer   : Integer;
+    CopperLayer : Integer;
+    RuleName    : String;
+    Owner       : String;
+    Detail      : String;
+    Skip        : Boolean;
+    VProps      : TStringList;
+begin
+    if (Prim.Layer = eTopOverlay) then
+    begin
+        MaskLayer := eTopSolder;
+        CopperLayer := eTopLayer;
+    end
+    else
+    begin
+        MaskLayer := eBottomSolder;
+        CopperLayer := eBottomLayer;
+    end;
+    Margin := MilsToCoord(30);
+    R := Prim.BoundingRectangle;
+    SIter := Board.SpatialIterator_Create;
+    SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject, eFillObject,
+                                    eRegionObject, ePadObject, eViaObject));
+    SIter.AddFilter_LayerSet(AllLayers);
+    SIter.AddFilter_Area(R.Left - Margin, R.Bottom - Margin, R.Right + Margin, R.Top + Margin);
+    Other := SIter.FirstPCBObject;
+    while (Other <> nil) do
+    begin
+        RuleName := '';
+        if (Other.I_ObjectAddress <> Prim.I_ObjectAddress) then
+        begin
+            if (Other.Layer = Prim.Layer) then
+            begin
+                Skip := False;
+                if (Other.ObjectId = eTextObject) then
+                    Skip := SilkTextHidden(Other);
+                if not Skip then
+                begin
+                    Rule := Board.FindDominantRuleForObjectPair(Prim, Other, eRule_SilkToSilkClearance);
+                    if (Rule <> nil) then
+                        if (Rule.ActualCheck(Prim, Other) <> nil) then
+                            RuleName := 'silk_to_silk';
+                end;
+            end
+            else if (((Other.ObjectId = ePadObject) and
+                      ((Other.Layer = CopperLayer) or (Other.Layer = eMultiLayer))) or
+                     (Other.ObjectId = eViaObject) or (Other.Layer = MaskLayer)) then
+            begin
+                Rule := Board.FindDominantRuleForObjectPair(Prim, Other, eRule_SilkToSolderMaskClearance);
+                if (Rule <> nil) then
+                    if (Rule.ActualCheck(Prim, Other) <> nil) or (Rule.ActualCheck(Other, Prim) <> nil) then
+                        RuleName := 'silk_to_mask';
+            end;
+        end;
+        if (RuleName <> '') then
+        begin
+            Owner := '';
+            if Other.InComponent then
+                if (Other.Component <> nil) then
+                    Owner := Other.Component.Name.Text;
+            Detail := '';
+            if (Other.ObjectId = ePadObject) then
+                Detail := Other.Name
+            else if (Other.ObjectId = eTextObject) then
+                Detail := Other.Text;
+            VProps := TStringList.Create;
+            try
+                AddJSONInteger(VProps, 'item', ItemIndex);
+                AddJSONProperty(VProps, 'rule', RuleName);
+                AddJSONProperty(VProps, 'object', Other.ObjectIDString);
+                AddJSONProperty(VProps, 'owner', Owner);
+                AddJSONProperty(VProps, 'detail', Detail);
+                ViolationsArray.Add(BuildJSONObject(VProps, 2));
+            finally
+                VProps.Free;
+            end;
+        end;
+        Other := SIter.NextPCBObject;
+    end;
+    Board.SpatialIterator_Destroy(SIter);
+
+    Rule := Board.FindDominantRuleForObject(Prim, eRule_BoardOutlineClearance);
+    if (Rule <> nil) then
+        if (Rule.ActualCheck(Prim, Board.BoardOutline) <> nil) then
+        begin
+            VProps := TStringList.Create;
+            try
+                AddJSONInteger(VProps, 'item', ItemIndex);
+                AddJSONProperty(VProps, 'rule', 'board_edge');
+                AddJSONProperty(VProps, 'object', 'Board outline');
+                AddJSONProperty(VProps, 'owner', '');
+                AddJSONProperty(VProps, 'detail', '');
+                ViolationsArray.Add(BuildJSONObject(VProps, 2));
+            finally
+                VProps.Free;
+            end;
+        end;
+end;
+
+// The free silk primitive matching a '-' item (without the '-'), or nil.
+// Tracks match by end points (either direction), arcs by centre, radius and
+// angles, text by its string and the centre of its box.
+function FindSilkGraphic(Board: IPCB_Board; Entry: String; Layer: Integer): IPCB_Primitive;
+var
+    Iterator  : IPCB_BoardIterator;
+    Prim      : IPCB_Primitive;
+    Kind      : String;
+    R         : TCoordRect;
+    Tol       : Integer;
+    X1, Y1    : Integer;
+    X2, Y2    : Integer;
+    CR        : Integer;
+    A1, A2    : Integer;
+    TextValue : String;
+    Hit       : Boolean;
+begin
+    Result := nil;
+    Tol := MilsToCoord(0.2);
+    Kind := GetFieldFromPipeString(Entry, 0);
+    X1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + Board.XOrigin;
+    Y1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + Board.YOrigin;
+    X2 := 0;
+    Y2 := 0;
+    CR := 0;
+    A1 := 0;
+    A2 := 0;
+    TextValue := '';
+    if (Kind = 'T') then
+    begin
+        X2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4)))) + Board.XOrigin;
+        Y2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5)))) + Board.YOrigin;
+    end
+    else if (Kind = 'A') then
+    begin
+        CR := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4))));
+        A1 := Round(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5))) * 100);
+        A2 := Round(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6))) * 100);
+    end
+    else
+        TextValue := GetFieldFromPipeString(Entry, 7);
+
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject));
+    Iterator.AddFilter_IPCB_LayerSet(MkSet(Layer));
+    Iterator.AddFilter_Method(eProcessAll);
+    Prim := Iterator.FirstPCBObject;
+    while (Prim <> nil) do
+    begin
+        Hit := False;
+        if not Prim.InComponent then
+        begin
+            if (Kind = 'T') and (Prim.ObjectId = eTrackObject) then
+            begin
+                if (Abs(Prim.X1 - X1) <= Tol) and (Abs(Prim.Y1 - Y1) <= Tol) and
+                   (Abs(Prim.X2 - X2) <= Tol) and (Abs(Prim.Y2 - Y2) <= Tol) then
+                    Hit := True
+                else if (Abs(Prim.X1 - X2) <= Tol) and (Abs(Prim.Y1 - Y2) <= Tol) and
+                        (Abs(Prim.X2 - X1) <= Tol) and (Abs(Prim.Y2 - Y1) <= Tol) then
+                    Hit := True;
+            end
+            else if (Kind = 'A') and (Prim.ObjectId = eArcObject) then
+            begin
+                if (Abs(Prim.XCenter - X1) <= Tol) and (Abs(Prim.YCenter - Y1) <= Tol) and
+                   (Abs(Prim.Radius - CR) <= Tol) and (Abs(Round(Prim.StartAngle * 100) - A1) <= 1) and
+                   (Abs(Round(Prim.EndAngle * 100) - A2) <= 1) then
+                    Hit := True;
+            end
+            else if (Kind = 'X') and (Prim.ObjectId = eTextObject) then
+            begin
+                if (Prim.Text = TextValue) then
+                begin
+                    R := Prim.BoundingRectangle;
+                    if (Abs((R.Left + R.Right) div 2 - X1) <= MilsToCoord(1)) and
+                       (Abs((R.Bottom + R.Top) div 2 - Y1) <= MilsToCoord(1)) then
+                        Hit := True;
+                end;
+            end;
+        end;
+        if Hit then
+        begin
+            Result := Prim;
+            Break;
+        end;
+        Prim := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// Add or remove free silkscreen graphics (the links of label blocks) in one
+// undo step. Items, coordinates in mils from the board origin:
+//   +T|side|x1|y1|x2|y2|width                   track
+//   +A|side|cx|cy|radius|start|end|width        arc (degrees, CCW; 0 to 360 = circle)
+//   +X|side|cx|cy|height|stroke|rotation|text   stroke text, box centred on cx, cy
+// The same with '-' removes the matching free primitive. Every created
+// primitive is then checked with Altium's silk rules.
+function EditSilkGraphics(ItemsList: TStringList): String;
+var
+    Board           : IPCB_Board;
+    Prim            : IPCB_Primitive;
+    CreatedList     : TStringList;
+    RemoveList      : TStringList;
+    MissingArray    : TStringList;
+    ViolationsArray : TStringList;
+    ResultProps     : TStringList;
+    Entry           : String;
+    Op              : String;
+    Kind            : String;
+    Layer           : Integer;
+    XO, YO          : Integer;
+    TX, TY          : Integer;
+    R               : TCoordRect;
+    i               : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    CreatedList := TStringList.Create;
+    RemoveList := TStringList.Create;
+    MissingArray := TStringList.Create;
+    ViolationsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        PCBServer.PreProcess;
+
+        // Removals first, so they can never match what this call creates
+        for i := 0 to ItemsList.Count - 1 do
+        begin
+            Entry := Trim(ItemsList[i]);
+            if (Copy(Entry, 1, 1) = '-') then
+            begin
+                Entry := Copy(Entry, 2, Length(Entry) - 1);
+                if (GetFieldFromPipeString(Entry, 1) = 'B') then
+                    Layer := eBottomOverlay
+                else
+                    Layer := eTopOverlay;
+                Prim := FindSilkGraphic(Board, Entry, Layer);
+                if (Prim <> nil) then
+                    RemoveList.AddObject(IntToStr(i), Prim)
+                else
+                    MissingArray.Add('"' + JSONEscapeString(Entry) + '"');
+            end;
+        end;
+        for i := 0 to RemoveList.Count - 1 do
+            Board.RemovePCBObject(RemoveList.Objects[i]);
+
+        for i := 0 to ItemsList.Count - 1 do
+        begin
+            Entry := Trim(ItemsList[i]);
+            Op := Copy(Entry, 1, 1);
+            Entry := Copy(Entry, 2, Length(Entry) - 1);
+            Kind := GetFieldFromPipeString(Entry, 0);
+            if (GetFieldFromPipeString(Entry, 1) = 'B') then
+                Layer := eBottomOverlay
+            else
+                Layer := eTopOverlay;
+            Prim := nil;
+            if (Op = '+') and (Kind = 'T') then
+            begin
+                Prim := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                Prim.Layer := Layer;
+                Prim.X1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + XO;
+                Prim.Y1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + YO;
+                Prim.X2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4)))) + XO;
+                Prim.Y2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5)))) + YO;
+                Prim.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6))));
+                Board.AddPCBObject(Prim);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+            end
+            else if (Op = '+') and (Kind = 'A') then
+            begin
+                Prim := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+                Prim.Layer := Layer;
+                Prim.XCenter := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + XO;
+                Prim.YCenter := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + YO;
+                Prim.Radius := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4))));
+                Prim.StartAngle := SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5)));
+                Prim.EndAngle := SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6)));
+                Prim.LineWidth := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 7))));
+                Board.AddPCBObject(Prim);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+            end
+            else if (Op = '+') and (Kind = 'X') then
+            begin
+                TX := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + XO;
+                TY := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + YO;
+                Prim := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+                Prim.Layer := Layer;
+                Prim.UseTTFonts := False;
+                Prim.Text := GetFieldFromPipeString(Entry, 7);
+                Prim.Size := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4))));
+                Prim.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5))));
+                Prim.MirrorFlag := (Layer = eBottomOverlay);
+                Prim.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6)));
+                Prim.XLocation := TX;
+                Prim.YLocation := TY;
+                Board.AddPCBObject(Prim);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+                // Centre its box on the target, then rebuild the stroke
+                // geometry that batch DRC uses
+                R := Prim.BoundingRectangle;
+                PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                Prim.MoveByXY(TX - (R.Left + R.Right) div 2, TY - (R.Bottom + R.Top) div 2);
+                Prim.SetState_XSizeYSize;
+                PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                Prim.GraphicallyInvalidate;
+            end
+            else if (Op <> '-') then
+                MissingArray.Add('"' + JSONEscapeString('cannot read ' + ItemsList[i]) + '"');
+            if (Prim <> nil) then
+                CreatedList.AddObject(IntToStr(i), Prim);
+        end;
+
+        PCBServer.PostProcess;
+        Board.ViewManager_FullUpdate;
+
+        for i := 0 to CreatedList.Count - 1 do
+            SilkGraphicViolations(Board, CreatedList.Objects[i], StrToInt(CreatedList[i]), ViolationsArray);
+
+        AddJSONInteger(ResultProps, 'created_count', CreatedList.Count);
+        AddJSONInteger(ResultProps, 'removed_count', RemoveList.Count);
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'not_found'))
+        else
+            ResultProps.Add('"not_found": []');
+        if (ViolationsArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(ViolationsArray, 'violations', 1))
+        else
+            ResultProps.Add('"violations": []');
+        Result := BuildJSONObject(ResultProps);
+    finally
+        CreatedList.Free;
+        RemoveList.Free;
         MissingArray.Free;
         ViolationsArray.Free;
         ResultProps.Free;

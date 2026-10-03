@@ -827,6 +827,35 @@ begin
     end;
 end;
 
+// Free silkscreen graphics (label-block links): "items" of +/- entries
+function ExecuteEditSilkGraphics(RequestData: TStringList): String;
+var
+    ItemsList: TStringList;
+    Expected: String;
+    Board: IPCB_Board;
+begin
+    Expected := RequestParam('board', '');
+    Board := GetBoardSafe(0);
+    if (Expected <> '') and (Board <> nil) then
+        if not SameBoardFile(Board.FileName, Expected) then
+        begin
+            Result := 'ERROR: The focused PCB is ' + Board.FileName + ', not ' + Expected +
+                      ', the board these graphics were computed for. Nothing was changed.';
+            Exit;
+        end;
+
+    ItemsList := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'items', ItemsList);
+        if (ItemsList.Count > 0) then
+            Result := EditSilkGraphics(ItemsList)
+        else
+            Result := 'ERROR: No items provided for edit_silk_graphics';
+    finally
+        ItemsList.Free;
+    end;
+end;
+
 // Designators to check (optional - empty means every visible designator)
 function ExecuteCheckSilkscreen(RequestData: TStringList): String;
 var
@@ -1217,6 +1246,8 @@ begin
             Result := ExportSilkscreenData(ROOT_DIR);
         'place_designators':
             Result := ExecutePlaceDesignators(RequestData);
+        'edit_silk_graphics':
+            Result := ExecuteEditSilkGraphics(RequestData);
         'check_silkscreen':
             Result := ExecuteCheckSilkscreen(RequestData);
         'auto_place_silkscreen':

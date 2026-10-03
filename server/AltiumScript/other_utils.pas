@@ -181,6 +181,7 @@ begin
        (CommandName = 'get_net_connections')                 or
        (CommandName = 'export_silkscreen_data')              or
        (CommandName = 'place_designators')                   or
+       (CommandName = 'edit_silk_graphics')                  or
        (CommandName = 'check_silkscreen')                    or
        (CommandName = 'auto_place_silkscreen')               or
        (CommandName = 'set_component_position')              or

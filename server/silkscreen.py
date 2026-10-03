@@ -325,6 +325,7 @@ class Board:
         self.components = {}
         self.silk = []        # (side, obstacle, kind, owner) - kind D/C/F for texts, '' otherwise
         self.mask = []        # (side, obstacle)
+        self.free_silk = []   # free silk primitives as drawn: (side, "T"|"A"|"X", values)
         self._parse(text)
         self.outline = self._outline_polygon()
         # A 'Layer Stack Region' reports the cutout kind but is the board
@@ -380,8 +381,12 @@ class Board:
             elif tag == "ST":
                 x1, y1, x2, y2, w = (_f(v) for v in f[3:8])
                 self.silk.append((f[1], _seg_obstacle(x1, y1, x2, y2, w / 2, SILK, f[2], "silk track"), "", f[2]))
+                if not f[2]:
+                    self.free_silk.append((f[1], "T", (x1, y1, x2, y2, w)))
             elif tag == "SA":
                 cx, cy, r, a1, a2, w = (_f(v) for v in f[3:9])
+                if not f[2]:
+                    self.free_silk.append((f[1], "A", (cx, cy, r, a1, a2, w)))
                 pts = _arc_points(cx, cy, r, a1, a2)
                 sag = r * (1 - math.cos(math.radians(10.0) / 2))
                 for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
@@ -390,6 +395,8 @@ class Board:
                 if f[3] == "D":
                     continue    # designators: obstacles come from Component.text_box
                 r = tuple(_f(v) for v in f[4:8])
+                if f[3] == "F" and not f[2] and len(f) > 11:
+                    self.free_silk.append((f[1], "X", ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2, f[11])))
                 if len(f) > 9:
                     r = ink_box(r, _f(f[8]), f[9] == "1")
                 label = {"D": "designator", "C": "comment"}.get(f[3], "silk text")
@@ -882,6 +889,11 @@ def _describe(ob, rect, clearance):
     return f"{d:.1f} mil from {what} (needs {clearance:.1f})"
 
 
+def _in_line(x, y, extent):
+    """Is the point level with the part, across or along it?"""
+    return extent[0] <= x <= extent[2] or extent[1] <= y <= extent[3]
+
+
 def quality_problems(placer, comp, rect, rot, proposals, max_gap):
     """How a label at rect reads, apart from clearances: far from its part,
     taken for another part's label, over a part body, upside down.
@@ -906,11 +918,18 @@ def quality_problems(placer, comp, rect, rot, proposals, max_gap):
         if srect is not None and _point_rect_dist((srect[0] + srect[2]) / 2, (srect[1] + srect[3]) / 2,
                                                   same.skeleton) < d_same:
             same = None
+    # A label level with its own part reads as that part's, even when a
+    # part that is not level with it is nearer (rows of labels beside a
+    # column of mixed parts)
+    lx, ly = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+    if same is not None and _in_line(lx, ly, comp.extent) and not _in_line(lx, ly, same.extent):
+        same = None
     if same is not None and d_same < d_own - band:
         found.append(f"reads as {same.designator}'s label: {same.designator} is closer")
     elif same is not None and d_same < d_own + band:
         found.append(f"ambiguous: {same.designator} is about as close")
-    elif not inside and placer.misleading(comp, gap, d_own, other, d_other, float("inf")):
+    elif (not inside and placer.misleading(comp, gap, d_own, other, d_other, float("inf"))
+          and not (_in_line(lx, ly, comp.extent) and not _in_line(lx, ly, other.extent))):
         found.append(f"away from its part and closer to {other.designator}")
     for owner, body in placer.bodies[comp.side].query(rect):
         if owner != comp.designator and _covers(body, comp.extent):
@@ -1035,13 +1054,14 @@ def _nice_step(span, lines=10):
 
 
 def render_view(board, boxes, focus=None, side="T", targets=(), problems=(), options=None,
-                max_px=1400, margin=100.0, grid=None):
+                max_px=1400, margin=100.0, grid=None, graphics=()):
     """PNG of one board side for an agent to read and pick coordinates from.
 
     Drawn: board edge, part bodies (dim), solder mask openings (copper), silk
     (white), part names at their centres (grey), designator boxes from boxes
     {des: (rect, rotation)} (yellow; problems red; targets cyan with a line to
-    their part) and numbered option boxes {des: [Candidate]} (green). A grid
+    their part), numbered option boxes {des: [Candidate]} (green) and
+    proposed silk graphics (label_blocks dicts, magenta). A grid
     with labelled lines (mils) lets positions be read off directly. focus is
     the area to show (None = whole board)."""
     from PIL import Image, ImageDraw, ImageFont
@@ -1112,6 +1132,14 @@ def render_view(board, boxes, focus=None, side="T", targets=(), problems=(), opt
         else:
             dr.rectangle(box(ob.geom), outline=(200, 200, 200))
 
+    # Free silk text (e.g. label-block markers) shows its letters
+    for s, kind, v in board.free_silk:
+        if s == side and kind == "X" and visible((v[0], v[1], v[0], v[1])):
+            f = font(min(30.0, 22 * scale))
+            px, py = pt(v[0], v[1])
+            tw = dr.textlength(v[2], font=f)
+            dr.text((px - tw / 2, py - 11 * scale), v[2], font=f, fill=(235, 235, 235))
+
     # Grid over the copper, under the labels: read coordinates off the image
     step = grid or _nice_step(max(fx1 - fx0, fy1 - fy0))
     gf = font(12)
@@ -1171,6 +1199,20 @@ def render_view(board, boxes, focus=None, side="T", targets=(), problems=(), opt
             bx, by = pt((c.extent[0] + c.extent[2]) / 2, (c.extent[1] + c.extent[3]) / 2)
             dr.line([(ax, ay), (bx, by)], fill=(60, 220, 255), width=1)
             label_box(rect, rot, des, (60, 220, 255), 2)
+
+    pink = (255, 90, 220)
+    for g in graphics:
+        lw = max(1, int(g.get("w", 4) * scale))
+        if g["kind"] == "track":
+            dr.line([pt(g["x1"], g["y1"]), pt(g["x2"], g["y2"])], fill=pink, width=lw)
+        elif g["kind"] == "arc":
+            dr.line([pt(x, y) for x, y in _arc_points(g["cx"], g["cy"], g["r"], g["a1"], g["a2"])],
+                    fill=pink, width=lw)
+        elif g["kind"] == "text":
+            f = font(g["size"] * scale)
+            tw = dr.textlength(g["text"], font=f)
+            px, py = pt(g["cx"], g["cy"])
+            dr.text((px - tw / 2, py - g["size"] * scale * 0.6), g["text"], font=f, fill=pink)
 
     many = len(options or {}) > 1
     of = font(13)
