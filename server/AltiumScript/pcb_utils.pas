@@ -3005,6 +3005,7 @@ var
     ResultProps  : TStringList;
     MissingArray : TStringList;
     PlacedArray  : TStringList;
+    MovedTexts   : TStringList;
     TextProps    : TStringList;
     XO, YO       : Integer;
     TargetX      : Integer;
@@ -3025,6 +3026,7 @@ begin
     ResultProps := TStringList.Create;
     MissingArray := TStringList.Create;
     PlacedArray := TStringList.Create;
+    MovedTexts := TStringList.Create;
 
     try
         PCBServer.PreProcess;
@@ -3090,14 +3092,7 @@ begin
                         end;
                     end;
 
-                    // Rebuild the text's stroke geometry: batch DRC checks a
-                    // cached copy that scripted moves and resizes leave stale,
-                    // reporting collisions (and missing real ones) at the old
-                    // spot until something regenerates it
-                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-                    Txt.SetState_XSizeYSize;
-                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-                    Txt.GraphicallyInvalidate;
+                    MovedTexts.AddObject(Designator, Txt);
 
                     // Report the final text box as Altium sees it
                     R := Txt.BoundingRectangle;
@@ -3121,6 +3116,19 @@ begin
         end;
 
         PCBServer.PostProcess;
+
+        // Rebuild the stroke geometry of every moved text: batch DRC checks a
+        // cached copy that scripted moves and resizes leave stale, reporting
+        // collisions (and missing real ones) at the old spot. Done after the
+        // undo group closes: inside it the rebuild does not stick.
+        for i := 0 to MovedTexts.Count - 1 do
+        begin
+            Txt := MovedTexts.Objects[i];
+            Txt.BeginModify;
+            Txt.SetState_XSizeYSize;
+            Txt.EndModify;
+            Txt.GraphicallyInvalidate;
+        end;
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
 
         AddJSONInteger(ResultProps, 'placed_count', PlacedArray.Count);
@@ -3138,6 +3146,7 @@ begin
         ResultProps.Free;
         MissingArray.Free;
         PlacedArray.Free;
+        MovedTexts.Free;
     end;
 end;
 
@@ -3696,6 +3705,18 @@ begin
         end;
 
         PCBServer.PostProcess;
+
+        // As for designators: rebuild new text geometry outside the undo group
+        for i := 0 to CreatedList.Count - 1 do
+        begin
+            Prim := CreatedList.Objects[i];
+            if (Prim.ObjectId = eTextObject) then
+            begin
+                Prim.BeginModify;
+                Prim.SetState_XSizeYSize;
+                Prim.EndModify;
+            end;
+        end;
         Board.ViewManager_FullUpdate;
 
         for i := 0 to CreatedList.Count - 1 do
