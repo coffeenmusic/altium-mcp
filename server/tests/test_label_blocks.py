@@ -143,6 +143,20 @@ class RecordTests(unittest.TestCase):
         b.free_silk.pop()
         self.assertTrue(any("missing" in p for p in lb.check_record(b, rec)))
 
+    def test_graphics_update_the_model_without_an_export(self):
+        b = ss.Board(board_text(*row_of_resistors()))
+        g, _ = lb.marker_graphics(1500, 1500, "A", "circle")
+        g.append(lb.track(1400, 1400, 1450, 1400))
+        before = len(b.silk)
+        b._parse("\n".join(lb.graphics_lines("T", g)))
+        self.assertEqual(sorted(k for _, k, _ in b.free_silk), ["A", "T", "X"])
+        self.assertGreater(len(b.silk), before)
+        rec = {"members": [], "side": "T", "labels": {}, "graphics": g}
+        self.assertEqual(lb.check_record(b, rec), [])
+        lb.drop_graphics(b, "T", g)
+        self.assertEqual(b.free_silk, [])
+        self.assertEqual(len(b.silk), before)
+
     def test_association_problems(self):
         self.assertTrue(lb.is_association_problem("93 mil from its part, in line with it"))
         self.assertTrue(lb.is_association_problem("reads as R2's label: R2 is closer"))

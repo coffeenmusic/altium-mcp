@@ -208,7 +208,9 @@ The server communicates with Altium Designer using a scripting bridge:
 
 When adding bridge code: start every routine, and its `begin` and final `end;`, at column 0, and don't let routines call each other in a cycle (the bundle has no forward declarations). `tests/test_script_bundle.py` checks the real units. The sandbox runs its script as a file too.
 
-As a backstop, the server checks Altium's USER object count before every call and refuses within 1,000 of the cap, asking for a save and restart: the user's own menu scripts still leak each time they run.
+Altium's script engine also leaks memory: every property read of a board object costs roughly 100-200 bytes that are never freed. On a 40,000-object board that is about 25 MB per silkscreen export and 50 MB per full silkscreen check, so a long session of exports grows Altium by gigabytes until it runs out of memory and dies with unsaved work. The bridge scripts read each object's properties once and skip objects early; the silkscreen tools reuse one board export for up to 15 minutes and update it themselves after their own moves and link graphics.
+
+As a backstop, the server checks Altium before every call and refuses when it is within 1,000 USER objects of the cap (the user's own menu scripts still leak each time they run) or using more than half of the machine's RAM, asking for a save and restart.
 
 ## References
 - Get scripts' project path from Jeff Collins and William Kitchen's stripped down version

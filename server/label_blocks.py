@@ -21,6 +21,7 @@ from silkscreen import SILK, MASK
 
 LINE_W = 4.0            # leader and marker line width
 ARROW = 10.0            # arrowhead stroke length
+LEADER_MAX = 250.0      # longer than this, index markers read better than a line
 MARKER_SIZE = 25.0      # marker letter height
 MARKER_STROKE = 4.0
 NEAR_GAP = 20.0         # a block this close to its row, alongside it, needs no link
@@ -162,6 +163,33 @@ def to_items(side, graphics, op="+"):
     return out
 
 
+def graphics_lines(side, graphics):
+    """Graphics as export_silkscreen_data lines, to update a board model
+    without exporting it again."""
+    out = []
+    for g in graphics:
+        if g["kind"] == "track":
+            out.append(f"ST|{side}||{g['x1']}|{g['y1']}|{g['x2']}|{g['y2']}|{g['w']}")
+        elif g["kind"] == "arc":
+            out.append(f"SA|{side}||{g['cx']}|{g['cy']}|{g['r']}|{g['a1']}|{g['a2']}|{g['w']}")
+        else:
+            w, h = _letter_size(g["text"], g["size"], g["stroke"])
+            k = g["stroke"] / 2          # Altium's box runs half a stroke past the ink
+            out.append(f"SX|{side}||F|{g['cx'] - w / 2 - k}|{g['cy'] - h / 2 - k}|{g['cx'] + w / 2 + k}|"
+                       f"{g['cy'] + h / 2 + k}|{g['stroke']}|0|{g.get('rot', 0)}|{g['text']}")
+    return out
+
+
+def drop_graphics(board, side, graphics):
+    """Remove graphics from a board model (they were deleted in Altium)."""
+    for g in graphics:
+        area = ss._inflate(_bounds(_graphic_rects(g)), 2.0)
+        board.silk = [e for e in board.silk
+                      if not (e[0] == side and not e[3] and area[0] <= e[1].bbox[0] and area[1] <= e[1].bbox[1]
+                              and e[1].bbox[2] <= area[2] and e[1].bbox[3] <= area[3])]
+        board.free_silk = [e for e in board.free_silk if not (e[0] == side and _same_graphic(g, e[1], e[2]))]
+
+
 def _graphic_rects(g):
     """Boxes covering a graphic's ink, for clearance checks. Straight tracks
     are covered by a few boxes along them so diagonals are not inflated."""
@@ -222,13 +250,13 @@ def marker_graphics(cx, cy, letter, shape):
     return g, box
 
 
-def next_marker(used):
+def next_marker(used, shape=None):
     """The first (letter, shape) not in used: letters in circles, then squares,
-    then triangles."""
-    for shape in SHAPES:
+    then triangles (or only the given shape)."""
+    for s in ([shape] if shape else SHAPES):
         for letter in LETTERS:
-            if (letter, shape) not in used:
-                return letter, shape
+            if (letter, s) not in used:
+                return letter, s
     return None
 
 
@@ -516,13 +544,16 @@ def _link(board, chk, fr, band, uv, brect, gap, side, want, used_markers, labels
             return "leader", graphics, None, LINK_COST["leader"] + W_LEADER * length, f"{length:.0f} mil leader"
         if want == "leader":
             return None, None, None, 0, ""
-    marker = next_marker(used_markers)
-    if marker is None:
-        return None, None, None, 0, ""
-    placed = _markers(chk, fr, band, brect, taken, marker)
-    if placed is None:
-        return None, None, None, 0, ""
-    return "index", placed, marker, LINK_COST["index"], f"index {marker[0]} in a {marker[1]}"
+    # Circles first; a square is smaller, a triangle bigger
+    for shape in ("circle", "square", "triangle"):
+        marker = next_marker(used_markers, shape)
+        if marker is None:
+            continue
+        placed = _markers(chk, fr, band, brect, taken, marker)
+        if placed is not None:
+            return ("index", placed, marker, LINK_COST["index"] + SHAPES.index(shape) * 5,
+                    f"index {marker[0]} in a {marker[1]}")
+    return None, None, None, 0, ""
 
 
 def _leader(chk, fr, band, brect, taken):
@@ -548,18 +579,28 @@ def _leader(chk, fr, band, brect, taken):
                 cands.append([(brect[0] - off_silk, v), (band[2] + off_mask, v)])
             else:
                 cands.append([(brect[2] + off_silk, v), (band[0] - off_mask, v)])
-    if not cands:
-        # L-shape: out of the block's end along u, then across into the row
+    if not cands and (brect[0] >= band[2] or brect[2] <= band[0]):
+        # L-shapes for a block off to one side diagonally:
+        # out of the block's end along u, then across into the row...
         vb = (brect[1] + brect[3]) / 2
+        u_start = brect[0] - off_silk if brect[0] >= band[2] else brect[2] + off_silk
+        v_end = band[3] + off_mask if vb > band[3] else band[1] - off_mask
         for u in _sweep(band[0] + w, band[2] - w):
-            if brect[0] >= band[2] or brect[2] <= band[0]:
-                u_start = brect[0] - off_silk if brect[0] >= band[2] else brect[2] + off_silk
-                v_end = band[3] + off_mask if vb > band[3] else band[1] - off_mask
-                cands.append([(u_start, vb), (u, vb), (u, v_end)])
+            cands.append([(u_start, vb), (u, vb), (u, v_end)])
+        # ...or out of the block's face across, then along into the row's end part
+        v_start = brect[1] - off_silk if vb > band[3] else brect[3] + off_silk
+        u_end = band[2] + off_mask if brect[0] >= band[2] else band[0] - off_mask
+        for v in _sweep(band[1] + w, band[3] - w):
+            for us in _sweep(brect[0] + w, brect[2] - w, 10.0)[:5]:
+                cands.append([(us, v_start), (us, v), (u_end, v)])
     best = None
     for pts in cands:
+        # Drop zero-length legs (an L whose corner meets an end)
+        pts = [p for i, p in enumerate(pts) if i == 0 or math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 0.5]
+        if len(pts) < 2:
+            continue
         length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
-        if length < 2 * ARROW or (best and length >= best[1]):
+        if length < 2 * ARROW or length > LEADER_MAX or (best and length >= best[1]):
             continue
         g = _polyline_with_arrow(fr, pts)
         if chk.graphic_legal(g, taken):
@@ -656,8 +697,8 @@ def _summary(opt, fr, band, brect, note):
 def record(option):
     """What to remember about an applied block to recognise it later."""
     return {"members": list(option.members), "side": option.side,
-            "labels": {d: [round((r[0] + r[2]) / 2, 3), round((r[1] + r[3]) / 2, 3), rot]
-                       for d, (r, rot, _, _) in option.labels.items()},
+            "labels": {d: [round((r[0] + r[2]) / 2, 3), round((r[1] + r[3]) / 2, 3), rot, h, stroke]
+                       for d, (r, rot, h, stroke) in option.labels.items()},
             "link": option.link, "graphics": option.graphics,
             "marker": list(option.marker) if option.marker else None}
 
@@ -665,7 +706,8 @@ def record(option):
 def check_record(board, rec, tol=1.5):
     """Problems with a recorded block on the board as it is now (empty = intact)."""
     problems = []
-    for d, (x, y, rot) in rec["labels"].items():
+    for d, label in rec["labels"].items():
+        x, y, rot = label[:3]
         c = board.components.get(d)
         if c is None or not c.visible:
             problems.append(f"{d} is missing or hidden")

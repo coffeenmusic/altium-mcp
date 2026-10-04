@@ -255,18 +255,40 @@ class AltiumConfig:
         
         return paths_verified
 
-# Windows caps each process's USER objects (windows, menus...) at a quota,
-# 10,000 by default. Every bridge call makes Altium create a hidden copy of
-# each form in the script projects on the user's menus and never free it
-# (measured on one machine: 14 forms, about 110 USER objects per call). At
-# the cap Altium shows errors and then crashes, losing unsaved work, so calls
-# stop while there is still room to save.
+# Two Altium resources run out over a long session, and at either limit
+# Altium fails and then crashes, losing unsaved work:
+# - USER objects (windows, menus), capped per process at 10,000 by default.
+#   Running a script PROJECT leaked about 105 per call (hidden copies of the
+#   forms of the user's menu scripts); the bridge now runs a script file,
+#   but the user's own menu scripts still leak.
+# - Memory: Altium's script engine leaks a little on every property read of
+#   a board object, about 25 MB per silkscreen export on a 40k-object board
+#   and 50 MB per full silkscreen check, and never gives it back.
+# Calls stop while there is still room to save.
 USER_OBJECT_RESERVE = 1000
+MEMORY_SHARE_LIMIT = 0.5        # of physical RAM
 
-def altium_user_objects() -> Optional[tuple]:
-    """(USER objects in use, quota) for the running Altium, or None."""
+def altium_resources() -> Optional[dict]:
+    """USER objects, their quota, private memory and the machine's RAM (MB)
+    for the running Altium, or None when it is not running."""
     import ctypes
     from ctypes import wintypes
+
+    class MemCounters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t)]
+
+    class MemStatus(ctypes.Structure):
+        _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
@@ -274,9 +296,12 @@ def altium_user_objects() -> Optional[tuple]:
             quota = int(winreg.QueryValueEx(key, "USERProcessHandleQuota")[0])
     except OSError:
         quota = 10000
-    kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
+    kernel32, user32, psapi = ctypes.windll.kernel32, ctypes.windll.user32, ctypes.windll.psapi
     kernel32.OpenProcess.restype = wintypes.HANDLE
-    used = None
+    status = MemStatus()
+    status.dwLength = ctypes.sizeof(MemStatus)
+    kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    found = None
     for pid in win32process.EnumProcesses():
         handle = kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
@@ -286,12 +311,33 @@ def altium_user_objects() -> Optional[tuple]:
             size = wintypes.DWORD(1024)
             if (kernel32.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(size))
                     and os.path.basename(name.value).upper() == "X2.EXE"):
-                # Launcher instances are short-lived; the main one has the most
-                count = user32.GetGuiResources(handle, 1)    # GR_USEROBJECTS
-                used = count if used is None else max(used, count)
+                counters = MemCounters()
+                counters.cb = ctypes.sizeof(MemCounters)
+                psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+                # Launcher instances are short-lived; the main one is the biggest
+                here = {"user_objects": user32.GetGuiResources(handle, 1),     # GR_USEROBJECTS
+                        "private_mb": counters.PrivateUsage / 2 ** 20}
+                if found is None or here["private_mb"] > found["private_mb"]:
+                    found = here
         finally:
             kernel32.CloseHandle(handle)
-    return None if used is None else (used, quota)
+    if found is not None:
+        found.update(quota=quota, ram_mb=status.ullTotalPhys / 2 ** 20)
+    return found
+
+def altium_limit_problem() -> Optional[str]:
+    """Why calling into Altium now would risk a crash, or None."""
+    r = altium_resources()
+    if r is None:
+        return None
+    if r["user_objects"] > r["quota"] - USER_OBJECT_RESERVE:
+        return (f"Altium is using {r['user_objects']} of its {r['quota']} window handles and will fail, "
+                "then crash, near the limit. Ask the user to save their work in Altium and restart it.")
+    if r["private_mb"] > MEMORY_SHARE_LIMIT * r["ram_mb"]:
+        return (f"Altium is using {r['private_mb'] / 1024:.1f} GB of memory ({r['ram_mb'] / 1024:.0f} GB in the "
+                "machine); its script engine leaks memory on every call and it will run out. Ask the user "
+                "to save their work in Altium and restart it.")
+    return None
 
 class AltiumBridge:
     def __init__(self):
@@ -313,12 +359,9 @@ class AltiumBridge:
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = 120) -> Dict[str, Any]:
         try:
-            usage = altium_user_objects()
-            if usage and usage[0] > usage[1] - USER_OBJECT_RESERVE:
-                return {"success": False, "error": (
-                    f"Altium is using {usage[0]} of its {usage[1]} window handles and will start "
-                    "failing, then crash, near the limit (each script call leaks some). Not running "
-                    f"'{command}'. Ask the user to save their work in Altium and restart it.")}
+            problem = altium_limit_problem()
+            if problem:
+                return {"success": False, "error": f"Not running '{command}': {problem}"}
 
             # Clean up any existing response file
             if RESPONSE_FILE.exists():
@@ -1237,11 +1280,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         return json.dumps({"success": False,
                            "error": f"sandbox script missing at {SANDBOX_PAS}"})
 
-    usage = altium_user_objects()
-    if usage and usage[0] > usage[1] - USER_OBJECT_RESERVE:
-        return json.dumps({"success": False, "error": (
-            f"Altium is using {usage[0]} of its {usage[1]} window handles and will crash near "
-            "the limit. Ask the user to save their work in Altium and restart it.")})
+    problem = altium_limit_problem()
+    if problem:
+        return json.dumps({"success": False, "error": problem})
 
     try:
         src = SANDBOX_PAS.read_text(encoding="utf-8")
@@ -2170,7 +2211,7 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
 # set_designator_positions are written into it, check_silkscreen always
 # refreshes it, and it is re-exported once older than SILK_SNAPSHOT_SECONDS.
 # Edits made by hand in Altium are seen after that, or with refresh=True.
-SILK_SNAPSHOT_SECONDS = 300
+SILK_SNAPSHOT_SECONDS = 900
 _silk_snapshot = {"board": None, "time": 0.0}
 
 async def _silk_board(refresh: bool = False):
@@ -2828,17 +2869,30 @@ def _save_blocks(board_file: str, records: list):
     data[board_file.lower()] = records
     SILK_BLOCKS_FILE.write_text(json.dumps(data, indent=1), encoding="utf-8")
 
+def _update_snapshot_graphics(removed_records: list, added_option):
+    """Keep the board snapshot in step with link graphics just drawn or
+    deleted, instead of exporting the whole board again (every export leaks
+    memory in Altium's script engine)."""
+    board = _silk_snapshot["board"]
+    if board is None:
+        return
+    for r in removed_records:
+        label_blocks.drop_graphics(board, r["side"], r["graphics"])
+    if added_option is not None and added_option.graphics:
+        board._parse("\n".join(label_blocks.graphics_lines(added_option.side, added_option.graphics)))
+
 def _replaced_graphics(records: list, members: list) -> list:
     """Link graphics of earlier blocks of these parts (placing replaces them)."""
     return [g for r in records if set(r["members"]) & set(members) for g in r["graphics"]]
 
-def _block_members(board, designators: list) -> list:
-    """The parts of a block: one designator stands for its whole row."""
+def _block_members(board, designators: list, whole_row: bool = True) -> list:
+    """The parts of a block: one designator stands for its whole row unless
+    whole_row is off."""
     names = [str(d).strip() for d in designators or []]
     missing = [d for d in names if d not in board.components]
     if missing:
         raise ValueError(f"not on the board: {missing}")
-    if len(names) == 1:
+    if len(names) == 1 and whole_row:
         return label_blocks.find_row(board, names[0])[1]
     return names
 
@@ -2872,7 +2926,7 @@ def _block_image(board, option) -> bytes:
 @mcp.tool()
 async def get_label_block_options(ctx: Context, designators: list, count: int = 3,
                                   min_height_mils: float = 25, max_distance_mils: float = 500,
-                                  link: str = "auto", refresh: bool = False):
+                                  link: str = "auto", whole_row: bool = True, refresh: bool = False):
     """
     Place a row of parts' designators together as a block, when they do not
     fit next to their parts one by one. Use this instead of hiding
@@ -2881,7 +2935,8 @@ async def get_label_block_options(ctx: Context, designators: list, count: int = 
     Parts in a row get their designators in a row too, in the same order,
     even some way off. Give one designator to use the whole row it belongs
     to (parts side by side along x or y, similar size across the row, gaps
-    up to 50 mil), or list the parts yourself; a single part works too.
+    up to 50 mil), or list the parts yourself. For a block of just one part
+    (its label alone, linked to it), give it with whole_row=False.
 
     Each option is a block of labels - across the row (in line with each
     part when the pitch allows, else side by side) or end to end along it -
@@ -2899,6 +2954,8 @@ async def get_label_block_options(ctx: Context, designators: list, count: int = 
         min_height_mils (float): Smallest text allowed (default 25).
         max_distance_mils (float): Furthest the block may sit from the parts (default 500).
         link (str): "auto" (cheapest), "none", "leader" or "index".
+        whole_row (bool): With one designator, use its whole row (default)
+            or just that part.
         refresh (bool): Re-export the board from Altium first.
 
     Returns:
@@ -2909,7 +2966,7 @@ async def get_label_block_options(ctx: Context, designators: list, count: int = 
         return json.dumps({"success": False, "error": "link must be auto, none, leader or index"})
     try:
         board = await _silk_board(refresh)
-        members = _block_members(board, designators)
+        members = _block_members(board, designators, whole_row)
         records = _load_blocks(board.file)
         used = label_blocks.used_markers(board, records)
         axis, members, options = label_blocks.block_options(
@@ -2929,7 +2986,8 @@ async def get_label_block_options(ctx: Context, designators: list, count: int = 
     return [json.dumps(out, indent=2)] + [MCPImage(data=_block_image(board, o), format="png") for o in options]
 
 @mcp.tool()
-async def place_label_block(ctx: Context, designators: list, option: int = 1) -> str:
+async def place_label_block(ctx: Context, designators: list, option: int = 1,
+                            whole_row: bool = True) -> str:
     """
     Apply a label block from get_label_block_options: move the parts'
     designators into the block (shown, at the block's text size) and draw
@@ -2939,6 +2997,7 @@ async def place_label_block(ctx: Context, designators: list, option: int = 1) ->
     Args:
         designators (list): The same designators given to get_label_block_options.
         option (int): Which option (default 1).
+        whole_row (bool): As given to get_label_block_options.
 
     Returns:
         JSON: the block's parts, link and marker, ok, and any Altium
@@ -2946,7 +3005,7 @@ async def place_label_block(ctx: Context, designators: list, option: int = 1) ->
     """
     try:
         board = await _silk_board()
-        members = _block_members(board, designators)
+        members = _block_members(board, designators, whole_row)
         axis = label_blocks.row_axis(board, members)
         members = sorted(members, key=lambda d: label_blocks._reading_key(board.components[d], axis))
     except Exception as e:
@@ -2981,8 +3040,8 @@ async def place_label_block(ctx: Context, designators: list, option: int = 1) ->
     if items:
         response = await altium_bridge.execute_command(
             "edit_silk_graphics", {"items": items, "board": board.file.replace("\\", "/")})
-        _silk_snapshot["board"] = None
         if not response.get("success", False):
+            _silk_snapshot["board"] = None
             return json.dumps({"success": False, "error": f"labels moved, but drawing the link failed: "
                                                           f"{response.get('error', 'Unknown error')}"})
         result = response.get("result", {})
@@ -2992,6 +3051,7 @@ async def place_label_block(ctx: Context, designators: list, option: int = 1) ->
                             for v in result.get("violations", [])]
         if result.get("not_found"):
             graphic_problems.append(f"old link graphics not found: {result['not_found']}")
+        _update_snapshot_graphics(old, opt)
     try:
         label_problems = _group_silk_violations(await _check_silk_drc(list(members)))
     except Exception as e:
@@ -3036,9 +3096,10 @@ async def remove_label_block(ctx: Context, designators: list) -> str:
     if items:
         response = await altium_bridge.execute_command(
             "edit_silk_graphics", {"items": items, "board": board.file.replace("\\", "/")})
-        _silk_snapshot["board"] = None
         if not response.get("success", False):
+            _silk_snapshot["board"] = None
             return json.dumps({"success": False, "error": response.get("error", "Unknown error")})
+        _update_snapshot_graphics(old, None)
     _save_blocks(board.file, [r for r in records if r not in old])
     return json.dumps({"removed": [{"parts": r["members"], "link": r["link"]} for r in old]}, indent=2)
 

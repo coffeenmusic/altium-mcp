@@ -2734,6 +2734,9 @@ var
     Flag      : String;
     Flag2     : String;
     Detail    : String;
+    ObjId     : Integer;
+    PrimLayer : Integer;
+    Wanted    : Boolean;
     FileName  : String;
     S2S, S2M  : Double;
     EdgeOut   : Double;
@@ -2844,16 +2847,30 @@ begin
         Prim := Iterator.FirstPCBObject;
         while (Prim <> nil) do
         begin
+            // Every property read leaks a little memory in the script engine
+            // (about 40 MB per export on a 40k-object board), so each object's
+            // kind and layer are read once, objects that produce no line are
+            // skipped before anything else is read, and the owner is read
+            // only for the rest
+            ObjId := Prim.ObjectId;
+            PrimLayer := Prim.Layer;
+            IsSilk := (PrimLayer = eTopOverlay) or (PrimLayer = eBottomOverlay);
+            IsMask := (PrimLayer = eTopSolder) or (PrimLayer = eBottomSolder);
+            Wanted := IsSilk or IsMask or (ObjId = ePadObject) or (ObjId = eViaObject) or
+                      (ObjId = eComponentBodyObject) or (ObjId = eRegionObject);
             Owner := '';
-            if Prim.InComponent then
-                if (Prim.Component <> nil) then
-                    Owner := Prim.Component.Name.Text;
+            if Wanted then
+                if Prim.InComponent then
+                begin
+                    Comp := Prim.Component;
+                    if (Comp <> nil) then
+                        Owner := Comp.Name.Text;
+                end;
+            Side := SilkSideOfLayer(PrimLayer);
 
-            Side := SilkSideOfLayer(Prim.Layer);
-            IsSilk := (Prim.Layer = eTopOverlay) or (Prim.Layer = eBottomOverlay);
-            IsMask := (Prim.Layer = eTopSolder) or (Prim.Layer = eBottomSolder);
-
-            if (Prim.ObjectId = eTrackObject) then
+            if not Wanted then
+                Side := Side        // nothing to export
+            else if (ObjId = eTrackObject) then
             begin
                 if IsSilk or IsMask then
                 begin
@@ -2864,7 +2881,7 @@ begin
                         SilkLen(Prim.Width));
                 end;
             end
-            else if (Prim.ObjectId = eArcObject) then
+            else if (ObjId = eArcObject) then
             begin
                 if IsSilk then
                     Lines.Add('SA|' + Side + '|' + Owner + '|' +
@@ -2874,7 +2891,7 @@ begin
                 else if IsMask then
                     Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
             end
-            else if (Prim.ObjectId = eTextObject) then
+            else if (ObjId = eTextObject) then
             begin
                 if IsSilk then
                 begin
@@ -2894,14 +2911,14 @@ begin
                     end;
                 end;
             end
-            else if (Prim.ObjectId = eFillObject) then
+            else if (ObjId = eFillObject) then
             begin
                 if IsSilk then
                     Lines.Add('SB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO))
                 else if IsMask then
                     Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
             end
-            else if (Prim.ObjectId = eRegionObject) then
+            else if (ObjId = eRegionObject) then
             begin
                 if (Prim.Kind = eRegionKind_BoardCutout) then
                 begin
@@ -2918,10 +2935,10 @@ begin
                 else if IsMask then
                     Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
             end
-            else if (Prim.ObjectId = ePadObject) then
+            else if (ObjId = ePadObject) then
             begin
                 // Mask opening per side (see SilkPadMaskStr)
-                if ((Prim.Layer = eTopLayer) or (Prim.Layer = eMultiLayer)) and (not Prim.IsTenting_Top) then
+                if ((PrimLayer = eTopLayer) or (PrimLayer = eMultiLayer)) and (not Prim.IsTenting_Top) then
                 begin
                     Kind := SilkPadMaskStr(Prim, eTopSolder, XO, YO);
                     if (Kind <> '') then
@@ -2930,7 +2947,7 @@ begin
                             SilkNum(Prim.Rotation) + '|' + IntToStr(Prim.TopShape) + '|' +
                             SilkLen(Prim.TopXSize) + '|' + SilkLen(Prim.TopYSize) + '|' + Kind);
                 end;
-                if ((Prim.Layer = eBottomLayer) or (Prim.Layer = eMultiLayer)) and (not Prim.IsTenting_Bottom) then
+                if ((PrimLayer = eBottomLayer) or (PrimLayer = eMultiLayer)) and (not Prim.IsTenting_Bottom) then
                 begin
                     Kind := SilkPadMaskStr(Prim, eBottomSolder, XO, YO);
                     if (Kind <> '') then
@@ -2940,7 +2957,7 @@ begin
                             SilkLen(Prim.BotXSize) + '|' + SilkLen(Prim.BotYSize) + '|' + Kind);
                 end;
             end
-            else if (Prim.ObjectId = eViaObject) then
+            else if (ObjId = eViaObject) then
             begin
                 Diameter := Prim.Size;
                 if (Prim.SolderMaskExpansion > 0) then
@@ -2952,7 +2969,7 @@ begin
                     Lines.Add('MV|B|' + Owner + '|' + SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
                         SilkLen(Diameter));
             end
-            else if (Prim.ObjectId = eComponentBodyObject) then
+            else if (ObjId = eComponentBodyObject) then
             begin
                 if (Owner <> '') then
                     Lines.Add('Y|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
