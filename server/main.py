@@ -1651,17 +1651,21 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
             COMMENT|<text>[|<visible 1/0>]   set the Comment (empty text
                                 is allowed); hidden unless visible is 1
             DESCRIPTION|<text>  set the Description
-            SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification]]
+            SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification[|font]]]
                                 add a symbol parameter, or replace one with
                                 that name. By default, visible ones without
                                 x|y go below the body's bottom-left corner,
                                 left-aligned, 100 mil apart in record order
-                                (leave x and y empty to keep that and still
-                                give a justification). justification:
+                                (leave a field empty to skip it and still
+                                give a later one). justification:
                                 bottom_left, bottom_center, bottom_right,
                                 center_left, center, center_right, top_left,
-                                top_center or top_right; omitted keeps the
-                                parameter's own.
+                                top_center or top_right. font: <font
+                                name>:<size>, e.g. "Arial:10" (resolved by
+                                name, so it works in any document). Omitted
+                                fields keep the parameter's own. A parameter
+                                the tool positions gets Autoposition off, so
+                                Altium does not move it later.
             PINPARAM|<pin number>|<name>|<value>   add (or replace) a hidden
                                 parameter on every pin with that number
             PINDESC|<pin number>|<text>   set the Description of every pin
@@ -1730,7 +1734,9 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
              symbols: [{name, description, part_count, <type counts>}]};
              dump mode: {library_name, symbol_name, description, part_count,
              comment: {text, visible}, parameters: [{name, value, visible,
-             x, y, justification}], primitives: [...]} - pins also carry
+             x, y, justification, autoposition, font: {name, size}}],
+             primitives: [...]} - x and y are where Altium holds the
+             parameter now. Pins also carry
              description, symbol_inside, symbol_inside_edge,
              symbol_outside_edge and symbol_outside (IEEE symbol names as
              PINSYMBOL takes them), and their parameters [{name, value}]

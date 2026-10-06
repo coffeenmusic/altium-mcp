@@ -858,7 +858,7 @@ end;
 //   GRAPHIC|<same entry format as create_schematic_symbol graphics>  (SYMBOL only)
 //   COMMENT|<text>[|<visible 1/0>]       set the Comment (hidden unless visible is 1)
 //   DESCRIPTION|<text>                   set the Description
-//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification]]
+//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification[|font name:size]]]
 //   PINPARAM|<pin number>|<name>|<value>
 //   PINDESC|<pin number>|<text>
 //   PINSYMBOL|<pin number>|<inside|inside_edge|outside_edge|outside>|<IEEE symbol>
@@ -2079,14 +2079,19 @@ begin
     Lib.SchIterator_Destroy(Iter);
 end;
 
-// True when a parameter belongs to Owner itself. A symbol's iterator also
-// returns its pins' parameters and, for the symbol shown in the library
-// editor, the library's own copy of its Comment.
+// True when a parameter that Owner's iterator returned belongs to Owner
+// itself. A symbol's iterator also returns its pins' parameters. While a
+// symbol is shown in the library editor, the library document holds its
+// visible parameters (their Container is the SchLib) and hands them back
+// when another symbol is shown; those still belong to the symbol.
 function IsOwnParameter(Param: ISch_Parameter; Owner: ISch_GraphicalObject): Boolean;
 begin
     Result := False;
-    if (Param.Container <> nil) then
-        Result := (Param.Container.I_ObjectAddress = Owner.I_ObjectAddress);
+    if (Param.Container = nil) then Exit;
+    if (Param.Container.I_ObjectAddress = Owner.I_ObjectAddress) then
+        Result := True
+    else if (Owner.ObjectId = eSchComponent) then
+        Result := (Param.Container.ObjectId = eSchLib);
 end;
 
 // A parameter of a symbol or a pin by name (case-insensitive), or nil
@@ -2235,8 +2240,10 @@ end;
 // Apply edit records to a symbol, as one undo step:
 //   COMMENT|<text>[|<visible 1/0>]               set the Comment (hidden unless visible is 1)
 //   DESCRIPTION|<text>                           set the Description
-//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification]]
-//                                                add or replace a symbol parameter
+//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification[|font name:size]]]
+//                                                add or replace a symbol parameter;
+//                                                one the tool positions gets
+//                                                Autoposition off, so it stays put
 //   PINPARAM|<pin number>|<name>|<value>         add or replace a hidden pin
 //                                                parameter on every pin with that number
 //   PINDESC|<pin number>|<text>                  set the Description of every pin with
@@ -2265,6 +2272,8 @@ var
     Just      : Integer;
     Sym       : Integer;
     Edge      : String;
+    FontID    : Integer;
+    FontSpec  : String;
 begin
     Result := 0;
     if (Edits.Count = 0) then Exit;
@@ -2304,6 +2313,16 @@ begin
                     Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': unknown justification ' +
                         Trim(GetFieldFromPipeString(Line, 6)) + ' for SYMPARAM ' + Name) + '"');
             end;
+            // Optional font as <name>:<size>; omitted keeps the parameter's own
+            FontID := -1;
+            FontSpec := Trim(GetFieldFromPipeString(Line, 7));
+            if (FontSpec <> '') then
+            begin
+                FontID := FontIDFromSpec(FontSpec);
+                if (FontID < 0) then
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': font ' + FontSpec +
+                        ' for SYMPARAM ' + Name + ' is not <font name>:<size>') + '"');
+            end;
             if (Trim(GetFieldFromPipeString(Line, 4)) <> '') then
             begin
                 X := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))));
@@ -2324,9 +2343,14 @@ begin
                 Param.Text := Value;
                 Param.IsHidden := not Visible;
                 Param.ShowName := False;
+                // Autoposition would let Altium re-stack the parameter away
+                // from the location given here
+                Param.Autoposition := False;
                 Param.Location := Point(X, Y);
                 if (Just >= 0) then
                     Param.Justification := Just;
+                if (FontID >= 0) then
+                    Param.FontID := FontID;
                 Comp.AddSchObject(Param);
                 SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
             end
@@ -2336,9 +2360,14 @@ begin
                 Param.Text := Value;
                 Param.IsHidden := not Visible;
                 if Visible or (Trim(GetFieldFromPipeString(Line, 4)) <> '') then
+                begin
+                    Param.Autoposition := False;
                     Param.Location := Point(X, Y);
+                end;
                 if (Just >= 0) then
                     Param.Justification := Just;
+                if (FontID >= 0) then
+                    Param.FontID := FontID;
                 SchServer.RobotManager.SendMessage(Param.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
             end;
             Result := Result + 1;
@@ -2495,6 +2524,8 @@ begin
                     AddJSONNumber(PProps, 'x', CoordToMils(Param.Location.X));
                     AddJSONNumber(PProps, 'y', CoordToMils(Param.Location.Y));
                     AddJSONProperty(PProps, 'justification', JustificationName(Param.Justification));
+                    AddJSONBoolean(PProps, 'autoposition', Param.Autoposition);
+                    PProps.Add('"font": ' + FontJSON(Param.FontID));
                     Items.Add(BuildJSONObject(PProps, 2));
                 finally
                     PProps.Free;
@@ -2601,4 +2632,44 @@ end;
 function JustificationName(Value: Integer): String;
 begin
     Result := GetFieldFromPipeString(JustificationNames(0), Value);
+end;
+
+// The font ID for '<font name>:<size>' (e.g. 'Times New Roman:9'), adding
+// the font to the font table when it is missing; -1 when the text is not of
+// that form. Fonts are always given by name and size: font IDs differ
+// between documents.
+function FontIDFromSpec(Spec: String): Integer;
+var
+    i, Cut   : Integer;
+    FontName : String;
+    SizeText : String;
+begin
+    Result := -1;
+    Cut := 0;
+    for i := 1 to Length(Spec) do
+        if (Copy(Spec, i, 1) = ':') then
+            Cut := i;
+    if (Cut < 2) then Exit;
+    FontName := Trim(Copy(Spec, 1, Cut - 1));
+    SizeText := Trim(Copy(Spec, Cut + 1, Length(Spec)));
+    if (FontName = '') or (SizeText = '') or (Length(SizeText) > 3) then Exit;
+    for i := 1 to Length(SizeText) do
+        if (Pos(Copy(SizeText, i, 1), '0123456789') = 0) then Exit;
+    if (StrToInt(SizeText) < 1) then Exit;
+    Result := SchServer.FontManager.GetFontID(StrToInt(SizeText), 0, False, False, False, False, FontName);
+end;
+
+// A font as JSON: {"name": ..., "size": ...}
+function FontJSON(FontID: Integer): String;
+var
+    Props : TStringList;
+begin
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'name', SchServer.FontManager.FontName[FontID]);
+        AddJSONInteger(Props, 'size', SchServer.FontManager.Size[FontID]);
+        Result := BuildJSONObject(Props, 3);
+    finally
+        Props.Free;
+    end;
 end;
