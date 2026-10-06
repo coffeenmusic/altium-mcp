@@ -1418,12 +1418,16 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
       component_bodies)
     - footprint_name given (exact, case-insensitive): full geometry dump -
       pads (position, rotation, layer, sizes/shape per stack, hole size/
-      type/width/rotation, plating), tracks, arcs, fills, texts, regions
-      (outline vertices). Coordinates in mils; shapes and hole types as raw
-      Altium enum ints; layers as names. 3D component bodies are listed
+      type/width/rotation, plating, paste_mode/paste_expansion,
+      mask_mode/mask_expansion, locked), tracks, arcs, fills, texts,
+      regions (outline vertices). Coordinates in mils relative to the
+      footprint origin (also for the footprint shown in the editor, which
+      Altium holds offset by the library origin); shapes and hole types as
+      raw Altium enum ints; layers as names. 3D component bodies are listed
       apart in bodies_3d, not among the primitives, so the
       create_footprints_batch round-trip is unchanged: model_file,
-      model_embedded, standoff_height and overall_height (mils), layer, and
+      model_embedded, model_x/model_y (offset from the footprint origin),
+      standoff_height and overall_height (mils), layer, and
       rotation_x/y/z (degrees) and model_z_offset (mils). The rotations and
       offset come from the saved library file (Altium's script API cannot
       return them); "placement" says so, and they are null for a body that
@@ -1484,15 +1488,35 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
             Altium enum ints, booleans as 1/0):
             FPLIB|<path to .PcbLib>   (optional first line: opens/focuses)
             FOOTPRINT|<name>|<description>
-            PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape]]
+            EDITFOOTPRINT|<name>      add MODEL3D records to an existing
+                                      footprint (never creates one; other
+                                      records under it are reported and
+                                      ignored)
+            PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape[|paste_mode|paste_expansion|mask_mode|mask_expansion]]]
+                Leave a field empty to skip it and still give a later one.
+                paste_mode/mask_mode are TMaskExpansionMode ints: 1 rule,
+                2 manual (with the expansion in mils). 0 (no mask) cannot
+                be set on a pad by script and is reported as a problem.
+                Omitted: rule. Every pad the tool creates is locked.
             TRACK|x1|y1|x2|y2|width|layer
             ARC|cx|cy|radius|start_angle|end_angle|width|layer
             FILL|x1|y1|x2|y2|rotation|layer
             TEXT|x|y|size|width|rotation|layer|mirror|ttf|text
             REGION|layer|kind|x1|y1|x2|y2|...
+            MODEL3D|<STEP file>|<layer>|<rot_x>|<rot_y>|<rot_z>|<z_offset>[|<x>|<y>[|<embed 1/0>]]
+                add a 3D body from a STEP file: rotations in degrees,
+                z_offset (model height above the board) and x|y (offset
+                from the footprint origin) in mils, embedded in the
+                library unless embed is 0. Read the result back with
+                get_footprint_primitives (bodies_3d); its rotations and
+                z offset appear only once the library is saved.
+
+    The library is left modified and unsaved; the user saves it.
 
     Returns:
-        str: JSON with created count, primitive_errors, failed names
+        str: JSON with created and edited counts, models_added,
+             primitive_errors, failed names and problems (e.g. a missing
+             model file, mask mode 0, a record EDITFOOTPRINT ignores)
     """
     logger.info(f"Creating footprints batch from {spec_file}")
 
@@ -3680,6 +3704,7 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
                 shape options: Rect (default), Round, Oval
                 Coordinates are in mm relative to component origin (0,0).
                 Pin 1 is indicated by a gap in the top-left silkscreen corner.
+                Pads are created locked.
 
     Courtyard & silkscreen are auto-generated from pad extents + 0.25 mm margin
     unless courtyard_x_mm / courtyard_y_mm are provided explicitly (half-dimensions).

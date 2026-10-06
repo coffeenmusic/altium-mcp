@@ -23,7 +23,12 @@ end;
 // as raw enum ints - symmetric with get_footprint_primitives):
 //   FPLIB|<path to .PcbLib>              (optional first line - focus/open)
 //   FOOTPRINT|<name>|<description>
-//   PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape]]
+//   EDITFOOTPRINT|<name>                 add MODEL3D records to an existing
+//                                        footprint (never creates one)
+//   PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape[|paste_mode|paste_exp|mask_mode|mask_exp]]]
+//       (mask modes are TMaskExpansionMode ints: 0 no mask, 1 rule, 2 manual;
+//        every pad created is locked)
+//   MODEL3D|<STEP file>|<layer>|<rot_x>|<rot_y>|<rot_z>|<z_offset>[|<x>|<y>[|<embed 1/0>]]
 //   TRACK|x1|y1|x2|y2|width|layer
 //   ARC|cx|cy|radius|start_angle|end_angle|width|layer
 //   FILL|x1|y1|x2|y2|rotation|layer
@@ -44,13 +49,22 @@ var
     Region      : IPCB_Region;
     Contour     : IPCB_Contour;
     Via         : IPCB_Via;
+    Body        : IPCB_ComponentBody;
+    Model       : IPCB_Model;
     Line, Kind  : String;
     LibPath     : String;
     FieldValue  : String;
+    CurMode     : String;
+    ModelPath   : String;
     CreatedCount: Integer;
+    EditedCount : Integer;
+    ModelCount  : Integer;
     PrimErrors  : Integer;
+    OX, OY      : Integer;
     i, V        : Integer;
     Matched     : Boolean;
+    Shown       : Boolean;
+    Problems    : TStringList;
 
 
 begin
@@ -63,9 +77,16 @@ begin
     Lines := TStringList.Create;
     FailedArray := TStringList.Create;
     ResultProps := TStringList.Create;
+    Problems := TStringList.Create;
     LibComp := nil;
     PcbLib := nil;
+    CurMode := '';
+    Shown := False;
+    OX := 0;
+    OY := 0;
     CreatedCount := 0;
+    EditedCount := 0;
+    ModelCount := 0;
     PrimErrors := 0;
 
     try
@@ -99,7 +120,7 @@ begin
                         Exit;
                     end;
                 end
-                else if (Kind = 'FOOTPRINT') then
+                else if (Kind = 'FOOTPRINT') or (Kind = 'EDITFOOTPRINT') then
                 begin
                     PcbLib := GetPcbLibSafe(0);
                     // Focus can drift between chunks - retry via the opened
@@ -116,13 +137,89 @@ begin
                         Result := 'ERROR: No PCB library document is active';
                         Exit;
                     end;
-                    LibComp := PCBServer.CreatePCBLibComp;
-                    LibComp.Name := Trim(GetFieldFromPipeString(Line, 1));
-                    LibComp.Description := GetFieldFromPipeString(Line, 2);
-                    PcbLib.RegisterComponent(LibComp);
-                    PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
-                    CreatedCount := CreatedCount + 1;
+                    CurMode := Kind;
+                    OX := 0;
+                    OY := 0;
+                    Shown := False;
+                    if (Kind = 'EDITFOOTPRINT') then
+                    begin
+                        LibComp := FindLibFootprint(PcbLib, Trim(GetFieldFromPipeString(Line, 1)));
+                        if (LibComp = nil) then
+                        begin
+                            FailedArray.Add('"' + JSONEscapeString(Trim(GetFieldFromPipeString(Line, 1))) + '"');
+                            Problems.Add('"' + JSONEscapeString(Trim(GetFieldFromPipeString(Line, 1)) +
+                                ': not in the library (EDITFOOTPRINT never creates a footprint)') + '"');
+                        end
+                        else
+                        begin
+                            EditedCount := EditedCount + 1;
+                            // The library board holds the footprint shown in
+                            // the editor, in library coordinates (offset by the
+                            // library origin), and writes it back to the
+                            // footprint when another one is shown
+                            if (PcbLib.CurrentComponent <> nil) then
+                                if (PcbLib.CurrentComponent.I_ObjectAddress = LibComp.I_ObjectAddress) then
+                                begin
+                                    Shown := True;
+                                    OX := PcbLib.Board.XOrigin;
+                                    OY := PcbLib.Board.YOrigin;
+                                end;
+                        end;
+                    end
+                    else
+                    begin
+                        LibComp := PCBServer.CreatePCBLibComp;
+                        LibComp.Name := Trim(GetFieldFromPipeString(Line, 1));
+                        LibComp.Description := GetFieldFromPipeString(Line, 2);
+                        PcbLib.RegisterComponent(LibComp);
+                        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
+                        CreatedCount := CreatedCount + 1;
+                    end;
                 end
+                else if (LibComp <> nil) and (Kind = 'MODEL3D') then
+                begin
+                    ModelPath := Trim(GetFieldFromPipeString(Line, 1));
+                    if not FileExists(ModelPath) then
+                        Problems.Add('"' + JSONEscapeString(LibComp.Name + ': 3D model file not found: ' + ModelPath) + '"')
+                    else
+                    begin
+                        Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+                        Model := Body.ModelFactory_FromFilename(ModelPath, False);
+                        if (Model = nil) then
+                            Problems.Add('"' + JSONEscapeString(LibComp.Name + ': could not load 3D model ' + ModelPath) + '"')
+                        else
+                        begin
+                            // Embedded unless the embed field is 0
+                            if (Trim(GetFieldFromPipeString(Line, 9)) = '0') then
+                                Model.Embed := False;
+                            Model.SetState(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))),
+                                           SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))),
+                                           SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5))),
+                                           MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 6)))));
+                            Body.Model := Model;
+                            Body.SetState_FromModel;
+                            Body.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 2)));
+                            Body.MoveByXY(OX + MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 7)))),
+                                          OY + MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 8)))));
+                            // Added to the footprint itself, a body for the
+                            // shown footprint is lost when another is shown
+                            if Shown then
+                            begin
+                                PcbLib.Board.AddPCBObject(Body);
+                                PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+                            end
+                            else
+                            begin
+                                LibComp.AddPCBObject(Body);
+                                PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+                            end;
+                            ModelCount := ModelCount + 1;
+                        end;
+                    end;
+                end
+                else if (LibComp <> nil) and (CurMode = 'EDITFOOTPRINT') and (Kind <> '') then
+                    Problems.Add('"' + JSONEscapeString('line ' + IntToStr(i + 1) + ': ' + Kind +
+                        ' is ignored - only MODEL3D can be added to an existing footprint') + '"')
                 else if (LibComp <> nil) and (Kind = 'PAD') then
                 begin
                     Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
@@ -158,8 +255,16 @@ begin
                         Pad.BotYSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 20))));
                         Pad.BotShape := StrToInt(Trim(GetFieldFromPipeString(Line, 21)));
                     end;
+                    // Paste and solder mask expansion; omitted keeps the
+                    // default (rule)
+                    FieldValue := SetPadMaskExpansion(Pad, Trim(GetFieldFromPipeString(Line, 22)), Trim(GetFieldFromPipeString(Line, 23)),
+                                                      Trim(GetFieldFromPipeString(Line, 24)), Trim(GetFieldFromPipeString(Line, 25)));
+                    if (FieldValue <> '') then
+                        Problems.Add('"' + JSONEscapeString(LibComp.Name + ' pad ' + Pad.Name + ': ' + FieldValue) + '"');
                     // Rotation last: it rotates the pad about its location
                     Pad.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4)));
+                    // Every pad the tool creates is locked
+                    Pad.Moveable := False;
                     LibComp.AddPCBObject(Pad);
                     PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
                 end
@@ -259,21 +364,28 @@ begin
             PcbLib.CurrentComponent := LibComp;
             PcbLib.Board.ViewManager_FullUpdate;
         end;
-        if (CreatedCount > 0) and (PcbLib <> nil) then
+        if (CreatedCount + EditedCount > 0) and (PcbLib <> nil) then
             MarkDocumentModified(PcbLib.Board.FileName);
 
         AddJSONInteger(ResultProps, 'created', CreatedCount);
+        AddJSONInteger(ResultProps, 'edited', EditedCount);
+        AddJSONInteger(ResultProps, 'models_added', ModelCount);
         AddJSONInteger(ResultProps, 'primitive_errors', PrimErrors);
         if (FailedArray.Count > 0) then
             ResultProps.Add(BuildJSONArray(FailedArray, 'failed'))
         else
             ResultProps.Add('"failed": []');
+        if (Problems.Count > 0) then
+            ResultProps.Add(BuildJSONArray(Problems, 'problems'))
+        else
+            ResultProps.Add('"problems": []');
 
         Result := BuildJSONObject(ResultProps);
     finally
         Lines.Free;
         FailedArray.Free;
         ResultProps.Free;
+        Problems.Free;
     end;
 end;
 
@@ -304,6 +416,7 @@ var
     BodiesArray : TStringList;
     BodyProps   : TStringList;
     Model       : IPCB_Model;
+    OX, OY      : Integer;
 begin
     Result := '';
 
@@ -394,6 +507,18 @@ begin
                     AddJSONProperty(FPProps, 'footprint_name', LibComp.Name);
                     AddJSONProperty(FPProps, 'description', LibComp.Description);
 
+                    // The footprint shown in the editor is held in library
+                    // coordinates, offset by the library origin; report every
+                    // footprint relative to its own origin
+                    OX := 0;
+                    OY := 0;
+                    if (PcbLib.CurrentComponent <> nil) then
+                        if (PcbLib.CurrentComponent.I_ObjectAddress = LibComp.I_ObjectAddress) then
+                        begin
+                            OX := PcbLib.Board.XOrigin;
+                            OY := PcbLib.Board.YOrigin;
+                        end;
+
                     GrpIter := LibComp.GroupIterator_Create;
                     Prim := GrpIter.FirstPCBObject;
                     while (Prim <> nil) do
@@ -408,8 +533,8 @@ begin
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'pad');
                                     AddJSONProperty(PrimProps, 'name', Prim.Name);
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y));
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x - OX));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y - OY));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
                                     AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
                                     AddJSONBoolean(PrimProps, 'plated', Prim.Plated);
@@ -432,22 +557,27 @@ begin
                                     end;
                                     if (Prim.TopShape = eRoundedRectangular) then
                                         AddJSONInteger(PrimProps, 'corner_pct', Prim.StackCRPctOnLayer[eTopLayer]);
+                                    AddJSONInteger(PrimProps, 'paste_mode', Prim.PasteMaskExpansionMode);
+                                    AddJSONNumber(PrimProps, 'paste_expansion', CoordToMils(Prim.PasteMaskExpansion));
+                                    AddJSONInteger(PrimProps, 'mask_mode', Prim.SolderMaskExpansionMode);
+                                    AddJSONNumber(PrimProps, 'mask_expansion', CoordToMils(Prim.SolderMaskExpansion));
+                                    AddJSONBoolean(PrimProps, 'locked', not Prim.Moveable);
                                 end;
                                 eTrackObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'track');
-                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1));
-                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1));
-                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2));
-                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2));
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1 - OX));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1 - OY));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2 - OX));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2 - OY));
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
                                     AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
                                 end;
                                 eArcObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'arc');
-                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.XCenter));
-                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.YCenter));
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.XCenter - OX));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.YCenter - OY));
                                     AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
                                     AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
                                     AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
@@ -457,10 +587,10 @@ begin
                                 eFillObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'fill');
-                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1Location));
-                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1Location));
-                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2Location));
-                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2Location));
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1Location - OX));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1Location - OY));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2Location - OX));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2Location - OY));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
                                     AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
                                 end;
@@ -468,8 +598,8 @@ begin
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'text');
                                     AddJSONProperty(PrimProps, 'text', Prim.Text);
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.XLocation));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.YLocation));
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.XLocation - OX));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.YLocation - OY));
                                     AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
@@ -488,8 +618,8 @@ begin
                                         begin
                                             PProps := TStringList.Create;
                                             try
-                                                AddJSONNumber(PProps, 'x', CoordToMils(Prim.MainContour.x[V]));
-                                                AddJSONNumber(PProps, 'y', CoordToMils(Prim.MainContour.y[V]));
+                                                AddJSONNumber(PProps, 'x', CoordToMils(Prim.MainContour.x[V] - OX));
+                                                AddJSONNumber(PProps, 'y', CoordToMils(Prim.MainContour.y[V] - OY));
                                                 PointsArray.Add(BuildJSONObject(PProps, 3));
                                             finally
                                                 PProps.Free;
@@ -504,8 +634,8 @@ begin
                                 eViaObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'via');
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y));
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x - OX));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y - OY));
                                     AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
                                     AddJSONNumber(PrimProps, 'hole_size', CoordToMils(Prim.HoleSize));
                                     AddJSONProperty(PrimProps, 'low_layer', Layer2String(Prim.LowLayer));
@@ -529,6 +659,8 @@ begin
                                         begin
                                             AddJSONProperty(BodyProps, 'model_file', Model.FileName);
                                             AddJSONBoolean(BodyProps, 'model_embedded', Model.Embed);
+                                            AddJSONNumber(BodyProps, 'model_x', CoordToMils(Model.Origin.X - OX));
+                                            AddJSONNumber(BodyProps, 'model_y', CoordToMils(Model.Origin.Y - OY));
                                         end
                                         else
                                             AddJSONProperty(BodyProps, 'model_file', '');
@@ -1968,6 +2100,8 @@ begin
             Pad.TopXSize := MMsToCoord(WMM);
             Pad.TopYSize := MMsToCoord(HMM);
             Pad.TopShape := PadShape;
+            // Every pad the tool creates is locked
+            Pad.Moveable := False;
 
             LibComp.AddPCBObject(Pad);
             PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
@@ -3793,4 +3927,66 @@ begin
         ViolationsArray.Free;
         ResultProps.Free;
     end;
+end;
+
+// The footprint with this name in a PCB library (case-insensitive), or nil
+function FindLibFootprint(PcbLib: IPCB_Library; Name: String): IPCB_LibComponent;
+var
+    Iter : IPCB_LibraryIterator;
+    Comp : IPCB_LibComponent;
+begin
+    Result := nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Iter.SetState_FilterAll;
+    Comp := Iter.FirstPCBObject;
+    while (Comp <> nil) do
+    begin
+        if (UpperCase(Comp.Name) = UpperCase(Name)) then
+        begin
+            Result := Comp;
+            Break;
+        end;
+        Comp := Iter.NextPCBObject;
+    end;
+    PcbLib.LibraryIterator_Destroy(Iter);
+end;
+
+// Set a pad's paste and solder mask expansion before it is added to a
+// footprint. Modes are TMaskExpansionMode ints as text (0 no mask, 1 rule,
+// 2 manual), expansions in mils; '' leaves that setting alone. A manual
+// expansion goes through the pad cache: the PasteMaskExpansion and
+// SolderMaskExpansion setters stop the script. Mode 0 (no mask) cannot be set
+// on a pad by script: neither mode setter accepts it, and PasteMaskEnabled
+// and tenting are not kept. The result is then a problem to report,
+// otherwise ''.
+function SetPadMaskExpansion(Pad: IPCB_Pad; PasteMode, PasteExp, MaskMode, MaskExp: String): String;
+var
+    PadCache : IDispatch;
+begin
+    Result := '';
+    if ((PasteMode = '2') and (PasteExp <> '')) or ((MaskMode = '2') and (MaskExp <> '')) then
+    begin
+        PadCache := Pad.GetState_Cache;
+        if (PasteMode = '2') and (PasteExp <> '') then
+        begin
+            PadCache.PasteMaskExpansion := MilsToCoord(SafeStrToFloat(PasteExp));
+            PadCache.PasteMaskExpansionValid := eCacheManual;
+        end;
+        if (MaskMode = '2') and (MaskExp <> '') then
+        begin
+            PadCache.SolderMaskExpansion := MilsToCoord(SafeStrToFloat(MaskExp));
+            PadCache.SolderMaskExpansionValid := eCacheManual;
+        end;
+        Pad.SetState_Cache(PadCache);
+    end;
+    if (PasteMode = '1') then
+        Pad.PasteMaskExpansionMode := 1;
+    if (MaskMode = '1') then
+        Pad.SolderMaskExpansionMode := 1;
+    if (PasteMode = '0') and (MaskMode = '0') then
+        Result := 'paste and solder mask mode 0 (no mask) cannot be set on a pad by script; left at rule'
+    else if (PasteMode = '0') then
+        Result := 'paste mask mode 0 (no mask) cannot be set on a pad by script; left at rule'
+    else if (MaskMode = '0') then
+        Result := 'solder mask mode 0 (no mask) cannot be set on a pad by script; left at rule';
 end;
