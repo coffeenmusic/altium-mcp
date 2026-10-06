@@ -856,7 +856,7 @@ end;
 //   EDITSYMBOL|<name>                    start editing an existing symbol
 //   PIN|<same fields as create_schematic_symbol pins>      (SYMBOL only)
 //   GRAPHIC|<same entry format as create_schematic_symbol graphics>  (SYMBOL only)
-//   COMMENT|<text>                       set the Comment and hide it
+//   COMMENT|<text>[|<visible 1/0>]       set the Comment (hidden unless visible is 1)
 //   DESCRIPTION|<text>                   set the Description
 //   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y]
 //   PINPARAM|<pin number>|<name>|<value>
@@ -1622,8 +1622,9 @@ begin
     LibRef := Comp.LibReference;
 
     // Prefer a record harvested from a part in the SAME pose. Its offsets are
-    // then literal - the house style puts a horizontal resistor's four fields
-    // at the four corners, which is not a stack and must not be re-flowed.
+    // then literal - a reference sheet may put a horizontal resistor's four
+    // fields at the four corners, which is not a stack and must not be
+    // re-flowed.
     ExactPose := False;
     Found := False;
     MaxDy := -999999;
@@ -1670,10 +1671,10 @@ begin
                 AnchorX := CoordToMils(Comp.Location.X) + StrToInt(GetFieldFromPipeString(Rec, 4));
                 TextY   := CoordToMils(Comp.Location.Y) + StrToInt(GetFieldFromPipeString(Rec, 5));
 
-                // ...unless the anchor lands ON the body. RES-DISCRETE offsets
-                // (-100 / +600) sit clear of its body and give the four-corner
-                // house layout; CAP-NP uses dx=0, which for a rotated cap is
-                // the middle of the plates. Push those clear, keeping dy.
+                // ...unless the anchor lands ON the body. Offsets such as a
+                // resistor's -100 / +600 sit clear of its body; dx=0 on a
+                // rotated capacitor is the middle of its plates. Push those
+                // clear, keeping dy.
                 if (AnchorX >= BodyL) and (AnchorX <= BodyR) then
                     if (Just = 2) or (Just = 5) or (Just = 8) then
                         AnchorX := BodyL - 50
@@ -2102,10 +2103,11 @@ begin
     Owner.SchIterator_Destroy(Iter);
 end;
 
-// Set a symbol's Comment and hide it. The library editor keeps its own copy
-// of the Comment of the symbol it shows and writes that copy back to the
-// symbol when it shows another one, so for that symbol the copy is set too.
-procedure SetSymbolComment(Lib: ISch_Lib; Comp: ISch_Component; Text: String);
+// Set a symbol's Comment and whether it is visible. The library editor
+// keeps its own copy of the Comment of the symbol it shows and writes that
+// copy back to the symbol when it shows another one, so for that symbol the
+// copy is set too.
+procedure SetSymbolComment(Lib: ISch_Lib; Comp: ISch_Component; Text: String; Visible: Boolean);
 var
     Iter : ISch_Iterator;
     LibCopy : ISch_Parameter;
@@ -2113,7 +2115,7 @@ var
 begin
     SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_BeginModify, c_NoEventData);
     Comp.Comment.Text := Text;
-    Comp.Comment.IsHidden := True;
+    Comp.Comment.IsHidden := not Visible;
     SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
 
     if (Lib.CurrentSchComponent = nil) then Exit;
@@ -2132,7 +2134,7 @@ begin
     if (LibCopy = nil) then Exit;
     SchServer.RobotManager.SendMessage(LibCopy.I_ObjectAddress, c_BroadCast, SCHM_BeginModify, c_NoEventData);
     LibCopy.Text := Text;
-    LibCopy.IsHidden := True;
+    LibCopy.IsHidden := not Visible;
     SchServer.RobotManager.SendMessage(LibCopy.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
 end;
 
@@ -2223,13 +2225,13 @@ begin
 end;
 
 // Apply edit records to a symbol, as one undo step:
-//   COMMENT|<text>                               set the Comment and hide it
+//   COMMENT|<text>[|<visible 1/0>]               set the Comment (hidden unless visible is 1)
 //   DESCRIPTION|<text>                           set the Description
 //   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y]  add or replace a symbol parameter
 //   PINPARAM|<pin number>|<name>|<value>         add or replace a hidden pin
 //                                                parameter on every pin with that number
-// Visible symbol parameters without x|y go below the body's bottom-left
-// corner, 100 mil apart, in record order. Problems (e.g. no pin with that
+// By default, visible symbol parameters without x|y go below the body's
+// bottom-left corner, 100 mil apart, in record order. Problems (e.g. no pin with that
 // number) are added to Problems as JSON strings. Returns the records applied.
 function ApplySymbolEdits(Lib: ISch_Lib; Comp: ISch_Component; Edits: TStringList; Problems: TStringList): Integer;
 var
@@ -2259,7 +2261,9 @@ begin
         Kind := UpperCase(Trim(GetFieldFromPipeString(Line, 0)));
         if (Kind = 'COMMENT') then
         begin
-            SetSymbolComment(Lib, Comp, GetFieldFromPipeString(Line, 1));
+            // Hidden unless the optional visible field is 1
+            SetSymbolComment(Lib, Comp, GetFieldFromPipeString(Line, 1),
+                             Trim(GetFieldFromPipeString(Line, 2)) = '1');
             Result := Result + 1;
         end
         else if (Kind = 'DESCRIPTION') then

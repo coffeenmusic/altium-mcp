@@ -1649,20 +1649,18 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
             EDITSYMBOL|<name>   edit an existing symbol instead (its pins
                                 and graphics are left alone; a missing
                                 symbol is reported as failed, never created)
-            COMMENT|<text>      set the Comment ("" for empty) and hide it
+            COMMENT|<text>[|<visible 1/0>]   set the Comment (empty text
+                                is allowed); hidden unless visible is 1
             DESCRIPTION|<text>  set the Description
             SYMPARAM|<name>|<value>|<visible 1/0>[|x|y]   add a symbol
                                 parameter, or replace one with that name.
-                                Visible ones without x|y go below the
-                                body's bottom-left corner, left-aligned,
-                                100 mil apart in record order.
+                                By default, visible ones without x|y go
+                                below the body's bottom-left corner,
+                                left-aligned, 100 mil apart in record order.
             PINPARAM|<pin number>|<name>|<value>   add (or replace) a hidden
                                 parameter on every pin with that number
             Each SYMBOL or EDITSYMBOL line starts a new symbol; the other
-            records belong to the most recent one. Neoventus symbols get:
-            COMMENT| (empty), SYMPARAM|VALUE|VALUE|1,
-            SYMPARAM|PKG_STYLE|PKG_STL|1, SYMPARAM|PLACE|YES|0, and the
-            description ".Description".
+            records belong to the most recent one.
 
     Every created or edited symbol is one undo step and marks the library
     as modified; nothing is saved - the user saves the library.
