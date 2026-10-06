@@ -217,9 +217,7 @@ begin
             // Look for component name
             if (Pos('"symbol_name"', RequestData[i]) > 0) then
             begin
-                ValueStart := Pos(':', RequestData[i]) + 1;
-                ComponentName := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                ComponentName := TrimJSON(ComponentName);
+                ComponentName := JSONLineValue(RequestData[i]);
             end
             // Look for part_count
             else if (Pos('"part_count"', RequestData[i]) > 0) then
@@ -275,7 +273,7 @@ begin
             begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                ParamValue := TrimJSON(ParamValue);
+                ParamValue := JSONLineValue(RequestData[i]);
                 PinsList.Add('Description=' + ParamValue);
             end;
         end;
@@ -516,13 +514,13 @@ begin
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            LibraryPath := TrimJSON(ParamValue);
+            LibraryPath := JSONLineValue(RequestData[i]);
         end
         else if (Pos('"footprint_name"', RequestData[i]) > 0) then
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            FootprintName := TrimJSON(ParamValue);
+            FootprintName := JSONLineValue(RequestData[i]);
         end;
     end;
 
@@ -544,7 +542,7 @@ begin
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            SpecFile := TrimJSON(ParamValue);
+            SpecFile := JSONLineValue(RequestData[i]);
         end;
     end;
 
@@ -570,8 +568,7 @@ begin
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            SpecFile := ParamValue;
+            SpecFile := JSONLineValue(RequestData[i]);
         end;
     end;
 
@@ -600,16 +597,14 @@ begin
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            LibraryPath := ParamValue;
+            LibraryPath := JSONLineValue(RequestData[i]);
         end
         // Look for symbol_name
         else if (Pos('"symbol_name"', RequestData[i]) > 0) then
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            SymbolName := ParamValue;
+            SymbolName := JSONLineValue(RequestData[i]);
         end;
     end;
 
@@ -1004,8 +999,7 @@ begin
         begin
             // Found the outjob_path parameter
             ParamValue := Copy(RequestData[i], Pos(':', RequestData[i]) + 1, Length(RequestData[i]));
-            ParamValue := TrimJSON(ParamValue);
-            OutJobPath := ParamValue;
+            OutJobPath := JSONLineValue(RequestData[i]);
             break;
         end;
     end;
@@ -1085,12 +1079,12 @@ begin
             if (Pos('"footprint_name"', RequestData[i]) > 0) then
             begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
-                FootprintName := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+                FootprintName := JSONLineValue(RequestData[i]);
             end
             else if (Pos('"description"', RequestData[i]) > 0) then
             begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
-                Description := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+                Description := JSONLineValue(RequestData[i]);
             end
             else if (Pos('"courtyard_x_mm"', RequestData[i]) > 0) then
             begin
@@ -1148,16 +1142,14 @@ begin
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            LibraryPath := ParamValue;
+            LibraryPath := JSONLineValue(RequestData[i]);
         end
         // Look for symbol_name
         else if (Pos('"symbol_name"', RequestData[i]) > 0) then
         begin
             ValueStart := Pos(':', RequestData[i]) + 1;
             ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ParamValue := TrimJSON(ParamValue);
-            SymbolName := ParamValue;
+            SymbolName := JSONLineValue(RequestData[i]);
         end;
     end;
 
@@ -1306,9 +1298,9 @@ begin
     ValueStart := Pos(':', Line) + 1;
     ParamValue := Copy(Line, ValueStart, Length(Line) - ValueStart + 1);
 
-    // Trim only if it's not an array
+    // Decode it only if it's not an array (keeps commas, decodes escapes)
     if (Pos('[', ParamValue) = 0) then
-        ParamValue := TrimJSON(ParamValue);
+        ParamValue := JSONLineValue(Line);
 
     // Add to parameters list
     if (ParamName <> '') and (ParamName <> 'command') then

@@ -50,6 +50,7 @@ var
     CreatedCount: Integer;
     PrimErrors  : Integer;
     i, V        : Integer;
+    Matched     : Boolean;
 
 
 begin
@@ -63,11 +64,16 @@ begin
     FailedArray := TStringList.Create;
     ResultProps := TStringList.Create;
     LibComp := nil;
+    PcbLib := nil;
     CreatedCount := 0;
     PrimErrors := 0;
 
     try
         Lines.LoadFromFile(SpecFilePath);
+
+        // One undo step for the whole batch; this is also what marks the
+        // library as modified (the user saves it)
+        PCBServer.PreProcess;
 
         for i := 0 to Lines.Count - 1 do
         begin
@@ -77,18 +83,20 @@ begin
             try
                 if (Kind = 'FPLIB') then
                 begin
-                    LibPath := GetFieldFromPipeString(Line, 1);
-                    if (LibPath <> '') and FileExists(LibPath) then
+                    // Stop unless that library is now the focused one -
+                    // never work on whatever else is focused
+                    LibPath := Trim(GetFieldFromPipeString(Line, 1));
+                    if FileExists(LibPath) then
+                        ServerDoc := OpenLibraryDocument('PcbLib', LibPath);
+                    PcbLib := GetPcbLibSafe(0);
+                    Matched := False;
+                    if (PcbLib <> nil) then
+                        Matched := (NormalizedPath(PcbLib.Board.FileName) = NormalizedPath(LibPath));
+                    if not Matched then
                     begin
-                        if Client.IsDocumentOpen(LibPath) then
-                            ServerDoc := Client.GetDocumentByPath(LibPath)
-                        else
-                            ServerDoc := Client.OpenDocument('PcbLib', LibPath);
-                        if (ServerDoc <> Nil) then
-                        begin
-                            Client.ShowDocument(ServerDoc);
-                            Sleep(500);
-                        end;
+                        PCBServer.PostProcess;
+                        Result := 'ERROR: Could not open and focus ' + LibPath + ' - nothing was created';
+                        Exit;
                     end;
                 end
                 else if (Kind = 'FOOTPRINT') then
@@ -104,6 +112,7 @@ begin
                     end;
                     if (PcbLib = nil) then
                     begin
+                        PCBServer.PostProcess;
                         Result := 'ERROR: No PCB library document is active';
                         Exit;
                     end;
@@ -111,6 +120,7 @@ begin
                     LibComp.Name := Trim(GetFieldFromPipeString(Line, 1));
                     LibComp.Description := GetFieldFromPipeString(Line, 2);
                     PcbLib.RegisterComponent(LibComp);
+                    PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
                     CreatedCount := CreatedCount + 1;
                 end
                 else if (LibComp <> nil) and (Kind = 'PAD') then
@@ -151,7 +161,7 @@ begin
                     // Rotation last: it rotates the pad about its location
                     Pad.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4)));
                     LibComp.AddPCBObject(Pad);
-                    PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'TRACK') then
                 begin
@@ -163,7 +173,7 @@ begin
                     Track.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5))));
                     Track.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
                     LibComp.AddPCBObject(Track);
-                    PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'ARC') then
                 begin
@@ -176,7 +186,7 @@ begin
                     Arc.LineWidth := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 6))));
                     Arc.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 7)));
                     LibComp.AddPCBObject(Arc);
-                    PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Arc.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'FILL') then
                 begin
@@ -188,7 +198,7 @@ begin
                     Fill.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
                     Fill.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
                     LibComp.AddPCBObject(Fill);
-                    PCBServer.SendMessageToRobots(Fill.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Fill.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'VIA') then
                 begin
@@ -200,7 +210,7 @@ begin
                     Via.LowLayer := String2Layer(Trim(GetFieldFromPipeString(Line, 5)));
                     Via.HighLayer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
                     LibComp.AddPCBObject(Via);
-                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Via.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'REGION') then
                 begin
@@ -217,7 +227,7 @@ begin
                     Region.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 1)));
                     Region.Kind := StrToInt(Trim(GetFieldFromPipeString(Line, 2)));
                     LibComp.AddPCBObject(Region);
-                    PCBServer.SendMessageToRobots(Region.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Region.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'TEXT') then
                 begin
@@ -234,7 +244,7 @@ begin
                     Text.Text := StringReplace(GetFieldFromPipeString(Line, 9), '<NL>', #13#10, REPLACEALL);
                     Text.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
                     LibComp.AddPCBObject(Text);
-                    PCBServer.SendMessageToRobots(Text.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Text.I_ObjectAddress);
                 end;
             except
                 PrimErrors := PrimErrors + 1;
@@ -242,6 +252,15 @@ begin
                     FailedArray.Add('"' + JSONEscapeString(Trim(GetFieldFromPipeString(Line, 1))) + '"');
             end;
         end;
+
+        PCBServer.PostProcess;
+        if (LibComp <> nil) and (PcbLib <> nil) then
+        begin
+            PcbLib.CurrentComponent := LibComp;
+            PcbLib.Board.ViewManager_FullUpdate;
+        end;
+        if (CreatedCount > 0) and (PcbLib <> nil) then
+            MarkDocumentModified(PcbLib.Board.FileName);
 
         AddJSONInteger(ResultProps, 'created', CreatedCount);
         AddJSONInteger(ResultProps, 'primitive_errors', PrimErrors);
@@ -282,6 +301,9 @@ var
     TypeName    : String;
     i, C, V     : Integer;
     Found       : Boolean;
+    BodiesArray : TStringList;
+    BodyProps   : TStringList;
+    Model       : IPCB_Model;
 begin
     Result := '';
 
@@ -293,17 +315,12 @@ begin
             Exit;
         end;
         // Never re-open an open document (reload discards unsaved changes)
-        if Client.IsDocumentOpen(LibraryPath) then
-            ServerDoc := Client.GetDocumentByPath(LibraryPath)
-        else
-            ServerDoc := Client.OpenDocument('PcbLib', LibraryPath);
+        ServerDoc := OpenLibraryDocument('PcbLib', LibraryPath);
         if ServerDoc = Nil then
         begin
             Result := 'ERROR: Failed to open library: ' + LibraryPath;
             Exit;
         end;
-        Client.ShowDocument(ServerDoc);
-        Sleep(500);
     end;
 
     PcbLib := GetPcbLibSafe(0);
@@ -319,6 +336,7 @@ begin
 
     try
         AddJSONProperty(ResultProps, 'library_name', ExtractFileName(PcbLib.Board.FileName));
+        AddJSONProperty(ResultProps, 'library_path', PcbLib.Board.FileName);
 
         for C := 0 to PcbLib.ComponentCount - 1 do
         begin
@@ -371,6 +389,7 @@ begin
                 Found := True;
                 FPProps := TStringList.Create;
                 PrimsArray := TStringList.Create;
+                BodiesArray := TStringList.Create;
                 try
                     AddJSONProperty(FPProps, 'footprint_name', LibComp.Name);
                     AddJSONProperty(FPProps, 'description', LibComp.Description);
@@ -493,9 +512,34 @@ begin
                                     AddJSONProperty(PrimProps, 'high_layer', Layer2String(Prim.HighLayer));
                                 end;
                                 eComponentBodyObject:
-                                    // 3D bodies are models, not 2D primitives -
-                                    // excluded from the graphics round-trip
+                                begin
+                                    // 3D bodies are models, not 2D primitives:
+                                    // reported apart, so the graphics
+                                    // round-trip is unchanged. The model's
+                                    // rotations and Z offset are added by the
+                                    // server from the saved file:
+                                    // Model.GetState returns them through out
+                                    // parameters, which DelphiScript never
+                                    // receives.
                                     AddJSONProperty(PrimProps, 'type', '');
+                                    BodyProps := TStringList.Create;
+                                    try
+                                        Model := Prim.Model;
+                                        if (Model <> nil) then
+                                        begin
+                                            AddJSONProperty(BodyProps, 'model_file', Model.FileName);
+                                            AddJSONBoolean(BodyProps, 'model_embedded', Model.Embed);
+                                        end
+                                        else
+                                            AddJSONProperty(BodyProps, 'model_file', '');
+                                        AddJSONNumber(BodyProps, 'standoff_height', CoordToMils(Prim.StandoffHeight));
+                                        AddJSONNumber(BodyProps, 'overall_height', CoordToMils(Prim.OverallHeight));
+                                        AddJSONProperty(BodyProps, 'layer', Layer2String(Prim.Layer));
+                                        BodiesArray.Add(BuildJSONObject(BodyProps, 2));
+                                    finally
+                                        BodyProps.Free;
+                                    end;
+                                end;
                             else
                             begin
                                 AddJSONProperty(PrimProps, 'type', 'unknown');
@@ -520,6 +564,10 @@ begin
                     LibComp.GroupIterator_Destroy(GrpIter);
 
                     FPProps.Add(BuildJSONArray(PrimsArray, 'primitives', 1));
+                    if (BodiesArray.Count > 0) then
+                        FPProps.Add(BuildJSONArray(BodiesArray, 'bodies_3d', 1))
+                    else
+                        FPProps.Add('"bodies_3d": []');
 
                     if (FootprintName = '*') then
                         FPArray.Add(BuildJSONObject(FPProps, 1))
@@ -529,6 +577,7 @@ begin
                 finally
                     FPProps.Free;
                     PrimsArray.Free;
+                    BodiesArray.Free;
                 end;
             end;
         end;
@@ -1865,6 +1914,8 @@ begin
     SilkLayer := String2Layer('Top Overlay');
 
     try
+        // One undo step; this is also what marks the library as modified
+        PCBServer.PreProcess;
         LibComp := PCBServer.CreatePCBLibComp;
         LibComp.Name := FootprintName;
 
@@ -1919,7 +1970,7 @@ begin
             Pad.TopShape := PadShape;
 
             LibComp.AddPCBObject(Pad);
-            PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+            PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
 
             if (XMM - WMM/2) < MinX then MinX := XMM - WMM/2;
             if (YMM - HMM/2) < MinY then MinY := YMM - HMM/2;
@@ -1950,7 +2001,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := ILayer.MechanicalLayer(15);
@@ -1958,7 +2009,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY2);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := ILayer.MechanicalLayer(15);
@@ -1966,7 +2017,7 @@ begin
         Track.x2 := MMsToCoord(CrtX1); Track.y2 := MMsToCoord(CrtY2);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := ILayer.MechanicalLayer(15);
@@ -1974,7 +2025,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY2);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Silkscreen on TopOverlay (inset 0.1mm from courtyard)
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
@@ -1983,7 +2034,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY1+0.1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := SilkLayer;
@@ -1991,7 +2042,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY2-0.1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Left silk — split to mark pin 1 (gap at top-left corner for pin 1 indicator)
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
@@ -2000,7 +2051,7 @@ begin
         Track.x2 := MMsToCoord(CrtX1+0.1); Track.y2 := MMsToCoord(CrtY2-0.6);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Right silk
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
@@ -2009,12 +2060,14 @@ begin
         Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY2-0.1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Register with library board, navigate, and refresh
         PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
+        PCBServer.PostProcess;
         PcbLib.CurrentComponent := LibComp;
         PcbLib.Board.ViewManager_FullUpdate;
+        MarkDocumentModified(PcbLib.Board.FileName);
 
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONProperty(ResultProps, 'footprint_name', FootprintName);

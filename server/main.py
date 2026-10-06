@@ -24,6 +24,7 @@ import re
 import silkscreen
 import label_blocks
 import script_bundle
+import pcblib_file
 
 # Configure logging
 logging.basicConfig(
@@ -1420,8 +1421,14 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
       pads (position, rotation, layer, sizes/shape per stack, hole size/
       type/width/rotation, plating), tracks, arcs, fills, texts, regions
       (outline vertices). Coordinates in mils; shapes and hole types as raw
-      Altium enum ints; layers as names. 3D component bodies are models,
-      not 2D primitives, and are excluded.
+      Altium enum ints; layers as names. 3D component bodies are listed
+      apart in bodies_3d, not among the primitives, so the
+      create_footprints_batch round-trip is unchanged: model_file,
+      model_embedded, standoff_height and overall_height (mils), layer, and
+      rotation_x/y/z (degrees) and model_z_offset (mils). The rotations and
+      offset come from the saved library file (Altium's script API cannot
+      return them); "placement" says so, and they are null for a body that
+      is not saved yet.
     - footprint_name "*": full dump of every footprint
 
     Use as the reference when recreating or validating footprints, and to
@@ -1435,8 +1442,8 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
 
     Returns:
         str: JSON - inventory: {library_name, footprint_count, footprints:
-             [{name, description, <type counts>}]}; dump: primitives list
-             per footprint
+             [{name, description, <type counts>}]}; dump: primitives and
+             bodies_3d per footprint
     """
     logger.info(f"Getting footprint primitives (library={library_path}, footprint={footprint_name})")
 
@@ -1450,7 +1457,14 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
         return json.dumps({"success": False, "error": f"Failed to get footprint primitives: {error_msg}"})
 
     result = response.get("result", {})
-    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return result
+    if isinstance(result, dict):
+        pcblib_file.add_body_placements(result)
+    return json.dumps(result, indent=2)
 
 @mcp.tool()
 async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
@@ -1614,7 +1628,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
 @mcp.tool()
 async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     """
-    Create many schematic symbols in a single Altium script run.
+    Create many schematic symbols, or edit existing ones, in a single
+    Altium script run.
 
     Use instead of repeated create_schematic_symbol calls when creating
     more than a handful of symbols (bulk library imports/migrations): one
@@ -1631,11 +1646,30 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
             SYMBOL|<name>|<description>|<part_count>
             PIN|<same pipe fields as create_schematic_symbol pins>
             GRAPHIC|<same entry format as create_schematic_symbol graphics>
-            Each SYMBOL line starts a new symbol; PIN/GRAPHIC lines belong
-            to the most recent SYMBOL.
+            EDITSYMBOL|<name>   edit an existing symbol instead (its pins
+                                and graphics are left alone; a missing
+                                symbol is reported as failed, never created)
+            COMMENT|<text>      set the Comment ("" for empty) and hide it
+            DESCRIPTION|<text>  set the Description
+            SYMPARAM|<name>|<value>|<visible 1/0>[|x|y]   add a symbol
+                                parameter, or replace one with that name.
+                                Visible ones without x|y go below the
+                                body's bottom-left corner, left-aligned,
+                                100 mil apart in record order.
+            PINPARAM|<pin number>|<name>|<value>   add (or replace) a hidden
+                                parameter on every pin with that number
+            Each SYMBOL or EDITSYMBOL line starts a new symbol; the other
+            records belong to the most recent one. Neoventus symbols get:
+            COMMENT| (empty), SYMPARAM|VALUE|VALUE|1,
+            SYMPARAM|PKG_STYLE|PKG_STL|1, SYMPARAM|PLACE|YES|0, and the
+            description ".Description".
+
+    Every created or edited symbol is one undo step and marks the library
+    as modified; nothing is saved - the user saves the library.
 
     Returns:
-        str: JSON object with created count and a failed name list
+        str: JSON object with created and edited counts, a failed name list
+             and problems (e.g. a PINPARAM pin number not in the symbol)
     """
     logger.info(f"Creating symbols batch from {spec_file}")
 
@@ -1677,7 +1711,9 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
         str: JSON object - inventory mode: {library_name, symbol_count,
              symbols: [{name, description, part_count, <type counts>}]};
              dump mode: {library_name, symbol_name, description, part_count,
-             primitives: [...]}
+             comment: {text, visible}, parameters: [{name, value, visible,
+             x, y}], primitives: [...]} - pins carry their parameters
+             [{name, value}] when they have any
     """
     logger.info(f"Getting symbol primitives (library={library_path}, symbol={symbol_name})")
 

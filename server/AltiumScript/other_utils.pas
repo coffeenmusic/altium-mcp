@@ -868,3 +868,74 @@ begin
         end;
     end;
 end;
+
+// A file path in one canonical spelling for comparisons: lower case,
+// backslashes, and doubled separators collapsed (a leading \\ of a UNC path
+// is kept)
+function NormalizedPath(Path: String): String;
+var
+    Lead : String;
+begin
+    Result := LowerCase(StringReplace(Trim(Path), '/', '\', REPLACEALL));
+    Lead := '';
+    if (Copy(Result, 1, 2) = '\\') then
+    begin
+        Lead := '\\';
+        Result := Copy(Result, 3, Length(Result));
+    end;
+    while (Pos('\\', Result) > 0) do
+        Result := StringReplace(Result, '\\', '\', REPLACEALL);
+    Result := Lead + Result;
+end;
+
+// The open document for a file, or nil. Paths are compared case-
+// insensitively with separators normalised: Client.IsDocumentOpen misses a
+// path spelled differently, and the file would be opened a second time.
+function FindOpenDocument(Path: String): IServerDocument;
+var
+    i, j   : Integer;
+    Module : IServerModule;
+    Want   : String;
+begin
+    Result := nil;
+    Want := NormalizedPath(Path);
+    for i := 0 to Client.Count - 1 do
+    begin
+        Module := Client.ServerModule[i];
+        if (Module <> nil) then
+            for j := 0 to Module.DocumentCount - 1 do
+                if (NormalizedPath(Module.Documents[j].FileName) = Want) then
+                begin
+                    Result := Module.Documents[j];
+                    Exit;
+                end;
+    end;
+end;
+
+// Focus a library document ('SchLib' or 'PcbLib'), opening it only when it
+// is not open yet: re-opening an open document reloads it from disk and
+// silently discards unsaved changes. Returns nil when it cannot be opened.
+function OpenLibraryDocument(Kind: String; Path: String): IServerDocument;
+begin
+    Result := FindOpenDocument(Path);
+    if (Result = nil) then
+        Result := Client.OpenDocument(Kind, Path);
+    if (Result <> nil) then
+    begin
+        Client.ShowDocument(Result);
+        Sleep(500);
+    end;
+end;
+
+// Mark an open document as changed, so its tab shows it unsaved and Altium
+// asks before closing it. Objects a script adds to a library through
+// PreProcess/PostProcess do not reliably set the flag (a PCB library never
+// does); the user reviews and saves.
+procedure MarkDocumentModified(Path: String);
+var
+    Doc : IServerDocument;
+begin
+    Doc := FindOpenDocument(Path);
+    if (Doc <> nil) then
+        Doc.Modified := True;
+end;
