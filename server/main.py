@@ -644,11 +644,8 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
         
         # Default rules content
         default_rules = (
-            "Only place pins on the left and right side of the symbol. "
-            "Place power rail pins at the upper right, ground pins in the bottom left, "
-            "no connect pins in the bottom right, inputs on the left, outputs on the right, "
-            "and try to group other pins together by similar functionality (for example, SPI, I2C, RGMII, etc.). "
-            "Always separate groups by 100mil gaps unless there is extra spacing, then space out groups equal distance from each other. "
+            "Your own pin placement rules, for example where power, ground, "
+            "inputs, outputs and no-connect pins go and how pin groups are spaced."
         )
         
         # Create a helpful message for the user
@@ -667,6 +664,8 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
             rules_content = f.read()
         
         logger.info("Successfully read symbol placement rules file")
+        if not rules_content.strip():
+            rules_content = """No symbol placement rules are configured. Follow the conventions of a comparable symbol in the user's library (find one with search_library_symbol and read it with get_symbol_primitives) and any instructions from the user. Keep pins on a 100 mil grid so wires connect to them."""
         
         # Return the rules with a message about how to modify them
         result = {
@@ -784,8 +783,8 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     a missing reference as an error.
 
     Create a new schematic symbol in the current library with the specified pins
-    Instructions: pins should be grouped together via function and only placed on
-                  the left and right side in 100 mil increments
+    Instructions: follow the rules from get_symbol_placement_rules and the
+                  reference symbol's conventions; keep pins on a 100 mil grid
 
     Pin name inversion/overbar: To show an overbar on a pin name (for active-low signals),
                   place a backslash after EACH character that should be overbarred.
@@ -1652,13 +1651,33 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
             COMMENT|<text>[|<visible 1/0>]   set the Comment (empty text
                                 is allowed); hidden unless visible is 1
             DESCRIPTION|<text>  set the Description
-            SYMPARAM|<name>|<value>|<visible 1/0>[|x|y]   add a symbol
-                                parameter, or replace one with that name.
-                                By default, visible ones without x|y go
-                                below the body's bottom-left corner,
-                                left-aligned, 100 mil apart in record order.
+            SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification]]
+                                add a symbol parameter, or replace one with
+                                that name. By default, visible ones without
+                                x|y go below the body's bottom-left corner,
+                                left-aligned, 100 mil apart in record order
+                                (leave x and y empty to keep that and still
+                                give a justification). justification:
+                                bottom_left, bottom_center, bottom_right,
+                                center_left, center, center_right, top_left,
+                                top_center or top_right; omitted keeps the
+                                parameter's own.
             PINPARAM|<pin number>|<name>|<value>   add (or replace) a hidden
                                 parameter on every pin with that number
+            PINDESC|<pin number>|<text>   set the Description of every pin
+                                with that number
+            PINSYMBOL|<pin number>|<edge>|<symbol>   set an IEEE symbol of
+                                every pin with that number. edge: inside,
+                                inside_edge, outside_edge or outside.
+                                symbol: a TIeeeSymbol name without the
+                                leading "e", any case - none, dot, clock,
+                                activelowinput, activelowoutput, schmitt,
+                                analogsignalin, digitalsignalin, opencollector,
+                                hiz, ... (the full list is in the
+                                altium-script skill, SCH_API_Reference.md,
+                                TIeeeSymbol). An unknown edge or symbol is
+                                reported under problems.
+            These records work after SYMBOL and EDITSYMBOL alike.
             Each SYMBOL or EDITSYMBOL line starts a new symbol; the other
             records belong to the most recent one.
 
@@ -1667,7 +1686,8 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
 
     Returns:
         str: JSON object with created and edited counts, a failed name list
-             and problems (e.g. a PINPARAM pin number not in the symbol)
+             and problems (e.g. a pin number not in the symbol, an unknown
+             IEEE symbol or justification)
     """
     logger.info(f"Creating symbols batch from {spec_file}")
 
@@ -1710,8 +1730,11 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
              symbols: [{name, description, part_count, <type counts>}]};
              dump mode: {library_name, symbol_name, description, part_count,
              comment: {text, visible}, parameters: [{name, value, visible,
-             x, y}], primitives: [...]} - pins carry their parameters
-             [{name, value}] when they have any
+             x, y, justification}], primitives: [...]} - pins also carry
+             description, symbol_inside, symbol_inside_edge,
+             symbol_outside_edge and symbol_outside (IEEE symbol names as
+             PINSYMBOL takes them), and their parameters [{name, value}]
+             when they have any
     """
     logger.info(f"Getting symbol primitives (library={library_path}, symbol={symbol_name})")
 

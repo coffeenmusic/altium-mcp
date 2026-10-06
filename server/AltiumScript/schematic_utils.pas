@@ -858,8 +858,10 @@ end;
 //   GRAPHIC|<same entry format as create_schematic_symbol graphics>  (SYMBOL only)
 //   COMMENT|<text>[|<visible 1/0>]       set the Comment (hidden unless visible is 1)
 //   DESCRIPTION|<text>                   set the Description
-//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y]
+//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification]]
 //   PINPARAM|<pin number>|<name>|<value>
+//   PINDESC|<pin number>|<text>
+//   PINSYMBOL|<pin number>|<inside|inside_edge|outside_edge|outside>|<IEEE symbol>
 // Records belong to the most recent SYMBOL or EDITSYMBOL line. Far fewer
 // Altium script launches than one create call per symbol.
 function CreateSymbolsBatch(SpecFilePath: String): String;
@@ -973,7 +975,8 @@ begin
                 else
                     ProblemsArray.Add('"' + JSONEscapeString('line ' + IntToStr(i + 1) + ': GRAPHIC only belongs to a SYMBOL') + '"');
             end
-            else if (Kind = 'COMMENT') or (Kind = 'DESCRIPTION') or (Kind = 'SYMPARAM') or (Kind = 'PINPARAM') then
+            else if (Kind = 'COMMENT') or (Kind = 'DESCRIPTION') or (Kind = 'SYMPARAM') or
+                    (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') then
             begin
                 if (CurrentName <> '') then
                     EditsList.Add(Line)
@@ -1190,6 +1193,11 @@ begin
                                     AddJSONNumber(PrimProps, 'length', CoordToMils(PinObj.PinLength));
                                     AddJSONBoolean(PrimProps, 'show_name', PinObj.ShowName);
                                     AddJSONBoolean(PrimProps, 'show_designator', PinObj.ShowDesignator);
+                                    AddJSONProperty(PrimProps, 'description', PinObj.Description);
+                                    AddJSONProperty(PrimProps, 'symbol_inside', IeeeSymbolName(PinObj.Symbol_Inner));
+                                    AddJSONProperty(PrimProps, 'symbol_inside_edge', IeeeSymbolName(PinObj.Symbol_InnerEdge));
+                                    AddJSONProperty(PrimProps, 'symbol_outside_edge', IeeeSymbolName(PinObj.Symbol_OuterEdge));
+                                    AddJSONProperty(PrimProps, 'symbol_outside', IeeeSymbolName(PinObj.Symbol_Outer));
                                     AddPinParametersJSON(PrimProps, PinObj);
                                 end;
                                 eRectangle:
@@ -2227,9 +2235,15 @@ end;
 // Apply edit records to a symbol, as one undo step:
 //   COMMENT|<text>[|<visible 1/0>]               set the Comment (hidden unless visible is 1)
 //   DESCRIPTION|<text>                           set the Description
-//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y]  add or replace a symbol parameter
+//   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification]]
+//                                                add or replace a symbol parameter
 //   PINPARAM|<pin number>|<name>|<value>         add or replace a hidden pin
 //                                                parameter on every pin with that number
+//   PINDESC|<pin number>|<text>                  set the Description of every pin with
+//                                                that number
+//   PINSYMBOL|<pin number>|<edge>|<symbol>       set an IEEE symbol of every pin with that
+//                                                number; edge inside, inside_edge,
+//                                                outside_edge or outside
 // By default, visible symbol parameters without x|y go below the body's
 // bottom-left corner, 100 mil apart, in record order. Problems (e.g. no pin with that
 // number) are added to Problems as JSON strings. Returns the records applied.
@@ -2248,6 +2262,9 @@ var
     Pin       : ISch_Pin;
     Corner    : String;
     X, Y      : Integer;
+    Just      : Integer;
+    Sym       : Integer;
+    Edge      : String;
 begin
     Result := 0;
     if (Edits.Count = 0) then Exit;
@@ -2278,6 +2295,15 @@ begin
             Name := Trim(GetFieldFromPipeString(Line, 1));
             Value := GetFieldFromPipeString(Line, 2);
             Visible := (Trim(GetFieldFromPipeString(Line, 3)) = '1');
+            // Optional justification; omitted keeps the parameter's own
+            Just := -1;
+            if (Trim(GetFieldFromPipeString(Line, 6)) <> '') then
+            begin
+                Just := JustificationValue(GetFieldFromPipeString(Line, 6));
+                if (Just < 0) then
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': unknown justification ' +
+                        Trim(GetFieldFromPipeString(Line, 6)) + ' for SYMPARAM ' + Name) + '"');
+            end;
             if (Trim(GetFieldFromPipeString(Line, 4)) <> '') then
             begin
                 X := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))));
@@ -2299,6 +2325,8 @@ begin
                 Param.IsHidden := not Visible;
                 Param.ShowName := False;
                 Param.Location := Point(X, Y);
+                if (Just >= 0) then
+                    Param.Justification := Just;
                 Comp.AddSchObject(Param);
                 SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
             end
@@ -2309,22 +2337,55 @@ begin
                 Param.IsHidden := not Visible;
                 if Visible or (Trim(GetFieldFromPipeString(Line, 4)) <> '') then
                     Param.Location := Point(X, Y);
+                if (Just >= 0) then
+                    Param.Justification := Just;
                 SchServer.RobotManager.SendMessage(Param.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
             end;
             Result := Result + 1;
         end
-        else if (Kind = 'PINPARAM') then
+        else if (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') then
         begin
             PinNum := Trim(GetFieldFromPipeString(Line, 1));
             Name := Trim(GetFieldFromPipeString(Line, 2));
             Value := GetFieldFromPipeString(Line, 3);
             Matched := False;
+            Sym := 0;
+            Edge := LowerCase(Name);
+            if (Kind = 'PINSYMBOL') then
+            begin
+                Sym := IeeeSymbolValue(Value);
+                if (Edge <> 'inside') and (Edge <> 'inside_edge') and (Edge <> 'outside_edge') and (Edge <> 'outside') then
+                begin
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': unknown pin edge ' + Name +
+                        ' for PINSYMBOL (inside, inside_edge, outside_edge or outside)') + '"');
+                    Sym := -1;
+                end
+                else if (Sym < 0) then
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': unknown IEEE symbol ' + Trim(Value) +
+                        ' for PINSYMBOL') + '"');
+            end;
             Iter := Comp.SchIterator_Create;
             Iter.AddFilter_ObjectSet(MkSet(ePin));
             Pin := Iter.FirstSchObject;
-            while (Pin <> nil) do
+            while (Pin <> nil) and (Sym >= 0) do
             begin
-                if (Pin.Designator = PinNum) then
+                if (Pin.Designator = PinNum) and (Kind <> 'PINPARAM') then
+                begin
+                    Matched := True;
+                    SchServer.RobotManager.SendMessage(Pin.I_ObjectAddress, c_BroadCast, SCHM_BeginModify, c_NoEventData);
+                    if (Kind = 'PINDESC') then
+                        Pin.Description := GetFieldFromPipeString(Line, 2)
+                    else if (Edge = 'inside') then
+                        Pin.Symbol_Inner := Sym
+                    else if (Edge = 'inside_edge') then
+                        Pin.Symbol_InnerEdge := Sym
+                    else if (Edge = 'outside_edge') then
+                        Pin.Symbol_OuterEdge := Sym
+                    else
+                        Pin.Symbol_Outer := Sym;
+                    SchServer.RobotManager.SendMessage(Pin.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
+                end
+                else if (Pin.Designator = PinNum) then
                 begin
                     Matched := True;
                     Param := FindChildParameter(Pin, Name);
@@ -2351,8 +2412,10 @@ begin
             Comp.SchIterator_Destroy(Iter);
             if Matched then
                 Result := Result + 1
-            else
-                Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': no pin ' + PinNum + ' for PINPARAM ' + Name) + '"');
+            else if (Kind = 'PINPARAM') then
+                Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': no pin ' + PinNum + ' for PINPARAM ' + Name) + '"')
+            else if (Sym >= 0) then
+                Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': no pin ' + PinNum + ' for ' + Kind) + '"');
         end;
     end;
     SchServer.ProcessControl.PostProcess(Lib, '');
@@ -2431,6 +2494,7 @@ begin
                     AddJSONBoolean(PProps, 'visible', not Param.IsHidden);
                     AddJSONNumber(PProps, 'x', CoordToMils(Param.Location.X));
                     AddJSONNumber(PProps, 'y', CoordToMils(Param.Location.Y));
+                    AddJSONProperty(PProps, 'justification', JustificationName(Param.Justification));
                     Items.Add(BuildJSONObject(PProps, 2));
                 finally
                     PProps.Free;
@@ -2468,4 +2532,73 @@ begin
     if (Lib <> nil) then
         if (Lib.ObjectID = eSchLib) then
             Result := Lib.DocumentName;
+end;
+
+// TIeeeSymbol names without the leading 'e', in enum order: a name's
+// position is its value (eNoSymbol = 0 ... eBidirectionalSignalFlow = 34)
+function IeeeSymbolNames(Dummy: Integer): String;
+begin
+    Result := 'NOSYMBOL|DOT|RIGHTLEFTSIGNALFLOW|CLOCK|ACTIVELOWINPUT|ANALOGSIGNALIN|' +
+              'NOTLOGICCONNECTION|SHIFTRIGHT|POSTPONEDOUTPUT|OPENCOLLECTOR|HIZ|HIGHCURRENT|' +
+              'PULSE|SCHMITT|DELAY|GROUPLINE|GROUPBIN|ACTIVELOWOUTPUT|PISYMBOL|GREATEREQUAL|' +
+              'LESSEQUAL|SIGMA|OPENCOLLECTORPULLUP|OPENEMITTER|OPENEMITTERPULLUP|' +
+              'DIGITALSIGNALIN|AND|INVERTOR|OR|XOR|SHIFTLEFT|INPUTOUTPUT|OPENCIRCUITOUTPUT|' +
+              'LEFTRIGHTSIGNALFLOW|BIDIRECTIONALSIGNALFLOW';
+end;
+
+// The TIeeeSymbol value of a name (case-insensitive, no leading 'e'; 'none'
+// is eNoSymbol), or -1 for an unknown name
+function IeeeSymbolValue(Name: String): Integer;
+var
+    i   : Integer;
+    Key : String;
+begin
+    Result := -1;
+    Key := UpperCase(Trim(Name));
+    if (Key = 'NONE') then
+        Key := 'NOSYMBOL';
+    if (Key = '') then Exit;
+    for i := 0 to 34 do
+        if (GetFieldFromPipeString(IeeeSymbolNames(0), i) = Key) then
+        begin
+            Result := i;
+            Exit;
+        end;
+end;
+
+// The lower-case name of a TIeeeSymbol value; 'none' for eNoSymbol
+function IeeeSymbolName(Value: Integer): String;
+begin
+    if (Value = 0) then
+        Result := 'none'
+    else
+        Result := LowerCase(GetFieldFromPipeString(IeeeSymbolNames(0), Value));
+end;
+
+// Text justification names in TTextJustification order: a name's position
+// is its value (eJustify_BottomLeft = 0 ... eJustify_TopRight = 8)
+function JustificationNames(Dummy: Integer): String;
+begin
+    Result := 'bottom_left|bottom_center|bottom_right|center_left|center|' +
+              'center_right|top_left|top_center|top_right';
+end;
+
+// The TTextJustification value of a name (case-insensitive), or -1
+function JustificationValue(Name: String): Integer;
+var
+    i : Integer;
+begin
+    Result := -1;
+    for i := 0 to 8 do
+        if (GetFieldFromPipeString(JustificationNames(0), i) = LowerCase(Trim(Name))) then
+        begin
+            Result := i;
+            Exit;
+        end;
+end;
+
+// The name of a TTextJustification value
+function JustificationName(Value: Integer): String;
+begin
+    Result := GetFieldFromPipeString(JustificationNames(0), Value);
 end;
