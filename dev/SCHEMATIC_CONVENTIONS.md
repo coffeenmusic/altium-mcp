@@ -4,7 +4,8 @@ Rules for programmatic schematic generation, each one learned by getting it
 wrong and having a PCB designer point at the result. An agent that follows
 these should not repeat the mistakes.
 
-Tooling: [`make_circuit.py`](make_circuit.py) (spec) →
+Tooling: a circuit spec (part data from
+[`make_part_spec.py`](make_part_spec.py)) →
 [`build_circuit.pas`](build_circuit.pas) (build) →
 [`check_connectivity.pas`](check_connectivity.pas) (verify), with
 [`harvest_param_placement.pas`](harvest_param_placement.pas) as a one-time

@@ -180,6 +180,16 @@ def inject(body: str):
         encoding="utf-8")
 
 
+PLACEHOLDER = "SandboxLog('no experiment loaded');\nResultText := '{\"ok\": true}';"
+
+
+def restore():
+    """Put the placeholder experiment back. Sandbox.pas is tracked by git and
+    experiments often hold local paths or project names, so a successful run
+    leaves the placeholder; a failed one keeps the experiment to inspect."""
+    inject(PLACEHOLDER)
+
+
 def run(timeout=120, quiet=False):
     for f in (SANDBOX_LOG, SANDBOX_RESULT):
         if f.exists():
@@ -204,7 +214,10 @@ def run(timeout=120, quiet=False):
     time.sleep(0.3)
 
     if quiet:
-        return SANDBOX_RESULT.exists()
+        if SANDBOX_RESULT.exists():
+            restore()
+            return True
+        return False
 
     print("=" * 62)
     if SANDBOX_LOG.exists():
@@ -215,6 +228,7 @@ def run(timeout=120, quiet=False):
         if SANDBOX_RESULT.exists():
             print("-" * 62)
             print("RESULT:", SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace")[:3000])
+            restore()
             return True
         print("-" * 62)
         print(f">> Script STOPPED after: {lines[-1] if lines else '(nothing)'}")

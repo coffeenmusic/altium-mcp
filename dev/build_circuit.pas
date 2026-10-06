@@ -1,4 +1,6 @@
-// Build a schematic circuit from the spec written by dev/make_circuit.py.
+// Build a schematic circuit from a circuit spec file
+// (C:\Users\Public\altium_mcp\circuit_spec.txt). A generator script writes
+// it, taking each part's data from the database as dev/make_part_spec.py does.
 //
 // Places database-linked components, wires them, and adds junctions, net
 // labels, power ports and notes. Afterwards it writes pin_map.txt - every
@@ -6,7 +8,7 @@
 // coordinates instead of predicted ones (rotated symbols make prediction
 // unreliable).
 //
-// Spec records (see make_circuit.py):
+// Spec records:
 //   PART|desig|symlib|symbol|designitemid|x|y|orient
 //   COMMENT|t   DESCRIPTION|t   FOOTPRINT|n   PARAM|name|value
 //   WIRE|x1|y1|x2|y2[|...]   JUNCTION|x|y
