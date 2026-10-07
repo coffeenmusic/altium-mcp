@@ -308,6 +308,7 @@ class _Checker:
         self.placer = ss.Placer(board, members, ss.Options())
         self.silk = self.placer.clearance[SILK]
         self.mask = self.placer.clearance[MASK]
+        self.member_extents = [board.components[d].extent for d in members]
         # Graphics about to be replaced (an earlier block of these parts)
         for g in ignore:
             area = ss._inflate(_bounds(_graphic_rects(g)), 2.0)
@@ -327,6 +328,10 @@ class _Checker:
                 return False
         area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
         for owner, body in self.placer.bodies[self.side].query(rect):
+            # The parts themselves sit under this one (e.g. a SOM): their
+            # labels are no more hidden than they are
+            if any(ss._covers(body, e) for e in self.member_extents):
+                continue
             if ss.rect_overlap_area(rect, body) / area > 0.25:
                 return False
         return True

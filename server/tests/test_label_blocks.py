@@ -63,6 +63,16 @@ class BlockTests(unittest.TestCase):
             e = b.components[d].extent
             self.assertTrue(e[0] <= xs[members.index(d)] <= e[2])
 
+    def test_row_under_a_module_still_gets_a_block(self):
+        # A big module body (a SOM) covers the walled-in row: its labels may
+        # sit under the module too, as the parts do
+        lines = row_of_resistors() + WALLS + [
+            "C|U9|T|1100|1000|0|1|500|500|1700|1500|500|500|560|540|0|60|6|5|0|SOM",
+            "Y|U9|500|500|1700|1500"]
+        b = ss.Board(board_text(*lines))
+        _, _, opts = lb.block_options(b, ["R1", "R2", "R3", "R4", "R5"], count=1)
+        self.assertTrue(opts)
+
     def test_walled_in_row_gets_a_linked_block(self):
         # Silk walls just above and below the row: the labels must go elsewhere
         lines = row_of_resistors() + WALLS
