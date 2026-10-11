@@ -22,6 +22,7 @@ import base64
 import glob
 import re
 
+from altium_files import read_altium_text, write_altium_text
 from outjob_parser import parse_outjob
 
 # Configure logging
@@ -305,9 +306,7 @@ class AltiumBridge:
             
             # Read the response file and print it for debugging
             logger.info("Response file found, reading response")
-            response_text = ""
-            with open(RESPONSE_FILE, "r") as f:
-                response_text = f.read()
+            response_text = read_altium_text(RESPONSE_FILE)
             
             # Log the raw response for debugging
             logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
@@ -1253,10 +1252,10 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     titles = [t for _, t in dialogs]
     steps = []
     if SANDBOX_LOG.exists():
-        steps = SANDBOX_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+        steps = read_altium_text(SANDBOX_LOG).splitlines()
 
     if SANDBOX_RESULT.exists():
-        result_text = SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace").strip()
+        result_text = read_altium_text(SANDBOX_RESULT).strip()
         return json.dumps({"success": True, "result": result_text, "steps": steps,
                            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
@@ -1538,9 +1537,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
 
     spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
     spec_path.parent.mkdir(parents=True, exist_ok=True)
-    # cp1252: the bridge reads these as ANSI, and part descriptions carry
-    # characters that are not plain ASCII
-    spec_path.write_text("\n".join(lines) + "\n", encoding="cp1252", errors="replace")
+    # Part descriptions carry characters that are not plain ASCII
+    write_altium_text(spec_path, "\n".join(lines) + "\n")
 
     response = await altium_bridge.execute_command("build_circuit", {})
     if not response.get("success", False):
@@ -1558,7 +1556,7 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
     pin_map = {}
     pm = Path("C:/Users/Public/altium_mcp/pin_map.txt")
     if pm.is_file():
-        for line in pm.read_text(errors="replace").splitlines():
+        for line in read_altium_text(pm).splitlines():
             f = line.strip().split("|")
             if len(f) == 5 and f[0] == "PIN":
                 pin_map.setdefault(f[1], {})[f[2]] = [int(f[3]), int(f[4])]
