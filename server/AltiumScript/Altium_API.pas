@@ -1011,6 +1011,81 @@ begin
     end;
 end;
 
+// get_erc_violations: optional "compile" parameter (default true)
+function ExecuteGetERCViolations(RequestData: TStringList): String;
+var
+    i: Integer;
+    DoCompile: Boolean;
+    ParamValue: String;
+begin
+    DoCompile := True;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"compile"', RequestData[i]) > 0) then
+        begin
+            ParamValue := Copy(RequestData[i], Pos(':', RequestData[i]) + 1, Length(RequestData[i]));
+            DoCompile := LowerCase(TrimJSON(ParamValue)) <> 'false';
+        end;
+    end;
+    Result := GetERCViolations(ROOT_DIR, DoCompile);
+end;
+
+// get_component_primitives: "designators" array parameter
+function ExecuteGetComponentPrimitives(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    DesignatorsList: TStringList;
+begin
+    DesignatorsList := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"designators"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DesignatorsList.Add(ParamValue);
+                    i := i + 1;
+                end;
+                break;
+            end;
+        end;
+
+        if DesignatorsList.Count > 0 then
+            Result := GetComponentPrimitivesFromList(ROOT_DIR, DesignatorsList)
+        else
+            Result := 'ERROR: No designators given for get_component_primitives';
+    finally
+        DesignatorsList.Free;
+    end;
+end;
+
+// get_project_components: optional "include_parameters" (default false)
+function ExecuteGetProjectComponents(RequestData: TStringList): String;
+var
+    i: Integer;
+    IncludeParams: Boolean;
+    ParamValue: String;
+begin
+    IncludeParams := False;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"include_parameters"', RequestData[i]) > 0) then
+        begin
+            ParamValue := Copy(RequestData[i], Pos(':', RequestData[i]) + 1, Length(RequestData[i]));
+            IncludeParams := LowerCase(TrimJSON(ParamValue)) = 'true';
+        end;
+    end;
+    Result := GetProjectComponents(ROOT_DIR, IncludeParams);
+end;
+
 // Function to execute a command with parameters
 function ExecuteCommand(CommandName: String): String;
 var
@@ -1107,6 +1182,16 @@ begin
             Result := ExecuteSearchLibrarySymbol(RequestData);
         'create_pcb_footprint':
             Result := ExecuteCreatePCBFootprint(RequestData);
+        'get_project_info':
+            Result := GetProjectInfo(ROOT_DIR);
+        'get_project_components':
+            Result := ExecuteGetProjectComponents(RequestData);
+        'get_erc_violations':
+            Result := ExecuteGetERCViolations(RequestData);
+        'get_board_summary':
+            Result := GetBoardSummary(ROOT_DIR);
+        'get_component_primitives':
+            Result := ExecuteGetComponentPrimitives(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;

@@ -158,7 +158,10 @@ begin
        (CommandName = 'create_symbols_batch') or
        (CommandName = 'get_footprint_primitives') or
        (CommandName = 'create_footprints_batch') or
-       (CommandName = 'create_pcb_footprint') then
+       (CommandName = 'create_pcb_footprint') or
+       (CommandName = 'get_project_info') or
+       (CommandName = 'get_project_components') or
+       (CommandName = 'get_erc_violations') then
     begin
         Result := True;
         Exit;
@@ -181,7 +184,9 @@ begin
        (CommandName = 'get_net_connections')                 or
        (CommandName = 'set_component_position')              or
        (CommandName = 'set_pcb_layer_visibility')            or
-       (CommandName = 'get_pcb_layer_stackup')               then
+       (CommandName = 'get_pcb_layer_stackup')               or
+       (CommandName = 'get_board_summary')                   or
+       (CommandName = 'get_component_primitives')            then
     begin
         DocumentKind := 'PCB';
     end
@@ -861,5 +866,277 @@ begin
                 Exit;
             end;
         end;
+    end;
+end;
+
+// ---------------------------------------------------------------------------
+// Project-level read-only queries (get_project_info, get_erc_violations).
+// Both work on the focused project and never save or modify documents.
+// ---------------------------------------------------------------------------
+
+// Error level of an IViolation as text (TErrorLevel).
+function ErrorLevelName(Level: Integer): String;
+begin
+    case Level of
+        0: Result := 'no_report';
+        1: Result := 'warning';
+        2: Result := 'error';
+        3: Result := 'fatal';
+    else
+        Result := 'level_' + IntToStr(Level);
+    end;
+end;
+
+// Focused project: parameters, documents (with unsaved-changes flag) and variants
+function GetProjectInfo(ROOT_DIR: String): String;
+var
+    Project      : IProject;
+    Doc          : IDocument;
+    ServerDoc    : IServerDocument;
+    ProjVariant  : IProjectVariant;
+    Variation    : IComponentVariation;
+    I, J         : Integer;
+    SchCount     : Integer;
+    ModifiedCount: Integer;
+    ResultProps  : TStringList;
+    ParamsArray  : TStringList;
+    DocsArray    : TStringList;
+    VariantsArray: TStringList;
+    VariationsArr: TStringList;
+    ItemProps    : TStringList;
+    OutputLines  : TStringList;
+    OpenState    : String;
+begin
+    Project := GetWorkspace.DM_FocusedProject;
+    if Project = Nil then
+    begin
+        Result := 'ERROR: No focused project';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    ParamsArray := TStringList.Create;
+    DocsArray := TStringList.Create;
+    VariantsArray := TStringList.Create;
+    try
+        AddJSONProperty(ResultProps, 'project_path', Project.DM_ProjectFullPath);
+
+        for I := 0 to Project.DM_ParameterCount - 1 do
+        begin
+            ItemProps := TStringList.Create;
+            try
+                AddJSONProperty(ItemProps, 'name', Project.DM_Parameters(I).DM_Name);
+                AddJSONProperty(ItemProps, 'value', Project.DM_Parameters(I).DM_Value);
+                ParamsArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+            end;
+        end;
+
+        SchCount := 0;
+        ModifiedCount := 0;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Doc := Project.DM_LogicalDocuments(I);
+            if Doc.DM_DocumentKind = 'SCH' then Inc(SchCount);
+            ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
+            if ServerDoc = Nil then
+                OpenState := 'closed'
+            else if ServerDoc.Modified then
+            begin
+                OpenState := 'modified';
+                Inc(ModifiedCount);
+            end
+            else
+                OpenState := 'open';
+            ItemProps := TStringList.Create;
+            try
+                AddJSONProperty(ItemProps, 'path', Doc.DM_FullPath);
+                AddJSONProperty(ItemProps, 'kind', Doc.DM_DocumentKind);
+                AddJSONProperty(ItemProps, 'state', OpenState);
+                DocsArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+            end;
+        end;
+
+        for I := 0 to Project.DM_ProjectVariantCount - 1 do
+        begin
+            ProjVariant := Project.DM_ProjectVariants(I);
+            VariationsArr := TStringList.Create;
+            ItemProps := TStringList.Create;
+            try
+                for J := 0 to ProjVariant.DM_VariationCount - 1 do
+                begin
+                    Variation := ProjVariant.DM_Variations(J);
+                    VariationsArr.Add('{"designator": "' + JSONEscapeString(Variation.DM_PhysicalDesignator) +
+                        '", "kind": ' + IntToStr(Variation.DM_VariationKind) + '}');
+                end;
+                AddJSONProperty(ItemProps, 'name', ProjVariant.DM_Description);
+                ItemProps.Add(BuildJSONArray(VariationsArr, 'variations', 1));
+                VariantsArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+                VariationsArr.Free;
+            end;
+        end;
+
+        ResultProps.Add(BuildJSONArray(ParamsArray, 'parameters'));
+        AddJSONInteger(ResultProps, 'schematic_sheet_count', SchCount);
+        AddJSONInteger(ResultProps, 'modified_document_count', ModifiedCount);
+        ResultProps.Add(BuildJSONArray(DocsArray, 'documents'));
+        ResultProps.Add(BuildJSONArray(VariantsArray, 'variants'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_project_info.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        ParamsArray.Free;
+        DocsArray.Free;
+        VariantsArray.Free;
+    end;
+end;
+
+// Compile the focused project (in memory, nothing is saved) and list the
+// compiler/ERC violations. Violations live on the project object; the
+// per-document DM_ViolationCount does not exist in recent Altium versions.
+function GetERCViolations(ROOT_DIR: String; DoCompile: Boolean): String;
+var
+    Project     : IProject;
+    Violation   : IViolation;
+    I, Level    : Integer;
+    NFatal, NError, NWarning : Integer;
+    ResultProps : TStringList;
+    ViolArray   : TStringList;
+    ItemProps   : TStringList;
+    OutputLines : TStringList;
+begin
+    Project := GetWorkspace.DM_FocusedProject;
+    if Project = Nil then
+    begin
+        Result := 'ERROR: No focused project';
+        Exit;
+    end;
+
+    if DoCompile then
+        Project.DM_Compile;
+
+    NFatal := 0; NError := 0; NWarning := 0;
+
+    ResultProps := TStringList.Create;
+    ViolArray := TStringList.Create;
+    try
+        for I := 0 to Project.DM_ViolationCount - 1 do
+        begin
+            Violation := Project.DM_Violations(I);
+            Level := Violation.DM_ErrorLevel;
+            if Level = 3 then Inc(NFatal);
+            if Level = 2 then Inc(NError);
+            if Level = 1 then Inc(NWarning);
+            ItemProps := TStringList.Create;
+            try
+                AddJSONProperty(ItemProps, 'level', ErrorLevelName(Level));
+                AddJSONProperty(ItemProps, 'type', Violation.DM_DescriptorString);
+                AddJSONProperty(ItemProps, 'detail', Violation.DM_DetailString);
+                ViolArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+            end;
+        end;
+
+        AddJSONProperty(ResultProps, 'project_path', Project.DM_ProjectFullPath);
+        AddJSONBoolean(ResultProps, 'compiled', DoCompile);
+        AddJSONInteger(ResultProps, 'total', ViolArray.Count);
+        AddJSONInteger(ResultProps, 'fatal', NFatal);
+        AddJSONInteger(ResultProps, 'errors', NError);
+        AddJSONInteger(ResultProps, 'warnings', NWarning);
+        ResultProps.Add(BuildJSONArray(ViolArray, 'violations'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_erc.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        ViolArray.Free;
+    end;
+end;
+
+// Every component of the compiled (flattened) project with its comment,
+// footprint, library reference, sheet and parameters. Compiles first.
+function GetProjectComponents(ROOT_DIR: String; IncludeParameters: Boolean): String;
+var
+    Project     : IProject;
+    Flat        : IDocument;
+    Comp        : IComponent;
+    I, J        : Integer;
+    CompArray   : TStringList;
+    CompProps   : TStringList;
+    ParamArray  : TStringList;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+begin
+    Project := GetWorkspace.DM_FocusedProject;
+    if Project = Nil then
+    begin
+        Result := 'ERROR: No focused project';
+        Exit;
+    end;
+    Project.DM_Compile;
+    Flat := Project.DM_DocumentFlattened;
+    if Flat = Nil then
+    begin
+        Result := 'ERROR: Project could not be compiled (no flattened document)';
+        Exit;
+    end;
+
+    CompArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        for I := 0 to Flat.DM_ComponentCount - 1 do
+        begin
+            Comp := Flat.DM_Components(I);
+            CompProps := TStringList.Create;
+            ParamArray := TStringList.Create;
+            try
+                if IncludeParameters then
+                    for J := 0 to Comp.DM_ParameterCount - 1 do
+                        ParamArray.Add('{"name": "' + JSONEscapeString(Comp.DM_Parameters(J).DM_Name) +
+                            '", "value": "' + JSONEscapeString(Comp.DM_Parameters(J).DM_Value) + '"}');
+                AddJSONProperty(CompProps, 'designator', Comp.DM_PhysicalDesignator);
+                AddJSONProperty(CompProps, 'comment', Comp.DM_Comment);
+                AddJSONProperty(CompProps, 'footprint', Comp.DM_Footprint);
+                AddJSONProperty(CompProps, 'library_reference', Comp.DM_LibraryReference);
+                AddJSONProperty(CompProps, 'sheet', ExtractFileName(Comp.DM_OwnerDocumentFullPath));
+                if IncludeParameters then
+                    CompProps.Add(BuildJSONArray(ParamArray, 'parameters', 1));
+                CompArray.Add(BuildJSONObject(CompProps, 1));
+            finally
+                CompProps.Free;
+                ParamArray.Free;
+            end;
+        end;
+
+        AddJSONProperty(ResultProps, 'project_path', Project.DM_ProjectFullPath);
+        AddJSONInteger(ResultProps, 'component_count', CompArray.Count);
+        ResultProps.Add(BuildJSONArray(CompArray, 'components'));
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_project_components.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        CompArray.Free;
+        ResultProps.Free;
     end;
 end;
