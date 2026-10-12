@@ -1738,7 +1738,7 @@ var
     Iter, ChildIter : ISch_Iterator;
     Prim, Param, Obj : ISch_GraphicalObject;
     Impl : ISch_Implementation;
-    Rec, Kind, CurLib, PName, PVal, Adopted : String;
+    Rec, Kind, CurLib, PName, PVal, Adopted, Missing, Ok : String;
     Proj : IProject;
     i, fld, vtx, PartCount, GfxCount, PinCount : Integer;
     HotX, HotY : Integer;
@@ -1795,6 +1795,7 @@ begin
     SchServer.ProcessControl.PreProcess(TargetDoc, '');
     Comp := nil;
     CurLib := '';
+    Missing := '';
     PartCount := 0;
     GfxCount := 0;
 
@@ -1825,7 +1826,14 @@ begin
             LibDoc.SchIterator_Destroy(Iter);
 
             if (Found = nil) then
-                Comp := nil
+            begin
+                // Report it: skipping silently gave an empty sheet that
+                // claimed success (issue #19)
+                Comp := nil;
+                if (Missing <> '') then Missing := Missing + ', ';
+                Missing := Missing + '"' + JSONEscapeString(GetFieldFromPipeString(Rec, 1) + ': ' +
+                    GetFieldFromPipeString(Rec, 3) + ' not found in ' + CurLib) + '"';
+            end
             else
             begin
                 Replica := Found.Replicate;
@@ -2048,10 +2056,12 @@ begin
     PinMap.SaveToFile('C:\Users\Public\altium_mcp\pin_map.txt');
     PinMap.Free;
 
-    Result := '{"success": true, "detached_from": "' + Adopted + '", "sheet": "' + TargetDoc.DocumentName +
+    if (Missing = '') then Ok := 'true' else Ok := 'false';
+    Result := '{"success": ' + Ok + ', "detached_from": "' + Adopted + '", "sheet": "' + TargetDoc.DocumentName +
               '", "parts": ' + IntToStr(PartCount) +
               ', "graphics": ' + IntToStr(GfxCount) +
-              ', "pins": ' + IntToStr(PinCount) + '}';
+              ', "pins": ' + IntToStr(PinCount) +
+              ', "missing_parts": [' + Missing + ']}';
     Spec.Free;
     Placement.Free;
 end;

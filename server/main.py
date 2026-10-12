@@ -26,6 +26,9 @@ import label_blocks
 import script_bundle
 import pcblib_file
 
+from altium_files import read_altium_text, write_altium_text
+from outjob_parser import parse_outjob
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,  # Change to DEBUG for more detailed logs
@@ -394,9 +397,7 @@ class AltiumBridge:
             
             # Read the response file and print it for debugging
             logger.info("Response file found, reading response")
-            response_text = ""
-            with open(RESPONSE_FILE, "r") as f:
-                response_text = f.read()
+            response_text = read_altium_text(RESPONSE_FILE)
             
             # Log the raw response for debugging
             logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
@@ -1194,17 +1195,49 @@ SANDBOX_BEGIN = "// === BEGIN EXPERIMENT"
 SANDBOX_END = "// === END EXPERIMENT"
 
 
+def _window_process_name(hwnd) -> str:
+    """Executable file name of the process that owns a window ('' if unknown)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return ""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value)
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _dismiss_altium_dialogs():
     """Close Altium modal popups that would otherwise block a script run.
 
     Altium uses two kinds: Win32 task dialogs (#32770) and Delphi TMessageForm
-    error/warning boxes.
+    error/warning boxes. It also shows "Select Item To Run"
+    (TForm_RunScriptParameters) when it cannot find the script project; that
+    one stays open and blocks every later script run. Only windows owned by
+    the Altium process (X2.EXE) are touched, so dialogs of other applications
+    are never closed.
+
+    Returns (handle, class name, title) of the windows that were closed, so
+    the caller can tell the user (a closed dialog may have been one the user
+    had open).
     """
     try:
         import ctypes
         from ctypes import wintypes
     except ImportError:
-        return 0
+        return []
     user32 = ctypes.windll.user32
     found = []
 
@@ -1214,20 +1247,23 @@ def _dismiss_altium_dialogs():
             return True
         cls = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(hwnd, cls, 64)
-        if cls.value == "#32770":
-            found.append(hwnd)
-        elif cls.value == "TMessageForm":
-            n = user32.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(n + 1)
-            user32.GetWindowTextW(hwnd, buf, n + 1)
-            if buf.value in ("Error", "Warning", "Information", "Confirm"):
-                found.append(hwnd)
+        if cls.value not in ("#32770", "TMessageForm", "TForm_RunScriptParameters"):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        title = buf.value
+        if cls.value == "TMessageForm" and title not in ("Error", "Warning", "Information", "Confirm"):
+            return True
+        if _window_process_name(hwnd).lower() != "x2.exe":
+            return True
+        found.append((hwnd, cls.value, title))
         return True
 
     user32.EnumWindows(cb, 0)
-    for h in found:
+    for h, _, _ in found:
         user32.PostMessageW(h, 0x0010, 0, 0)
-    return len(found)
+    return found
 
 
 @mcp.tool()
@@ -1310,20 +1346,25 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     subprocess.Popen(cmd, shell=True)
 
     start = time.time()
-    dialogs = 0
+    # Keyed by window: a dialog that ignores WM_CLOSE (Yes/No boxes do) is
+    # found again on every pass and must be reported once
+    dismissed = {}
     while not SANDBOX_RESULT.exists() and time.time() - start < timeout_seconds:
         await asyncio.sleep(0.5)
         if time.time() - start > 6:
-            dialogs += _dismiss_altium_dialogs()
+            for h, c, t in _dismiss_altium_dialogs():
+                dismissed[h] = (c, t)
 
+    dialogs = list(dismissed.values())
+    titles = [t for _, t in dialogs]
     steps = []
     if SANDBOX_LOG.exists():
-        steps = SANDBOX_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+        steps = read_altium_text(SANDBOX_LOG).splitlines()
 
     if SANDBOX_RESULT.exists():
-        result_text = SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace").strip()
+        result_text = read_altium_text(SANDBOX_RESULT).strip()
         return json.dumps({"success": True, "result": result_text, "steps": steps,
-                           "dialogs_dismissed": dialogs}, indent=2)
+                           "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
     if steps:
         return json.dumps({
@@ -1336,7 +1377,17 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                         "shell command (sends the debugger Stop process to the running "
                         "Altium): \"<altium_exe>\" -REditScript:Stop  -- then retry.",
             "steps": steps,
-            "dialogs_dismissed": dialogs}, indent=2)
+            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
+
+    if any(c == "TForm_RunScriptParameters" for c, _ in dialogs):
+        return json.dumps({
+            "success": False,
+            "error": "Altium could not find the sandbox script",
+            "diagnosis": f"Altium was asked to run {SANDBOX_RUN} and showed 'Select Item To "
+                         "Run' instead, so it cannot open that path. The script executor is "
+                         "not wedged.",
+            "executor_wedged": False,
+            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
     return json.dumps({
         "success": False,
@@ -1347,7 +1398,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         "recovery": "A previously paused script may be blocking execution. Recover by "
                     "running this shell command: \"<altium_exe>\" -REditScript:Stop  "
                     "-- then retry. If it still fails, the script itself has a COMPILE error.",
-        "dialogs_dismissed": dialogs}, indent=2)
+        "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
 
 @mcp.tool()
@@ -1560,7 +1611,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         and occupies ~300 mil below the port. Keep wires out of that band.
 
     Args:
-        parts: component dicts. Required keys: designator, symbol_library,
+        parts: component dicts. Required keys: designator, symbol_library
+            (full path of a .SchLib file; .IntLib is not supported),
             symbol, x, y (mils). Optional: design_item_id, orientation (0-3),
             mirror (0/1), comment, description, footprint,
             parameters ({name: value}).
@@ -1599,6 +1651,16 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         for name, val in (p.get("parameters") or {}).items():
             lines.append(f"PARAM|{name}|{val}")
 
+    # The bridge can only read .SchLib files, and asked to open a path that
+    # does not exist Altium creates an empty library of that name instead -
+    # which used to give an empty sheet reported as success (issue #19)
+    for lib in sorted({str(p["symbol_library"]) for p in parts}):
+        if not lib.lower().endswith(".schlib") or not os.path.isfile(lib):
+            return json.dumps({"success": False,
+                               "error": "symbol_library must be the full path of an existing "
+                                        ".SchLib file (integrated libraries such as .IntLib "
+                                        f"are not supported): {lib}"})
+
     for route in (wires or []):
         if len(route) < 4 or len(route) % 2:
             return json.dumps({"success": False,
@@ -1619,9 +1681,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
 
     spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
     spec_path.parent.mkdir(parents=True, exist_ok=True)
-    # cp1252: the bridge reads these as ANSI, and part descriptions carry
-    # characters that are not plain ASCII
-    spec_path.write_text("\n".join(lines) + "\n", encoding="cp1252", errors="replace")
+    # Part descriptions carry characters that are not plain ASCII
+    write_altium_text(spec_path, "\n".join(lines) + "\n")
 
     response = await altium_bridge.execute_command("build_circuit", {})
     if not response.get("success", False):
@@ -1639,7 +1700,7 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
     pin_map = {}
     pm = Path("C:/Users/Public/altium_mcp/pin_map.txt")
     if pm.is_file():
-        for line in pm.read_text(errors="replace").splitlines():
+        for line in read_altium_text(pm).splitlines():
             f = line.strip().split("|")
             if len(f) == 5 and f[0] == "PIN":
                 pin_map.setdefault(f[1], {})[f[2]] = [int(f[3]), int(f[4])]
@@ -2311,7 +2372,7 @@ async def _silk_board(refresh: bool = False):
         result = response.get("result", {})
         if isinstance(result, str):
             result = json.loads(result)
-        text = Path(result["file"]).read_text(encoding="utf-8-sig", errors="replace")
+        text = read_altium_text(result["file"])
         snap["board"], snap["time"] = silkscreen.Board(text), time.time()
     return snap["board"]
 
@@ -3655,6 +3716,150 @@ async def get_output_job_containers(ctx: Context) -> str:
     
     logger.info(f"Retrieved output job containers data")
     return containers_data  # Already in JSON format
+
+@mcp.tool()
+async def get_outjob_settings(ctx: Context, outjob_path: str) -> str:
+    """
+    Read an .OutJob file from disk and return its outputs, containers and settings.
+
+    Works without Altium and on OutJobs that are not open. It reads the SAVED
+    file: changes not yet saved in Altium are not visible.
+
+    Notes for interpreting the result:
+    - An output is generated when it is connected to a container
+      (connected_containers non-empty). The per-output "enabled" flag mirrors
+      OutputEnabledN in the file and does not always match the UI.
+    - Gerber layers are decoded from Altium V7 layer IDs; unknown IDs are
+      reported as "Unknown layer 0x...".
+
+    Args:
+        outjob_path (str): Full path to the .OutJob file
+
+    Returns:
+        str: JSON with path, group_name, variant, containers (name, type,
+             output paths, file name expression, add_to_project) and outputs
+             (type, name, document_path, variant, connected_containers and a
+             decoded summary for Gerber, NC Drill, test points, pick and
+             place and print outputs, plus raw_settings)
+    """
+    try:
+        data = parse_outjob(outjob_path)
+    except FileNotFoundError:
+        return json.dumps({"error": f"OutJob not found: {outjob_path}"})
+    except Exception as e:
+        return json.dumps({"error": f"Could not parse OutJob: {e}"})
+    return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+async def _simple_command(command: str, params: dict, what: str) -> str:
+    """Run a bridge command and return its result as JSON text."""
+    response = await altium_bridge.execute_command(command, params)
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting {what}: {error_msg}")
+        return json.dumps({"error": f"Failed to get {what}: {error_msg}"})
+    result = response.get("result", {})
+    return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_project_info(ctx: Context) -> str:
+    """
+    Get the focused Altium project: parameters, documents and variants.
+
+    Read-only. Use it to check that nothing has unsaved changes before
+    generating outputs, and to read project parameters and variants.
+
+    Returns:
+        str: JSON with project_path, parameters [{name, value}],
+             schematic_sheet_count, modified_document_count, documents
+             [{path, kind, state}] where state is "closed", "open" or
+             "modified" (unsaved changes in memory), and variants
+             [{name, variations [{designator, kind}]}] where kind is
+             "not_fitted" or "alternate"
+    """
+    return await _simple_command("get_project_info", {}, "project info")
+
+
+@mcp.tool()
+async def get_project_components(ctx: Context, include_parameters: bool = False) -> str:
+    """
+    List every component of the compiled project (schematic side).
+
+    Compiles the focused project in memory first (nothing is saved). Unlike
+    the PCB component tools, this returns the schematic Comment of each
+    instance, which is where values of generic passives usually live.
+
+    Args:
+        include_parameters (bool): Also return every component parameter
+            (e.g. Manufacturer_Part_Number). Default False - the output is
+            much larger with parameters.
+
+    Returns:
+        str: JSON with component_count and components [{designator, comment,
+             footprint, library_reference, sheet, parameters?}]
+    """
+    return await _simple_command("get_project_components",
+                                 {"include_parameters": include_parameters}, "project components")
+
+
+@mcp.tool()
+async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
+    """
+    Compile the focused project and list its ERC/compiler violations.
+
+    Compiling works in memory and does not save any document (Altium may
+    refresh the derived .PrjPcbStructure file).
+
+    Args:
+        compile (bool): Compile before reading (default True). False returns
+            the violations of the last compilation.
+
+    Returns:
+        str: JSON with total, fatal, errors, warnings and violations
+             [{level, type, detail}]
+    """
+    return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
+
+
+@mcp.tool()
+async def get_board_summary(ctx: Context) -> str:
+    """
+    Summarise the focused PCB for fabrication checks.
+
+    Read-only. Coordinates are millimetres relative to the board origin.
+
+    Returns:
+        str: JSON with pcb_path, board origin (absolute), board_outline
+             (bounding box, width, height, vertex count), dimensions (cotas)
+             with their extents, via_count and vias_by_hole, components per
+             side, layer_contents (primitive count per layer, split into free
+             objects and objects inside components) and overlay_texts (free
+             texts on Top/Bottom Overlay, e.g. board name and revision)
+    """
+    return await _simple_command("get_board_summary", {}, "board summary")
+
+
+@mcp.tool()
+async def get_component_primitives(ctx: Context, designators: list) -> str:
+    """
+    List the primitives of PCB components with the layer each one is on.
+
+    Read-only. Useful to check footprints that were flipped to the bottom
+    side (e.g. fiducials: the copper and the pad that opens the solder mask
+    must end up on the same layer) and pad mask expansions.
+
+    Args:
+        designators (list): Component designators, e.g. ["FD1", "FD3"]
+
+    Returns:
+        str: JSON with components [{designator, footprint, layer, x_mm, y_mm,
+             rotation, primitives [{type, layer, ...}]}] and
+             missing_designators
+    """
+    return await _simple_command("get_component_primitives", {"designators": designators},
+                                 "component primitives")
+
 
 @mcp.tool()
 async def run_output_jobs(ctx: Context, container_names: list) -> str:
