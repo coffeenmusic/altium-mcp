@@ -108,6 +108,15 @@ class OutJobParserTest(unittest.TestCase):
         self.assertFalse(outputs["ODB++ Files"]["enabled"])
         self.assertEqual(outputs["Test Point Report"]["test_points"]["OriginPosition"], "Relative")
 
+    def test_byte_undefined_in_cp1252(self):
+        fd, path = tempfile.mkstemp(suffix=".OutJob")
+        with os.fdopen(fd, "wb") as f:
+            f.write(b"[OutputGroup1]\r\nName=X\r\nOutputMedium1=Fab\x81\r\n")
+        try:
+            self.assertEqual(parse_outjob(path)["containers"][0]["name"], "Fab\x81")
+        finally:
+            os.remove(path)
+
     def test_rejects_non_outjob(self):
         fd, path = tempfile.mkstemp(suffix=".OutJob")
         with os.fdopen(fd, "w") as f:

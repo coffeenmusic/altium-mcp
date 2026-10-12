@@ -62,7 +62,8 @@ def parse_layer_set(value: str) -> list:
 
 def _read_ini(path: Path) -> configparser.RawConfigParser:
     raw = path.read_bytes()
-    for encoding in ("utf-8-sig", "cp1252"):
+    # latin-1 decodes any byte, including the five cp1252 leaves undefined
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
         try:
             text = raw.decode(encoding)
             break

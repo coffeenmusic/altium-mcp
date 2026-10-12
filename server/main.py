@@ -1129,8 +1129,9 @@ def _dismiss_altium_dialogs():
     the Altium process (X2.EXE) are touched, so dialogs of other applications
     are never closed.
 
-    Returns (class name, title) of the windows that were closed, so the caller
-    can tell the user (a closed dialog may have been one the user had open).
+    Returns (handle, class name, title) of the windows that were closed, so
+    the caller can tell the user (a closed dialog may have been one the user
+    had open).
     """
     try:
         import ctypes
@@ -1162,7 +1163,7 @@ def _dismiss_altium_dialogs():
     user32.EnumWindows(cb, 0)
     for h, _, _ in found:
         user32.PostMessageW(h, 0x0010, 0, 0)
-    return [(c, t) for _, c, t in found]
+    return found
 
 
 @mcp.tool()
@@ -1243,12 +1244,16 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     subprocess.Popen(cmd, shell=True)
 
     start = time.time()
-    dialogs = []
+    # Keyed by window: a dialog that ignores WM_CLOSE (Yes/No boxes do) is
+    # found again on every pass and must be reported once
+    dismissed = {}
     while not SANDBOX_RESULT.exists() and time.time() - start < timeout_seconds:
         await asyncio.sleep(0.5)
         if time.time() - start > 6:
-            dialogs += _dismiss_altium_dialogs()
+            for h, c, t in _dismiss_altium_dialogs():
+                dismissed[h] = (c, t)
 
+    dialogs = list(dismissed.values())
     titles = [t for _, t in dialogs]
     steps = []
     if SANDBOX_LOG.exists():
@@ -2684,8 +2689,8 @@ async def get_project_info(ctx: Context) -> str:
              schematic_sheet_count, modified_document_count, documents
              [{path, kind, state}] where state is "closed", "open" or
              "modified" (unsaved changes in memory), and variants
-             [{name, variations [{designator, kind}]}] where kind 1 is
-             Not Fitted and 2 is Alternate Part
+             [{name, variations [{designator, kind}]}] where kind is
+             "not_fitted" or "alternate"
     """
     return await _simple_command("get_project_info", {}, "project info")
 

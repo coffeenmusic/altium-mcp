@@ -887,6 +887,18 @@ begin
     end;
 end;
 
+// Kind of an IComponentVariation as text (TVariationKind).
+function VariationKindName(Kind: Integer): String;
+begin
+    case Kind of
+        0: Result := 'none';
+        1: Result := 'not_fitted';
+        2: Result := 'alternate';
+    else
+        Result := 'kind_' + IntToStr(Kind);
+    end;
+end;
+
 // Focused project: parameters, documents (with unsaved-changes flag) and variants
 function GetProjectInfo(ROOT_DIR: String): String;
 var
@@ -970,7 +982,7 @@ begin
                 begin
                     Variation := ProjVariant.DM_Variations(J);
                     VariationsArr.Add('{"designator": "' + JSONEscapeString(Variation.DM_PhysicalDesignator) +
-                        '", "kind": ' + IntToStr(Variation.DM_VariationKind) + '}');
+                        '", "kind": "' + VariationKindName(Variation.DM_VariationKind) + '"}');
                 end;
                 AddJSONProperty(ItemProps, 'name', ProjVariant.DM_Description);
                 ItemProps.Add(BuildJSONArray(VariationsArr, 'variations', 1));
