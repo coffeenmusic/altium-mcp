@@ -22,6 +22,7 @@ import base64
 import glob
 import re
 
+from altium_files import read_altium_text, write_altium_text
 from outjob_parser import parse_outjob
 
 # Configure logging
@@ -305,9 +306,7 @@ class AltiumBridge:
             
             # Read the response file and print it for debugging
             logger.info("Response file found, reading response")
-            response_text = ""
-            with open(RESPONSE_FILE, "r") as f:
-                response_text = f.read()
+            response_text = read_altium_text(RESPONSE_FILE)
             
             # Log the raw response for debugging
             logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
@@ -1124,11 +1123,14 @@ def _dismiss_altium_dialogs():
     """Close Altium modal popups that would otherwise block a script run.
 
     Altium uses two kinds: Win32 task dialogs (#32770) and Delphi TMessageForm
-    error/warning boxes. Only windows owned by the Altium process (X2.EXE) are
-    touched, so dialogs of other applications are never closed.
+    error/warning boxes. It also shows "Select Item To Run"
+    (TForm_RunScriptParameters) when it cannot find the script project; that
+    one stays open and blocks every later script run. Only windows owned by
+    the Altium process (X2.EXE) are touched, so dialogs of other applications
+    are never closed.
 
-    Returns the titles of the windows that were closed, so the caller can tell
-    the user (a closed dialog may have been one the user had open).
+    Returns (class name, title) of the windows that were closed, so the caller
+    can tell the user (a closed dialog may have been one the user had open).
     """
     try:
         import ctypes
@@ -1144,7 +1146,7 @@ def _dismiss_altium_dialogs():
             return True
         cls = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(hwnd, cls, 64)
-        if cls.value not in ("#32770", "TMessageForm"):
+        if cls.value not in ("#32770", "TMessageForm", "TForm_RunScriptParameters"):
             return True
         n = user32.GetWindowTextLengthW(hwnd)
         buf = ctypes.create_unicode_buffer(n + 1)
@@ -1154,13 +1156,13 @@ def _dismiss_altium_dialogs():
             return True
         if _window_process_name(hwnd).lower() != "x2.exe":
             return True
-        found.append((hwnd, title))
+        found.append((hwnd, cls.value, title))
         return True
 
     user32.EnumWindows(cb, 0)
-    for h, _ in found:
+    for h, _, _ in found:
         user32.PostMessageW(h, 0x0010, 0, 0)
-    return [t for _, t in found]
+    return [(c, t) for _, c, t in found]
 
 
 @mcp.tool()
@@ -1233,8 +1235,11 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             except OSError:
                 pass
 
+    # Altium runs outside Claude Desktop's MSIX package and cannot see the
+    # virtualized AppData path this process sees (issue #19)
+    sandbox_prj = AltiumBridge._resolve_msix_path(str(SANDBOX_PRJ))
     cmd = (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScript('
-           f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
+           f'ProjectName="{sandbox_prj}"^|ProcName="Sandbox>Run")')
     subprocess.Popen(cmd, shell=True)
 
     start = time.time()
@@ -1244,14 +1249,15 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         if time.time() - start > 6:
             dialogs += _dismiss_altium_dialogs()
 
+    titles = [t for _, t in dialogs]
     steps = []
     if SANDBOX_LOG.exists():
-        steps = SANDBOX_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+        steps = read_altium_text(SANDBOX_LOG).splitlines()
 
     if SANDBOX_RESULT.exists():
-        result_text = SANDBOX_RESULT.read_text(encoding="utf-8", errors="replace").strip()
+        result_text = read_altium_text(SANDBOX_RESULT).strip()
         return json.dumps({"success": True, "result": result_text, "steps": steps,
-                           "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": dialogs}, indent=2)
+                           "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
     if steps:
         return json.dumps({
@@ -1264,7 +1270,17 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                         "shell command (sends the debugger Stop process to the running "
                         "Altium): \"<altium_exe>\" -REditScript:Stop  -- then retry.",
             "steps": steps,
-            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": dialogs}, indent=2)
+            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
+
+    if any(c == "TForm_RunScriptParameters" for c, _ in dialogs):
+        return json.dumps({
+            "success": False,
+            "error": "Altium could not find the sandbox script project",
+            "diagnosis": f"Altium was asked to run {sandbox_prj} and showed 'Select Item To "
+                         "Run' instead, so it cannot open that path. The script executor is "
+                         "not wedged.",
+            "executor_wedged": False,
+            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
     return json.dumps({
         "success": False,
@@ -1275,7 +1291,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         "recovery": "A previously paused script may be blocking execution. Recover by "
                     "running this shell command: \"<altium_exe>\" -REditScript:Stop  "
                     "-- then retry. If it still fails, the script itself has a COMPILE error.",
-        "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": dialogs}, indent=2)
+        "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
 
 @mcp.tool()
@@ -1451,7 +1467,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         and occupies ~300 mil below the port. Keep wires out of that band.
 
     Args:
-        parts: component dicts. Required keys: designator, symbol_library,
+        parts: component dicts. Required keys: designator, symbol_library
+            (full path of a .SchLib file; .IntLib is not supported),
             symbol, x, y (mils). Optional: design_item_id, orientation (0-3),
             mirror (0/1), comment, description, footprint,
             parameters ({name: value}).
@@ -1490,6 +1507,16 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         for name, val in (p.get("parameters") or {}).items():
             lines.append(f"PARAM|{name}|{val}")
 
+    # The bridge can only read .SchLib files, and asked to open a path that
+    # does not exist Altium creates an empty library of that name instead -
+    # which used to give an empty sheet reported as success (issue #19)
+    for lib in sorted({str(p["symbol_library"]) for p in parts}):
+        if not lib.lower().endswith(".schlib") or not os.path.isfile(lib):
+            return json.dumps({"success": False,
+                               "error": "symbol_library must be the full path of an existing "
+                                        ".SchLib file (integrated libraries such as .IntLib "
+                                        f"are not supported): {lib}"})
+
     for route in (wires or []):
         if len(route) < 4 or len(route) % 2:
             return json.dumps({"success": False,
@@ -1510,9 +1537,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
 
     spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
     spec_path.parent.mkdir(parents=True, exist_ok=True)
-    # cp1252: the bridge reads these as ANSI, and part descriptions carry
-    # characters that are not plain ASCII
-    spec_path.write_text("\n".join(lines) + "\n", encoding="cp1252", errors="replace")
+    # Part descriptions carry characters that are not plain ASCII
+    write_altium_text(spec_path, "\n".join(lines) + "\n")
 
     response = await altium_bridge.execute_command("build_circuit", {})
     if not response.get("success", False):
@@ -1530,7 +1556,7 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
     pin_map = {}
     pm = Path("C:/Users/Public/altium_mcp/pin_map.txt")
     if pm.is_file():
-        for line in pm.read_text(errors="replace").splitlines():
+        for line in read_altium_text(pm).splitlines():
             f = line.strip().split("|")
             if len(f) == 5 and f[0] == "PIN":
                 pin_map.setdefault(f[1], {})[f[2]] = [int(f[3]), int(f[4])]
