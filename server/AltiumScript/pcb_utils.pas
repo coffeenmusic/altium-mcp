@@ -2651,6 +2651,13 @@ begin
     else Result := 'object_' + IntToStr(ObjectId);
 end;
 
+// Millimetres rounded to 0.1 um. Coordinates are stored in mil units, so
+// a metric value comes back with float noise (0.2 mm reads 0.1999996).
+function RoundedMMs(Coord: Integer): Double;
+begin
+    Result := Round(CoordToMMs(Coord) * 10000) / 10000;
+end;
+
 // Outline, origin, dimensions, vias by hole size, component sides, primitive
 // counts per layer and the free texts on both overlays.
 function GetBoardSummary(ROOT_DIR: String): String;
@@ -2691,18 +2698,18 @@ begin
     Items := TStringList.Create;
     try
         AddJSONProperty(ResultProps, 'pcb_path', Board.FileName);
-        AddJSONNumber(ResultProps, 'origin_abs_x_mm', CoordToMMs(OX));
-        AddJSONNumber(ResultProps, 'origin_abs_y_mm', CoordToMMs(OY));
+        AddJSONNumber(ResultProps, 'origin_abs_x_mm', RoundedMMs(OX));
+        AddJSONNumber(ResultProps, 'origin_abs_y_mm', RoundedMMs(OY));
 
         Outline := Board.BoardOutline;
         Props := TStringList.Create;
         try
-            AddJSONNumber(Props, 'x1_mm', CoordToMMs(Outline.BoundingRectangle.Left - OX));
-            AddJSONNumber(Props, 'y1_mm', CoordToMMs(Outline.BoundingRectangle.Bottom - OY));
-            AddJSONNumber(Props, 'x2_mm', CoordToMMs(Outline.BoundingRectangle.Right - OX));
-            AddJSONNumber(Props, 'y2_mm', CoordToMMs(Outline.BoundingRectangle.Top - OY));
-            AddJSONNumber(Props, 'width_mm', CoordToMMs(Outline.BoundingRectangle.Right - Outline.BoundingRectangle.Left));
-            AddJSONNumber(Props, 'height_mm', CoordToMMs(Outline.BoundingRectangle.Top - Outline.BoundingRectangle.Bottom));
+            AddJSONNumber(Props, 'x1_mm', RoundedMMs(Outline.BoundingRectangle.Left - OX));
+            AddJSONNumber(Props, 'y1_mm', RoundedMMs(Outline.BoundingRectangle.Bottom - OY));
+            AddJSONNumber(Props, 'x2_mm', RoundedMMs(Outline.BoundingRectangle.Right - OX));
+            AddJSONNumber(Props, 'y2_mm', RoundedMMs(Outline.BoundingRectangle.Top - OY));
+            AddJSONNumber(Props, 'width_mm', RoundedMMs(Outline.BoundingRectangle.Right - Outline.BoundingRectangle.Left));
+            AddJSONNumber(Props, 'height_mm', RoundedMMs(Outline.BoundingRectangle.Top - Outline.BoundingRectangle.Bottom));
             AddJSONInteger(Props, 'vertex_count', Outline.PointCount);
             ResultProps.Add('"board_outline": ' + Trim(BuildJSONObject(Props, 1)));
         finally
@@ -2720,10 +2727,10 @@ begin
             Props := TStringList.Create;
             try
                 AddJSONProperty(Props, 'layer', Layer2String(Obj.Layer));
-                AddJSONNumber(Props, 'x1_mm', CoordToMMs(Obj.BoundingRectangle.Left - OX));
-                AddJSONNumber(Props, 'y1_mm', CoordToMMs(Obj.BoundingRectangle.Bottom - OY));
-                AddJSONNumber(Props, 'x2_mm', CoordToMMs(Obj.BoundingRectangle.Right - OX));
-                AddJSONNumber(Props, 'y2_mm', CoordToMMs(Obj.BoundingRectangle.Top - OY));
+                AddJSONNumber(Props, 'x1_mm', RoundedMMs(Obj.BoundingRectangle.Left - OX));
+                AddJSONNumber(Props, 'y1_mm', RoundedMMs(Obj.BoundingRectangle.Bottom - OY));
+                AddJSONNumber(Props, 'x2_mm', RoundedMMs(Obj.BoundingRectangle.Right - OX));
+                AddJSONNumber(Props, 'y2_mm', RoundedMMs(Obj.BoundingRectangle.Top - OY));
                 DimArray.Add(BuildJSONObject(Props, 1));
             finally
                 Props.Free;
@@ -2742,7 +2749,7 @@ begin
         while Obj <> Nil do
         begin
             Inc(ViaCount);
-            TallyKey(HoleKeys, HoleCounts, StringReplace(FloatToStr(CoordToMMs(Obj.HoleSize)), ',', '.', REPLACEALL));
+            TallyKey(HoleKeys, HoleCounts, StringReplace(FloatToStr(RoundedMMs(Obj.HoleSize)), ',', '.', REPLACEALL));
             Obj := Iterator.NextPCBObject;
         end;
         Board.BoardIterator_Destroy(Iterator);
@@ -2876,18 +2883,18 @@ begin
                             if Prim.ObjectId = ePadObject then
                             begin
                                 AddJSONProperty(PrimProps, 'name', Prim.Name);
-                                AddJSONNumber(PrimProps, 'size_x_mm', CoordToMMs(Prim.TopXSize));
-                                AddJSONNumber(PrimProps, 'size_y_mm', CoordToMMs(Prim.TopYSize));
-                                AddJSONNumber(PrimProps, 'solder_mask_expansion_mm', CoordToMMs(Prim.SolderMaskExpansion));
-                                AddJSONNumber(PrimProps, 'paste_mask_expansion_mm', CoordToMMs(Prim.PasteMaskExpansion));
+                                AddJSONNumber(PrimProps, 'size_x_mm', RoundedMMs(Prim.TopXSize));
+                                AddJSONNumber(PrimProps, 'size_y_mm', RoundedMMs(Prim.TopYSize));
+                                AddJSONNumber(PrimProps, 'solder_mask_expansion_mm', RoundedMMs(Prim.SolderMaskExpansion));
+                                AddJSONNumber(PrimProps, 'paste_mask_expansion_mm', RoundedMMs(Prim.PasteMaskExpansion));
                             end;
                             if Prim.ObjectId = eArcObject then
                             begin
-                                AddJSONNumber(PrimProps, 'radius_mm', CoordToMMs(Prim.Radius));
-                                AddJSONNumber(PrimProps, 'width_mm', CoordToMMs(Prim.LineWidth));
+                                AddJSONNumber(PrimProps, 'radius_mm', RoundedMMs(Prim.Radius));
+                                AddJSONNumber(PrimProps, 'width_mm', RoundedMMs(Prim.LineWidth));
                             end;
                             if Prim.ObjectId = eTrackObject then
-                                AddJSONNumber(PrimProps, 'width_mm', CoordToMMs(Prim.Width));
+                                AddJSONNumber(PrimProps, 'width_mm', RoundedMMs(Prim.Width));
                             PrimArray.Add(BuildJSONObject(PrimProps, 2));
                         finally
                             PrimProps.Free;
@@ -2899,8 +2906,8 @@ begin
                     AddJSONProperty(CompProps, 'designator', Comp.Name.Text);
                     AddJSONProperty(CompProps, 'footprint', Comp.Pattern);
                     AddJSONProperty(CompProps, 'layer', Layer2String(Comp.Layer));
-                    AddJSONNumber(CompProps, 'x_mm', CoordToMMs(Comp.X - OX));
-                    AddJSONNumber(CompProps, 'y_mm', CoordToMMs(Comp.Y - OY));
+                    AddJSONNumber(CompProps, 'x_mm', RoundedMMs(Comp.X - OX));
+                    AddJSONNumber(CompProps, 'y_mm', RoundedMMs(Comp.Y - OY));
                     AddJSONNumber(CompProps, 'rotation', Comp.Rotation);
                     CompProps.Add(BuildJSONArray(PrimArray, 'primitives', 1));
                     CompArray.Add(BuildJSONObject(CompProps, 1));
