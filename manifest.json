@@ -160,6 +160,38 @@
       "description": "Second step of layout duplication. Applies the layout of source components to destination components"
     },
     {
+      "name": "auto_place_silkscreen",
+      "description": "Bulk-place designators with the Silkscreen Auto Placer script, run headless inside Altium in one undo step"
+    },
+    {
+      "name": "check_silkscreen",
+      "description": "Find designators that need work: Altium's own silk rules plus quality checks such as far from the part, ambiguous, over a body or upside down"
+    },
+    {
+      "name": "view_silkscreen",
+      "description": "Render the silkscreen around some designators or in a region, with a grid labelled in board coordinates"
+    },
+    {
+      "name": "get_designator_options",
+      "description": "Ranked legal spots for designators, drawn as numbered boxes"
+    },
+    {
+      "name": "get_label_block_options",
+      "description": "Options for placing a row of parts' designators together as a block, linked to the parts by a leader line or index markers"
+    },
+    {
+      "name": "place_label_block",
+      "description": "Apply a label block: move the designators into it, draw its link, and check both with Altium's silk rules"
+    },
+    {
+      "name": "remove_label_block",
+      "description": "Remove the label block of some parts: delete its link graphics and leave the designators where they are"
+    },
+    {
+      "name": "set_designator_positions",
+      "description": "Place designators by coordinates or relative to their part, and get Altium's DRC verdict for each"
+    },
+    {
       "name": "create_pcb_footprint",
       "description": "Create a new PCB footprint in the currently active PcbLib document with SMD pads, auto-generated courtyard, and silkscreen with pin 1 indicator"
     },
