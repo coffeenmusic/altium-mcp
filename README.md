@@ -6,7 +6,7 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 ## Example commands
 - Run all output jobs
 - Create a symbol for the part in the attached datasheet and use the currently open symbol as a reference example.
-- Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` description as pin placement rules. Please modify for your own preferences.)
+- Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `server\symbol_placement_rules.txt` in the extension's install folder as pin placement rules. Please modify for your own preferences; an extension update replaces the file, so keep a copy.)
 - Create an op-amp symbol with a triangle body like the other op-amps in my library (symbols support line/polygon/arc/ellipse/label body graphics, not just rectangles)
 - Find me the LM358 symbol in my opamp library and open it
 - Create a multi-part symbol for a quad op-amp from the attached LM324 datasheet (creates parts A, B, C, D with shared V+/V- power pins)
@@ -19,6 +19,8 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 - Auto-place my silkscreen, then fix the designators the placer left on top of parts or far from them
 - Give me a list of all IC designators in my design
 - Get me all length matching rules
+- Check my project is ready for fabrication: unsaved documents, ERC errors, and which layers my Gerber output job plots
+- Draw a schematic of an LED with a current-limiting resistor on a new sheet, using symbols from my library
 
 ## Installing the MCP Server
 The easiest way to install is to use Claude Code, point it to this repo and ask it to install it for you. Or alternatively, see below.
@@ -43,7 +45,7 @@ The older approach of bundling pre-compiled packages in `server/lib/` is no long
 
 **How it works:**
 
-1. `start_server.py` (at the repo root) looks for a ready virtual environment in `%USERPROFILE%\.altium-mcpenvs\<key>`, where `<key>` is a hash of the pinned requirements and the Python version
+1. `start_server.py` (at the repo root) looks for a ready virtual environment in `%USERPROFILE%\.altium-mcp\venvs\<key>`, where `<key>` is a hash of the pinned requirements and the Python version
 2. If it isn't ready, it starts a **detached** builder process (`start_server.py --build`) that creates the venv and pip-installs the pinned dependencies, then waits for it. Claude Desktop kills a server that has not answered within about 60 seconds, and restarts servers freely; a build that ran inside the launcher died with it. The detached builder finishes regardless, so a restarted launcher finds the venv ready or a build still in progress.
 3. A lock file (holding the builder's PID) makes sure only one build runs at a time; other launchers wait for it. A lock whose owner has exited is taken over immediately.
 4. It then launches `server/main.py` using the venv's Python
@@ -55,7 +57,7 @@ On a slow network the first build can exceed the client's 60-second startup time
 
 **Build steps:**
 
-1. Make sure `start_server.py` exists at the repo root (see below for contents)
+1. Make sure `start_server.py` exists at the repo root
 2. Make sure `server/main.py` does NOT have the old `site.addsitedir` hack at the top
 3. Update `manifest.json`: set `entry_point` to `start_server.py`, remove any `env`/`PYTHONPATH` fields, and use `manifest_version: "0.3"`
 4. Package the DXT — either use `dxt pack` or manually zip and rename:
@@ -153,7 +155,8 @@ The server provides several tools to interact with Altium Designer:
   These records work after `SYMBOL` and `EDITSYMBOL` alike. An unknown pin number, edge, symbol or justification is listed under `problems`; the rest of the batch still runs.
 
   The result lists `created`, `edited`, `failed` and `problems`. Created and edited symbols leave the library modified and unsaved, so the user reviews them and saves; the tool never saves a library. Objects a script adds through PreProcess/PostProcess do not reliably set Altium's modified flag (in a PCB library they never do), so the symbol and footprint tools set it themselves. A `LIBRARY|<path>` line focuses that library if it is already open (it never reloads it, which would discard unsaved symbols) and opens it otherwise. If that library cannot be focused, the batch stops before changing anything.
-- `get_symbol_placement_rules`: Create symbol's helper tool that reads `~\AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` to get pin placement rules for symbol creation. The file ships empty, so the tool returns neutral guidance (follow a comparable symbol in the user's library, keep pins on a 100 mil grid); put your own rules in it.
+- `build_schematic`: Build a wired schematic on a new sheet from a circuit description: parts from a `.SchLib` (full path; `.IntLib` is not supported), wires, junctions, net labels, power ports and notes, in mils. Returns every placed pin's true connection point, so a second call can route wires from measured coordinates, and lists any part it could not place. The new sheet is kept out of your project.
+- `get_symbol_placement_rules`: Create symbol's helper tool that reads `server\symbol_placement_rules.txt` in the extension's install folder to get pin placement rules for symbol creation. The file ships empty, so the tool returns neutral guidance (follow a comparable symbol in the user's library, keep pins on a 100 mil grid); put your own rules in it.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 - `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
 
@@ -238,6 +241,8 @@ Altium's script engine also leaks memory: every property read of a board object 
 
 As a backstop, the server checks Altium before every call and refuses when it is within 1,000 USER objects of the cap (the user's own menu scripts still leak each time they run) or using more than half of the machine's RAM, asking for a save and restart.
 
+Files exchanged with the scripts are read and written the way Altium does: in the Windows ANSI code page, or as UTF-8 when the file starts with a byte-order mark.
+
 ## References
 - Get scripts' project path from Jeff Collins and William Kitchen's stripped down version
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp
@@ -249,6 +254,7 @@ As a backstop, the server checks Altium before every call and refuses when it is
 - Jeff Collins has an XIA_Release_Manager.pas script that taught me the art of the Output Job. See his post on the Altium Forums: https://forum.live.altium.com/#/posts/189423
 
 ## Contributors
+- [daescobarh](https://github.com/daescobarh) — project validation tools (`get_project_info`, `get_project_components`, `get_erc_violations`, `get_board_summary`, `get_component_primitives`, `get_outjob_settings`) and safer dialog dismissal ([PR #18](https://github.com/coffeenmusic/altium-mcp/pull/18))
 - [coffeedust](https://github.com/coffeedust) — `create_pcb_footprint` tool for PcbLib automation ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7))
 - [fwolter](https://github.com/fwolter) — Fix JSON parsing error when the decimal separator is a comma ([PR #3](https://github.com/coffeenmusic/altium-mcp/pull/3))
 
@@ -264,14 +270,12 @@ This is a third-party integration and not made by Altium. Made by [coffeenmusic]
 - Run DRC: IPCB_Board.RunBatchDesignRuleCheck( 
 - Move cursor to position: IPCB_Board.XCursor, IPCB_Board.YCursor 
 - Add get schematic & pcb library path for footprint. 
-- Add get symbol from library
 - log response time of each tool
 - Add go to schematic sheet
 - Go to sheet with component designator
 - Board.ChooseLocation(x, y, 'Test');
 - Zoom to selected objects:
 - Change Schematic Selection Filter: SelectionFilter.pas
-- Place schematic objects (place component from library): PlaceSchObjects.pas
 - How can I read through components from libraries in Components panel?
 
 TODO Tests:
@@ -279,4 +283,4 @@ Need to add the following test units
 - `get_pcb_layers` 
 - `set_pcb_layer_visibility`
 - `layout_duplicator`
-- `get_pcb_screenshot`
+- `get_screenshot`
