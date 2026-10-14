@@ -172,3 +172,53 @@ begin
     else
         List.Add(JSONPairStr(Name, 'false', False));
 end;
+
+// Decode JSON string escapes: \\ \" \/ \n \r \t and \uXXXX
+function JSONUnescape(S: String): String;
+var
+    i : Integer;
+    C : String;
+begin
+    Result := '';
+    i := 1;
+    while (i <= Length(S)) do
+    begin
+        C := Copy(S, i, 1);
+        if (C = '\') and (i < Length(S)) then
+        begin
+            i := i + 1;
+            C := Copy(S, i, 1);
+            if (C = 'n') then
+                Result := Result + #10
+            else if (C = 'r') then
+                Result := Result + #13
+            else if (C = 't') then
+                Result := Result + #9
+            else if (C = 'u') and (i + 4 <= Length(S)) then
+            begin
+                Result := Result + Chr(StrToInt('$' + Copy(S, i + 1, 4)));
+                i := i + 4;
+            end
+            else
+                Result := Result + C;
+        end
+        else
+            Result := Result + C;
+        i := i + 1;
+    end;
+end;
+
+// The string value of a '"key": "value",' request line: the trailing comma
+// and surrounding quotes removed and JSON escapes decoded. Unlike TrimJSON
+// it keeps commas and quotes inside the value, so file paths arrive intact.
+function JSONLineValue(Line: String): String;
+var
+    S : String;
+begin
+    S := Trim(Copy(Line, Pos(':', Line) + 1, Length(Line)));
+    if (Copy(S, Length(S), 1) = ',') then
+        S := Trim(Copy(S, 1, Length(S) - 1));
+    if (Length(S) >= 2) and (Copy(S, 1, 1) = '"') and (Copy(S, Length(S), 1) = '"') then
+        S := Copy(S, 2, Length(S) - 2);
+    Result := JSONUnescape(S);
+end;

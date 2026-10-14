@@ -293,17 +293,12 @@ begin
             Exit;
         end;
         // Never re-open an open document (reload discards unsaved changes)
-        if Client.IsDocumentOpen(LibraryPath) then
-            ServerDoc := Client.GetDocumentByPath(LibraryPath)
-        else
-            ServerDoc := Client.OpenDocument('PcbLib', LibraryPath);
+        ServerDoc := OpenLibraryDocument('PcbLib', LibraryPath);
         if ServerDoc = Nil then
         begin
             Result := 'ERROR: Failed to open library: ' + LibraryPath;
             Exit;
         end;
-        Client.ShowDocument(ServerDoc);
-        Sleep(500);
     end;
 
     PcbLib := GetPcbLibSafe(0);

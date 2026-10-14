@@ -672,19 +672,13 @@ begin
             Exit;
         end;
 
-        // Open the library document. If it is already open, only focus it -
-        // re-opening reloads from disk and silently discards unsaved changes.
-        if Client.IsDocumentOpen(LibraryPath) then
-            ServerDoc := Client.GetDocumentByPath(LibraryPath)
-        else
-            ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
+        // Open the library, or only focus it when it is already open
+        ServerDoc := OpenLibraryDocument('SchLib', LibraryPath);
         if ServerDoc = Nil then
         begin
             Result := 'ERROR: Failed to open library: ' + LibraryPath;
             Exit;
         end;
-        Client.ShowDocument(ServerDoc);
-        Sleep(500); // Give Altium time to focus the document
     end;
 
     // Get the current schematic library document
@@ -988,17 +982,12 @@ begin
             Result := 'ERROR: Library file not found: ' + LibraryPath;
             Exit;
         end;
-        if Client.IsDocumentOpen(LibraryPath) then
-            ServerDoc := Client.GetDocumentByPath(LibraryPath)
-        else
-            ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
+        ServerDoc := OpenLibraryDocument('SchLib', LibraryPath);
         if ServerDoc = Nil then
         begin
             Result := 'ERROR: Failed to open library: ' + LibraryPath;
             Exit;
         end;
-        Client.ShowDocument(ServerDoc);
-        Sleep(500);
     end;
 
     CurrentLib := SchServer.GetCurrentSchDocument;
@@ -1721,8 +1710,8 @@ begin
             if (GetFieldFromPipeString(Rec, 2) <> CurLib) then
             begin
                 CurLib := GetFieldFromPipeString(Rec, 2);
-                Client.ShowDocument(Client.OpenDocument('SchLib', CurLib));
-                Sleep(1200);
+                OpenLibraryDocument('SchLib', CurLib);
+                Sleep(700);
             end;
             LibDoc := SchServer.GetCurrentSchDocument;
 
