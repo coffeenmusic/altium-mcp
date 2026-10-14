@@ -47,8 +47,39 @@ if not B1 then
     ResultText := '{"error": "symbol not found"}'
 else
 begin
+    Obj1.SchIterator_Destroy(Obj2);
     SandboxLog('replicating');
-    Obj3 := Obj3.Replicate;
+    Obj4 := Obj3;              // the library symbol
+    Obj3 := Obj4.Replicate;    // the copy that is placed
+
+    // While a symbol is the one shown in the library editor, Altium hands its
+    // body, pins and visible parameters to the library document, and
+    // Replicate copies only what the component itself holds, so the copy was
+    // placed empty (issue #22). Copy across what the library document holds,
+    // and only when the copy came out short.
+    I1 := 0;
+    Obj2 := Obj4.SchIterator_Create;
+    Obj5 := Obj2.FirstSchObject;
+    while (Obj5 <> nil) do begin I1 := I1 + 1; Obj5 := Obj2.NextSchObject; end;
+    Obj4.SchIterator_Destroy(Obj2);
+    I2 := 0;
+    Obj2 := Obj3.SchIterator_Create;
+    Obj5 := Obj2.FirstSchObject;
+    while (Obj5 <> nil) do begin I2 := I2 + 1; Obj5 := Obj2.NextSchObject; end;
+    Obj3.SchIterator_Destroy(Obj2);
+    if (I2 < I1) then
+    begin
+        SandboxLog('copy has ' + IntToStr(I2) + ' of ' + IntToStr(I1) + ' children: copying the rest');
+        Obj2 := Obj4.SchIterator_Create;
+        Obj5 := Obj2.FirstSchObject;
+        while (Obj5 <> nil) do
+        begin
+            if (Obj5.Container <> nil) and (Obj5.Container.ObjectId <> eSchComponent) then
+                Obj3.AddSchObject(Obj5.Replicate);
+            Obj5 := Obj2.NextSchObject;
+        end;
+        Obj4.SchIterator_Destroy(Obj2);
+    end;
 
     // SAFETY: after opening the symbol library, THAT document is current.
     // Placing into it would modify a shared library (this happened once and

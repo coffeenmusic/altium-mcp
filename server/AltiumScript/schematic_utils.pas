@@ -1631,6 +1631,51 @@ begin
     end;
 end;
 
+// A detached copy of a library symbol with all of its primitives. While a
+// symbol is the one shown in the library editor, Altium hands its body, pins
+// and visible parameters to the library document (their Container is the
+// SchLib), and Replicate copies only what the component itself holds - so
+// the shown symbol, such as one just made by create_schematic_symbol, was
+// placed with no body or pins (issue #22). Copy across what the library
+// document holds, and only when the copy came out short.
+function ReplicateLibSymbol(Comp: ISch_Component): ISch_Component;
+var
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Have, Want : Integer;
+begin
+    Result := Comp.Replicate;
+    Want := 0;
+    Iter := Comp.SchIterator_Create;
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        Want := Want + 1;
+        Obj := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+    Have := 0;
+    Iter := Result.SchIterator_Create;
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        Have := Have + 1;
+        Obj := Iter.NextSchObject;
+    end;
+    Result.SchIterator_Destroy(Iter);
+    if (Have >= Want) then Exit;
+
+    Iter := Comp.SchIterator_Create;
+    Obj := Iter.FirstSchObject;
+    while (Obj <> nil) do
+    begin
+        if (Obj.Container <> nil) and (Obj.Container.ObjectId <> eSchComponent) then
+            Result.AddSchObject(Obj.Replicate);
+        Obj := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+end;
+
 function BuildCircuitFromSpec(SpecPath: String; PlacementPath: String): String;
 var
     Spec, Placement, PinMap : TStringList;
@@ -1737,7 +1782,7 @@ begin
             end
             else
             begin
-                Replica := Found.Replicate;
+                Replica := ReplicateLibSymbol(Found);
                 Replica.Designator.Text := GetFieldFromPipeString(Rec, 1);
                 Replica.DesignItemID    := GetFieldFromPipeString(Rec, 4);
                 Replica.Orientation     := StrToInt(GetFieldFromPipeString(Rec, 7));
