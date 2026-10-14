@@ -1,46 +1,55 @@
 """Build a placement spec for a DbLib part - generically, from the database.
 
-Given a corporate part number, this finds which enabled *_Query view contains
-it, reads every non-null column, and emits a pipe-delimited spec file that the
-placement script consumes. No table-specific or column-specific code: whatever
-the view returns becomes the component's parameters, so every category works.
+Given a part number, this finds which enabled DbLib table contains it, reads
+every non-null column, and emits a pipe-delimited spec file that the
+placement script consumes. No database-specific code: the part-number field,
+the symbol/footprint/description columns and the columns to skip all come
+from the .DbLib, and whatever else the table returns becomes the
+component's parameters, so every category works.
+
+The DbLib is the one installed in a running Altium (IntegratedLibraryManager),
+or the ALTIUM_DBLIB environment variable.
 
 Usage:
-    python dev/make_part_spec.py <corp_part_number> <designator> [x_mils] [y_mils]
+    python dev/make_part_spec.py <part_number> <designator> [x_mils] [y_mils]
 """
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-DBLIB = Path(r"N:\IT\Neoventus_Altium_CAD\Altium_Libraries\Neoventus_Components.DbLib")
+from db_search import part_key, resolve_dblib, table_info
+
 SPEC_OUT = Path("C:/Users/Public/altium_mcp/part_spec.txt")
 
-# Columns that carry component identity/models rather than plain parameters.
-# Derived from the .DbLib "Options=" mappings, whose bracketed ParameterName
-# values mark system fields.
-SYSTEM_COLUMNS = {
-    "altium_symbol": "symbol",
-    "altium_footprint": "footprint",
-    "altium_3dmodel": "model3d",
+# The .DbLib marks system fields with a bracketed ParameterName in its
+# "Options=" mappings; these are the ones that carry the component's
+# identity and models rather than plain parameters.
+SYSTEM_ROLES = {
+    "library ref": "symbol",
+    "footprint ref": "footprint",
+    "pcb3d ref": "model3d",
     "description": "description",
 }
-# Columns to skip are NOT hardcoded: the .DbLib maps them to an empty
-# ParameterName, which is how it says "do not create a parameter for this"
-# (e.g. PKG_TYPE, DxDesigner_*). See field_mappings().
+# Columns to skip are NOT hardcoded either: the .DbLib maps them to an empty
+# ParameterName, which is how it says "do not create a parameter for this".
+# See field_mappings().
+
+_DBLIB = None
+
+
+def dblib():
+    global _DBLIB
+    if _DBLIB is None:
+        _DBLIB = resolve_dblib()
+    return _DBLIB
 
 
 def dblib_config():
-    txt = DBLIB.read_text(errors="replace")
+    txt = dblib().read_text(errors="replace")
     conn = re.search(r"^ConnectionString=(.+)$", txt, re.M).group(1).strip()
     search = re.search(r"^LibrarySearchPath=(.+)$", txt, re.M)
-    tables = []
-    for m in re.finditer(r"\[Table\d+\]\s*\n((?:(?!\[).*\n)*)", txt):
-        body = m.group(1)
-        name = re.search(r"^TableName=(.*)$", body, re.M)
-        enabled = re.search(r"^Enabled=(.*)$", body, re.M)
-        if name and enabled and enabled.group(1).strip().lower() == "true":
-            tables.append(name.group(1).strip())
+    tables = [t for t in table_info(dblib()) if t["enabled"]]
     return conn, tables, (search.group(1) if search else "")
 
 
@@ -51,7 +60,7 @@ def field_mappings(table):
     ParameterName marks a system field ([Description], [Library Ref], ...);
     an EMPTY ParameterName means the column must not become a parameter.
     """
-    txt = DBLIB.read_text(errors="replace")
+    txt = dblib().read_text(errors="replace")
     excluded, system = set(), {}
     for line in txt.splitlines():
         if not line.startswith("Options="):
@@ -100,13 +109,19 @@ $rdr.Close(); $conn.Close()
 
 
 def find_part(part_number):
+    """(table, row) of the enabled table holding a part, or (None, None).
+    Lookup tables (those with their own part-number field, and with it the
+    DbLib's field mappings) are tried first."""
     conn, tables, _ = dblib_config()
-    for t in tables:
-        if not t.lower().endswith("_query"):
+    fallback = part_key(table_info(dblib()))
+    safe = part_number.replace("'", "''")
+    for t in sorted(tables, key=lambda t: not t["key"]):
+        key = t["key"] or fallback
+        if not key:
             continue
-        row = query(conn, f"SELECT TOP 1 * FROM [{t}] WHERE Corp_Part_Number='{part_number}'")
+        row = query(conn, f"SELECT TOP 1 * FROM [{t['name']}] WHERE [{key}]='{safe}'")
         if row:
-            return t, row
+            return t["name"], row
     return None, None
 
 
@@ -142,16 +157,16 @@ def symbol_library_for(symbol_name, search_paths):
 def build_spec(part_number, designator, x=3000, y=3000, new_sheet=True):
     table, row = find_part(part_number)
     if not row:
-        raise SystemExit(f"part {part_number} not found in any enabled *_Query view")
+        raise SystemExit(f"part {part_number} not found in any enabled DbLib table")
 
-    excluded, _system_from_dblib = field_mappings(table)
+    excluded, system = field_mappings(table)
     symbol = footprint = description = None
     params = []
     for col, val in row.items():
         key = col.lower()
         if key in excluded or val == "":
             continue
-        role = SYSTEM_COLUMNS.get(key)
+        role = SYSTEM_ROLES.get(system.get(key, ""))
         if role == "symbol":
             symbol = val
         elif role == "footprint":
@@ -164,7 +179,7 @@ def build_spec(part_number, designator, x=3000, y=3000, new_sheet=True):
             params.append((col, val))
 
     if not symbol:
-        raise SystemExit(f"no Altium_Symbol for {part_number}")
+        raise SystemExit(f"no symbol (the [Library Ref] field) for {part_number}")
 
     _, _, search = dblib_config()
     sym_lib = symbol_library_for(symbol, search.split(";"))

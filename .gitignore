@@ -16,3 +16,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local files holding one company's database data, designs or requests (kept on disk, not published)
+dev/DBLIB_FINDINGS.md
+dev/make_circuit.py
+dev/sheet*_parts.json
+dev/sheet*_rebuild.py
+altium-mcp-requests.md

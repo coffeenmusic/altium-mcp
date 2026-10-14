@@ -2,9 +2,9 @@
 
 ## Safety rules
 
-- **Never save anything on the N: drive.** It hosts the shared corporate
-  symbol/footprint libraries and the component database. Reading is fine
-  (config, symbol scans, SELECT queries); writing is not.
+- **Never save anything on the shared library drive.** It hosts the
+  company's shared symbol/footprint libraries and component database.
+  Reading is fine (config, symbol scans, SELECT queries); writing is not.
 - A script that opens a library to read a symbol makes that library the
   *current document*. Never register or add objects while a library is
   current - verify the target is a schematic (`ObjectID` 32 = `eSchDoc`;
@@ -154,8 +154,6 @@ so a wedge there still leaves everything useful already on disk.
 
 ## Findings
 
-- [`DBLIB_FINDINGS.md`](DBLIB_FINDINGS.md) - placing database-linked
-  components so they are indistinguishable from a GUI placement.
 - [`SCHEMATIC_CONVENTIONS.md`](SCHEMATIC_CONVENTIONS.md) - **read before
   generating any schematic.** Pin connection points, tap gaps, ground length,
   rail placement, net-label attachment, parameter text, mirroring, and the

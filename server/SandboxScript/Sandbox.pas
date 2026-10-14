@@ -44,13 +44,7 @@ begin
 
     try
         // === BEGIN EXPERIMENT (rewritten by the run_altium_script tool) ===
-        SandboxLog('compile-check the exporter by loading it and calling a harmless entry point');
-        S1 := 'c:\Users\stephen.thompson\Documents\Claude Code\PCB_RL\exporter\Export_PCB_Data.pas';
-        SandboxLog('file exists: ' + BoolToStr(FileExists(S1), True));
-        SandboxLog('running ExportAllPCBsInFolderAuto via RunScriptFile');
-        Client.SendMessage('ScriptingSystem:RunScriptFile',
-            'FileName=' + S1 + '|ProcName=ExportAllPCBsInFolderAuto', 512, Client.CurrentView);
-        ResultText := 'dispatched';
+        SandboxLog('no script loaded');
         // === END EXPERIMENT ===
     except
         SandboxLog('EXCEPTION escaped the script body');
