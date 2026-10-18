@@ -25,11 +25,12 @@ the script; -REditScript:Stop then clears any paused debugger state.
 """
 
 import ctypes
+import itertools
 import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -298,6 +299,28 @@ def answer_dialog(d: Dialog) -> None:
         user32.PostMessageW(d.hwnd, WM_CLOSE, 0, 0)
 
 
+# One counter per server process: a Sandbox is created for every call, so a
+# per-instance counter would restart at 1 and two calls within the same
+# second would get the same file names
+_RUN_COUNTER = itertools.count(1)
+
+
+def read_when_ready(path: Path, reader, timeout: float = 5.0) -> str:
+    """Read a file Altium may still have open for writing.
+
+    The result file exists as soon as SaveToFile creates it, and while Altium
+    still holds it the read fails with PermissionError, so retry briefly.
+    """
+    end = time.time() + timeout
+    while True:
+        try:
+            return reader(path)
+        except PermissionError:
+            if time.time() > end:
+                raise
+            time.sleep(0.2)
+
+
 @dataclass
 class RunFiles:
     script: Path
@@ -312,12 +335,10 @@ class Sandbox:
     template: Path
     runs_dir: Path
     keep_runs: int = 20
-    _counter: int = field(default=0, repr=False)
 
     def new_run_files(self, tag: str = "Sbx") -> RunFiles:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
-        self._counter += 1
-        stem = f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{self._counter}"
+        stem = f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{next(_RUN_COUNTER)}"
         return RunFiles(self.runs_dir / f"{stem}.pas", self.runs_dir / f"{stem}_log.txt",
                         self.runs_dir / f"{stem}_result.txt")
 

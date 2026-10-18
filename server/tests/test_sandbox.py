@@ -122,6 +122,36 @@ class MapLineTest(unittest.TestCase):
         self.assertIsNone(sandbox.map_error_line(b, "Access violation"))
 
 
+class RunFilesTest(unittest.TestCase):
+    def test_names_unique_across_sandbox_instances(self):
+        # main.py builds a new Sandbox for every call; names must still differ
+        # within the same second
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = sandbox.Sandbox("x2.exe", Path("t.pas"), Path(d)).new_run_files()
+            b = sandbox.Sandbox("x2.exe", Path("t.pas"), Path(d)).new_run_files()
+            self.assertNotEqual(a.script, b.script)
+
+    def test_read_when_ready_retries_locked_file(self):
+        calls = []
+
+        def reader(path):
+            calls.append(path)
+            if len(calls) < 3:
+                raise PermissionError("still open in Altium")
+            return "ok"
+
+        self.assertEqual(sandbox.read_when_ready(Path("r.txt"), reader, timeout=2), "ok")
+        self.assertEqual(len(calls), 3)
+
+    def test_read_when_ready_gives_up(self):
+        def reader(path):
+            raise PermissionError("locked")
+
+        with self.assertRaises(PermissionError):
+            sandbox.read_when_ready(Path("r.txt"), reader, timeout=0.3)
+
+
 class DialogTest(unittest.TestCase):
     def test_script_error_detection(self):
         err = sandbox.Dialog(1, "#32770", "X2", "Undeclared identifier: X at Line:5, Char:20. Continue execution?")

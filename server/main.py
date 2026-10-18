@@ -1203,10 +1203,11 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     report["dialogs_dismissed"] = len(dismissed)
     report["dismissed_dialog_titles"] = [d.title for d in dismissed.values()]
-    steps = read_altium_text(files.log).splitlines() if files.log.exists() else []
+    steps = (sandbox.read_when_ready(files.log, read_altium_text).splitlines()
+             if files.log.exists() else [])
 
     if files.result.exists():
-        result_text = read_altium_text(files.result).strip()
+        result_text = sandbox.read_when_ready(files.result, read_altium_text).strip()
         sb.prune()
         exc = next((s for s in steps if s.startswith(sandbox.EXCEPTION_PREFIX)), None)
         if exc is not None:
