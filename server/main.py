@@ -23,6 +23,7 @@ import glob
 import re
 
 from altium_files import read_altium_text, write_altium_text
+import sandbox
 from outjob_parser import parse_outjob
 
 # Configure logging
@@ -1088,82 +1089,14 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
 
 SANDBOX_DIR = MCP_DIR / "SandboxScript"
 SANDBOX_PAS = SANDBOX_DIR / "Sandbox.pas"
-SANDBOX_PRJ = SANDBOX_DIR / "Sandbox.PrjScr"
-SANDBOX_LOG = EXCHANGE_DIR / "sandbox_log.txt"
-SANDBOX_RESULT = EXCHANGE_DIR / "sandbox_result.json"
-SANDBOX_BEGIN = "// === BEGIN EXPERIMENT"
-SANDBOX_END = "// === END EXPERIMENT"
+# Run files live in the exchange folder: Altium runs outside Claude Desktop's
+# MSIX package and cannot see the virtualized AppData path (issue #19)
+SANDBOX_RUNS = EXCHANGE_DIR / "runs"
 
 
-def _window_process_name(hwnd) -> str:
-    """Executable file name of the process that owns a window ('' if unknown)."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except ImportError:
-        return ""
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return ""
-    try:
-        buf = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buf))
-        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return os.path.basename(buf.value)
-        return ""
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _dismiss_altium_dialogs():
-    """Close Altium modal popups that would otherwise block a script run.
-
-    Altium uses two kinds: Win32 task dialogs (#32770) and Delphi TMessageForm
-    error/warning boxes. It also shows "Select Item To Run"
-    (TForm_RunScriptParameters) when it cannot find the script project; that
-    one stays open and blocks every later script run. Only windows owned by
-    the Altium process (X2.EXE) are touched, so dialogs of other applications
-    are never closed.
-
-    Returns (handle, class name, title) of the windows that were closed, so
-    the caller can tell the user (a closed dialog may have been one the user
-    had open).
-    """
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except ImportError:
-        return []
-    user32 = ctypes.windll.user32
-    found = []
-
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def cb(hwnd, lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        cls = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(hwnd, cls, 64)
-        if cls.value not in ("#32770", "TMessageForm", "TForm_RunScriptParameters"):
-            return True
-        n = user32.GetWindowTextLengthW(hwnd)
-        buf = ctypes.create_unicode_buffer(n + 1)
-        user32.GetWindowTextW(hwnd, buf, n + 1)
-        title = buf.value
-        if cls.value == "TMessageForm" and title not in ("Error", "Warning", "Information", "Confirm"):
-            return True
-        if _window_process_name(hwnd).lower() != "x2.exe":
-            return True
-        found.append((hwnd, cls.value, title))
-        return True
-
-    user32.EnumWindows(cb, 0)
-    for h, _, _ in found:
-        user32.PostMessageW(h, 0x0010, 0, 0)
-    return found
+def _sandbox() -> sandbox.Sandbox:
+    return sandbox.Sandbox(altium_exe=altium_bridge.config.altium_exe_path,
+                           template=SANDBOX_PAS, runs_dir=SANDBOX_RUNS)
 
 
 @mcp.tool()
@@ -1173,22 +1106,31 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     what happened, step by step.
 
     Use this to develop and verify Altium API code before relying on it.
-    Altium has no headless test mode and its failure modes are hostile: a
-    runtime error leaves the script PAUSED IN THE DEBUGGER with no dialog,
-    after which every later script run silently does nothing until the
-    debugger is stopped (Ctrl+F3) or Altium is restarted. This tool detects
-    that state and reports exactly which statement died.
-
-    The script runs in a SEPARATE script project, so a crash here can never
-    break the other MCP tools.
+    Each call writes the script into a fresh copy of SandboxScript/Sandbox.pas
+    with a unique file name and runs it with ScriptingSystem:RunScriptFile, so
+    a script that failed earlier can never be re-run from Altium's editor.
+    When Altium reports a compile or run-time error, the tool returns Altium's
+    message with the line in YOUR script, answers the dialog, stops the
+    debugger and confirms with a probe run that the next call will work. No
+    manual Ctrl+F3 or -REditScript:Stop is needed.
 
     Writing the script:
     - Call SandboxLog('...') before each risky statement. The log is flushed
       after every call, so the last logged line identifies what failed.
     - Assign findings to the string variable ResultText - it is returned.
-    - DelphiScript has NO inline variable declarations. Reuse the provided
-      scratch variables: S1..S3 (String), I1..I3 and B1 (Integer),
-      Obj1..Obj5 (IDispatch), List1 (TStringList), IntMan, DbDoc.
+    - Variables: either start the script with your own block, e.g.
+          var
+              Doc, Comp : IDispatch;
+              X, Y : Integer;
+      or reuse the scratch variables S1..S9 (String), I1..I9 and B1..B3
+      (Integer), F1..F4 (Double), Obj1..Obj9 (IDispatch), List1..List3
+      (TStringList), IntMan, DbDoc. Assigning an undeclared plain name is
+      refused before Altium is called. Do not assign to a for-loop variable
+      inside its loop (compile error).
+    - Helpers: MM(mm) converts millimetres to internal units;
+      OpenSchDoc(path) returns the ISch_Document, opening the file if needed
+      (GetSchDocumentByPath alone returns nil for a closed file, and a call on
+      nil stops the script); SaveDoc(path) marks a document modified and saves it.
     - try/except does NOT catch runtime errors such as bad conversions or
       invalid API calls, so it cannot be relied on to keep a script alive.
     - The sandbox is standalone: helpers and constants from the production
@@ -1202,101 +1144,123 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     skill is installed and can install it.
 
     Args:
-        script (str): DelphiScript statements to execute (body only).
+        script (str): DelphiScript statements to execute (body only, optionally
+            preceded by a var block).
         timeout_seconds (int): How long to wait for completion (default 120).
 
     Returns:
-        str: JSON with success, the step log, the script's ResultText, and on
-             failure the last step reached plus whether Altium's script
-             executor is now wedged and needs recovery.
+        str: JSON with success, the step log and the script's ResultText; on
+             failure Altium's error message and its location in the script,
+             the last step reached, and whether the executor was recovered.
     """
     logger.info(f"run_altium_script: {len(script.splitlines())} lines")
 
-    if not SANDBOX_PAS.exists() or not SANDBOX_PRJ.exists():
+    if not SANDBOX_PAS.exists():
+        return json.dumps({"success": False, "error": f"sandbox template missing: {SANDBOX_PAS}"})
+
+    split = sandbox.split_var_block(script)
+    problems = sandbox.check_script(split.body, sandbox.declared_names(split.decls), split.body_offset)
+    if problems:
         return json.dumps({"success": False,
-                           "error": f"sandbox project missing at {SANDBOX_DIR}"})
+                           "error": "refused before execution: the script would not compile",
+                           "problems": problems, "executor_wedged": False}, indent=2)
+
+    sb = _sandbox()
+    report = {}
+    # An error dialog left over from an earlier run blocks every new run
+    if any(d.is_script_error for d in sandbox.altium_dialogs()):
+        report["recovered_before_run"] = await asyncio.to_thread(sb.recover)
 
     try:
-        src = SANDBOX_PAS.read_text(encoding="utf-8")
-        pre, rest = src.split(SANDBOX_BEGIN, 1)
-        marker_line, rest = rest.split("\n", 1)
-        _, post = rest.split(SANDBOX_END, 1)
-        body = "\n".join("        " + ln if ln.strip() else ln
-                          for ln in script.strip("\n").splitlines())
-        SANDBOX_PAS.write_text(
-            pre + SANDBOX_BEGIN + marker_line + "\n" + body + "\n        " + SANDBOX_END + post,
-            encoding="utf-8")
+        files = sb.new_run_files()
+        built = sb.write(files, script)
     except Exception as e:
-        return json.dumps({"success": False, "error": f"could not inject script: {e}"})
-
-    for f in (SANDBOX_LOG, SANDBOX_RESULT):
-        if f.exists():
-            try:
-                f.unlink()
-            except OSError:
-                pass
-
-    # Altium runs outside Claude Desktop's MSIX package and cannot see the
-    # virtualized AppData path this process sees (issue #19)
-    sandbox_prj = AltiumBridge._resolve_msix_path(str(SANDBOX_PRJ))
-    cmd = (f'"{altium_bridge.config.altium_exe_path}" -RScriptingSystem:RunScript('
-           f'ProjectName="{sandbox_prj}"^|ProcName="Sandbox>Run")')
-    subprocess.Popen(cmd, shell=True)
+        return json.dumps({"success": False, "error": f"could not write the run file: {e}"})
+    sb.launch(files)
+    report["run_file"] = str(files.script)
 
     start = time.time()
     # Keyed by window: a dialog that ignores WM_CLOSE (Yes/No boxes do) is
     # found again on every pass and must be reported once
     dismissed = {}
-    while not SANDBOX_RESULT.exists() and time.time() - start < timeout_seconds:
+    error_dialog = None
+    while not files.result.exists() and time.time() - start < timeout_seconds:
         await asyncio.sleep(0.5)
-        if time.time() - start > 6:
-            for h, c, t in _dismiss_altium_dialogs():
-                dismissed[h] = (c, t)
+        for d in sandbox.altium_dialogs():
+            # A syntax error stops the script before 'sandbox start' is
+            # logged and shows Altium's Error box instead of the
+            # "Continue execution?" dialog
+            if d.is_script_error or (d.cls == "TMessageForm" and d.title == "Error"
+                                     and not files.log.exists()):
+                error_dialog = d
+                sandbox.answer_dialog(d)
+                break
+            if time.time() - start > 6:
+                sandbox.answer_dialog(d)
+                dismissed[d.hwnd] = d
+        if error_dialog:
+            break
 
-    dialogs = list(dismissed.values())
-    titles = [t for _, t in dialogs]
-    steps = []
-    if SANDBOX_LOG.exists():
-        steps = read_altium_text(SANDBOX_LOG).splitlines()
+    report["dialogs_dismissed"] = len(dismissed)
+    report["dismissed_dialog_titles"] = [d.title for d in dismissed.values()]
+    steps = read_altium_text(files.log).splitlines() if files.log.exists() else []
 
-    if SANDBOX_RESULT.exists():
-        result_text = read_altium_text(SANDBOX_RESULT).strip()
-        return json.dumps({"success": True, "result": result_text, "steps": steps,
-                           "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
+    if files.result.exists():
+        result_text = read_altium_text(files.result).strip()
+        sb.prune()
+        exc = next((s for s in steps if s.startswith(sandbox.EXCEPTION_PREFIX)), None)
+        if exc is not None:
+            before = steps[:steps.index(exc)]
+            return json.dumps({
+                "success": False,
+                "error": "script error",
+                "altium_message": exc[len(sandbox.EXCEPTION_PREFIX):],
+                "last_step_reached": before[-1] if before else None,
+                "diagnosis": "The statement after 'last_step_reached' failed (a call on nil is "
+                             "reported as 'Undeclared identifier: <method>'). The script was "
+                             "stopped cleanly; the executor is not wedged.",
+                "steps": steps, "executor_wedged": False, **report}, indent=2)
+        return json.dumps({"success": True, "result": result_text, "steps": steps, **report}, indent=2)
 
-    if steps:
+    if error_dialog:
+        recovery = await asyncio.to_thread(sb.recover)
+        started = bool(steps)
         return json.dumps({
             "success": False,
-            "error": "script started but did not finish",
-            "last_step_reached": steps[-1],
-            "diagnosis": "The statement AFTER the last step is what crashed or paused the script.",
-            "executor_wedged": True,
-            "recovery": "Altium's script executor is now blocked. Recover by running this "
-                        "shell command (sends the debugger Stop process to the running "
-                        "Altium): \"<altium_exe>\" -REditScript:Stop  -- then retry.",
+            "error": "run-time error" if started else "compile error",
+            "altium_message": error_dialog.text or (
+                "Altium showed an Error box before the script started; its text cannot be read "
+                "from outside Altium. This is usually a syntax error (for example a construct "
+                "DelphiScript does not support, such as 'on E: Exception do')."),
+            "location": sandbox.map_error_line(built, error_dialog.text),
+            "last_step_reached": steps[-1] if steps else None,
+            "diagnosis": ("The script started; the statement at 'location' failed while running "
+                          "(a call on nil is reported as 'Undeclared identifier: <method>')."
+                          if started else "The script did not compile; nothing in it ran."),
             "steps": steps,
-            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
+            "executor_wedged": not recovery["recovered"],
+            "recovery": recovery, **report}, indent=2)
 
-    if any(c == "TForm_RunScriptParameters" for c, _ in dialogs):
+    if any(d.cls == "TForm_RunScriptParameters" for d in dismissed.values()):
         return json.dumps({
             "success": False,
-            "error": "Altium could not find the sandbox script project",
-            "diagnosis": f"Altium was asked to run {sandbox_prj} and showed 'Select Item To "
-                         "Run' instead, so it cannot open that path. The script executor is "
-                         "not wedged.",
-            "executor_wedged": False,
-            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
+            "error": "Altium could not find the run file",
+            "diagnosis": f"Altium was asked to run {files.script} and showed 'Select Item To "
+                         "Run' instead, so it cannot open that path.",
+            "executor_wedged": False, **report}, indent=2)
 
+    # No result and no error dialog: still running, or stopped silently
+    recovery = await asyncio.to_thread(sb.recover)
     return json.dumps({
         "success": False,
-        "error": "script never started",
-        "diagnosis": "Usually a COMPILE error in the script, or a previously paused "
-                     "script blocking execution.",
-        "executor_wedged": True,
-        "recovery": "A previously paused script may be blocking execution. Recover by "
-                    "running this shell command: \"<altium_exe>\" -REditScript:Stop  "
-                    "-- then retry. If it still fails, the script itself has a COMPILE error.",
-        "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
+        "error": f"no result after {timeout_seconds} s",
+        "last_step_reached": steps[-1] if steps else None,
+        "diagnosis": ("The script started but did not finish: it was still running or stopped "
+                      "without a dialog. The debugger has been stopped, so it is no longer running."
+                      if steps else "Altium never started the script (busy, or not running)."),
+        "steps": steps,
+        "executor_wedged": not recovery["recovered"],
+        "recovery": recovery, **report}, indent=2)
 
 
 @mcp.tool()
