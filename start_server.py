@@ -27,6 +27,7 @@ SCRIPT_DIR = Path(__file__).parent
 
 REQUIREMENTS = [
     "mcp[cli]==1.5.0",
+    "pydantic==2.10.6",  # mcp 1.5.0 needs eval_type_backport, removed in later pydantic
     "pillow>=11.1.0",
     "pywin32>=310",
 ]
