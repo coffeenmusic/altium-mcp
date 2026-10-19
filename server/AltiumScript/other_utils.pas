@@ -104,6 +104,12 @@ begin
     end;
 end;
 
+// A path in the form Altium reports it (DM_FullPath): backslashes, no '..'
+function NormalizePath(Path: String): String;
+begin
+    result := ExpandFileName(StringReplace(Path, '/', '\', REPLACEALL));
+end;
+
 // The OutJob a request names, or the first open one when it names none.
 // Returns '' when a named file does not exist, or nothing is open.
 function ResolveOutJobPath(RequestedPath: String): String;
@@ -111,7 +117,7 @@ begin
     if RequestedPath <> '' then
     begin
         if FileExists(RequestedPath) then
-            result := RequestedPath
+            result := NormalizePath(RequestedPath)
         else
             result := '';
     end
@@ -682,7 +688,8 @@ begin
         if Project = Nil then Continue;
         for I := 0 to Project.DM_LogicalDocumentCount - 1 do
         begin
-            if LowerCase(Project.DM_LogicalDocuments(I).DM_FullPath) = LowerCase(OutJobPath) then
+            if SameText(NormalizePath(Project.DM_LogicalDocuments(I).DM_FullPath),
+                        NormalizePath(OutJobPath)) then
             begin
                 Result := Project;
                 Exit;
@@ -692,8 +699,9 @@ begin
 end;
 
 // Full path of the PDF that Publish container J writes: OutputFilePathJ
-// from [PublishSettings], under the project's output folder (plus
-// OutputBasePathJ) when relative. '' when the OutJob names no file.
+// from [PublishSettings], under OutputBasePathJ when that is absolute,
+// otherwise under the project's output folder plus OutputBasePathJ.
+// '' when the OutJob names no file.
 function PublishTargetFile(IniFile: TIniFile; J: Integer; Project: IProject;
                            OutJobPath: String; RelativePath: String): String;
 var
@@ -710,36 +718,42 @@ begin
         Exit;
     end;
 
-    if Project <> Nil then
-    begin
-        BaseDir := Project.DM_GetOutputPath;
-        if not IsAbsolutePath(BaseDir) then
-            BaseDir := ExtractFilePath(Project.DM_ProjectFullPath) + BaseDir;
-    end
+    if IsAbsolutePath(RelativePath) then
+        BaseDir := RelativePath
     else
-        BaseDir := ExtractFilePath(OutJobPath);
+    begin
+        if Project <> Nil then
+        begin
+            BaseDir := Project.DM_GetOutputPath;
+            if not IsAbsolutePath(BaseDir) then
+                BaseDir := ExtractFilePath(Project.DM_ProjectFullPath) + BaseDir;
+        end
+        else
+            BaseDir := ExtractFilePath(OutJobPath);
+        if (BaseDir <> '') and (Copy(BaseDir, Length(BaseDir), 1) <> '\') then
+            BaseDir := BaseDir + '\';
+        BaseDir := BaseDir + RelativePath;
+    end;
     if (BaseDir <> '') and (Copy(BaseDir, Length(BaseDir), 1) <> '\') then
         BaseDir := BaseDir + '\';
-    if RelativePath <> '' then
-    begin
-        BaseDir := BaseDir + RelativePath;
-        if Copy(BaseDir, Length(BaseDir), 1) <> '\' then
-            BaseDir := BaseDir + '\';
-    end;
     Result := BaseDir + FileName;
 end;
 
 // True once TargetFile exists with a time stamp at or after StartTime,
 // polling for up to TimeoutSec. FileAge has 2 s resolution, hence the margin.
+// FileAge is -1 while the file is missing (e.g. mid-replace); that is not a
+// valid file date, so it is checked before conversion.
 function WaitForFileWritten(TargetFile: String; StartTime: TDateTime; TimeoutSec: Integer): Boolean;
 var
     Deadline: TDateTime;
+    Age: Integer;
 begin
     Result := False;
     Deadline := Now + TimeoutSec / 86400;
     repeat
-        if FileExists(TargetFile) then
-            if FileDateToDateTime(FileAge(TargetFile)) >= StartTime - 2 / 86400 then
+        Age := FileAge(TargetFile);
+        if Age <> -1 then
+            if FileDateToDateTime(Age) >= StartTime - 2 / 86400 then
             begin
                 Result := True;
                 Exit;
@@ -794,17 +808,12 @@ begin
         // Add the OutJob path to the result
         AddJSONProperty(ResultProps, 'outjob_path', OutJobPath);
 
-        // Open the OutJob document
+        // Open the OutJob document. Checked for Nil before any use: a
+        // caller-supplied outjob_path may name a file Altium cannot open.
         if not(Client.IsDocumentOpen(OutJobPath)) then
-        begin
-            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath);
-            OutJobDoc.Focus();
-        end
+            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath)
         else
-        begin
             OutJobDoc := Client.GetDocumentByPath(OutJobPath);
-            OutJobDoc.Focus();
-        end;
 
         // Exit if we can't open the OutJob document
         if OutJobDoc = Nil then
@@ -850,8 +859,13 @@ begin
                                 ContainerAction := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', DEFAULT);
                                 RelativePath := IniFile.ReadString('PublishSettings', 'OutputBasePath' + IntToStr(J), '');
 
-                                // Ensure document is focused
-                                OutJobDoc.Focus();
+                                // Show the OutJob, not just focus it: with
+                                // only Focus() the Print process wrote no
+                                // file. Done for every container, since a
+                                // previous one may have changed the view.
+                                // Before ResetParameters, so showing the
+                                // document cannot touch the parameters.
+                                Client.ShowDocument(OutJobDoc);
 
                                 // Run the container based on its type
                                 if ContainerAction = 'GeneratedFiles' then
@@ -864,8 +878,11 @@ begin
                                     AddStringParameter('OutputBasePath', RelativePath);
                                     RunProcess('WorkspaceManager:GenerateReport');
 
-                                    // Assume success
+                                    // The generated file names are not known
+                                    // here, so the output is not checked.
+                                    // output_verified tells the caller.
                                     AddJSONBoolean(ContainerResultProps, 'success', True);
+                                    AddJSONBoolean(ContainerResultProps, 'output_verified', False);
                                     SuccessCount := SuccessCount + 1;
                                 end
                                 else if ContainerAction = 'Publish' then
@@ -875,12 +892,6 @@ begin
                                     // An empty OutputBasePath is not passed.
                                     Project := OutJobProject(OutJobPath);
                                     TargetFile := PublishTargetFile(IniFile, J, Project, OutJobPath, RelativePath);
-
-                                    // Print acts on the shown view, not just
-                                    // the focused document (hypothesis).
-                                    // Before ResetParameters, so showing the
-                                    // document cannot touch the parameters.
-                                    Client.ShowDocument(OutJobDoc);
 
                                     ResetParameters;
                                     AddStringParameter('Action', 'PublishToPDF');
