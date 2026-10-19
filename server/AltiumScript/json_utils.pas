@@ -114,7 +114,7 @@ begin
     // Use provided filename or generate temp filename
     if Not(AnsiEndsStr('.json', LowerCase(FileName))) then
     begin
-        TempFile := Path + 'temp_json_output.json';
+        TempFile := ROOT_DIR + 'temp_json_output.json';
     end
     else
     begin
