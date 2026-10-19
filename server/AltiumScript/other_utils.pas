@@ -104,6 +104,30 @@ begin
     end;
 end;
 
+// The OutJob a request names, or the first open one when it names none.
+// Returns '' when a named file does not exist, or nothing is open.
+function ResolveOutJobPath(RequestedPath: String): String;
+begin
+    if RequestedPath <> '' then
+    begin
+        if FileExists(RequestedPath) then
+            result := RequestedPath
+        else
+            result := '';
+    end
+    else
+        result := GetOpenOutputJob();
+end;
+
+// Error text for an OutJob that ResolveOutJobPath could not find
+function OutJobNotFoundError(RequestedPath: String): String;
+begin
+    if RequestedPath <> '' then
+        result := 'OutJob file not found: ' + RequestedPath
+    else
+        result := 'No open OutJob document found';
+end;
+
 // Return the Index-th (0-based) field of a pipe-delimited string,
 // e.g. GetFieldFromPipeString('R1|100|200', 1) = '100'.
 // Returns '' if the field does not exist.
@@ -527,8 +551,9 @@ begin
     end;
 end;
 
-// Get all available output job containers from the first open OutJob
-function GetOutputJobContainers(ROOT_DIR: String): String;
+// Get all available output job containers from RequestedPath, or from the
+// first open OutJob when RequestedPath is empty
+function GetOutputJobContainers(RequestedPath: String, ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -540,16 +565,15 @@ var
     ContainerProps: TStringList;
     OutputLines: TStringList;
 begin
-    // Get the path of the first open OutJob
-    OutJobPath := GetOpenOutputJob();
+    OutJobPath := ResolveOutJobPath(RequestedPath);
 
-    // Exit if no open OutJob was found
+    // Exit if no OutJob was found
     if OutJobPath = '' then
     begin
         ResultProps := TStringList.Create;
         try
             AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No open OutJob document found');
+            AddJSONProperty(ResultProps, 'error', OutJobNotFoundError(RequestedPath));
             Result := BuildJSONObject(ResultProps);
         finally
             ResultProps.Free;
@@ -639,8 +663,9 @@ begin
     end;
 end;
 
-// Run selected output job containers with simplified logic
-function RunOutputJobs(ContainerNames: TStringList, ROOT_DIR: String): String;
+// Run selected output job containers with simplified logic, from
+// RequestedPath or, when that is empty, the first open OutJob
+function RunOutputJobs(ContainerNames: TStringList, RequestedPath: String, ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -656,16 +681,15 @@ var
     OutJobDoc: IServerDocument;
     OutputLines: TStringList;
 begin
-    // Get the path of the first open OutJob
-    OutJobPath := GetOpenOutputJob();
+    OutJobPath := ResolveOutJobPath(RequestedPath);
 
-    // Exit if no open OutJob was found
+    // Exit if no OutJob was found
     if OutJobPath = '' then
     begin
         ResultProps := TStringList.Create;
         try
             AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No open OutJob document found');
+            AddJSONProperty(ResultProps, 'error', OutJobNotFoundError(RequestedPath));
             Result := BuildJSONObject(ResultProps);
         finally
             ResultProps.Free;
