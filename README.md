@@ -45,7 +45,7 @@ The older approach of bundling pre-compiled packages in `server/lib/` is no long
 **How it works:**
 
 1. `start_server.py` (at the repo root) looks for a ready virtual environment in `%USERPROFILE%\.altium-mcp\venvs\<key>`, where `<key>` is a hash of the pinned requirements and the Python version
-2. If it isn't ready, it starts a **detached** builder process (`start_server.py --build`) that creates the venv and pip-installs the pinned dependencies, then waits for it. Claude Desktop kills a server that has not answered within about 60 seconds, and restarts servers freely; a build that ran inside the launcher died with it. The detached builder finishes regardless, so a restarted launcher finds the venv ready or a build still in progress.
+2. If it isn't ready, it starts a **detached** builder process (`start_server.py --build`) that creates the venv and pip-installs the dependencies, then waits for it. It installs the hash-locked `requirements.txt` when the package contains it, and falls back to the short `REQUIREMENTS` list in `start_server.py` when the file is missing or the locked wheels don't fit the interpreter. Claude Desktop kills a server that has not answered within about 60 seconds, and restarts servers freely; a build that ran inside the launcher died with it. The detached builder finishes regardless, so a restarted launcher finds the venv ready or a build still in progress.
 3. A lock file (holding the builder's PID) makes sure only one build runs at a time; other launchers wait for it. A lock whose owner has exited is taken over immediately.
 4. It then launches `server/main.py` using the venv's Python
 5. First launch takes ~20-30 seconds; subsequent launches are instant
@@ -61,7 +61,7 @@ On a slow network the first build can exceed the client's 60-second startup time
 3. Update `manifest.json`: set `entry_point` to `start_server.py`, remove any `env`/`PYTHONPATH` fields, and use `manifest_version: "0.3"`
 4. Package the DXT — either use `dxt pack` or manually zip and rename:
 ```powershell
-Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, server -DestinationPath altium-mcp.zip
+Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, requirements.txt, server -DestinationPath altium-mcp.zip
 Rename-Item altium-mcp.zip altium-mcp.dxt
 ```
 
