@@ -110,13 +110,31 @@ begin
     result := ExpandFileName(StringReplace(Path, '/', '\', REPLACEALL));
 end;
 
+function IsAbsolutePath(Path: String): Boolean;
+var
+    P: String;
+begin
+    P := StringReplace(Path, '/', '\', REPLACEALL);
+    Result := (Copy(P, 2, 2) = ':\') or (Copy(P, 1, 2) = '\\');
+end;
+
+// A requested path is used only when it is a full path to an existing
+// .OutJob. A relative path would resolve against Altium's working folder,
+// and any other file type would be opened as an OutJob.
+function IsUsableOutJobPath(RequestedPath: String): Boolean;
+begin
+    Result := IsAbsolutePath(RequestedPath) and
+              (LowerCase(ExtractFileExt(RequestedPath)) = '.outjob') and
+              FileExists(RequestedPath);
+end;
+
 // The OutJob a request names, or the first open one when it names none.
-// Returns '' when a named file does not exist, or nothing is open.
+// Returns '' when the named path is not usable, or nothing is open.
 function ResolveOutJobPath(RequestedPath: String): String;
 begin
     if RequestedPath <> '' then
     begin
-        if FileExists(RequestedPath) then
+        if IsUsableOutJobPath(RequestedPath) then
             result := NormalizePath(RequestedPath)
         else
             result := '';
@@ -125,13 +143,17 @@ begin
         result := GetOpenOutputJob();
 end;
 
-// Error text for an OutJob that ResolveOutJobPath could not find
+// Error text for an OutJob that ResolveOutJobPath could not resolve
 function OutJobNotFoundError(RequestedPath: String): String;
 begin
-    if RequestedPath <> '' then
-        result := 'OutJob file not found: ' + RequestedPath
+    if RequestedPath = '' then
+        result := 'No open OutJob document found'
+    else if not IsAbsolutePath(RequestedPath) then
+        result := 'outjob_path must be a full path: ' + RequestedPath
+    else if LowerCase(ExtractFileExt(RequestedPath)) <> '.outjob' then
+        result := 'Not an .OutJob file: ' + RequestedPath
     else
-        result := 'No open OutJob document found';
+        result := 'OutJob file not found: ' + RequestedPath;
 end;
 
 // Return the Index-th (0-based) field of a pipe-delimited string,
@@ -669,11 +691,6 @@ begin
     end;
 end;
 
-function IsAbsolutePath(Path: String): Boolean;
-begin
-    Result := (Copy(Path, 2, 2) = ':\') or (Copy(Path, 1, 2) = '\\');
-end;
-
 // The open project that holds OutJobPath, or Nil when none does. A Publish
 // container prints [Project Physical Documents], so it needs this project.
 function OutJobProject(OutJobPath: String): IProject;
@@ -698,25 +715,27 @@ begin
     end;
 end;
 
-// Full path of the PDF that Publish container J writes: OutputFilePathJ
+// Full path of the PDF that Publish container J writes: OutputFileNameJ
 // from [PublishSettings], under OutputBasePathJ when that is absolute,
 // otherwise under the project's output folder plus OutputBasePathJ.
-// '' when the OutJob names no file.
+// OutputFilePathJ is only a cached full path from the last publish. It goes
+// stale when the project is copied or the name is changed, so only its file
+// name is used, and only when OutputFileNameJ is empty.
+// '' when neither key names a file.
 function PublishTargetFile(IniFile: TIniFile; J: Integer; Project: IProject;
                            OutJobPath: String; RelativePath: String): String;
 var
     FileName, BaseDir: String;
 begin
     Result := '';
-    FileName := IniFile.ReadString('PublishSettings', 'OutputFilePath' + IntToStr(J), '');
+    FileName := IniFile.ReadString('PublishSettings', 'OutputFileName' + IntToStr(J), '');
     if FileName = '' then
-        FileName := IniFile.ReadString('PublishSettings', 'OutputFileName' + IntToStr(J), '');
+        FileName := ExtractFileName(StringReplace(
+            IniFile.ReadString('PublishSettings', 'OutputFilePath' + IntToStr(J), ''),
+            '/', '\', REPLACEALL));
     if FileName = '' then Exit;
-    if IsAbsolutePath(FileName) then
-    begin
-        Result := FileName;
-        Exit;
-    end;
+    if ExtractFileExt(FileName) = '' then
+        FileName := FileName + '.PDF';
 
     if IsAbsolutePath(RelativePath) then
         BaseDir := RelativePath
@@ -909,13 +928,19 @@ begin
                                     AddJSONProperty(ContainerResultProps, 'output_file', TargetFile);
                                     if TargetFile = '' then
                                     begin
-                                        AddJSONBoolean(ContainerResultProps, 'success', False);
-                                        AddJSONProperty(ContainerResultProps, 'error',
-                                            'OutJob names no output file for this container (OutputFilePath' + IntToStr(J) + ')');
+                                        // Altium falls back to a default name
+                                        // the OutJob does not record, so the
+                                        // file cannot be checked.
+                                        AddJSONBoolean(ContainerResultProps, 'success', True);
+                                        AddJSONBoolean(ContainerResultProps, 'output_verified', False);
+                                        AddJSONProperty(ContainerResultProps, 'note',
+                                            'The OutJob sets no file name for this container, so the PDF was not checked');
+                                        SuccessCount := SuccessCount + 1;
                                     end
                                     else if WaitForFileWritten(TargetFile, StartTime, 15) then
                                     begin
                                         AddJSONBoolean(ContainerResultProps, 'success', True);
+                                        AddJSONBoolean(ContainerResultProps, 'output_verified', True);
                                         SuccessCount := SuccessCount + 1;
                                     end
                                     else
