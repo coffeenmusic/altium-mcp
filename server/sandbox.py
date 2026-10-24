@@ -139,10 +139,13 @@ def check_script(body_lines: List[str], extra_names: List[str], line_offset: int
     Only assignments to plain names are checked (`X := ...`, `for X := ...`):
     a name that is neither a sandbox variable nor declared in the script's
     `var` block always fails with "Undeclared identifier". Property and array
-    assignments (`Obj.X :=`, `A[i] :=`) are not checked.
+    assignments (`Obj.X :=`, `A[i] :=`) are not checked. A script using `with`
+    is not checked at all: inside `with Obj do X := ...`, X is Obj's property.
     """
     known = {n.lower() for n in TEMPLATE_NAMES + extra_names}
     code = strip_strings_and_comments("\n".join(body_lines))
+    if re.search(r"\bwith\b", code, re.IGNORECASE):
+        return []
     problems = []
     for lineno, line in enumerate(code.splitlines(), 1):
         for m in _ASSIGN_RE.finditer(line):
@@ -250,6 +253,12 @@ class Dialog:
     @property
     def is_script_error(self) -> bool:
         return self.cls == "#32770" and "continue execution" in self.text.lower()
+
+    @property
+    def is_error_box(self) -> bool:
+        """A script-error dialog, or an OK-only Error/Information box such as the
+        one a refused run raises. Confirm and Warning boxes may be the user's."""
+        return self.is_script_error or (self.cls == "TMessageForm" and self.title in ("Error", "Information"))
 
 
 def altium_dialogs() -> List[Dialog]:
@@ -365,20 +374,22 @@ class Sandbox:
             if files.result.exists():
                 return True
             for d in altium_dialogs():
-                answer_dialog(d)
+                if d.is_error_box:
+                    answer_dialog(d)
             time.sleep(0.5)
         return False
 
     def recover(self, attempts: int = 3) -> dict:
-        """Answer Altium's dialogs, stop the debugger and confirm with a probe run.
+        """Answer Altium's error boxes, stop the debugger and confirm with a probe run.
 
-        Every Altium dialog is answered here, not only "Continue execution?":
-        after a syntax error Altium follows that dialog with an Error box, and
-        either one blocks all later script runs.
+        Not only "Continue execution?" is answered: after a syntax error Altium
+        follows that dialog with an Error box, and a refused run leaves an
+        Information box; any of them blocks all later script runs. Confirm and
+        Warning boxes are left alone - they may be the user's.
         """
         for n in range(1, attempts + 1):
             for _ in range(3):
-                found = altium_dialogs()
+                found = [d for d in altium_dialogs() if d.is_error_box]
                 for d in found:
                     answer_dialog(d)
                 if not found:

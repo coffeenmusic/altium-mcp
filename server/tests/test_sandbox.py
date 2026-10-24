@@ -71,6 +71,10 @@ class CheckTest(unittest.TestCase):
     def test_case_insensitive(self):
         self.assertEqual(self.check("resulttext := 'ok';\nobj1 := nil;"), [])
 
+    def test_with_statement_not_checked(self):
+        # Inside a with block a plain name can be the object's property
+        self.assertEqual(self.check("Obj1 := SchServer.GetCurrentSchDocument;\nwith Obj1 do\n  DocumentName := 'x';"), [])
+
     def test_template_declares_scratch_names(self):
         code = sandbox.strip_strings_and_comments(TEMPLATE)
         declared = set()
@@ -158,6 +162,16 @@ class DialogTest(unittest.TestCase):
         self.assertTrue(err.is_script_error)
         self.assertFalse(sandbox.Dialog(2, "#32770", "X2", "Save changes?").is_script_error)
         self.assertFalse(sandbox.Dialog(3, "TMessageForm", "Error", "Continue execution?").is_script_error)
+
+    def test_error_boxes_only(self):
+        # Recovery answers script errors and OK-only Error/Information boxes,
+        # never a Confirm or Warning box or another #32770 dialog (the user's)
+        self.assertTrue(sandbox.Dialog(1, "#32770", "X2", "Bad at Line:1, Char:2. Continue execution?").is_error_box)
+        self.assertTrue(sandbox.Dialog(2, "TMessageForm", "Error").is_error_box)
+        self.assertTrue(sandbox.Dialog(3, "TMessageForm", "Information").is_error_box)
+        self.assertFalse(sandbox.Dialog(4, "TMessageForm", "Confirm").is_error_box)
+        self.assertFalse(sandbox.Dialog(5, "TMessageForm", "Warning").is_error_box)
+        self.assertFalse(sandbox.Dialog(6, "#32770", "Save As", "File name:").is_error_box)
 
 
 if __name__ == "__main__":
