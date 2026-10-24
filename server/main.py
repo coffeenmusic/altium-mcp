@@ -69,6 +69,26 @@ START_TIMEOUT = 20
 START_TIMEOUT_COLD = 240
 RESPONSE_TIMEOUT = 120
 
+# Present while a script the MCP launched is stuck (paused in Altium's
+# debugger). Only then is the debugger stopped, so a script the user is
+# running or debugging is never stopped. Every server using this exchange
+# folder sees it, including after a restart.
+STUCK_MARKER = EXCHANGE_DIR / "mcp_script_stuck.txt"
+
+
+def _mark_script_stuck(what: str):
+    try:
+        STUCK_MARKER.write_text(what, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_script_stuck():
+    try:
+        STUCK_MARKER.unlink()
+    except OSError:
+        pass
+
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
 
@@ -289,13 +309,18 @@ class AltiumBridge:
         except Exception:
             return True  # unknown: assume running and use the normal timeouts
 
-    def stop_script_debugger(self):
-        """Stop a script paused in Altium's debugger.
+    async def stop_script_debugger(self):
+        """Stop a script of ours paused in Altium's debugger.
 
         A runtime error leaves a script paused in the debugger, after which
-        Altium silently ignores every new RunScript request until it is
-        stopped. Harmless when nothing is paused.
+        Altium refuses every new RunScript until it is stopped. Each refused
+        launch leaves a modal "Another script executing now" error open, and
+        while it is open Altium turns the Stop request away as well ("another
+        instance ... is busy"), so Altium's message boxes are closed first.
+        Harmless when nothing is paused.
         """
+        _dismiss_altium_dialogs(message_boxes_only=True)
+        await asyncio.sleep(1)
         logger.warning("Sending -REditScript:Stop to Altium to unblock the script executor")
         try:
             subprocess.Popen(f'"{self.config.altium_exe_path}" -REditScript:Stop', shell=True)
@@ -352,15 +377,16 @@ class AltiumBridge:
                 return {"success": False, "error": "Failed to run Altium script"}
 
             # A running Altium picks the request up within seconds. If it does
-            # not, the executor is almost always blocked by a script paused in
-            # the debugger: stop it and launch once more. The script consumes
-            # request.json, so a queued first launch cannot run it twice.
+            # not and a script of ours is stuck in the debugger, stop it and
+            # launch once more. The script consumes request.json, so a queued
+            # first launch cannot run it twice. Any other script is left alone:
+            # it may be one the user is running or debugging.
             started = await self._wait_for_start(START_TIMEOUT_COLD if cold_start else START_TIMEOUT)
             recovered = False
-            if not started:
-                logger.warning(f"Altium did not pick up the request within "
-                               f"{START_TIMEOUT}s - attempting recovery")
-                self.stop_script_debugger()
+            if not started and STUCK_MARKER.exists():
+                logger.warning(f"Altium did not pick up the request within {START_TIMEOUT}s "
+                               f"and a script of ours is stuck - attempting recovery")
+                await self.stop_script_debugger()
                 await asyncio.sleep(2)
                 recovered = True
                 if REQUEST_FILE.exists():
@@ -372,16 +398,21 @@ class AltiumBridge:
                     REQUEST_FILE.unlink()  # a launch Altium runs later must find nothing to do
                 except OSError:
                     pass
-                logger.error("Altium never started the bridge script, even after recovery")
-                return {
-                    "success": False,
-                    "error": "Altium did not start the bridge script (not executed)",
-                    "diagnosis": "Altium is not accepting script runs. Usual causes: a modal "
-                                 "dialog is open in Altium, Altium is busy (compiling, "
-                                 "loading) or hung, or Altium is still starting up. An "
-                                 "automatic debugger stop was already tried.",
-                    "next_step": "Check the Altium window for an open dialog, then retry.",
-                }
+                # Each refused launch left an OK-only "Another script executing
+                # now" box in Altium: do not leave it in front of the user
+                _dismiss_altium_dialogs(message_boxes_only=True)
+                logger.error("Altium never started the bridge script")
+                # Tools pass on only "error", so the explanation goes in it
+                why = ("A script of ours was stuck in Altium's debugger and stopping it did "
+                       "not free Altium." if recovered else
+                       "Altium is not accepting script runs: a dialog may be open, Altium may "
+                       "be busy or still starting up, or a script of the user's own may be "
+                       "running or paused in its debugger. Nothing was stopped.")
+                return {"success": False,
+                        "error": f"Altium did not start the command (not executed). {why} Check "
+                                 f"the Altium window for an open dialog or a running or paused "
+                                 f"script, then retry."}
+            _clear_script_stuck()
 
             logger.info("Bridge script started, waiting for response file...")
             start_time = time.time()
@@ -404,15 +435,14 @@ class AltiumBridge:
                 logger.error("Timeout waiting for response from Altium")
                 # The script started but never finished: it is most likely
                 # paused in the debugger now. Unblock it for the next command.
-                self.stop_script_debugger()
+                _mark_script_stuck(f"bridge command {command}")
+                await self.stop_script_debugger()
                 return {"success": False,
-                        "error": f"No response received from Altium within {RESPONSE_TIMEOUT}s "
-                                 f"(command '{command}' started but did not finish)",
-                        "diagnosis": "The command probably hit a runtime error and paused in "
-                                     "Altium's debugger, or is still running on a very large "
-                                     "design. The script executor has been stopped "
-                                     "automatically so the next command can run.",
-                        "executor_recovered": True}
+                        "error": f"No response from Altium within {RESPONSE_TIMEOUT}s: command "
+                                 f"'{command}' started but did not finish. It probably hit a "
+                                 f"runtime error and paused in Altium's debugger (now stopped, "
+                                 f"so the next command can run), or it is still working on a "
+                                 f"very large design."}
 
             if recovered:
                 logger.info("Command succeeded after automatic executor recovery")
@@ -1228,7 +1258,7 @@ def _window_process_name(hwnd) -> str:
         kernel32.CloseHandle(handle)
 
 
-def _dismiss_altium_dialogs():
+def _dismiss_altium_dialogs(message_boxes_only: bool = False):
     """Close Altium modal popups that would otherwise block a script run.
 
     Altium uses two kinds: Win32 task dialogs (#32770) and Delphi TMessageForm
@@ -1236,7 +1266,8 @@ def _dismiss_altium_dialogs():
     (TForm_RunScriptParameters) when it cannot find the script project; that
     one stays open and blocks every later script run. Only windows owned by
     the Altium process (X2.EXE) are touched, so dialogs of other applications
-    are never closed.
+    are never closed. With message_boxes_only, only the OK-only Error and
+    Information boxes are closed: the ones a refused script launch raises.
 
     Returns (handle, class name, title) of the windows that were closed, so
     the caller can tell the user (a closed dialog may have been one the user
@@ -1264,6 +1295,8 @@ def _dismiss_altium_dialogs():
         title = buf.value
         if cls.value == "TMessageForm" and title not in ("Error", "Warning", "Information", "Confirm"):
             return True
+        if message_boxes_only and (cls.value != "TMessageForm" or title not in ("Error", "Information")):
+            return True
         if _window_process_name(hwnd).lower() != "x2.exe":
             return True
         found.append((hwnd, cls.value, title))
@@ -1286,10 +1319,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     runtime error leaves the script PAUSED IN THE DEBUGGER with no dialog,
     after which every later script run silently does nothing until the
     debugger is stopped (Ctrl+F3) or Altium is restarted. This tool detects
-    that state and reports exactly which statement died.
+    that state, reports exactly which statement died, and stops the paused
+    script, so later runs and the other MCP tools keep working. It only stops
+    scripts the MCP started, never one the user is running or debugging.
 
-    The script runs in a SEPARATE script project, so a crash here can never
-    break the other MCP tools.
+    The script runs in a SEPARATE script project, so its code never touches
+    the other MCP tools' scripts.
 
     Writing the script:
     - Call SandboxLog('...') before each risky statement. The log is flushed
@@ -1369,12 +1404,15 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         steps = read_altium_text(SANDBOX_LOG).splitlines()
 
     if SANDBOX_RESULT.exists():
+        _clear_script_stuck()
         result_text = read_altium_text(SANDBOX_RESULT).strip()
         return json.dumps({"success": True, "result": result_text, "steps": steps,
                            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
     if steps:
-        altium_bridge.stop_script_debugger()
+        # Our script started and never finished: it is ours, so stop it
+        _mark_script_stuck("run_altium_script")
+        await altium_bridge.stop_script_debugger()
         return json.dumps({
             "success": False,
             "error": "script started but did not finish",
@@ -1396,15 +1434,20 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             "executor_wedged": False,
             "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
-    altium_bridge.stop_script_debugger()
+    if STUCK_MARKER.exists():
+        await altium_bridge.stop_script_debugger()
+        recovery = ("A script of ours was stuck in Altium's debugger and has been stopped. "
+                    "Retry once; if it still never starts, the script has a COMPILE error.")
+    else:
+        recovery = ("Nothing was stopped: no script of ours is stuck. If a script of the "
+                    "user's own is running or paused in Altium's debugger, it must finish or "
+                    "be stopped first; otherwise the script has a COMPILE error.")
     return json.dumps({
         "success": False,
         "error": "script never started",
-        "diagnosis": "Usually a COMPILE error in the script, or a previously paused "
-                     "script blocking execution.",
-        "executor_wedged": False,
-        "recovery": "-REditScript:Stop was sent automatically to clear any paused script. "
-                    "Retry once; if it still never starts, the script has a COMPILE error.",
+        "diagnosis": "Usually a COMPILE error in the script, or another script running or "
+                     "paused in Altium's debugger.",
+        "recovery": recovery,
         "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
 
