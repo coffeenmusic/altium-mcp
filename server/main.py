@@ -21,6 +21,7 @@ import io
 import base64
 import glob
 import re
+import uuid
 
 from altium_files import read_altium_text, write_altium_text
 from outjob_parser import parse_outjob
@@ -61,6 +62,12 @@ EXCHANGE_DIR = Path("C:/Users/Public/altium_mcp")
 EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
+
+# Seconds for a running Altium to pick up a request (normally ~1-5 s), for a
+# cold Altium launch to get that far, and for a started command to finish
+START_TIMEOUT = 20
+START_TIMEOUT_COLD = 240
+RESPONSE_TIMEOUT = 120
 
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
@@ -273,44 +280,146 @@ class AltiumBridge:
         async with self._command_lock:
             return await self._execute_command_locked(command, params)
 
+    @staticmethod
+    def _altium_running() -> bool:
+        try:
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq X2.EXE", "/NH"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            return "X2.EXE" in out.upper()
+        except Exception:
+            return True  # unknown: assume running and use the normal timeouts
+
+    def stop_script_debugger(self):
+        """Stop a script paused in Altium's debugger.
+
+        A runtime error leaves a script paused in the debugger, after which
+        Altium silently ignores every new RunScript request until it is
+        stopped. Harmless when nothing is paused.
+        """
+        logger.warning("Sending -REditScript:Stop to Altium to unblock the script executor")
+        try:
+            subprocess.Popen(f'"{self.config.altium_exe_path}" -REditScript:Stop', shell=True)
+        except Exception as e:
+            logger.error(f"Could not send -REditScript:Stop: {e}")
+
+    @staticmethod
+    async def _wait_for_start(timeout: float) -> bool:
+        """The bridge script deletes request.json as soon as it has read it."""
+        start = time.time()
+        while time.time() - start < timeout:
+            if not REQUEST_FILE.exists() or RESPONSE_FILE.exists():
+                return True
+            await asyncio.sleep(0.25)
+        return not REQUEST_FILE.exists() or RESPONSE_FILE.exists()
+
+    @staticmethod
+    async def _read_response_text() -> str:
+        """Read response.json, retrying while Altium may still be writing it."""
+        text = ""
+        for _ in range(12):
+            try:
+                text = read_altium_text(RESPONSE_FILE)
+                json.loads(text)
+                return text
+            except (OSError, json.JSONDecodeError):
+                await asyncio.sleep(0.25)
+        return text
+
     async def _execute_command_locked(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         try:
             # Clean up any existing response file
             if RESPONSE_FILE.exists():
                 RESPONSE_FILE.unlink()
-            
-            # Write the request file with command and parameters
+
+            # The script echoes request_id so a late reply to an earlier,
+            # timed-out command is never mistaken for this command's result
+            request_id = uuid.uuid4().hex[:12]
             with open(REQUEST_FILE, "w") as f:
                 json.dump({
                     "command": command,
+                    "request_id": request_id,
                     **params  # Include parameters directly in the main JSON object
                 }, f, indent=2)
-            
-            logger.info(f"Wrote request file for command: {command}")
-            
-            # Run the Altium script
+
+            logger.info(f"Wrote request file for command: {command} (request_id={request_id})")
+
+            cold_start = not self._altium_running()
+            if cold_start:
+                logger.info("Altium is not running - launching it, allowing time for startup")
+
             success = await self.run_altium_script()
             if not success:
                 return {"success": False, "error": "Failed to run Altium script"}
-            
-            # Wait for the response file
-            logger.info(f"Waiting for response file to appear...")
-            timeout = 120  # seconds
+
+            # A running Altium picks the request up within seconds. If it does
+            # not, the executor is almost always blocked by a script paused in
+            # the debugger: stop it and launch once more. The script consumes
+            # request.json, so a queued first launch cannot run it twice.
+            started = await self._wait_for_start(START_TIMEOUT_COLD if cold_start else START_TIMEOUT)
+            recovered = False
+            if not started:
+                logger.warning(f"Altium did not pick up the request within "
+                               f"{START_TIMEOUT}s - attempting recovery")
+                self.stop_script_debugger()
+                await asyncio.sleep(2)
+                recovered = True
+                if REQUEST_FILE.exists():
+                    await self.run_altium_script()
+                started = await self._wait_for_start(START_TIMEOUT)
+
+            if not started:
+                try:
+                    REQUEST_FILE.unlink()  # a launch Altium runs later must find nothing to do
+                except OSError:
+                    pass
+                logger.error("Altium never started the bridge script, even after recovery")
+                return {
+                    "success": False,
+                    "error": "Altium did not start the bridge script (not executed)",
+                    "diagnosis": "Altium is not accepting script runs. Usual causes: a modal "
+                                 "dialog is open in Altium, Altium is busy (compiling, "
+                                 "loading) or hung, or Altium is still starting up. An "
+                                 "automatic debugger stop was already tried.",
+                    "next_step": "Check the Altium window for an open dialog, then retry.",
+                }
+
+            logger.info("Bridge script started, waiting for response file...")
             start_time = time.time()
-            while not RESPONSE_FILE.exists() and time.time() - start_time < timeout:
-                await asyncio.sleep(0.5)
-            
-            if not RESPONSE_FILE.exists():
+            while time.time() - start_time < RESPONSE_TIMEOUT:
+                if RESPONSE_FILE.exists():
+                    response_text = await self._read_response_text()
+                    try:
+                        rid = json.loads(response_text).get("request_id")
+                    except (json.JSONDecodeError, AttributeError):
+                        rid = None
+                    if rid is None or rid == request_id:
+                        break
+                    logger.warning(f"Discarding stale response for request_id={rid}")
+                    try:
+                        RESPONSE_FILE.unlink()
+                    except OSError:
+                        pass
+                await asyncio.sleep(0.25)
+            else:
                 logger.error("Timeout waiting for response from Altium")
-                return {"success": False, "error": "No response received from Altium (timeout)"}
-            
-            # Read the response file and print it for debugging
-            logger.info("Response file found, reading response")
-            response_text = read_altium_text(RESPONSE_FILE)
-            
+                # The script started but never finished: it is most likely
+                # paused in the debugger now. Unblock it for the next command.
+                self.stop_script_debugger()
+                return {"success": False,
+                        "error": f"No response received from Altium within {RESPONSE_TIMEOUT}s "
+                                 f"(command '{command}' started but did not finish)",
+                        "diagnosis": "The command probably hit a runtime error and paused in "
+                                     "Altium's debugger, or is still running on a very large "
+                                     "design. The script executor has been stopped "
+                                     "automatically so the next command can run.",
+                        "executor_recovered": True}
+
+            if recovered:
+                logger.info("Command succeeded after automatic executor recovery")
+
             # Log the raw response for debugging
             logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
-            
+
             # Parse the JSON response with detailed error handling
             try:
                 response = json.loads(response_text)
@@ -1265,15 +1374,15 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                            "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
     if steps:
+        altium_bridge.stop_script_debugger()
         return json.dumps({
             "success": False,
             "error": "script started but did not finish",
             "last_step_reached": steps[-1],
             "diagnosis": "The statement AFTER the last step is what crashed or paused the script.",
-            "executor_wedged": True,
-            "recovery": "Altium's script executor is now blocked. Recover by running this "
-                        "shell command (sends the debugger Stop process to the running "
-                        "Altium): \"<altium_exe>\" -REditScript:Stop  -- then retry.",
+            "executor_wedged": False,
+            "recovery": "The paused script was stopped automatically (-REditScript:Stop); "
+                        "the executor is free again. Fix the failing statement and retry.",
             "steps": steps,
             "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
@@ -1287,15 +1396,15 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             "executor_wedged": False,
             "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
+    altium_bridge.stop_script_debugger()
     return json.dumps({
         "success": False,
         "error": "script never started",
         "diagnosis": "Usually a COMPILE error in the script, or a previously paused "
                      "script blocking execution.",
-        "executor_wedged": True,
-        "recovery": "A previously paused script may be blocking execution. Recover by "
-                    "running this shell command: \"<altium_exe>\" -REditScript:Stop  "
-                    "-- then retry. If it still fails, the script itself has a COMPILE error.",
+        "executor_wedged": False,
+        "recovery": "-REditScript:Stop was sent automatically to clear any paused script. "
+                    "Retry once; if it still never starts, the script has a COMPILE error.",
         "dialogs_dismissed": len(dialogs), "dismissed_dialog_titles": titles}, indent=2)
 
 
