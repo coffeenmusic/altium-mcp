@@ -2382,6 +2382,22 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         
         def capture_screenshot_thread():
             try:
+                # Work in physical pixels. Python is not DPI aware, so on a
+                # scaled display Windows hands this process window rects
+                # divided by the scale factor (1080x902 for a 2160x1804
+                # window at 200%), while the BitBlt below copies the window's
+                # real pixels: the capture came back as only the top-left
+                # part of the window. Per-monitor awareness for this thread
+                # alone gives GetWindowRect the physical size and ends with
+                # the thread. V2 (-4) needs Windows 10 1703; V1 (-3) is the
+                # fallback.
+                import ctypes
+                set_dpi_context = ctypes.windll.user32.SetThreadDpiAwarenessContext
+                set_dpi_context.restype = ctypes.c_void_p
+                set_dpi_context.argtypes = [ctypes.c_void_p]
+                if not (set_dpi_context(-4) or set_dpi_context(-3)):
+                    logger.warning("Could not make the capture thread DPI aware; on a scaled display the capture may show only part of the window")
+
                 # Find Altium windows
                 altium_windows = []
                 altium_fallback_windows = []
@@ -2451,7 +2467,6 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                 try:
                     for attempt in range(2):
                         if attempt:
-                            import ctypes
                             ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
                             ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
                         try:
