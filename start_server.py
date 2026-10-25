@@ -25,11 +25,33 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 
+# The hash-locked set exported by uv. Installed when present, so no
+# dependency of mcp floats to a release it was never tested with (pydantic
+# 2.14 breaking mcp 1.5.0 at import was one).
+LOCKED_REQUIREMENTS = SCRIPT_DIR / "requirements.txt"
+
+# Fallback when the lock file is missing, or pins wheels the interpreter has
+# none for (a newer Python than the lock was made with).
 REQUIREMENTS = [
     "mcp[cli]==1.5.0",
+    "pydantic==2.10.6",  # mcp 1.5.0 needs eval_type_backport, removed in later pydantic
     "pillow>=11.1.0",
     "pywin32>=310",
 ]
+
+
+def _locked_text():
+    try:
+        return LOCKED_REQUIREMENTS.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _marker_payload():
+    # Both inputs, so a change to either the lock file or the fallback list
+    # invalidates the venv. Not which one was installed: that is decided at
+    # build time and must not make a ready venv look stale.
+    return "\n".join(REQUIREMENTS) + "\n--locked--\n" + _locked_text()
 
 
 def _data_dir():
@@ -50,7 +72,7 @@ def _data_dir():
 def _venv_key():
     # One venv per (requirements, interpreter version). Changing either gets a
     # fresh directory instead of mutating one another process may be using.
-    text = "|".join(REQUIREMENTS) + "|py%d.%d" % sys.version_info[:2]
+    text = _marker_payload() + "|py%d.%d" % sys.version_info[:2]
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
@@ -71,15 +93,11 @@ LAUNCH_WAIT_SECONDS = 50
 STALE_LOCK_SECONDS = 1800
 
 
-def _marker_payload():
-    return "\n".join(REQUIREMENTS)
-
-
 def venv_is_ready():
     # python.exe alone is not enough: `python -m venv` can succeed and the pip
     # install still fail, leaving an interpreter with no mcp module. The marker
     # is written last and records what was installed, so a change to
-    # REQUIREMENTS also invalidates it.
+    # the requirements also invalidates it.
     if not PYTHON_EXE.exists():
         return False
     try:
@@ -90,7 +108,10 @@ def venv_is_ready():
 
 def _manual_build_message(reason):
     pip_exe = VENV_DIR / "Scripts" / "pip.exe"
-    requirements = " ".join('"%s"' % r for r in REQUIREMENTS)
+    if _locked_text():
+        requirements = '-r "%s"' % LOCKED_REQUIREMENTS
+    else:
+        requirements = " ".join('"%s"' % r for r in REQUIREMENTS)
     return (
         "%s\n\n"
         "Build log: %s\n"
@@ -187,9 +208,17 @@ def _build_venv():
                 "Something is holding it open." % VENV_DIR
             )
     subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
-    subprocess.check_call(
-        [str(VENV_DIR / "Scripts" / "pip.exe"), "install", "--quiet"] + REQUIREMENTS
-    )
+    pip = [str(VENV_DIR / "Scripts" / "pip.exe"), "install", "--quiet"]
+    installed = False
+    if _locked_text():
+        # Hashes in the file put pip in hash-checking mode for every package.
+        try:
+            subprocess.check_call(pip + ["-r", str(LOCKED_REQUIREMENTS)])
+            installed = True
+        except subprocess.CalledProcessError as exc:
+            print("locked install failed (%s); falling back to %s" % (exc, REQUIREMENTS))
+    if not installed:
+        subprocess.check_call(pip + REQUIREMENTS)
     MARKER.write_text(_marker_payload(), encoding="utf-8")
     _prune_old_venvs()
 
