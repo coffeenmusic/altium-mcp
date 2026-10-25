@@ -984,29 +984,26 @@ begin
     end;
 end;
 
-// Function to execute get output job containers
-function ExecuteGetOutputJobContainers(RequestData: TStringList): String;
+// The optional "outjob_path" request parameter, '' when absent or empty
+function RequestOutJobPath(RequestData: TStringList): String;
 var
-    ParamValue: String;
     i: Integer;
-    OutJobPath: String;
 begin
-    OutJobPath := '';
-    
-    // Parse parameters from the request
+    Result := '';
     for i := 0 to RequestData.Count - 1 do
     begin
         if (Pos('"outjob_path"', RequestData[i]) > 0) then
         begin
-            // Found the outjob_path parameter
-            ParamValue := Copy(RequestData[i], Pos(':', RequestData[i]) + 1, Length(RequestData[i]));
-            OutJobPath := JSONLineValue(RequestData[i]);
+            Result := Trim(JSONLineValue(RequestData[i]));
             break;
         end;
     end;
-    
-    // Call the appropriate function
-    Result := GetOutputJobContainers(ROOT_DIR);
+end;
+
+// Function to execute get output job containers
+function ExecuteGetOutputJobContainers(RequestData: TStringList): String;
+begin
+    Result := GetOutputJobContainers(RequestOutJobPath(RequestData), ROOT_DIR);
 end;
 
 // Function to execute run output jobs
@@ -1045,7 +1042,7 @@ begin
         
         if ContainersList.Count > 0 then
         begin
-            Result := RunOutputJobs(ContainersList, ROOT_DIR);
+            Result := RunOutputJobs(ContainersList, RequestOutJobPath(RequestData), ROOT_DIR);
         end
         else
         begin
@@ -1268,10 +1265,17 @@ begin
 
     // A focus failure is an answer, not a dialog: WriteResponse turns the
     // 'ERROR: ' prefix into success=false with this message.
-    if not EnsureDocumentFocused(CommandName, ViewHint) then
+    // An OutJob command that names its file needs no OutJob open in a
+    // project: the command resolves and opens the named file itself.
+    if not (((CommandName = 'get_output_job_containers') or
+             (CommandName = 'run_output_jobs')) and
+            (RequestOutJobPath(RequestData) <> '')) then
     begin
-        Result := 'ERROR: ' + FocusFailure;
-        Exit;
+        if not EnsureDocumentFocused(CommandName, ViewHint) then
+        begin
+            Result := 'ERROR: ' + FocusFailure;
+            Exit;
+        end;
     end;
 
     // Direct command execution based on the command name

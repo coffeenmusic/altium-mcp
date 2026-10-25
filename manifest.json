@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "altium-mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
   "author": {
     "name": "Stephen Thompson"
@@ -17,11 +17,11 @@
   "tools": [
     {
       "name": "get_output_job_containers",
-      "description": "Get all available output job containers from a specified OutJob file"
+      "description": "List the output containers of an OutJob file (outjob_path, or the first open OutJob)"
     },
     {
       "name": "run_output_jobs",
-      "description": "Run specified output job containers"
+      "description": "Run output job containers from an OutJob file (outjob_path, or the first open OutJob) and check that PDF containers wrote their file"
     },
     {
       "name": "get_outjob_settings",
