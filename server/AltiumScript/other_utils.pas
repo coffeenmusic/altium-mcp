@@ -715,45 +715,65 @@ begin
     end;
 end;
 
-// Full path of the PDF that Publish container J writes: OutputFileNameJ
-// from [PublishSettings], under OutputBasePathJ when that is absolute,
-// otherwise under the project's output folder plus OutputBasePathJ.
+// Full path of the PDF that Publish container J writes, from its keys in
+// [PublishSettings], or '' when that is not known in advance. As Altium
+// 26.10 publishes from a script:
+// - Folder: a release-managed container (ReleaseManagedJ other than 0)
+//   writes to the project's output folder and ignores OutputBasePathJ.
+//   Otherwise OutputBasePathJ is the folder, relative to the project folder.
+// - Name: PublishMethodJ 0 writes one file, OutputFileNameJ. PublishMethodJ
+//   1 writes every output to OutputFileNameMultiJ, unless
+//   UseOutputNameForMultiJ names each file after its output. A name that
+//   starts with '=' is an expression Altium evaluates.
 // OutputFilePathJ is only a cached full path from the last publish. It goes
 // stale when the project is copied or the name is changed, so only its file
 // name is used, and only when OutputFileNameJ is empty.
-// '' when neither key names a file.
+// Without the project the OutJob's folder stands in for the project folder;
+// the file is then never written and the caller reports why.
 function PublishTargetFile(IniFile: TIniFile; J: Integer; Project: IProject;
                            OutJobPath: String; RelativePath: String): String;
 var
-    FileName, BaseDir: String;
+    FileName, BaseDir, ProjectDir, Method: String;
 begin
     Result := '';
-    FileName := IniFile.ReadString('PublishSettings', 'OutputFileName' + IntToStr(J), '');
-    if FileName = '' then
-        FileName := ExtractFileName(StringReplace(
-            IniFile.ReadString('PublishSettings', 'OutputFilePath' + IntToStr(J), ''),
-            '/', '\', REPLACEALL));
-    if FileName = '' then Exit;
+    Method := IniFile.ReadString('PublishSettings', 'PublishMethod' + IntToStr(J), '0');
+    if Method = '0' then
+    begin
+        FileName := IniFile.ReadString('PublishSettings', 'OutputFileName' + IntToStr(J), '');
+        if FileName = '' then
+            FileName := ExtractFileName(StringReplace(
+                IniFile.ReadString('PublishSettings', 'OutputFilePath' + IntToStr(J), ''),
+                '/', '\', REPLACEALL));
+    end
+    else if (Method = '1') and
+            (IniFile.ReadString('PublishSettings', 'UseOutputNameForMulti' + IntToStr(J), '0') = '0') then
+        FileName := IniFile.ReadString('PublishSettings', 'OutputFileNameMulti' + IntToStr(J), '')
+    else
+        Exit;
+    if (FileName = '') or (Copy(FileName, 1, 1) = '=') then Exit;
     if ExtractFileExt(FileName) = '' then
         FileName := FileName + '.PDF';
 
-    if IsAbsolutePath(RelativePath) then
+    if Project <> Nil then
+        ProjectDir := ExtractFilePath(Project.DM_ProjectFullPath)
+    else
+        ProjectDir := ExtractFilePath(OutJobPath);
+
+    if IniFile.ReadString('PublishSettings', 'ReleaseManaged' + IntToStr(J), '1') <> '0' then
+    begin
+        BaseDir := '';
+        if Project <> Nil then
+            BaseDir := Project.DM_GetOutputPath;
+        if not IsAbsolutePath(BaseDir) then
+            BaseDir := ProjectDir + BaseDir;
+    end
+    else if RelativePath = '' then
+        Exit
+    else if IsAbsolutePath(RelativePath) then
         BaseDir := RelativePath
     else
-    begin
-        if Project <> Nil then
-        begin
-            BaseDir := Project.DM_GetOutputPath;
-            if not IsAbsolutePath(BaseDir) then
-                BaseDir := ExtractFilePath(Project.DM_ProjectFullPath) + BaseDir;
-        end
-        else
-            BaseDir := ExtractFilePath(OutJobPath);
-        if (BaseDir <> '') and (Copy(BaseDir, Length(BaseDir), 1) <> '\') then
-            BaseDir := BaseDir + '\';
-        BaseDir := BaseDir + RelativePath;
-    end;
-    if (BaseDir <> '') and (Copy(BaseDir, Length(BaseDir), 1) <> '\') then
+        BaseDir := ProjectDir + RelativePath;
+    if Copy(BaseDir, Length(BaseDir), 1) <> '\' then
         BaseDir := BaseDir + '\';
     Result := BaseDir + FileName;
 end;
@@ -928,13 +948,13 @@ begin
                                     AddJSONProperty(ContainerResultProps, 'output_file', TargetFile);
                                     if TargetFile = '' then
                                     begin
-                                        // Altium falls back to a default name
-                                        // the OutJob does not record, so the
-                                        // file cannot be checked.
+                                        // Altium decides the name (a default,
+                                        // an expression or the output names)
+                                        // or the folder, so it cannot be checked.
                                         AddJSONBoolean(ContainerResultProps, 'success', True);
                                         AddJSONBoolean(ContainerResultProps, 'output_verified', False);
                                         AddJSONProperty(ContainerResultProps, 'note',
-                                            'The OutJob sets no file name for this container, so the PDF was not checked');
+                                            'Altium decides the PDF name or folder for this container, so the PDF was not checked');
                                         SuccessCount := SuccessCount + 1;
                                     end
                                     else if WaitForFileWritten(TargetFile, StartTime, 15) then

@@ -3007,6 +3007,14 @@ async def run_output_jobs(ctx: Context, container_names: list, outjob_path: str 
     """
     Run specified output job containers
 
+    The OutJob's project must be open in Altium. A PDF (Publish) container
+    reports output_file and output_verified: true once Altium has written
+    that file. output_verified is false for generated-file containers and
+    for PDFs that Altium names itself (after each output, or from an
+    expression). When a PDF already exists and the container prompts before
+    overwriting (the default), Altium asks in a dialog and the run waits for
+    the answer.
+
     Args:
         container_names (list): List of container names to run
         outjob_path (str): Full path to the OutJob file (optional). When empty,

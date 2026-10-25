@@ -120,8 +120,8 @@ When launching claude for the first time, the server will automatically try to l
 The server provides several tools to interact with Altium Designer:
 
 ### Output Jobs
-- `get_output_job_containers`: Using currently open .OutJob file, reads all available output containers
-- `run_output_jobs`: Pass a list of output job container names from the currently open .OutJob to run any number of them. `.OutJob` must be the currently focused document.
+- `get_output_job_containers`: Reads all available output containers from the `.OutJob` at `outjob_path` (a full path, optional) or, without one, from the first OutJob open in a project
+- `run_output_jobs`: Pass a list of output job container names to run any number of them, from the `.OutJob` at `outjob_path` or the first open one. The OutJob's project must be open in Altium. PDF containers report `output_verified` once the PDF is written. If the PDF already exists and the container prompts before overwriting, Altium asks in a dialog and the run waits for the answer.
 - `get_outjob_settings`: Read any `.OutJob` file from disk (no Altium needed, the OutJob does not have to be open) and return its containers (output paths, file name expression, add-to-project) and outputs (connected containers, variant, document) with decoded settings: Gerber units/format/origin and the plotted and "add to all plots" layers decoded from Altium layer IDs, NC Drill, IPC-D-356 test points, pick and place and print layers. Use it to audit fabrication settings before generating. Reads the saved file, so unsaved changes in Altium are not visible.
 
 ### Project & Validation
