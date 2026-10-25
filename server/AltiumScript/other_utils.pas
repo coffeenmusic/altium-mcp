@@ -104,6 +104,58 @@ begin
     end;
 end;
 
+// A path in the form Altium reports it (DM_FullPath): backslashes, no '..'
+function NormalizePath(Path: String): String;
+begin
+    result := ExpandFileName(StringReplace(Path, '/', '\', REPLACEALL));
+end;
+
+function IsAbsolutePath(Path: String): Boolean;
+var
+    P: String;
+begin
+    P := StringReplace(Path, '/', '\', REPLACEALL);
+    Result := (Copy(P, 2, 2) = ':\') or (Copy(P, 1, 2) = '\\');
+end;
+
+// A requested path is used only when it is a full path to an existing
+// .OutJob. A relative path would resolve against Altium's working folder,
+// and any other file type would be opened as an OutJob.
+function IsUsableOutJobPath(RequestedPath: String): Boolean;
+begin
+    Result := IsAbsolutePath(RequestedPath) and
+              (LowerCase(ExtractFileExt(RequestedPath)) = '.outjob') and
+              FileExists(RequestedPath);
+end;
+
+// The OutJob a request names, or the first open one when it names none.
+// Returns '' when the named path is not usable, or nothing is open.
+function ResolveOutJobPath(RequestedPath: String): String;
+begin
+    if RequestedPath <> '' then
+    begin
+        if IsUsableOutJobPath(RequestedPath) then
+            result := NormalizePath(RequestedPath)
+        else
+            result := '';
+    end
+    else
+        result := GetOpenOutputJob();
+end;
+
+// Error text for an OutJob that ResolveOutJobPath could not resolve
+function OutJobNotFoundError(RequestedPath: String): String;
+begin
+    if RequestedPath = '' then
+        result := 'No open OutJob document found'
+    else if not IsAbsolutePath(RequestedPath) then
+        result := 'outjob_path must be a full path: ' + RequestedPath
+    else if LowerCase(ExtractFileExt(RequestedPath)) <> '.outjob' then
+        result := 'Not an .OutJob file: ' + RequestedPath
+    else
+        result := 'OutJob file not found: ' + RequestedPath;
+end;
+
 // Return the Index-th (0-based) field of a pipe-delimited string,
 // e.g. GetFieldFromPipeString('R1|100|200', 1) = '100'.
 // Returns '' if the field does not exist.
@@ -527,8 +579,9 @@ begin
     end;
 end;
 
-// Get all available output job containers from the first open OutJob
-function GetOutputJobContainers(ROOT_DIR: String): String;
+// Get all available output job containers from RequestedPath, or from the
+// first open OutJob when RequestedPath is empty
+function GetOutputJobContainers(RequestedPath: String, ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -540,16 +593,15 @@ var
     ContainerProps: TStringList;
     OutputLines: TStringList;
 begin
-    // Get the path of the first open OutJob
-    OutJobPath := GetOpenOutputJob();
+    OutJobPath := ResolveOutJobPath(RequestedPath);
 
-    // Exit if no open OutJob was found
+    // Exit if no OutJob was found
     if OutJobPath = '' then
     begin
         ResultProps := TStringList.Create;
         try
             AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No open OutJob document found');
+            AddJSONProperty(ResultProps, 'error', OutJobNotFoundError(RequestedPath));
             Result := BuildJSONObject(ResultProps);
         finally
             ResultProps.Free;
@@ -639,8 +691,99 @@ begin
     end;
 end;
 
-// Run selected output job containers with simplified logic
-function RunOutputJobs(ContainerNames: TStringList, ROOT_DIR: String): String;
+// The open project that holds OutJobPath, or Nil when none does. A Publish
+// container prints [Project Physical Documents], so it needs this project.
+function OutJobProject(OutJobPath: String): IProject;
+var
+    P, I: Integer;
+    Project: IProject;
+begin
+    Result := Nil;
+    for P := 0 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        Project := GetWorkspace.DM_Projects(P);
+        if Project = Nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            if SameText(NormalizePath(Project.DM_LogicalDocuments(I).DM_FullPath),
+                        NormalizePath(OutJobPath)) then
+            begin
+                Result := Project;
+                Exit;
+            end;
+        end;
+    end;
+end;
+
+// Full path of the PDF that Publish container J writes: OutputFileNameJ
+// from [PublishSettings], under OutputBasePathJ when that is absolute,
+// otherwise under the project's output folder plus OutputBasePathJ.
+// OutputFilePathJ is only a cached full path from the last publish. It goes
+// stale when the project is copied or the name is changed, so only its file
+// name is used, and only when OutputFileNameJ is empty.
+// '' when neither key names a file.
+function PublishTargetFile(IniFile: TIniFile; J: Integer; Project: IProject;
+                           OutJobPath: String; RelativePath: String): String;
+var
+    FileName, BaseDir: String;
+begin
+    Result := '';
+    FileName := IniFile.ReadString('PublishSettings', 'OutputFileName' + IntToStr(J), '');
+    if FileName = '' then
+        FileName := ExtractFileName(StringReplace(
+            IniFile.ReadString('PublishSettings', 'OutputFilePath' + IntToStr(J), ''),
+            '/', '\', REPLACEALL));
+    if FileName = '' then Exit;
+    if ExtractFileExt(FileName) = '' then
+        FileName := FileName + '.PDF';
+
+    if IsAbsolutePath(RelativePath) then
+        BaseDir := RelativePath
+    else
+    begin
+        if Project <> Nil then
+        begin
+            BaseDir := Project.DM_GetOutputPath;
+            if not IsAbsolutePath(BaseDir) then
+                BaseDir := ExtractFilePath(Project.DM_ProjectFullPath) + BaseDir;
+        end
+        else
+            BaseDir := ExtractFilePath(OutJobPath);
+        if (BaseDir <> '') and (Copy(BaseDir, Length(BaseDir), 1) <> '\') then
+            BaseDir := BaseDir + '\';
+        BaseDir := BaseDir + RelativePath;
+    end;
+    if (BaseDir <> '') and (Copy(BaseDir, Length(BaseDir), 1) <> '\') then
+        BaseDir := BaseDir + '\';
+    Result := BaseDir + FileName;
+end;
+
+// True once TargetFile exists with a time stamp at or after StartTime,
+// polling for up to TimeoutSec. FileAge has 2 s resolution, hence the margin.
+// FileAge is -1 while the file is missing (e.g. mid-replace); that is not a
+// valid file date, so it is checked before conversion.
+function WaitForFileWritten(TargetFile: String; StartTime: TDateTime; TimeoutSec: Integer): Boolean;
+var
+    Deadline: TDateTime;
+    Age: Integer;
+begin
+    Result := False;
+    Deadline := Now + TimeoutSec / 86400;
+    repeat
+        Age := FileAge(TargetFile);
+        if Age <> -1 then
+            if FileDateToDateTime(Age) >= StartTime - 2 / 86400 then
+            begin
+                Result := True;
+                Exit;
+            end;
+        Sleep(250);
+    until Now > Deadline;
+end;
+
+// Run selected output job containers with simplified logic, from
+// RequestedPath or, when that is empty, the first open OutJob
+function RunOutputJobs(ContainerNames: TStringList, RequestedPath: String, ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -655,17 +798,19 @@ var
     SuccessCount: Integer;
     OutJobDoc: IServerDocument;
     OutputLines: TStringList;
+    Project: IProject;
+    TargetFile: String;
+    StartTime: TDateTime;
 begin
-    // Get the path of the first open OutJob
-    OutJobPath := GetOpenOutputJob();
+    OutJobPath := ResolveOutJobPath(RequestedPath);
 
-    // Exit if no open OutJob was found
+    // Exit if no OutJob was found
     if OutJobPath = '' then
     begin
         ResultProps := TStringList.Create;
         try
             AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No open OutJob document found');
+            AddJSONProperty(ResultProps, 'error', OutJobNotFoundError(RequestedPath));
             Result := BuildJSONObject(ResultProps);
         finally
             ResultProps.Free;
@@ -682,17 +827,12 @@ begin
         // Add the OutJob path to the result
         AddJSONProperty(ResultProps, 'outjob_path', OutJobPath);
 
-        // Open the OutJob document
+        // Open the OutJob document. Checked for Nil before any use: a
+        // caller-supplied outjob_path may name a file Altium cannot open.
         if not(Client.IsDocumentOpen(OutJobPath)) then
-        begin
-            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath);
-            OutJobDoc.Focus();
-        end
+            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath)
         else
-        begin
             OutJobDoc := Client.GetDocumentByPath(OutJobPath);
-            OutJobDoc.Focus();
-        end;
 
         // Exit if we can't open the OutJob document
         if OutJobDoc = Nil then
@@ -738,8 +878,13 @@ begin
                                 ContainerAction := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', DEFAULT);
                                 RelativePath := IniFile.ReadString('PublishSettings', 'OutputBasePath' + IntToStr(J), '');
 
-                                // Ensure document is focused
-                                OutJobDoc.Focus();
+                                // Show the OutJob, not just focus it: with
+                                // only Focus() the Print process wrote no
+                                // file. Done for every container, since a
+                                // previous one may have changed the view.
+                                // Before ResetParameters, so showing the
+                                // document cannot touch the parameters.
+                                Client.ShowDocument(OutJobDoc);
 
                                 // Run the container based on its type
                                 if ContainerAction = 'GeneratedFiles' then
@@ -752,24 +897,62 @@ begin
                                     AddStringParameter('OutputBasePath', RelativePath);
                                     RunProcess('WorkspaceManager:GenerateReport');
 
-                                    // Assume success
+                                    // The generated file names are not known
+                                    // here, so the output is not checked.
+                                    // output_verified tells the caller.
                                     AddJSONBoolean(ContainerResultProps, 'success', True);
+                                    AddJSONBoolean(ContainerResultProps, 'output_verified', False);
                                     SuccessCount := SuccessCount + 1;
                                 end
                                 else if ContainerAction = 'Publish' then
                                 begin
-                                    // Run PublishToPDF with simpler parameters
+                                    // Only report success once the file the
+                                    // OutJob names has been written.
+                                    // An empty OutputBasePath is not passed.
+                                    Project := OutJobProject(OutJobPath);
+                                    TargetFile := PublishTargetFile(IniFile, J, Project, OutJobPath, RelativePath);
+
                                     ResetParameters;
                                     AddStringParameter('Action', 'PublishToPDF');
                                     AddStringParameter('OutputMedium', ContainerName);
                                     AddStringParameter('ObjectKind', 'OutputBatch');
-                                    AddStringParameter('OutputBasePath', RelativePath);
+                                    // No OutputFilePath: with OutputBatch Altium
+                                    // treats it as a folder and appends the
+                                    // OutJob's file name. The OutJob names the file.
+                                    if RelativePath <> '' then
+                                        AddStringParameter('OutputBasePath', RelativePath);
                                     AddStringParameter('DisableDialog', 'True');
+                                    StartTime := Now;
                                     RunProcess('WorkspaceManager:Print');
 
-                                    // Assume success
-                                    AddJSONBoolean(ContainerResultProps, 'success', True);
-                                    SuccessCount := SuccessCount + 1;
+                                    AddJSONProperty(ContainerResultProps, 'output_file', TargetFile);
+                                    if TargetFile = '' then
+                                    begin
+                                        // Altium falls back to a default name
+                                        // the OutJob does not record, so the
+                                        // file cannot be checked.
+                                        AddJSONBoolean(ContainerResultProps, 'success', True);
+                                        AddJSONBoolean(ContainerResultProps, 'output_verified', False);
+                                        AddJSONProperty(ContainerResultProps, 'note',
+                                            'The OutJob sets no file name for this container, so the PDF was not checked');
+                                        SuccessCount := SuccessCount + 1;
+                                    end
+                                    else if WaitForFileWritten(TargetFile, StartTime, 15) then
+                                    begin
+                                        AddJSONBoolean(ContainerResultProps, 'success', True);
+                                        AddJSONBoolean(ContainerResultProps, 'output_verified', True);
+                                        SuccessCount := SuccessCount + 1;
+                                    end
+                                    else
+                                    begin
+                                        AddJSONBoolean(ContainerResultProps, 'success', False);
+                                        if Project = Nil then
+                                            AddJSONProperty(ContainerResultProps, 'error',
+                                                'No PDF written. The OutJob''s project is not open in Altium, so there are no project documents to print.')
+                                        else
+                                            AddJSONProperty(ContainerResultProps, 'error',
+                                                'No PDF written to the output file within 15 s');
+                                    end;
                                 end
                                 else
                                 begin

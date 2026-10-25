@@ -2822,22 +2822,24 @@ async def get_pcb_layer_stackup(ctx: Context) -> str:
     return json.dumps(stackup_data, indent=2)
 
 @mcp.tool()
-async def get_output_job_containers(ctx: Context) -> str:
+async def get_output_job_containers(ctx: Context, outjob_path: str = "") -> str:
     """
     Get all available output job containers from a specified OutJob file
-    
+
     Args:
-        outjob_path (str): Path to the OutJob file (optional, will use first open OutJob if not provided)
-    
+        outjob_path (str): Full path to the OutJob file (optional). When empty,
+            the first OutJob found in the open projects is used, in project
+            order, regardless of which document has focus.
+
     Returns:
-        str: JSON array with all output job containers and their properties
+        str: JSON with outjob_path (the file actually used) and the containers
     """
-    logger.info("Getting output job containers from the first open OutJob")
-    
+    logger.info(f"Getting output job containers from {outjob_path or 'the first open OutJob'}")
+
     # Execute the command in Altium to get output job containers
     response = await altium_bridge.execute_command(
-        "get_output_job_containers", 
-        {}  # No parameters needed - will use first open OutJob
+        "get_output_job_containers",
+        {"outjob_path": outjob_path}
     )
     
     # Check for success
@@ -3001,23 +3003,27 @@ async def get_component_primitives(ctx: Context, designators: list) -> str:
 
 
 @mcp.tool()
-async def run_output_jobs(ctx: Context, container_names: list) -> str:
+async def run_output_jobs(ctx: Context, container_names: list, outjob_path: str = "") -> str:
     """
     Run specified output job containers
-    
+
     Args:
         container_names (list): List of container names to run
-    
+        outjob_path (str): Full path to the OutJob file (optional). When empty,
+            the first OutJob found in the open projects is used, in project
+            order, regardless of which document has focus.
+
     Returns:
-        str: JSON object with results of running the output jobs
+        str: JSON object with outjob_path (the file actually used) and the
+             results of running the output jobs
     """
-    logger.info(f"Running output jobs")
+    logger.info(f"Running output jobs from {outjob_path or 'the first open OutJob'}")
     logger.info(f"Containers to run: {container_names}")
-    
+
     # Execute the command in Altium to run output jobs
     response = await altium_bridge.execute_command(
-        "run_output_jobs", 
-        {"container_names": container_names}
+        "run_output_jobs",
+        {"outjob_path": outjob_path, "container_names": container_names}
     )
     
     # Check for success
