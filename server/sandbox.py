@@ -156,6 +156,49 @@ def check_script(body_lines: List[str], extra_names: List[str], line_offset: int
     return problems
 
 
+# Calls that crashed Altium (AD26) in real sessions. The template's except block
+# catches most run-time errors, but a script that fails between
+# SchServer.ProcessControl.PreProcess and PostProcess leaves Altium's undo
+# history broken until Altium is restarted, and some of these calls take Altium
+# down without raising anything the script could catch.
+KNOWN_CRASHES = [
+    (r"\bSCHM_PrimitiveRegistration\b",
+     "RobotManager.SendMessage(.., SCHM_PrimitiveRegistration, ..) crashed Altium for a new "
+     "object; AddSchObject, save and reload the document instead"),
+    (r"\bGetState_DescriptionString\b", "crashes when called on objects from a schematic iterator"),
+    (r"\bBoundingRectangle\b", "a record: reading its fields crashes"),
+    (r"\.Corner\b(?!\s*:=)", "reading .Corner crashes; writing '.Corner := Point(..)' works"),
+    (r"\bDM_PortObjects\b", "crashes"),
+    (r"\bDM_PartDesignator\b", "does not exist; use DM_LogicalPartDesignator"),
+    (r"\.Tag\b", "schematic objects have no Tag property"),
+    (r"\bObj\d\s*:=\s*TStringList\.Create\b",
+     "a TStringList held in an IDispatch variable (Obj1..Obj9) crashes when indexed; "
+     "use List1..List3 or declare a TStringList in a var block"),
+    (r"\bList[123]\s*\.\s*Free\b|\bList[123]\s*:=\s*nil\b",
+     "List1..List3 are created and freed by the sandbox; empty them with .Clear"),
+]
+
+
+def lint_script(body_lines: List[str], line_offset: int = 0) -> List[str]:
+    """Calls known to crash Altium, and document edits that are never closed.
+
+    Strings and comments are ignored. Returns a list of problems; empty means
+    the script may run.
+    """
+    code = strip_strings_and_comments("\n".join(body_lines))
+    problems = []
+    for lineno, line in enumerate(code.splitlines(), 1):
+        for pat, why in KNOWN_CRASHES:
+            if re.search(pat, line, re.IGNORECASE):
+                problems.append(f"line {lineno + line_offset}: {why}")
+    pre = len(re.findall(r"\.PreProcess\s*\(", code, re.IGNORECASE))
+    post = len(re.findall(r"\.PostProcess\s*\(", code, re.IGNORECASE))
+    if pre != post:
+        problems.append(f"{pre} PreProcess but {post} PostProcess call(s): an edit that is never "
+                        "closed breaks Altium's undo history")
+    return problems
+
+
 @dataclass
 class BuiltScript:
     text: str
@@ -297,6 +340,76 @@ def altium_dialogs() -> List[Dialog]:
 
     user32.EnumWindows(proto(top), 0)
     return found
+
+
+def snapshot_dialog(d: Dialog, directory: Path, keep: int = 50) -> Optional[str]:
+    """Save a picture of a dialog before it is answered; return the file path.
+
+    Altium's own message boxes (TMessageForm) draw their text as a label that
+    is not a window, so the message cannot be read from outside Altium - the
+    picture is the only record of it. PrintWindow lets the dialog paint itself
+    into a bitmap, so windows covering it do not end up in the picture.
+    """
+    from ctypes import wintypes
+    from PIL import Image
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    # Physical pixels, so the bitmap is not cropped on scaled displays
+    old_ctx = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    try:
+        rect = wintypes.RECT()
+        user32.GetWindowRect(d.hwnd, ctypes.byref(rect))
+    finally:
+        if old_ctx:
+            user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old_ctx))
+    w, h = rect.right - rect.left, rect.bottom - rect.top
+    if w < 20 or h < 20:
+        return None
+    # A freshly opened dialog may not have painted yet
+    # (RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW)
+    user32.RedrawWindow(d.hwnd, None, None, 0x0001 | 0x0080 | 0x0100)
+    time.sleep(0.15)
+    hdc_win = user32.GetWindowDC(d.hwnd)
+    hdc = gdi32.CreateCompatibleDC(hdc_win)
+    bmp = gdi32.CreateCompatibleBitmap(hdc_win, w, h)
+    old = gdi32.SelectObject(hdc, bmp)
+    try:
+        if not (user32.PrintWindow(d.hwnd, hdc, 2) or user32.PrintWindow(d.hwnd, hdc, 0)):  # 2 = PW_RENDERFULLCONTENT
+            return None
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                        ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD),
+                        ("biCompression", wintypes.DWORD), ("biSizeImage", wintypes.DWORD),
+                        ("biXPelsPerMeter", wintypes.LONG), ("biYPelsPerMeter", wintypes.LONG),
+                        ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.biWidth, bi.biHeight = w, -h          # negative height: rows top-down
+        bi.biPlanes, bi.biBitCount = 1, 32
+        buf = ctypes.create_string_buffer(w * h * 4)
+        gdi32.GetDIBits(hdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
+        img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+        # A window that is not per-monitor DPI aware paints at its logical
+        # size and leaves the rest of the bitmap black
+        box = img.getbbox()
+        if box:
+            img = img.crop(box)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"dialog_{time.strftime('%Y%m%d_%H%M%S')}_{d.hwnd}.png"
+        img.save(path)
+    finally:
+        gdi32.SelectObject(hdc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(hdc)
+        user32.ReleaseDC(d.hwnd, hdc_win)
+    try:
+        pics = sorted(directory.glob("dialog_*.png"), key=lambda p: p.stat().st_mtime)
+        for p in pics[:-keep]:
+            p.unlink()
+    except OSError:
+        pass
+    return str(path)
 
 
 def answer_dialog(d: Dialog) -> None:

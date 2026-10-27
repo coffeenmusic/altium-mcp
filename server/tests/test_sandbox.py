@@ -84,6 +84,48 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
+class LintTest(unittest.TestCase):
+    def lint(self, script):
+        sp = sandbox.split_var_block(script)
+        return sandbox.lint_script(sp.body, sp.body_offset)
+
+    def test_clean_edit_passes(self):
+        script = ("Obj1 := OpenSchDoc('C:\\x.SchDoc');\nSchServer.ProcessControl.PreProcess(Obj1, '');\n"
+                  "Obj2.Corner := Point(MilsToCoord(100), MilsToCoord(100));\n"
+                  "List1.Clear;\nList1.Add('a');\nSchServer.ProcessControl.PostProcess(Obj1, '');")
+        self.assertEqual(self.lint(script), [])
+
+    def test_known_crash_with_line_number(self):
+        problems = self.lint("var\n  R : IDispatch;\nS1 := 'x';\nI1 := R.Corner.X;")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("line 4", problems[0])
+        self.assertIn("Corner", problems[0])
+
+    def test_case_insensitive(self):
+        self.assertEqual(len(self.lint("S1 := Obj1.getstate_descriptionstring;")), 1)
+        self.assertEqual(len(self.lint("list1.free;")), 1)
+        self.assertEqual(len(self.lint("Obj4 := TStringList.Create;")), 1)
+
+    def test_strings_and_comments_ignored(self):
+        script = "S1 := 'List1.Free';\n// Obj1.Tag := 1\n{ SCHM_PrimitiveRegistration }\nS2 := 'x.Tag';"
+        self.assertEqual(self.lint(script), [])
+
+    def test_unbalanced_preprocess(self):
+        problems = self.lint("SchServer.ProcessControl.PreProcess(Obj1, '');\nObj1.GraphicallyInvalidate;")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("PostProcess", problems[0])
+
+    def test_template_creates_and_frees_lists(self):
+        code = sandbox.strip_strings_and_comments(TEMPLATE)
+        run = code[code.index("procedure Run;"):]
+        body = re.search(r"\btry\b", run).start()      # the script body runs inside this try
+        for name in ("List1", "List2", "List3"):
+            created = re.search(name + r"\s*:=\s*TStringList\.Create", run)
+            self.assertIsNotNone(created, name)
+            self.assertLess(created.start(), body, name)
+            self.assertRegex(run, name + r"\.Free;")
+
+
 class BuildTest(unittest.TestCase):
     def test_paths_and_markers_filled(self):
         b = build("ResultText := 'ok';")
