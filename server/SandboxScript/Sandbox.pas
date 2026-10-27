@@ -83,6 +83,11 @@ begin
     LogPath := '%LOG_PATH%';
     OutPath := '%OUT_PATH%';
     LogLines := TStringList.Create;
+    // The scratch lists are ready to use: a list that was never created is
+    // nil, and the first List1.Add would stop the script
+    List1 := TStringList.Create;
+    List2 := TStringList.Create;
+    List3 := TStringList.Create;
     ResultText := '{"sandbox": "no result set"}';
     SandboxLog('sandbox start');
 
@@ -97,6 +102,9 @@ begin
         SandboxLog('EXCEPTION: ' + ExceptionMessage);
         ResultText := '{"error": "script raised an exception - see steps"}';
     end;
+    List1.Free;
+    List2.Free;
+    List3.Free;
 
     SandboxLog('sandbox end');
 
