@@ -21,15 +21,44 @@ begin
   Result := Trim(Result);
 end;
 
-// Helper function to escape JSON strings
+// Helper function to escape JSON strings. Walks the string one character at a
+// time instead of chaining StringReplace, and writes every non-ASCII character
+// as \uXXXX, so the response is pure ASCII whatever codepage SaveToFile uses.
+// (A description with curly quotes and a trademark sign came out with a bare
+// double quote and broke every tool that dumps all components.)
 function JSONEscapeString(const S: String): String;
+var
+    i, Code : Integer;
+    Hex : String;
 begin
-    Result := StringReplace(S, '\', '\\', REPLACEALL);
-    Result := StringReplace(Result, '"', '\"', REPLACEALL);
-    Result := StringReplace(Result, #13#10, '\n', REPLACEALL);
-    Result := StringReplace(Result, #10, '\n', REPLACEALL);
-    Result := StringReplace(Result, #13, '\n', REPLACEALL);
-    Result := StringReplace(Result, #9, '\t', REPLACEALL);
+    Result := '';
+    Hex := '0123456789ABCDEF';
+    for i := 1 to Length(S) do
+    begin
+        Code := Ord(S[i]);
+        if (Code = 34) then
+            Result := Result + '\"'
+        else if (Code = 92) then
+            Result := Result + '\\'
+        else if (Code = 10) then
+            Result := Result + '\n'
+        else if (Code = 13) then
+        begin
+            // CRLF is one line break; a lone CR is one too
+            if not ((i < Length(S)) and (Ord(S[i + 1]) = 10)) then
+                Result := Result + '\n';
+        end
+        else if (Code = 9) then
+            Result := Result + '\t'
+        else if (Code < 32) or (Code > 126) then
+            Result := Result + '\u'
+                + Copy(Hex, (Code div 4096) + 1, 1)
+                + Copy(Hex, ((Code div 256) mod 16) + 1, 1)
+                + Copy(Hex, ((Code div 16) mod 16) + 1, 1)
+                + Copy(Hex, (Code mod 16) + 1, 1)
+        else
+            Result := Result + S[i];
+    end;
 end;
 
 // Function to create a JSON name-value pair
