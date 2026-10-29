@@ -1,10 +1,32 @@
 const
     DEFAULT = 'Blank';
     SCRIPT_ERROR_LOG = 'C:\Users\Public\altium_mcp\script_errors.log';
+    PROGRESS_FILE = 'C:\Users\Public\altium_mcp\progress.txt';
 
 var
     // Why the last EnsureDocumentFocused call failed; reported to the server.
     FocusFailure : String;
+    // When ReportProgress last wrote PROGRESS_FILE
+    LastProgress : Double;
+
+// Tell the server a long command is still working. The server waits as long
+// as this file keeps changing, instead of stopping the command after a fixed
+// time. Writes at most once a second, so it is cheap to call on every item
+// of a batch.
+procedure ReportProgress;
+var
+    L : TStringList;
+begin
+    if Now - LastProgress < 1 / 86400 then Exit;
+    LastProgress := Now;
+    L := TStringList.Create;
+    try
+        L.Text := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+        L.SaveToFile(PROGRESS_FILE);
+    except
+    end;
+    L.Free;
+end;
 
 // Errors must never be modal. The server is driven by an agent with no hands:
 // a ShowMessage box blocks this script before it writes its response, every

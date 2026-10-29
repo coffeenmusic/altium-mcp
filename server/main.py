@@ -24,6 +24,7 @@ import re
 import uuid
 
 from altium_files import read_altium_text, write_altium_text
+from exchange_lock import ExchangeLock
 import sandbox
 from outjob_parser import parse_outjob
 
@@ -64,11 +65,29 @@ EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
 
+# Written by the bridge script when it starts a command and, at most once a
+# second, while a long command (a batch) is still working
+PROGRESS_FILE = EXCHANGE_DIR / "progress.txt"
+
 # Seconds for a running Altium to pick up a request (normally ~1-5 s), for a
-# cold Altium launch to get that far, and for a started command to finish
+# cold Altium launch to get that far, for a started command to go without
+# reporting progress, and for any command to finish at all
 START_TIMEOUT = 20
 START_TIMEOUT_COLD = 240
 RESPONSE_TIMEOUT = 120
+RESPONSE_TIMEOUT_MAX = 30 * 60
+
+# How long to wait while another server's command holds the exchange folder
+LOCK_TIMEOUT = START_TIMEOUT_COLD + RESPONSE_TIMEOUT
+
+# Commands that change the design or write files. When one of them times out
+# it may have done some or all of its work, so it must not just be retried.
+MUTATING_COMMANDS = {
+    "create_net_class", "create_schematic_symbol", "set_component_position",
+    "move_components", "place_components", "create_symbols_batch", "build_circuit",
+    "create_footprints_batch", "layout_duplicator", "layout_duplicator_apply",
+    "run_output_jobs", "create_pcb_footprint",
+}
 
 # Present while a script the MCP launched is stuck (paused in Altium's
 # debugger). Only then is the debugger stopped, so a script the user is
@@ -293,13 +312,24 @@ class AltiumBridge:
         self.config.verify_paths()
 
         # Commands share a single request.json/response.json pair, so
-        # concurrent tool calls must be serialized or they clobber each other
+        # concurrent tool calls must be serialized or they clobber each other:
+        # within this server by the asyncio lock, and against other servers
+        # using the same exchange folder by the file lock
         self._command_lock = asyncio.Lock()
+        self._exchange_lock = ExchangeLock(EXCHANGE_DIR / "bridge.lock")
 
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
         async with self._command_lock:
-            return await self._execute_command_locked(command, params)
+            if not await self._exchange_lock.acquire(LOCK_TIMEOUT):
+                return {"success": False,
+                        "error": f"Not run: another Altium MCP server (another Claude session) "
+                                 f"has had a command running in Altium for over {LOCK_TIMEOUT} s. "
+                                 f"Retry when it has finished."}
+            try:
+                return await self._execute_command_locked(command, params)
+            finally:
+                self._exchange_lock.release()
 
     @staticmethod
     def _altium_running() -> bool:
@@ -353,9 +383,14 @@ class AltiumBridge:
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            # Clean up any existing response file
-            if RESPONSE_FILE.exists():
-                RESPONSE_FILE.unlink()
+            # Holding the exchange lock, any reply or progress mark still
+            # here is left over from a command that timed out. A late writer
+            # may still hold it open; the request_id check below covers that.
+            for leftover in (RESPONSE_FILE, PROGRESS_FILE):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
 
             # The script echoes request_id so a late reply to an earlier,
             # timed-out command is never mistaken for this command's result
@@ -416,8 +451,12 @@ class AltiumBridge:
             _clear_script_stuck()
 
             logger.info("Bridge script started, waiting for response file...")
-            start_time = time.time()
-            while time.time() - start_time < RESPONSE_TIMEOUT:
+            # Wait as long as the command keeps reporting progress, up to
+            # RESPONSE_TIMEOUT_MAX: a large batch is not stopped mid-way
+            start_time = last_progress = time.monotonic()
+            progress_mark = None
+            response_text = None
+            while response_text is None:
                 if RESPONSE_FILE.exists():
                     response_text = await self._read_response_text()
                     try:
@@ -427,23 +466,41 @@ class AltiumBridge:
                     if rid is None or rid == request_id:
                         break
                     logger.warning(f"Discarding stale response for request_id={rid}")
+                    response_text = None
                     try:
                         RESPONSE_FILE.unlink()
                     except OSError:
                         pass
+                now = time.monotonic()
+                try:
+                    mark = PROGRESS_FILE.stat().st_mtime
+                except OSError:
+                    mark = None
+                if mark != progress_mark:
+                    progress_mark, last_progress = mark, now
+                if now - last_progress > RESPONSE_TIMEOUT or now - start_time > RESPONSE_TIMEOUT_MAX:
+                    break
                 await asyncio.sleep(0.25)
-            else:
+
+            if response_text is None:
                 logger.error("Timeout waiting for response from Altium")
                 # The script started but never finished: it is most likely
                 # paused in the debugger now. Unblock it for the next command.
                 _mark_script_stuck(f"bridge command {command}")
                 await self.stop_script_debugger()
+                # A command that changes the design may have done some or all
+                # of its work; a plain retry would then do it twice
+                outcome = (f" '{command}' changes the design and may have done some or all of "
+                           f"its work, so its outcome is unknown: check the design before "
+                           f"running it again." if command in MUTATING_COMMANDS else "")
                 return {"success": False,
-                        "error": f"No response from Altium within {RESPONSE_TIMEOUT}s: command "
-                                 f"'{command}' started but did not finish. It probably hit a "
-                                 f"runtime error and paused in Altium's debugger (now stopped, "
-                                 f"so the next command can run), or it is still working on a "
-                                 f"very large design."}
+                        "error": f"No response from Altium after "
+                                 f"{int(time.monotonic() - start_time)} s, the last "
+                                 f"{RESPONSE_TIMEOUT} s without progress: command '{command}' "
+                                 f"started but did not finish. It probably hit a runtime error "
+                                 f"and paused in Altium's debugger (now stopped, so the next "
+                                 f"command can run), or it is still working on a very large "
+                                 f"design.{outcome}"}
 
             if recovered:
                 logger.info("Command succeeded after automatic executor recovery")
