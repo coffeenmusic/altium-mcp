@@ -456,8 +456,13 @@ class AltiumBridge:
             start_time = last_progress = time.monotonic()
             progress_mark = None
             response_text = None
+            ignored_reply = None
             while response_text is None:
-                if RESPONSE_FILE.exists():
+                try:
+                    reply_mark = RESPONSE_FILE.stat().st_mtime
+                except OSError:
+                    reply_mark = None
+                if reply_mark is not None and reply_mark != ignored_reply:
                     response_text = await self._read_response_text()
                     try:
                         rid = json.loads(response_text).get("request_id")
@@ -465,12 +470,11 @@ class AltiumBridge:
                         rid = None
                     if rid is None or rid == request_id:
                         break
-                    logger.warning(f"Discarding stale response for request_id={rid}")
-                    response_text = None
-                    try:
-                        RESPONSE_FILE.unlink()
-                    except OSError:
-                        pass
+                    # Someone else's reply: a late one, or that of a server
+                    # still without the exchange lock. Leave it for its owner;
+                    # ours overwrites it when it comes.
+                    logger.warning(f"Ignoring a reply for request_id={rid}")
+                    response_text, ignored_reply = None, reply_mark
                 now = time.monotonic()
                 try:
                     mark = PROGRESS_FILE.stat().st_mtime
