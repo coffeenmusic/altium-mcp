@@ -1348,10 +1348,13 @@ var
     i: Integer;
     Line: String;
     ValueStart: Integer;
+    ErrText: String;
 begin
     // Initialize file paths based on script location
     InitializeFilePaths();
     RequestId := '';
+    CommandType := '';
+    LastScriptError := '';
 
     // Check if request file exists
     if not FileExists(REQUEST_FILE) then
@@ -1412,8 +1415,12 @@ begin
                 end
                 else
                 begin
-                    WriteResponse(False, '', 'Command execution failed');
-                    LogScriptError('Error: Command execution failed');
+                    // The command logged why it gave up; pass that on
+                    if LastScriptError <> '' then
+                        WriteResponse(False, '', LastScriptError)
+                    else
+                        WriteResponse(False, '', 'Command execution failed');
+                    LogScriptError('Error: Command execution failed: ' + CommandType);
                 end;
             end
             else
@@ -1426,9 +1433,13 @@ begin
             Params.Free;
         end;
     except
-        // Simple exception handling without the specific exception type
-        WriteResponse(False, '', 'Exception occurred during script execution');
-        LogScriptError('Error: Exception occurred during script execution');
+        // ExceptionMessage is Altium's own text for the error (the sandbox
+        // template reports it the same way)
+        ErrText := ExceptionMessage;
+        if CommandType <> '' then
+            ErrText := CommandType + ': ' + ErrText;
+        WriteResponse(False, '', 'Exception during script execution: ' + ErrText);
+        LogScriptError('Error: Exception during script execution: ' + ErrText);
     end;
 end;
 
