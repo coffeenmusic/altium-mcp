@@ -22,6 +22,15 @@ which DelphiScript reports as "Undeclared identifier: <method>") both open a
 #32770 dialog owned by X2.EXE whose text ends in "Continue execution?". While
 it is open every later script run is ignored. Answering it with Cancel stops
 the script; -REditScript:Stop then clears any paused debugger state.
+
+Why loops are guarded
+---------------------
+A script that is still running cannot be stopped at all: it runs on Altium's
+UI thread, and both -REditScript:Stop and answering dialogs are window
+messages that thread no longer reads. A loop that never ends therefore
+freezes Altium until X2.EXE is killed (issue #37). build_script makes every
+while and repeat loop also call the template's SandboxTick, which ends all
+loops once a deadline has passed, so the script finishes on its own.
 """
 
 import ctypes
@@ -39,8 +48,10 @@ BODY_END = "// === END EXPERIMENT"
 VARS_BEGIN = "// === USER VARS"
 VARS_END = "// === END USER VARS"
 EXCEPTION_PREFIX = "EXCEPTION: "   # logged by the template's except block
+GUARD_PREFIX = "LOOP GUARD: "       # logged by SandboxTick when it ends the loops
 LOG_TOKEN = "%LOG_PATH%"
 OUT_TOKEN = "%OUT_PATH%"
+GUARD_TOKEN = "%GUARD_SECONDS%"
 BODY_INDENT = " " * 8
 VARS_INDENT = " " * 4
 
@@ -133,6 +144,102 @@ def strip_strings_and_comments(code: str) -> str:
     return "".join(out)
 
 
+def _blank_strings_and_comments(code: str) -> str:
+    """Pascal source with string literals and comments replaced by spaces.
+
+    Unlike strip_strings_and_comments every character keeps its offset, so a
+    position found in the result is the same position in `code`.
+    """
+    out = list(code)
+    i, n = 0, len(code)
+    while i < n:
+        c = code[i]
+        if c == "'":
+            j = i + 1
+            while j < n and code[j] != "\n":
+                if code[j] == "'" and j + 1 < n and code[j + 1] == "'":
+                    j += 2
+                    continue
+                if code[j] == "'":
+                    break
+                j += 1
+            end = min(j + 1, n)
+        elif code.startswith("//", i):
+            j = code.find("\n", i)
+            end = n if j < 0 else j
+        elif c == "{" or code.startswith("(*", i):
+            close = "}" if c == "{" else "*)"
+            j = code.find(close, i + 1)
+            end = n if j < 0 else j + len(close)
+        else:
+            i += 1
+            continue
+        for k in range(i, end):
+            if out[k] != "\n":
+                out[k] = " "
+        i = end
+    return "".join(out)
+
+
+_LOOP_RE = re.compile(r"(?<![\w.])(while|until)\b", re.IGNORECASE)
+_DO_RE = re.compile(r"\bdo\b", re.IGNORECASE)
+# What can follow the condition of `until`: the statement's end
+_UNTIL_END_RE = re.compile(r"[()\[\];]|\b(?:end|else|except|finally|until)\b", re.IGNORECASE)
+
+
+def _until_end(blank: str, start: int) -> int:
+    depth = 0
+    for m in _UNTIL_END_RE.finditer(blank, start):
+        tok = m.group(0)
+        if tok in "([":
+            depth += 1
+        elif tok in ")]":
+            depth -= 1
+        elif depth <= 0:
+            return m.start()
+    return len(blank)
+
+
+def guard_loops(code: str, first_line: int) -> str:
+    """Make every while and repeat loop in `code` also call SandboxTick.
+
+        while C do        ->  while SandboxTick(L) and (C) do
+        repeat .. until C ->  repeat .. until (not SandboxTick(L)) or (C)
+
+    L is the line of the loop's `while` or `until` in the submitted script
+    (`first_line` is the line of the first line of `code`). The condition keeps its own lines, so line
+    numbers in Altium's messages still map back to the submitted script; only
+    the column moves on a line that holds a loop condition. for loops are left
+    alone: their bounds are fixed when they start.
+    """
+    blank = _blank_strings_and_comments(code)
+    edits = []
+    for m in _LOOP_RE.finditer(blank):
+        start = m.end()
+        if m.group(1).lower() == "while":
+            do = _DO_RE.search(blank, start)
+            if not do:
+                continue  # incomplete: leave it to the compiler
+            end = do.start()
+        else:
+            end = _until_end(blank, start)
+        while start < end and code[start].isspace():
+            start += 1
+        while end > start and code[end - 1].isspace():
+            end -= 1
+        if start == end:
+            continue
+        line = first_line + code.count("\n", 0, m.start())
+        cond = code[start:end]
+        if m.group(1).lower() == "while":
+            edits.append((start, end, f"SandboxTick({line}) and ({cond})"))
+        else:
+            edits.append((start, end, f"(not SandboxTick({line})) or ({cond})"))
+    for start, end, new in reversed(edits):
+        code = code[:start] + new + code[end:]
+    return code
+
+
 def check_script(body_lines: List[str], extra_names: List[str], line_offset: int = 0) -> List[str]:
     """Problems that would stop the script from compiling, found before Altium sees it.
 
@@ -164,15 +271,19 @@ class BuiltScript:
     vars_first_line: int          # 1-based line in `text` of the first user declaration
 
 
-def build_script(template: str, script: str, log_path: str, out_path: str) -> BuiltScript:
-    """Fill the template: user declarations, script body and the log/result paths."""
+def build_script(template: str, script: str, log_path: str, out_path: str,
+                 guard_seconds: int = 60) -> BuiltScript:
+    """Fill the template: user declarations, script body with its loops
+    guarded, the log/result paths and the loop guard's deadline."""
     split = split_var_block(script)
-    decls, body = split.decls, split.body
+    decls = split.decls
+    body = guard_loops("\n".join(split.body), split.body_offset + 1).split("\n")
     if template.count(BODY_BEGIN) != 1 or template.count(BODY_END) != 1:
         raise ValueError("template must contain the experiment markers exactly once")
     if template.count(VARS_BEGIN) != 1 or template.count(VARS_END) != 1:
         raise ValueError("template must contain the user-vars markers exactly once")
-    text = template.replace(LOG_TOKEN, log_path).replace(OUT_TOKEN, out_path)
+    text = (template.replace(LOG_TOKEN, log_path).replace(OUT_TOKEN, out_path)
+            .replace(GUARD_TOKEN, str(int(guard_seconds))))
 
     def fill(src, begin, end, lines, indent):
         pre, rest = src.split(begin, 1)
@@ -299,6 +410,29 @@ def altium_dialogs() -> List[Dialog]:
     return found
 
 
+def altium_hung() -> bool:
+    """True while Altium's UI thread is not answering window messages.
+
+    That is the case while a script (or a long command) is still running, and
+    for good when a script loops forever. Nothing sent to Altium then has any
+    effect: script launches queue up, and dialogs cannot be answered.
+    """
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    hung = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def top(hwnd, _):
+        if user32.IsWindowVisible(hwnd) and _process_name(hwnd).lower() == "x2.exe":
+            if user32.IsHungAppWindow(hwnd):
+                hung.append(hwnd)
+                return False
+        return True
+
+    user32.EnumWindows(proto(top), 0)
+    return bool(hung)
+
+
 def answer_dialog(d: Dialog) -> None:
     """Cancel a script-error dialog; close any other dialog."""
     user32 = ctypes.windll.user32
@@ -351,8 +485,9 @@ class Sandbox:
         return RunFiles(self.runs_dir / f"{stem}.pas", self.runs_dir / f"{stem}_log.txt",
                         self.runs_dir / f"{stem}_result.txt")
 
-    def write(self, files: RunFiles, script: str) -> BuiltScript:
-        built = build_script(self.template.read_text(encoding="utf-8"), script, str(files.log), str(files.result))
+    def write(self, files: RunFiles, script: str, guard_seconds: int = 60) -> BuiltScript:
+        built = build_script(self.template.read_text(encoding="utf-8"), script, str(files.log),
+                             str(files.result), guard_seconds)
         files.script.write_text(built.text, encoding="utf-8")
         return built
 
