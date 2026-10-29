@@ -18,7 +18,6 @@ import win32api
 import win32process
 from PIL import Image
 import io
-import base64
 import glob
 import re
 import uuid
@@ -2375,6 +2374,35 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     logger.info(f"Placement check complete: {result.get('violation_count', '?')} violations")
     return json.dumps(result, indent=2)
 
+def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
+    """Copy a window's pixels, frame included, into an RGB image.
+
+    Every GDI object is released even when a step fails, so a failed capture
+    does not leak device contexts or the bitmap.
+    """
+    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    mfc_dc = save_dc = bitmap = None
+    try:
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+        save_dc.SelectObject(bitmap)
+        save_dc.BitBlt((0, 0), (width, height), mfc_dc, (0, 0), win32con.SRCCOPY)
+        info = bitmap.GetInfo()
+        return Image.frombuffer('RGB', (info['bmWidth'], info['bmHeight']),
+                                bitmap.GetBitmapBits(True), 'raw', 'BGRX', 0, 1)
+    finally:
+        # The memory DC goes first: a bitmap still selected into a DC is not deleted
+        if save_dc is not None:
+            save_dc.DeleteDC()
+        if bitmap is not None and bitmap.GetHandle():
+            win32gui.DeleteObject(bitmap.GetHandle())
+        if mfc_dc is not None:
+            mfc_dc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwnd_dc)
+
+
 @mcp.tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
     """
@@ -2430,32 +2458,34 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                 "focused_kind": focused_kind,
                 "focused_document": focused_document})
 
-        # Run the screenshot capture in a separate thread
-        import threading
-        import queue
-        import datetime
-        from PIL import Image
-        
-        result_queue = queue.Queue()
-        
-        def capture_screenshot_thread():
-            try:
-                # Work in physical pixels. Python is not DPI aware, so on a
-                # scaled display Windows hands this process window rects
-                # divided by the scale factor (1080x902 for a 2160x1804
-                # window at 200%), while the BitBlt below copies the window's
-                # real pixels: the capture came back as only the top-left
-                # part of the window. Per-monitor awareness for this thread
-                # alone gives GetWindowRect the physical size and ends with
-                # the thread. V2 (-4) needs Windows 10 1703; V1 (-3) is the
-                # fallback.
-                import ctypes
-                set_dpi_context = ctypes.windll.user32.SetThreadDpiAwarenessContext
-                set_dpi_context.restype = ctypes.c_void_p
-                set_dpi_context.argtypes = [ctypes.c_void_p]
-                if not (set_dpi_context(-4) or set_dpi_context(-3)):
-                    logger.warning("Could not make the capture thread DPI aware; on a scaled display the capture may show only part of the window")
+        # The capture runs in a worker thread: it waits for Altium to come to
+        # the front and paint, which must not block the server's event loop
+        import ctypes
 
+        def capture_in_physical_pixels():
+            # Work in physical pixels. Python is not DPI aware, so on a
+            # scaled display Windows hands this process window rects
+            # divided by the scale factor (1080x902 for a 2160x1804
+            # window at 200%), while the BitBlt copies the window's real
+            # pixels: the capture came back as only the top-left part of
+            # the window. Per-monitor awareness for this thread gives
+            # GetWindowRect the physical size. The worker thread is pooled
+            # and reused, so its previous setting is restored afterwards.
+            # V2 (-4) needs Windows 10 1703; V1 (-3) is the fallback.
+            set_dpi_context = ctypes.windll.user32.SetThreadDpiAwarenessContext
+            set_dpi_context.restype = ctypes.c_void_p
+            set_dpi_context.argtypes = [ctypes.c_void_p]
+            previous_dpi_context = set_dpi_context(-4) or set_dpi_context(-3)
+            if not previous_dpi_context:
+                logger.warning("Could not make the capture thread DPI aware; on a scaled display the capture may show only part of the window")
+            try:
+                return capture_screenshot()
+            finally:
+                if previous_dpi_context:
+                    set_dpi_context(previous_dpi_context)
+
+        def capture_screenshot():
+            try:
                 # Find Altium windows
                 altium_windows = []
                 altium_fallback_windows = []
@@ -2489,12 +2519,11 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                     altium_windows = altium_fallback_windows
                 
                 if not altium_windows:
-                    result_queue.put({
-                        "success": False, 
+                    return {
+                        "success": False,
                         "error": f"No Altium windows found for {view_type} view"
-                    })
-                    return
-                
+                    }
+
                 # Altium owns several top-level windows with its name in the
                 # title, and while it switches documents a small transient one
                 # can come first. Take the largest window that is not
@@ -2552,55 +2581,33 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                 width = right - left
                 height = bottom - top
                 if width < 200 or height < 150:
-                    result_queue.put({"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"})
-                    return
-                
+                    return {"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"}
+
                 # Take screenshot using GDI functions instead of ImageGrab
                 try:
-                    # Get device context
-                    hwndDC = win32gui.GetWindowDC(hwnd)
-                    mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-                    saveDC = mfcDC.CreateCompatibleDC()
-                    
-                    # Create a bitmap object
-                    saveBitMap = win32ui.CreateBitmap()
-                    saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
-                    saveDC.SelectObject(saveBitMap)
-                    
-                    # Copy the screen into the bitmap
-                    saveDC.BitBlt((0, 0), (width, height), mfcDC, (0, 0), win32con.SRCCOPY)
-                    
-                    # Convert the bitmap to an Image
-                    bmpinfo = saveBitMap.GetInfo()
-                    bmpstr = saveBitMap.GetBitmapBits(True)
-                    img = Image.frombuffer(
-                        'RGB',
-                        (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
-                        bmpstr, 'raw', 'BGRX', 0, 1)
-                    
-                    # Save a local copy of the screenshot for debugging (non-fatal if it fails)
-                    try:
-                        debug_filename = str(MCP_DIR / f"screenshot_{view_type}.png")
-                        img.save(debug_filename)
-                        logger.info(f"Saved debug screenshot to {debug_filename}")
-                    except Exception as save_error:
-                        logger.warning(f"Could not save debug screenshot to {debug_filename}: {save_error}")
-                        debug_filename = None  # Clear it since save failed
-                    
-                    # Clean up GDI resources
-                    win32gui.DeleteObject(saveBitMap.GetHandle())
-                    saveDC.DeleteDC()
-                    mfcDC.DeleteDC()
-                    win32gui.ReleaseDC(hwnd, hwndDC)
-                    
-                    # Convert to base64
+                    img = _grab_window_image(hwnd, width, height)
+
+                    # Encode once: the same PNG bytes are returned and, when
+                    # asked for, kept as a debug copy
                     buffer = io.BytesIO()
                     img.save(buffer, format='PNG')
-                    buffer.seek(0)
-                    img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-                    
-                    # Put result in queue
-                    result_queue.put({
+                    png_bytes = buffer.getvalue()
+
+                    # A debug copy only on request, and with the per-user
+                    # data: the install folder is replaced on every update
+                    # (non-fatal if it fails)
+                    debug_filename = None
+                    if os.environ.get("ALTIUM_MCP_DEBUG_SCREENSHOTS", "") not in ("", "0"):
+                        try:
+                            debug_path = _data_dir() / f"screenshot_{view_type}.png"
+                            debug_path.parent.mkdir(parents=True, exist_ok=True)
+                            debug_path.write_bytes(png_bytes)
+                            debug_filename = str(debug_path)
+                            logger.info(f"Saved debug screenshot to {debug_filename}")
+                        except Exception as save_error:
+                            logger.warning(f"Could not save debug screenshot: {save_error}")
+
+                    return {
                         "success": True,
                         "width": width,
                         "height": height,
@@ -2609,47 +2616,35 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                         "view_type": view_type,
                         "foreground_confirmed": activated,
                         "image_format": "PNG",
-                        "encoding": "base64",
                         "debug_file": debug_filename,
-                        "image_data": img_base64
-                    })
-                    
+                        "image_data": png_bytes
+                    }
+
                 except Exception as e:
                     import traceback
                     trace = traceback.format_exc()
                     logger.error(f"GDI screenshot error: {e}\n{trace}")
-                    result_queue.put({
-                        "success": False, 
+                    return {
+                        "success": False,
                         "error": f"GDI screenshot failed: {str(e)}",
                         "traceback": trace
-                    })
-                
+                    }
+
             except Exception as e:
                 import traceback
-                result_queue.put({
-                    "success": False, 
+                return {
+                    "success": False,
                     "error": f"Screenshot thread error: {str(e)}",
                     "traceback": traceback.format_exc()
-                })
-        
-        # Start the thread
-        thread = threading.Thread(target=capture_screenshot_thread)
-        thread.daemon = True
-        thread.start()
-        
-        # Wait for the thread to complete
-        thread.join(timeout=10)  # 10 second timeout
-        
-        if thread.is_alive():
+                }
+
+        # A capture that hangs (Altium never painting, a stuck window call)
+        # gives up after 10 s; the worker thread then finishes on its own
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(capture_in_physical_pixels), timeout=10)
+        except asyncio.TimeoutError:
             logger.error("Screenshot thread timed out")
             return json.dumps({"success": False, "error": "Screenshot operation timed out"})
-        
-        # Get the result from the queue
-        if result_queue.empty():
-            logger.error("Screenshot thread did not return a result")
-            return json.dumps({"success": False, "error": "Screenshot thread did not return a result"})
-        
-        result = result_queue.get()
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -2662,8 +2657,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         # base64 text: raw base64 in the text result exceeds client token
         # limits (a full-window capture is ~300 KB), while image blocks are
         # rendered natively by clients
-        image_base64 = result.pop("image_data")
-        result.pop("encoding", None)
+        png_bytes = result.pop("image_data")
         zoom_info = response.get("result", {})
         if isinstance(zoom_info, dict) and "zoomed_component_count" in zoom_info:
             result["zoomed_component_count"] = zoom_info["zoomed_component_count"]
@@ -2672,7 +2666,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         result["captured_document"] = focused_document or None
         return [
             json.dumps(result),
-            MCPImage(data=base64.b64decode(image_base64), format="png"),
+            MCPImage(data=png_bytes, format="png"),
         ]
 
     except Exception as e:
