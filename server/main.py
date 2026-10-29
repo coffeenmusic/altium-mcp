@@ -19,11 +19,10 @@ import win32process
 from PIL import Image
 import io
 import base64
-import glob
-import re
 import uuid
 
 from altium_files import read_altium_text, write_altium_text
+from altium_install import find_altium_exe
 import sandbox
 from outjob_parser import parse_outjob
 
@@ -126,38 +125,8 @@ class AltiumConfig:
             self._create_default_config()
 
     def _create_default_config(self):
-        """Create a default configuration file with improved Altium executable discovery"""
-        
-        # Try to find Altium directories dynamically
-        altium_base_path = r"C:\Program Files\Altium"
-        altium_exe_path = None
-        
-        if os.path.exists(altium_base_path):
-            # Find all directories that match the pattern AD*
-            ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
-            
-            if ad_dirs:
-                # Sort directories by version number (extract the number after "AD")
-                def get_version_number(dir_path):
-                    match = re.search(r"AD(\d+)", os.path.basename(dir_path))
-                    if match:
-                        return int(match.group(1))
-                    return 0
-                
-                # Sort directories by version number (highest first)
-                ad_dirs.sort(key=get_version_number, reverse=True)
-                
-                # Try each directory until we find one with X2.EXE
-                for ad_dir in ad_dirs:
-                    potential_exe = os.path.join(ad_dir, "X2.EXE")
-                    if os.path.exists(potential_exe):
-                        altium_exe_path = potential_exe
-                        break
-        
-        # Set the found path (or empty string if nothing found)
-        self.altium_exe_path = altium_exe_path if altium_exe_path else ""
-        
-        # Save the configuration
+        """Create a default configuration file, with Altium's path if it can be found"""
+        self.altium_exe_path = find_altium_exe()
         self.save_config()
     
     def _as_dict(self):
@@ -184,94 +153,74 @@ class AltiumConfig:
         except Exception as e:
             logger.error(f"Error saving configuration: {e}")
 
+    def discover_altium(self) -> bool:
+        """Keep the saved Altium path if it still exists, else look for one.
+
+        Never asks the user, so it is safe at import time. Called again
+        before commands, so an Altium started after the server, or one
+        updated to a new folder, is picked up without a restart.
+        """
+        if self.altium_exe_path and os.path.exists(self.altium_exe_path):
+            return True
+        found = find_altium_exe()
+        if not found:
+            return False
+        logger.info(f"Automatically found Altium at: {found}")
+        self.altium_exe_path = found
+        self.save_config()
+        return True
+
     def verify_paths(self):
-        """Verify that the paths in the configuration exist, prompt for input if they don't"""
+        """Verify that the paths in the configuration exist, prompt for input if they don't
+
+        Shows file dialogs, so it must not run on the event loop, and never
+        before the server has answered the client's initialize request: a
+        dialog nobody sees would hold the startup until the client gives up.
+        Messages go to the log only; under the stdio transport stdout is the
+        protocol channel.
+        """
 
         # Initialize variables
         root = None
         paths_verified = True
-        
+
         # Check Altium executable
-        if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
-            paths_verified = False
-            
-            # Before prompting, try an automatic discovery
-            altium_base_path = r"C:\Program Files\Altium"
-            if os.path.exists(altium_base_path):
-                logger.info(f"Attempting automatic discovery in {altium_base_path}")
-                # Find all directories that match the pattern AD*
-                ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
-                
-                if ad_dirs:
-                    # Sort directories by version number (extract the number after "AD")
-                    def get_version_number(dir_path):
-                        match = re.search(r"AD(\d+)", os.path.basename(dir_path))
-                        if match:
-                            return int(match.group(1))
-                        return 0
-                    
-                    # Sort directories by version number (highest first)
-                    ad_dirs.sort(key=get_version_number, reverse=True)
-                    
-                    # Try each directory until we find one with X2.EXE
-                    for ad_dir in ad_dirs:
-                        potential_exe = os.path.join(ad_dir, "X2.EXE")
-                        if os.path.exists(potential_exe):
-                            self.altium_exe_path = potential_exe
-                            logger.info(f"Automatically found Altium at: {self.altium_exe_path}")
-                            print(f"Automatically found Altium at: {self.altium_exe_path}")
-                            paths_verified = True
-                            break
-            
-            # If automatic discovery failed, prompt for input
-            if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
-                if root is None:
-                    import tkinter as tk
-                    from tkinter import filedialog
-                    root = tk.Tk()
-                    root.withdraw()  # Hide the main window
-                
-                logger.info("Altium executable not found. Prompting user for selection...")
-                print(f"Altium executable not found. Searched in:")
-                print(f"  - Automatically scanned C:\\Program Files\\Altium\\AD*\\X2.EXE")
-                print(f"  - Last known path: {self.altium_exe_path}")
-                print("Please select the Altium X2.EXE file...")
-                
-                self.altium_exe_path = filedialog.askopenfilename(
-                    title="Select Altium Executable",
-                    filetypes=[("Executable files", "*.exe")],  # Only allow .exe files
-                    initialdir="C:/Program Files/Altium"
-                )
-                
-                if not self.altium_exe_path:
-                    logger.error("No Altium executable selected. Some functionality may not work.")
-                    print("Warning: No Altium executable selected. Automatic script execution will be disabled.")
-                    paths_verified = False
-        
+        if not self.discover_altium():
+            root = self._dialog_root()
+            logger.info("Altium executable not found in the registry, among running "
+                        "processes or under C:\\Program Files\\Altium. Prompting user for selection...")
+
+            self.altium_exe_path = filedialog.askopenfilename(
+                parent=root,
+                title="Select Altium Executable (X2.EXE)",
+                filetypes=[("Executable files", "*.exe")],  # Only allow .exe files
+                initialdir="C:/Program Files/Altium"
+            )
+
+            if not self.altium_exe_path:
+                logger.error("No Altium executable selected. Some functionality may not work.")
+                paths_verified = False
+
         # Check script path
         if not os.path.exists(self.script_path):
             paths_verified = False
-            
+
             if root is None:
-                import tkinter as tk
-                from tkinter import filedialog
-                root = tk.Tk()
-                root.withdraw()  # Hide the main window
-            
+                root = self._dialog_root()
+
             logger.info(f"Script file not found at {self.script_path}. Prompting user for selection...")
-            print(f"Script file not found at {self.script_path}. Please select the Altium project file...")
-            
+
             selected_path = filedialog.askopenfilename(
+                parent=root,
                 title="Select Altium Project File",
                 filetypes=[("Altium Project files", "*.PrjScr")],  # Changed to PrjScr for script project
                 initialdir=str(MCP_DIR)
             )
-            
+
             if selected_path:
                 self.script_path = selected_path
             else:
                 logger.error("No script file selected. Some functionality may not work.")
-                print("Warning: No script file selected. Please make sure to create one.")
                 paths_verified = False
         
         # Clean up tkinter root if created
@@ -280,25 +229,70 @@ class AltiumConfig:
         
         # Save the updated configuration
         self.save_config()
-        
+
         return paths_verified
+
+    @staticmethod
+    def _dialog_root():
+        # A hidden, topmost owner window, so the file dialog opens in front of
+        # the client instead of behind it where nobody notices it
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        return root
 
 class AltiumBridge:
     def __init__(self):
         # Ensure the MCP directory exists
         MCP_DIR.mkdir(exist_ok=True)
 
-        # Load configuration
+        # Load configuration. Finding Altium needs nobody, so it happens now;
+        # asking for a path waits for the first command (see ensure_paths)
         self.config = AltiumConfig()
-        self.config.verify_paths()
+        self.config.discover_altium()
+        self._asked_for_paths = False
 
         # Commands share a single request.json/response.json pair, so
         # concurrent tool calls must be serialized or they clobber each other
         self._command_lock = asyncio.Lock()
 
+    async def ensure_paths(self, need_script: bool = True) -> Optional[str]:
+        """None when Altium (and the bridge script project) can be found,
+        else what is missing and where to set it.
+
+        The file dialogs of verify_paths are shown at most once per server
+        run, in a worker thread so the event loop keeps answering the
+        client; after that a missing path is reported straight away.
+        """
+        def missing():
+            if not self.config.discover_altium():
+                return "altium_exe_path"
+            if need_script and not os.path.exists(self.config.script_path):
+                return "script_path"
+            return None
+
+        if missing() and not self._asked_for_paths:
+            self._asked_for_paths = True
+            await asyncio.to_thread(self.config.verify_paths)
+        what = missing()
+        if what == "altium_exe_path":
+            return (f"Altium Designer was not found (looked in the registry, at running "
+                    f"processes and under C:\\Program Files\\Altium). Set \"altium_exe_path\" "
+                    f"in {CONFIG_FILE} to the full path of X2.EXE, then retry. The folder "
+                    f"holding config.json can be changed with the ALTIUM_MCP_HOME "
+                    f"environment variable.")
+        if what == "script_path":
+            return (f"The bridge script project was not found at {self.config.script_path}. "
+                    f"Reinstall the extension, or set \"script_path\" in {CONFIG_FILE} to "
+                    f"Altium_API.PrjScr, then retry.")
+        return None
+
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
         async with self._command_lock:
+            problem = await self.ensure_paths()
+            if problem:
+                return {"success": False, "error": problem}
             return await self._execute_command_locked(command, params)
 
     @staticmethod
@@ -529,12 +523,10 @@ class AltiumBridge:
         """Run the Altium bridge script"""
         if not os.path.exists(self.config.altium_exe_path):
             logger.error(f"Altium executable not found at: {self.config.altium_exe_path}")
-            print(f"Error: Altium executable not found. Please check the configuration.")
             return False
 
         if not os.path.exists(self.config.script_path):
             logger.error(f"Script file not found at: {self.config.script_path}")
-            print(f"Error: Script file not found. Please check the configuration.")
             return False
 
         try:
@@ -1380,6 +1372,10 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         return json.dumps({"success": False,
                            "error": "refused before execution: the script would not compile",
                            "problems": problems, "executor_wedged": False}, indent=2)
+
+    problem = await altium_bridge.ensure_paths(need_script=False)
+    if problem:
+        return json.dumps({"success": False, "error": problem, "executor_wedged": False}, indent=2)
 
     sb = _sandbox()
     report = {}
@@ -3101,6 +3097,7 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
 @mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
+    altium_bridge.config.discover_altium()
     status = {
         "server": "Running",
         "altium_exe": altium_bridge.config.altium_exe_path,
@@ -3122,13 +3119,11 @@ if __name__ == "__main__":
     script_dir = MCP_DIR / "AltiumScript"
     script_dir.mkdir(exist_ok=True)
     
-    # Verify configuration before starting
-    if not altium_bridge.config.verify_paths():
-        print("Warning: Configuration not complete. Some functionality may not work.")
-    
-    # Print status
-    print(f"Altium executable: {altium_bridge.config.altium_exe_path}")
-    print(f"Script path: {altium_bridge.config.script_path}")
+    # Paths are verified, with a file dialog if need be, on the first command
+    # that needs Altium: a dialog here would hold up the client's initialize.
+    # Logged, not printed: under the stdio transport stdout is the protocol.
+    logger.info(f"Altium executable: {altium_bridge.config.altium_exe_path or '(not found yet)'}")
+    logger.info(f"Script path: {altium_bridge.config.script_path}")
     
     # Run the server
     mcp.run(transport='stdio')
