@@ -25,6 +25,7 @@ import uuid
 
 from altium_files import read_altium_text, write_altium_text
 import sandbox
+import win_processes
 from outjob_parser import parse_outjob
 
 # Configure logging
@@ -303,10 +304,10 @@ class AltiumBridge:
 
     @staticmethod
     def _altium_running() -> bool:
+        # Read in-process: starting tasklist took about 110 ms on every
+        # command and held up the event loop while it ran
         try:
-            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq X2.EXE", "/NH"],
-                                 capture_output=True, text=True, timeout=10).stdout
-            return "X2.EXE" in out.upper()
+            return bool(win_processes.pids_by_name("X2.EXE"))
         except Exception:
             return True  # unknown: assume running and use the normal timeouts
 
