@@ -92,6 +92,32 @@ EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
 
+# Copies of command results (design data) that older bridge scripts left in
+# this folder, which every account on the machine can read. Nothing reads
+# them. Named one by one: users keep their own script output here too.
+LEFTOVER_TEMP_FILES = (
+    "temp_board_summary.json", "temp_component_data.json",
+    "temp_component_primitives.json", "temp_erc.json",
+    "temp_footprint_primitives.json", "temp_json_output.json",
+    "temp_layers_data.json", "temp_net_connections.json", "temp_nets_data.json",
+    "temp_pins_data.json", "temp_project_components.json",
+    "temp_project_info.json", "temp_rules_data.json",
+    "temp_schematic_data.json", "temp_search_symbol.json",
+    "temp_selected_components.json", "temp_stackup_data.json",
+    "temp_symbol_primitives.json", "temp_symbol_reference.json",
+)
+
+
+def _remove_leftover_temp_files(folder: Path = EXCHANGE_DIR):
+    for name in LEFTOVER_TEMP_FILES:
+        try:
+            (folder / name).unlink()
+        except OSError:
+            pass  # absent, or held open: best effort
+
+
+_remove_leftover_temp_files()
+
 # Seconds for a running Altium to pick up a request (normally ~1-5 s), for a
 # cold Altium launch to get that far, and for a started command to finish
 START_TIMEOUT = 20
