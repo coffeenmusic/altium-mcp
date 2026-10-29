@@ -33,11 +33,9 @@ LOCKED_REQUIREMENTS = SCRIPT_DIR / "requirements.txt"
 # Fallback when the lock file is missing, or pins wheels the interpreter has
 # none for (a newer Python than the lock was made with).
 REQUIREMENTS = [
-    "mcp[cli]==1.5.0",
-    # mcp 1.5.0 needs eval_type_backport, which pydantic 2.14 removed. A range,
-    # not a pin: this list serves Pythons the lock has no wheels for, and
-    # the compiled core of pydantic 2.10.6 has none for the newest ones.
-    "pydantic>=2.10.6,<2.14",
+    # mcp declares the pydantic range it supports (per Python version), so
+    # pydantic needs no entry of its own here
+    "mcp[cli]==1.30.0",
     "pillow>=11.1.0",
     "pywin32>=310",
 ]
