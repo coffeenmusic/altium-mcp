@@ -1,8 +1,8 @@
 """Running Windows processes, read in-process instead of through tasklist.
 
 Starting `tasklist` took about 110 ms per call and blocked the server's
-event loop while it ran. A Toolhelp snapshot answers the same question in
-about a millisecond.
+event loop while it ran. A Toolhelp snapshot answers the same question in a
+few milliseconds.
 
 The kernel32 functions are bound on a private WinDLL instance: setting
 argtypes on ctypes.windll.kernel32 would change them for every other caller
