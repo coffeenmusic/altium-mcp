@@ -345,7 +345,7 @@ class AltiumBridge:
         for _ in range(12):
             try:
                 text = read_altium_text(RESPONSE_FILE)
-                json.loads(text)
+                json.loads(text, strict=False)
                 return text
             except (OSError, json.JSONDecodeError):
                 await asyncio.sleep(0.25)
@@ -421,7 +421,7 @@ class AltiumBridge:
                 if RESPONSE_FILE.exists():
                     response_text = await self._read_response_text()
                     try:
-                        rid = json.loads(response_text).get("request_id")
+                        rid = json.loads(response_text, strict=False).get("request_id")
                     except (json.JSONDecodeError, AttributeError):
                         rid = None
                     if rid is None or rid == request_id:
@@ -451,37 +451,17 @@ class AltiumBridge:
             # Log the raw response for debugging
             logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
 
-            # Parse the JSON response with detailed error handling
+            # Parse the JSON response. strict=False accepts control characters
+            # inside strings: JSONEscapeString escapes only CR, LF and TAB, and
+            # Altium text (descriptions, parameters) can hold others.
             try:
-                response = json.loads(response_text)
+                response = json.loads(response_text, strict=False)
                 logger.info(f"Successfully parsed JSON response")
                 return response
             except json.JSONDecodeError as e:
                 logger.error(f"Error parsing JSON response: {e}")
                 logger.error(f"Error at position {e.pos}, line {e.lineno}, column {e.colno}")
                 logger.error(f"Character at error position: '{response_text[e.pos:e.pos+10]}...'")
-                
-                # Try to manually fix common JSON issues
-                logger.info("Attempting to fix JSON response...")
-                fixed_text = response_text
-                
-                # Fix 1: If there's a quoted JSON array, try to fix it
-                if '"[' in fixed_text and ']"' in fixed_text:
-                    fixed_text = fixed_text.replace('"[', '[').replace(']"', ']')
-                    logger.info("Fixed double-quoted JSON array")
-                
-                # Fix 2: Handle escaped quotes in JSON strings
-                fixed_text = fixed_text.replace('\\"', '"')
-                
-                # Try to parse the fixed JSON
-                try:
-                    fixed_response = json.loads(fixed_text)
-                    logger.info("Successfully parsed fixed JSON response")
-                    return fixed_response
-                except json.JSONDecodeError as e2:
-                    logger.error(f"Still failed to parse JSON after fixes: {e2}")
-                
-                # If all else fails, return a structured error
                 return {
                     "success": False, 
                     "error": f"Invalid JSON response: {e}",

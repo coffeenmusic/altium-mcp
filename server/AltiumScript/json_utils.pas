@@ -226,3 +226,30 @@ begin
         S := Copy(S, 2, Length(S) - 2);
     Result := JSONUnescape(S);
 end;
+
+// Read the string array whose key is on RequestData[KeyLine] into List and
+// return the index of the array's closing line, so the caller's scan goes on
+// after it. The server writes '"key": [', one element per line and a line
+// with just ']', or '"key": []' when the list is empty. Each element has its
+// JSON escapes decoded, so backslashes (Altium's overbar notation), quotes,
+// commas and brackets inside a value arrive exactly as sent.
+function ReadJSONStringArray(RequestData: TStringList; KeyLine: Integer; List: TStringList): Integer;
+var
+    Line : String;
+begin
+    Result := KeyLine;
+    if Pos('[]', RequestData[KeyLine]) > 0 then Exit;
+    Result := KeyLine + 1;
+    while Result < RequestData.Count do
+    begin
+        Line := Trim(RequestData[Result]);
+        if (Line = ']') or (Line = '],') then Exit;
+        if Copy(Line, Length(Line), 1) = ',' then
+            Line := Copy(Line, 1, Length(Line) - 1);
+        if (Length(Line) >= 2) and (Copy(Line, 1, 1) = '"') and (Copy(Line, Length(Line), 1) = '"') then
+            Line := Copy(Line, 2, Length(Line) - 2);
+        if Line <> '' then
+            List.Add(JSONUnescape(Line));
+        Result := Result + 1;
+    end;
+end;

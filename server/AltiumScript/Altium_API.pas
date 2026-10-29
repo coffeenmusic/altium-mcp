@@ -48,23 +48,7 @@ begin
             if (Pos('"designators"', RequestData[i]) > 0) then
             begin
                 // Found the designators parameter
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-                
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // This is an array element
-                    // Extract the designator value
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        DesignatorsList.Add(ParamValue);
-                    
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, DesignatorsList);
                 
                 break;
             end;
@@ -101,30 +85,11 @@ begin
         begin
             // Look for class_name
             if (Pos('"class_name"', RequestData[i]) > 0) then
-            begin
-                ValueStart := Pos(':', RequestData[i]) + 1;
-                ComponentName := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                ComponentName := TrimJSON(ComponentName);
-            end
+                ComponentName := JSONLineValue(RequestData[i])
             // Look for net_names array
             else if (Pos('"net_names"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-                
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the net name
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        SourceList.Add(ParamValue);
-                    
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, SourceList);
             end;
         end;
         
@@ -171,21 +136,7 @@ begin
             // Look for optional designators array to zoom to before capture
             else if (Pos('"designators"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        DesignatorsList.Add(ParamValue);
-
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, DesignatorsList);
             end;
         end;
 
@@ -231,43 +182,12 @@ begin
             // Look for pins array
             else if (Pos('"pins"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the pin data
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    // Unescape JSON backslashes (e.g. \\ -> \ for Altium overbar notation)
-                    ParamValue := StringReplace(ParamValue, '\\', '\', REPLACEALL);
-
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        PinsList.Add(ParamValue);
-
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, PinsList);
             end
             // Look for graphics array
             else if (Pos('"graphics"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        GraphicsList.Add(ParamValue);
-
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, GraphicsList);
             end
             // Look for description
             else if (Pos('"description"', RequestData[i]) > 0) then
@@ -313,22 +233,7 @@ begin
             // Look for layer_names array
             if (Pos('"layer_names"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-                
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the layer name
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        SourceList.Add(ParamValue);
-                    
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, SourceList);
             end
             // Look for visible parameter
             else if (Pos('"visible"', RequestData[i]) > 0) then
@@ -441,22 +346,7 @@ begin
             // Look for designators array
             if (Pos('"designators"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-                
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the designator value
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        DesignatorsList.Add(ParamValue);
-                    
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, DesignatorsList);
             end
             // Look for x_offset
             else if (Pos('"x_offset"', RequestData[i]) > 0) then
@@ -628,21 +518,7 @@ begin
             // Look for designators array (optional - empty means use selection)
             if (Pos('"designators"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        DesignatorsList.Add(ParamValue);
-
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, DesignatorsList);
             end;
         end;
 
@@ -670,21 +546,7 @@ begin
             // Look for designators array (optional - empty means use selection)
             if (Pos('"designators"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        DesignatorsList.Add(ParamValue);
-
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, DesignatorsList);
             end
             // Look for clearance_mils
             else if (Pos('"clearance_mils"', RequestData[i]) > 0) then
@@ -720,22 +582,7 @@ begin
             // Look for placements array
             if (Pos('"placements"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the placement value
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        PlacementsList.Add(ParamValue);
-
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, PlacementsList);
             end;
         end;
 
@@ -770,42 +617,12 @@ begin
             // Look for source designators array
             if (Pos('"source_designators"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-                
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the designator value
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        SourceList.Add(ParamValue);
-                    
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, SourceList);
             end
             // Look for destination designators array
             else if (Pos('"destination_designators"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-                
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the designator value
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        DestList.Add(ParamValue);
-                    
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, DestList);
             end
         end;
         
@@ -861,22 +678,7 @@ begin
         begin
             if (Pos('"container_names"', RequestData[i]) > 0) then
             begin
-                // Parse the array in the next lines
-                i := i + 1; // Move to the next line (should be '[')
-                
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    // Extract the container name
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        ContainersList.Add(ParamValue);
-                    
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, ContainersList);
             end;
         end;
         
@@ -938,17 +740,7 @@ begin
             end
             else if (Pos('"pads"', RequestData[i]) > 0) then
             begin
-                i := i + 1;
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        PadsList.Add(ParamValue);
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, PadsList);
             end;
         end;
 
@@ -1033,17 +825,7 @@ begin
         begin
             if (Pos('"designators"', RequestData[i]) > 0) then
             begin
-                i := i + 1;
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
-                begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := Trim(ParamValue);
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        DesignatorsList.Add(ParamValue);
-                    i := i + 1;
-                end;
+                i := ReadJSONStringArray(RequestData, i, DesignatorsList);
                 break;
             end;
         end;
