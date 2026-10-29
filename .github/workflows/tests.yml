@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    # The server only runs on Windows (pywin32, Altium), and one test reads
+    # the ANSI code page
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      # The same hash-locked set start_server.py installs into its venv, so a
+      # lock that no longer installs fails here instead of on a user's machine
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+
+      # Offline tests only. tests/test_altium_script.py drives a running
+      # Altium Designer and cannot run here. None of these import main.py,
+      # which looks for Altium at import and may open a file dialog.
+      - name: Run unit tests
+        working-directory: server
+        run: python -m unittest -v tests.test_altium_files tests.test_outjob_parser tests.test_sandbox
