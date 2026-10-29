@@ -24,6 +24,7 @@ import re
 import uuid
 
 from altium_files import read_altium_text, write_altium_text
+import bridge_bundle
 import sandbox
 from outjob_parser import parse_outjob
 
@@ -63,6 +64,8 @@ EXCHANGE_DIR = Path("C:/Users/Public/altium_mcp")
 EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
+# The bridge script's units as one generated file (see bridge_bundle.py)
+BRIDGE_DIR = EXCHANGE_DIR / "bridge"
 
 # Seconds for a running Altium to pick up a request (normally ~1-5 s), for a
 # cold Altium launch to get that far, and for a started command to finish
@@ -538,13 +541,23 @@ class AltiumBridge:
             return False
 
         try:
-            # Resolve MSIX-virtualized path so Altium (an external process
-            # outside the MSIX sandbox) can find the script files
-            script_path = self._resolve_msix_path(self.config.script_path)
+            # The units as one generated file start in about 0.8 s; run as a
+            # project they take about 2.3 s (#42). The file is written to the
+            # exchange folder, which Altium can read wherever the extension is
+            # installed. The project stays as the fallback.
+            try:
+                bundle = bridge_bundle.bundle_file(Path(self.config.script_path), BRIDGE_DIR)
+                command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScriptFile('
+                           f'FileName={bundle}^|ProcName=Run)')
+            except Exception as e:
+                logger.warning(f"Could not generate the one-file bridge script ({e}); running the script project")
+                # Resolve MSIX-virtualized path so Altium (an external process
+                # outside the MSIX sandbox) can find the script files
+                script_path = self._resolve_msix_path(self.config.script_path)
 
-            # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
-            command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
-            
+                # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
+                command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
+
             logger.info(f"Running command: {command}")
             
             # Start the process
