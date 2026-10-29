@@ -5,6 +5,7 @@ import os
 import time
 import asyncio
 import logging
+import logging.handlers
 import subprocess
 import tkinter as tk
 from tkinter import filedialog
@@ -27,17 +28,6 @@ from altium_files import read_altium_text, write_altium_text
 import sandbox
 from outjob_parser import parse_outjob
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Change to DEBUG for more detailed logs
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # Output to console
-        logging.FileHandler(str(Path(__file__).with_name('altium_mcp.log')))  # Also log to file
-    ]
-)
-logger = logging.getLogger("AltiumMCPServer")
-
 # Set MCP_DIR to the directory of the current Python file
 MCP_DIR = Path(__file__).parent
 # config.json lives in a per-user folder OUTSIDE the install directory and
@@ -49,6 +39,44 @@ MCP_DIR = Path(__file__).parent
 def _data_dir() -> Path:
     override = os.environ.get("ALTIUM_MCP_HOME")
     return Path(override) if override else Path.home() / ".altium-mcp"
+
+
+class _RotatingLog(logging.handlers.RotatingFileHandler):
+    """Rotates like its base class, but keeps logging when it cannot.
+
+    Windows will not rename a file another process has open, and two servers
+    (two Claude sessions) often share this log. The base class then fails
+    on every record; this one keeps appending and leaves the rotation to the
+    next server that starts alone.
+    """
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except OSError:
+            self.maxBytes = 0
+            if self.stream is None:
+                self.stream = self._open()
+
+
+# The log sits beside config.json, for the same reasons, and rotates at
+# 1 MB with 3 backups. INFO by default: DEBUG adds a line for every MCP
+# protocol message. Set ALTIUM_MCP_LOG_LEVEL=DEBUG to get them back.
+LOG_FILE = _data_dir() / "altium_mcp.log"
+_log_level = logging.getLevelName(os.environ.get("ALTIUM_MCP_LOG_LEVEL", "INFO").upper())
+_log_handlers = [logging.StreamHandler()]  # stderr: stdout carries the MCP protocol
+try:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _log_handlers.append(_RotatingLog(str(LOG_FILE), maxBytes=1_000_000, backupCount=3,
+                                      encoding="utf-8"))
+except OSError:
+    pass  # no log file is no reason not to start
+logging.basicConfig(
+    level=_log_level if isinstance(_log_level, int) else logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=_log_handlers
+)
+logger = logging.getLogger("AltiumMCPServer")
 
 LEGACY_CONFIG_FILE = MCP_DIR / "config.json"
 CONFIG_FILE = _data_dir() / "config.json"
