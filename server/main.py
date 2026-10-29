@@ -90,6 +90,26 @@ def _clear_script_stuck():
     except OSError:
         pass
 
+def _lift_failed_result(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Make a command's own failure the response's failure.
+
+    Several bridge commands report failure as their result, e.g.
+    {"success": false, "error": "No layer names provided"}, and the bridge
+    wraps any result in "success": true. Tools then took the failure for
+    success: get_screenshot even captured after its focus step had failed.
+    Fields besides the message (per-container results of run_output_jobs,
+    for instance) are kept in the error text.
+    """
+    result = response.get("result")
+    if response.get("success") and isinstance(result, dict) and result.get("success") is False:
+        error = result.get("error") or result.get("message") or "the command reported failure"
+        details = {k: v for k, v in result.items() if k not in ("success", "error", "message")}
+        if details:
+            error = f"{error} {json.dumps(details)[:2000]}"
+        return {**response, "success": False, "error": error}
+    return response
+
+
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
 
@@ -299,7 +319,8 @@ class AltiumBridge:
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
         async with self._command_lock:
-            return await self._execute_command_locked(command, params)
+            response = await self._execute_command_locked(command, params)
+        return _lift_failed_result(response)
 
     @staticmethod
     def _altium_running() -> bool:

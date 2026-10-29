@@ -5,6 +5,9 @@ const
 var
     // Why the last EnsureDocumentFocused call failed; reported to the server.
     FocusFailure : String;
+    // The last message passed to LogScriptError during this run. A command
+    // that gives up with an empty result has logged why; Run replies with it.
+    LastScriptError : String;
 
 // Errors must never be modal. The server is driven by an agent with no hands:
 // a ShowMessage box blocks this script before it writes its response, every
@@ -14,6 +17,7 @@ procedure LogScriptError(Msg: String);
 var
     L : TStringList;
 begin
+    LastScriptError := Msg;
     L := TStringList.Create;
     try
         if FileExists(SCRIPT_ERROR_LOG) then L.LoadFromFile(SCRIPT_ERROR_LOG);

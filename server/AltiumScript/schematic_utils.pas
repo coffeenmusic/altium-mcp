@@ -1315,7 +1315,8 @@ begin
     Project := GetWorkspace.DM_FocusedProject;
     If (Project = Nil) Then
     begin
-        ShowMessage('Error: No project is currently open');
+        // Never a ShowMessage: it would block the bridge until someone clicks OK
+        Result := 'ERROR: No project is currently open';
         Exit;
     end;
 
