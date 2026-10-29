@@ -106,40 +106,14 @@ begin
     end;
 end;
 
-// Function to write JSON to a file and return as string
+// Return the JSON lines as one string. This used to save them to FileName
+// and load them back, which changed nothing (WriteResponse saves the result
+// the same way) but left temp_*.json copies of design data in the shared,
+// world-readable exchange folder. Nothing reads those files; FileName is
+// kept so the callers stay unchanged.
 function WriteJSONToFile(JSON: TStringList; FileName: String = ''): String;
-var
-    TempFile: String;
-    IsTemp: Boolean;
 begin
-    // Use provided filename or generate temp filename. Callers also pass a
-    // folder (ROOT_DIR); that gets the temp file too, which must not be left
-    // behind in the shared exchange folder.
-    IsTemp := Not(AnsiEndsStr('.json', LowerCase(FileName)));
-    if IsTemp then
-    begin
-        TempFile := ROOT_DIR + 'temp_json_output.json';
-    end
-    else
-    begin
-        TempFile := FileName;
-    end;
-    
-    try
-        // Save to file
-        JSON.SaveToFile(TempFile);
-        
-        // Load back the complete JSON data
-        JSON.Clear;
-        JSON.LoadFromFile(TempFile);
-        Result := JSON.Text;
-        
-        // Clean up temporary file if auto-generated
-        if IsTemp and FileExists(TempFile) then
-            DeleteFile(TempFile);
-    except
-        Result := '{"error": "Failed to write JSON to file"}';
-    end;
+    Result := JSON.Text;
 end;
 
 // Locale-safe StrToFloat: normalizes '.' to the system decimal separator before parsing.
