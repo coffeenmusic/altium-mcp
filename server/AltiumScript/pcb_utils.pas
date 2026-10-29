@@ -71,6 +71,7 @@ begin
 
         for i := 0 to Lines.Count - 1 do
         begin
+            ReportProgress;
             Line := Lines[i];
             Kind := UpperCase(Trim(GetFieldFromPipeString(Line, 0)));
 

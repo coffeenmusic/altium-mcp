@@ -1372,6 +1372,8 @@ begin
             // Consume the request: its disappearance tells the server the
             // script started, and a duplicate launch finds nothing to re-run
             DeleteFile(REQUEST_FILE);
+            LastProgress := 0;
+            ReportProgress;
 
             // Default command type
             CommandType := '';
