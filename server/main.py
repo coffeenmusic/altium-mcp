@@ -90,6 +90,13 @@ def _clear_script_stuck():
     except OSError:
         pass
 
+
+ALTIUM_HUNG_ERROR = (
+    "Not run: Altium is not responding. A script or a long command is still running in it, or "
+    "a script is stuck in a loop. Nothing can be sent to Altium until it finishes. Scripts "
+    "started by run_altium_script stop their while/repeat loops at their deadline; if Altium "
+    "stays frozen, only ending X2.EXE frees it, and unsaved work is then lost.")
+
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
 
@@ -298,6 +305,10 @@ class AltiumBridge:
 
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
+        # A launch sent to a hung Altium only queues up behind whatever holds
+        # its UI thread; say so now instead of after the start timeout
+        if await asyncio.to_thread(sandbox.altium_hung):
+            return {"success": False, "error": ALTIUM_HUNG_ERROR}
         async with self._command_lock:
             return await self._execute_command_locked(command, params)
 
@@ -1349,6 +1360,14 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     - Errors inside the script (undeclared identifiers, calls on nil, bad
       conversions) are caught by the sandbox and come back as "script error"
       with Altium's message and the last step; no try/except is needed.
+    - Loops: a running script cannot be stopped from outside, so a loop that
+      never ends would freeze Altium until it is killed. Every while and
+      repeat loop is therefore guarded: about 10 s before timeout_seconds all
+      loops exit, the rest of the script still runs (so a PostProcess after
+      the loop is not skipped), SaveDoc no longer saves, and the tool returns
+      "loop guard" with the loop's line. Make loops that delete or retry
+      objects bounded anyway (a fixed count, never the same object twice).
+      for loops are not guarded.
     - The sandbox is standalone: helpers and constants from the production
       units (TrimJSON, AddJSONProperty, ...) are NOT available; REPLACEALL is.
     - Never register objects into a library document and never write to shared
@@ -1381,6 +1400,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                            "error": "refused before execution: the script would not compile",
                            "problems": problems, "executor_wedged": False}, indent=2)
 
+    if await asyncio.to_thread(sandbox.altium_hung):
+        return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR, "executor_wedged": False}, indent=2)
+
     sb = _sandbox()
     report = {}
     # A script-error dialog left open blocks every new run. Answer it only
@@ -1396,9 +1418,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         if report["recovered_before_run"]["recovered"]:
             _clear_script_stuck()
 
+    # The loops stop early enough for the script to finish and its result to
+    # arrive before this tool gives up on it
+    guard_seconds = max(5, timeout_seconds - 10)
     try:
         files = sb.new_run_files()
-        built = sb.write(files, script)
+        built = sb.write(files, script, guard_seconds)
     except Exception as e:
         return json.dumps({"success": False, "error": f"could not write the run file: {e}"})
     sb.launch(files)
@@ -1435,6 +1460,20 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         _clear_script_stuck()  # our script ran to the end: Altium is free
         result_text = sandbox.read_when_ready(files.result, read_altium_text).strip()
         sb.prune()
+        guard = next((s for s in steps if s.startswith(sandbox.GUARD_PREFIX)), None)
+        if guard is not None:
+            m = re.search(r"line (\d+)", guard)
+            return json.dumps({
+                "success": False,
+                "error": "loop guard",
+                "altium_message": guard[len(sandbox.GUARD_PREFIX):],
+                "line": int(m.group(1)) if m else None,
+                "diagnosis": f"A while or repeat loop was still running after {guard_seconds} s, "
+                             "so every loop was cut short and the script ran to its end; Altium is "
+                             "free again. Statements after the loops ran on partial results and "
+                             "SaveDoc did not save: check the document before saving it. Make the "
+                             "loop bounded (a fixed count, never retrying the same object).",
+                "result": result_text, "steps": steps, "executor_wedged": False, **report}, indent=2)
         exc = next((s for s in steps if s.startswith(sandbox.EXCEPTION_PREFIX)), None)
         if exc is not None:
             before = steps[:steps.index(exc)]
@@ -1479,6 +1518,22 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             "diagnosis": f"Altium was asked to run {files.script} and showed 'Select Item To "
                          "Run' instead, so it cannot open that path.",
             "executor_wedged": False, **report}, indent=2)
+
+    # Still running: Stop and the recovery probe are window messages Altium
+    # is not reading, and each probe launch would only queue up behind it
+    if steps and await asyncio.to_thread(sandbox.altium_hung):
+        _mark_script_stuck("run_altium_script")
+        return json.dumps({
+            "success": False,
+            "error": f"no result after {timeout_seconds} s: the script is still running and "
+                     "Altium is not responding",
+            "last_step_reached": steps[-1],
+            "diagnosis": f"The script's while/repeat loops stop at {guard_seconds} s, so the time "
+                         "is going into a for loop or a single long Altium call. A running script "
+                         "cannot be stopped from outside. Wait for Altium; if it stays frozen, only "
+                         "ending X2.EXE frees it (unsaved work is lost). Do not retry until "
+                         "Altium responds.",
+            "steps": steps, "executor_wedged": True, **report}, indent=2)
 
     # No result and no error dialog. If our script started, it is ours: stop
     # it. If it never started, something else holds Altium - possibly a

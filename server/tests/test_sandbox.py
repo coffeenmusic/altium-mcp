@@ -104,6 +104,56 @@ class BuildTest(unittest.TestCase):
         self.assertLess(b.text.index("    Doc : IDispatch;"), b.text.index("begin", run))
 
 
+class LoopGuardTest(unittest.TestCase):
+    def test_while_and_repeat(self):
+        code = "while I1 < 10 do\n  I1 := I1 + 1;\nrepeat\n  I2 := I2 + 1;\nuntil I2 > 5;"
+        self.assertEqual(sandbox.guard_loops(code, 1),
+                         "while SandboxTick(1) and (I1 < 10) do\n  I1 := I1 + 1;\nrepeat\n"
+                         "  I2 := I2 + 1;\nuntil (not SandboxTick(5)) or (I2 > 5);")
+
+    def test_line_numbers_follow_first_line_and_lines_are_kept(self):
+        code = "S1 := 'a';\n\nwhile (A <> nil)\n  and (B = nil) do\n  A := nil;"
+        out = sandbox.guard_loops(code, 4)
+        self.assertIn("while SandboxTick(6) and ((A <> nil)\n  and (B = nil)) do", out)
+        self.assertEqual(out.count("\n"), code.count("\n"))
+
+    def test_nested_loops(self):
+        # The script that froze Altium: an outer retry loop around an iterator walk
+        code = ("while K = 1 do\nbegin\n  C := It.FirstSchObject;\n"
+                "  while (C <> nil) and (Hit = nil) do\n    C := It.NextSchObject;\nend;")
+        out = sandbox.guard_loops(code, 7)
+        self.assertIn("while SandboxTick(7) and (K = 1) do", out)
+        self.assertIn("while SandboxTick(10) and ((C <> nil) and (Hit = nil)) do", out)
+
+    def test_until_ends_at_end_or_else_or_text_end(self):
+        self.assertEqual(sandbox.guard_loops("repeat I1 := I1 + 1 until I1 = 3\nend", 1),
+                         "repeat I1 := I1 + 1 until (not SandboxTick(1)) or (I1 = 3)\nend")
+        self.assertEqual(sandbox.guard_loops("repeat I1 := 1 until F(I1, 2) > 0", 1),
+                         "repeat I1 := 1 until (not SandboxTick(1)) or (F(I1, 2) > 0)")
+
+    def test_strings_comments_properties_and_for_untouched(self):
+        code = ("S1 := 'while x do';\n// while y do\n{ repeat until z; }\n"
+                "Obj1.While := 1;\nfor I1 := 0 to 9 do S2 := '';")
+        self.assertEqual(sandbox.guard_loops(code, 1), code)
+
+    def test_keywords_case_insensitive(self):
+        self.assertEqual(sandbox.guard_loops("WHILE B1 = 0 DO B1 := 1;", 1),
+                         "WHILE SandboxTick(1) and (B1 = 0) DO B1 := 1;")
+
+    def test_build_guards_body_and_fills_deadline(self):
+        b = sandbox.build_script(TEMPLATE, "var\n  K : Integer;\nwhile K = 1 do K := 0;",
+                                 r"C:\x\log.txt", r"C:\x\out.txt", guard_seconds=42)
+        self.assertNotIn(sandbox.GUARD_TOKEN, b.text)
+        self.assertIn("SbxGuardUntil := Now + 42 / 86400;", b.text)
+        lines = b.text.splitlines()
+        # Line 3 of the submitted script, at its usual place in the run file
+        self.assertEqual(lines[b.body_first_line - 1], "        while SandboxTick(3) and (K = 1) do K := 0;")
+
+    def test_template_defines_guard(self):
+        self.assertIn("function SandboxTick(Line : Integer) : Boolean;", TEMPLATE)
+        self.assertIn("'" + sandbox.GUARD_PREFIX, TEMPLATE)
+
+
 class MapLineTest(unittest.TestCase):
     def test_body_line(self):
         b = build("S1 := 'a';\nS2 := Undeclared;")

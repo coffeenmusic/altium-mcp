@@ -9,6 +9,11 @@
 // SandboxLog() flushes to disk on every call, so when a script dies the log
 // still shows the last step that completed - the statement after it is the
 // culprit.
+//
+// The tool also makes every while and repeat loop of the script call
+// SandboxTick(). A script runs on Altium's UI thread and nothing can stop it
+// from outside, so a loop that never ends would freeze Altium until X2.EXE is
+// killed. Past the deadline (%GUARD_SECONDS% s) every guarded loop exits.
 
 const
     REPLACEALL = 1;
@@ -28,11 +33,30 @@ var
     List1, List2, List3 : TStringList;
     IntMan     : IIntegratedLibraryManager;
     DbDoc      : IDatabaseLibDocument;
+    // Loop guard state, see SandboxTick
+    SbxGuardUntil   : Double;
+    SbxGuardTripped : Boolean;
 
 procedure SandboxLog(Msg: String);
 begin
     LogLines.Add(Msg);
     LogLines.SaveToFile(LogPath);
+end;
+
+// Called on every pass of every while and repeat loop in the script, with the
+// loop's line in the submitted script. False once the deadline has passed,
+// which ends that loop and every guarded loop after it, so the script runs to
+// its end and Altium is released. Code after the loops still runs (so a
+// PostProcess after a loop is not skipped); SaveDoc refuses to save.
+function SandboxTick(Line : Integer) : Boolean;
+begin
+    if (not SbxGuardTripped) and (Now > SbxGuardUntil) then
+    begin
+        SbxGuardTripped := True;
+        SandboxLog('LOOP GUARD: the loop at line ' + IntToStr(Line) +
+                   ' was still running after %GUARD_SECONDS% s; every loop was cut short from here on');
+    end;
+    Result := not SbxGuardTripped;
 end;
 
 // Millimetres to Altium internal coordinate units (10000 per mil).
@@ -58,13 +82,16 @@ begin
     if Result = nil then SandboxLog('OpenSchDoc: could not open ' + Path);
 end;
 
-// Mark an open document modified and save it.
+// Mark an open document modified and save it. Not after the loop guard has
+// cut the script short: the document then holds a half-finished edit.
 procedure SaveDoc(Path : String);
 var
     D : IDispatch;
 begin
     D := Client.GetDocumentByPath(Path);
-    if D = nil then
+    if SbxGuardTripped then
+        SandboxLog('SaveDoc: not saved after the loop guard stopped the script ' + Path)
+    else if D = nil then
         SandboxLog('SaveDoc: not open ' + Path)
     else
     begin
@@ -83,6 +110,8 @@ begin
     LogPath := '%LOG_PATH%';
     OutPath := '%OUT_PATH%';
     LogLines := TStringList.Create;
+    SbxGuardUntil := Now + %GUARD_SECONDS% / 86400;
+    SbxGuardTripped := False;
     ResultText := '{"sandbox": "no result set"}';
     SandboxLog('sandbox start');
 
