@@ -24,6 +24,7 @@ import re
 import uuid
 
 from altium_files import read_altium_text, write_altium_text
+import routing
 import sandbox
 from outjob_parser import parse_outjob
 
@@ -1354,6 +1355,8 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     - Never register objects into a library document and never write to shared
       or network library paths. Verify the target document kind first
       (ObjectID 32 = schematic, 33 = symbol library).
+    - Copper: add routed tracks with route_track instead of computing segment
+      ends here, and run check_routing after moving tracks, vias or parts.
 
     For API guidance - interfaces, object models, worked examples - use the
     "altium-script" skill. ensure_altium_script_skill reports whether that
@@ -2374,6 +2377,125 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     result = response.get("result", {})
     logger.info(f"Placement check complete: {result.get('violation_count', '?')} violations")
     return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def check_routing(ctx: Context, nets: list = None, angle_tolerance_deg: float = 0.1,
+                        max_findings: int = 50) -> str:
+    """
+    Check the routed copper of the focused PCB for segments that are not 0,
+    45 or 90 degrees, and for right-angle and acute corners.
+
+    Run this after changing tracks or vias - a screenshot does not show a
+    stub that is 2 degrees off 45. Such stubs come from a diagonal whose end
+    was snapped to a grid on its own, or from a track end dragged along
+    when a via or component moved. Only tracks with a net that are not part
+    of a component or polygon pour count. A corner is where exactly two
+    track ends of one net meet on one layer; under a via or pad it is not
+    a corner.
+
+    Args:
+        nets (list, optional): Check only these nets (exact names, any case).
+        angle_tolerance_deg (float): How far a segment may be from a
+            multiple of 45 degrees (default 0.1).
+        max_findings (int): Most entries listed per kind (default 50). The
+            counts always cover every segment.
+
+    Returns:
+        str: JSON with clean (true when nothing was found), the segment
+             count, segment_angles (orthogonal / 45 / off-angle counts),
+             corner_turns (straight / 45 / 90 / acute counts), and the
+             off_angle segments and sharp_corners: net, layer, positions in
+             mils relative to the board origin, angle or turn in degrees.
+    """
+    logger.info(f"Checking routing (nets={nets}, tolerance={angle_tolerance_deg})")
+
+    response = await altium_bridge.execute_command("get_routing_geometry", {})
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error reading routing: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to read the routing: {error_msg}"})
+
+    geo = routing.parse_geometry(str(response.get("result", "")))
+    report = routing.check(geo, angle_tolerance_deg, nets)
+    report["clean"] = not report["off_angle"] and not report["sharp_corners"]
+    report["routed_arcs"] = len(geo["arcs"])
+    for key in ("off_angle", "sharp_corners"):
+        report[f"{key}_count"] = len(report[key])
+        report[key] = report[key][:max(0, max_findings)]
+    logger.info(f"Routing check: {report['off_angle_count']} off-angle, "
+                f"{report['sharp_corners_count']} sharp corners in {report['segments']} segments")
+    return json.dumps(report, indent=2)
+
+@mcp.tool()
+async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
+                      diagonal_first: bool = False, corner_chamfer_mils: float = 0,
+                      dry_run: bool = False) -> str:
+    """
+    Add a routed track through waypoints on the focused PCB, every segment
+    exactly 0, 45 or 90 degrees.
+
+    Between two waypoints that are not in line, the track takes a straight
+    leg and a 45 degree diagonal. The diagonal is computed from its own
+    start point, so its x and y runs are equal: nothing is snapped on its
+    own, which is what leaves stubs a few degrees off 45. Use this instead
+    of placing track segments from run_altium_script, and run
+    check_routing afterwards. It adds tracks only: no vias, and no DRC.
+
+    Args:
+        net_name (str): Net of the track; it must exist on the board.
+        layer (str): Layer name as get_component_pins and check_routing
+            report it, e.g. "Top Layer" or "Bottom Layer".
+        width_mils (float): Track width in mils.
+        points (list): Waypoints [[x, y], ...] in mils relative to the
+            board origin, at least two: usually a pad centre, any bends,
+            and the far pad or via centre.
+        diagonal_first (bool): Put the diagonal at the start of each
+            stretch instead of its end (default: straight, then diagonal).
+        corner_chamfer_mils (float): Cut each right-angle corner between two
+            straight legs with a 45 degree segment, setting back this far on
+            each leg (at most half the shorter leg). 0 leaves them square.
+        dry_run (bool): Only compute and return the segments.
+
+    Returns:
+        str: JSON with the segments in mils ([x1, y1, x2, y2]) and, unless
+             dry_run, how many tracks were added.
+    """
+    logger.info(f"Routing {net_name} on {layer} through {len(points or [])} points")
+
+    def coord(v):
+        return int(round(float(v) * routing.COORD_PER_MIL))
+
+    try:
+        waypoints = [(coord(p[0]), coord(p[1])) for p in points]
+    except (TypeError, ValueError, IndexError):
+        return json.dumps({"success": False, "error": "points must be a list of [x, y] pairs in mils"})
+    if len(waypoints) < 2:
+        return json.dumps({"success": False, "error": "points needs at least two waypoints"})
+    if width_mils <= 0:
+        return json.dumps({"success": False, "error": "width_mils must be positive"})
+
+    segments = routing.route(waypoints, diagonal_first, coord(corner_chamfer_mils))
+    if not segments:
+        return json.dumps({"success": False, "error": "the waypoints are all the same point"})
+    result = {"segments_mils": [[routing.to_mils(v) for v in s] for s in segments]}
+    if dry_run:
+        return json.dumps({"success": True, "dry_run": True, **result}, indent=2)
+
+    response = await altium_bridge.execute_command("create_route_tracks", {
+        "net_name": net_name,
+        "layer": layer,
+        "width": coord(width_mils),
+        "segments": ";".join("|".join(str(v) for v in s) for s in segments),
+    })
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error routing track: {error_msg}")
+        return json.dumps({"success": False, "error": f"Failed to add the track: {error_msg}", **result})
+
+    created = response.get("result", {})
+    if isinstance(created, dict):
+        result.update({k: v for k, v in created.items() if k != "success"})
+    return json.dumps({"success": True, **result}, indent=2)
 
 @mcp.tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
