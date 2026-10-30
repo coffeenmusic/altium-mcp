@@ -94,6 +94,9 @@ LAUNCH_WAIT_SECONDS = 50
 # A lock whose owner is still alive but older than this belongs to a build
 # that hung. Generous: the owner-alive check is the real staleness test.
 STALE_LOCK_SECONDS = 1800
+# A venv another launch has not used for this long, and that nothing runs
+# from, is deleted after a build (see _prune_old_venvs)
+KEEP_UNUSED_DAYS = 14
 
 
 def venv_is_ready():
@@ -226,12 +229,98 @@ def _build_venv():
     _prune_old_venvs()
 
 
+def _venvs_in_use():
+    """Names of the venvs under VENVS_DIR a running process was started from.
+
+    A venv's Scripts\\python.exe stays alive as long as the server it started,
+    so a running server shows up here. None when the process list cannot be
+    read: then nothing counts as unused.
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    try:
+        psapi, kernel32 = ctypes.WinDLL("psapi"), ctypes.WinDLL("kernel32")
+        pids = (wintypes.DWORD * 4096)()
+        needed = wintypes.DWORD()
+        if not psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(needed)):
+            return None
+        def long_form(path):
+            # A process reports its image path in the form it was started
+            # with, and the folder may be given in either: compare the long
+            # forms of both, not 8.3 short names (C:\Users\SIBOVA~1\...)
+            buf = ctypes.create_unicode_buffer(32768)
+            n = kernel32.GetLongPathNameW(path, buf, len(buf))
+            return os.path.normcase(buf.value if 0 < n < len(buf) else path)
+
+        root = long_form(str(VENVS_DIR)) + os.sep
+        names = set()
+        for pid in pids[:needed.value // ctypes.sizeof(wintypes.DWORD)]:
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                continue
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(len(buf))
+                if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    path = long_form(buf.value)
+                    if path.startswith(root):
+                        names.add(path[len(root):].split(os.sep)[0])
+            finally:
+                kernel32.CloseHandle(handle)
+        return names
+    except (OSError, AttributeError):
+        return None
+
+
 def _prune_old_venvs():
-    # Venvs keyed to an older requirement list or interpreter. Best effort: one
-    # still in use by a running server has locked files and simply stays.
+    # Venvs keyed to another requirement list or interpreter. Deleting one a
+    # server still runs from removes every file that is not locked, and the
+    # server then fails on whatever it imports next (a screenshot's PNG
+    # encoder, say); its next launch cannot rebuild it either, as the locked
+    # files stay. So a venv is kept while a process runs from it, while
+    # another builder is building it, and for KEEP_UNUSED_DAYS after its
+    # last launch: two clients may launch with different interpreters (Claude
+    # Desktop and Claude Code, or "py" with and without PY_PYTHON), and each
+    # keeps its venv instead of rebuilding it every time the other ran.
+    in_use = _venvs_in_use()
+    if in_use is None:
+        return
+    cutoff = time.time() - KEEP_UNUSED_DAYS * 86400
     for child in VENVS_DIR.iterdir():
-        if child.is_dir() and child != VENV_DIR:
+        if not child.is_dir() or child == VENV_DIR:
+            continue
+        if child.name.endswith(".trash"):
             shutil.rmtree(child, ignore_errors=True)
+            continue
+        if child.name in in_use or _builder_alive(child.name):
+            continue
+        try:
+            last_used = (child / MARKER.name).stat().st_mtime
+        except OSError:
+            last_used = 0  # never finished building
+        if last_used > cutoff:
+            continue
+        # Renamed first, so a delete that stops half way never leaves a
+        # broken venv under a name a launcher would pick up
+        trash = child.with_name(child.name + ".trash")
+        try:
+            os.rename(child, trash)
+        except OSError:
+            continue
+        shutil.rmtree(trash, ignore_errors=True)
+
+
+def _builder_alive(venv_name):
+    """True while a builder holds the lock for that venv."""
+    lock = VENVS_DIR / (venv_name + ".lock")
+    try:
+        age = time.time() - lock.stat().st_mtime
+        pid = int(lock.read_text(encoding="ascii").strip() or 0)
+    except (OSError, ValueError):
+        return False
+    return age < STALE_LOCK_SECONDS and _pid_alive(pid)
 
 
 def build_main():
@@ -289,8 +378,18 @@ def _build_log_tail(lines=12):
 
 # --- launcher ---------------------------------------------------------------
 
+def _mark_used():
+    # The marker's modification time is the venv's last launch, which keeps
+    # it from being pruned while it is in use (see _prune_old_venvs)
+    try:
+        os.utime(MARKER)
+    except OSError:
+        pass
+
+
 def ensure_venv():
     if venv_is_ready():
+        _mark_used()
         return str(PYTHON_EXE)
 
     if not _lock_is_live():
@@ -301,6 +400,7 @@ def ensure_venv():
     while time.time() - started < LAUNCH_WAIT_SECONDS:
         time.sleep(0.5)
         if venv_is_ready():
+            _mark_used()
             return str(PYTHON_EXE)
         if _lock_is_live():
             seen_builder = True
