@@ -2935,3 +2935,145 @@ begin
         ResultProps.Free;
     end;
 end;
+
+// The focused board's routed copper for check_routing, one record per line
+// in internal units: O|x origin|y origin, then T|layer|net|x1|y1|x2|y2|width
+// for each track with a net outside components and polygon pours, A|layer|net
+// for each such arc, and V|x|y|size and P|x|y|x size|y size for every via and
+// pad (a corner under one is no corner). The server does the geometry: it is
+// quicker in Python and can be tested there without Altium.
+function GetRoutingGeometry(Dummy: Integer): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+    Lines    : TStringList;
+    NetName  : String;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+
+    Lines := TStringList.Create;
+    try
+        Lines.Add('O|' + IntToStr(Board.XOrigin) + '|' + IntToStr(Board.YOrigin));
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while Prim <> nil do
+        begin
+            NetName := '';
+            if Prim.Net <> nil then NetName := Prim.Net.Name;
+            if (Prim.ObjectId = eTrackObject) or (Prim.ObjectId = eArcObject) then
+            begin
+                if (NetName <> '') and (not Prim.InComponent) and (not Prim.InPolygon) then
+                begin
+                    if Prim.ObjectId = eTrackObject then
+                        Lines.Add('T|' + Layer2String(Prim.Layer) + '|' + NetName + '|' +
+                                  IntToStr(Prim.x1) + '|' + IntToStr(Prim.y1) + '|' +
+                                  IntToStr(Prim.x2) + '|' + IntToStr(Prim.y2) + '|' + IntToStr(Prim.Width))
+                    else
+                        Lines.Add('A|' + Layer2String(Prim.Layer) + '|' + NetName);
+                end;
+            end
+            else if Prim.ObjectId = eViaObject then
+                Lines.Add('V|' + IntToStr(Prim.x) + '|' + IntToStr(Prim.y) + '|' + IntToStr(Prim.Size))
+            else
+                Lines.Add('P|' + IntToStr(Prim.x) + '|' + IntToStr(Prim.y) + '|' +
+                          IntToStr(Prim.TopXSize) + '|' + IntToStr(Prim.TopYSize));
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        Result := Lines.Text;
+    finally
+        Lines.Free;
+    end;
+end;
+
+// Add the tracks of route_track to the focused board. Segments holds
+// 'x1|y1|x2|y2' records in internal units relative to the board origin, as
+// the server computed them, so every segment is exactly 0, 45 or 90 degrees.
+function CreateRouteTracks(NetName: String; LayerName: String; Width: Integer; Segments: TStringList): String;
+var
+    Board       : IPCB_Board;
+    Iterator    : IPCB_BoardIterator;
+    Net         : IPCB_Net;
+    Prim        : IPCB_Primitive;
+    Track       : IPCB_Track;
+    Layer       : Integer;
+    i, Created  : Integer;
+    ResultProps : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Layer := String2Layer(LayerName);
+    if Layer = eNoLayer then
+    begin
+        Result := 'ERROR: Unknown layer: ' + LayerName;
+        Exit;
+    end;
+
+    Net := nil;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Prim := Iterator.FirstPCBObject;
+    while (Prim <> nil) and (Net = nil) do
+    begin
+        if UpperCase(Prim.Name) = UpperCase(NetName) then Net := Prim;
+        Prim := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+    if Net = nil then
+    begin
+        Result := 'ERROR: Net not found on the board: ' + NetName;
+        Exit;
+    end;
+
+    // PostProcess must run whatever happens, or Altium's undo stays broken
+    Created := 0;
+    PCBServer.PreProcess;
+    try
+        for i := 0 to Segments.Count - 1 do
+        begin
+            if Trim(Segments[i]) <> '' then
+            begin
+                Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                Track.x1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Segments[i], 0));
+                Track.y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Segments[i], 1));
+                Track.x2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Segments[i], 2));
+                Track.y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Segments[i], 3));
+                Track.Width := Width;
+                Track.Layer := Layer;
+                Track.Net := Net;
+                Board.AddPCBObject(Track);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
+                Created := Created + 1;
+            end;
+        end;
+    finally
+        PCBServer.PostProcess;
+    end;
+    Board.ViewManager_FullUpdate;
+
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'created', Created);
+        AddJSONProperty(ResultProps, 'net', Net.Name);
+        AddJSONProperty(ResultProps, 'layer', Layer2String(Layer));
+        Result := BuildJSONObject(ResultProps);
+    finally
+        ResultProps.Free;
+    end;
+end;

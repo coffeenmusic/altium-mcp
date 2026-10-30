@@ -1077,6 +1077,49 @@ begin
 end;
 
 // Function to execute a command with parameters
+// create_route_tracks: net_name, layer, width (internal units) and segments,
+// one string of 'x1|y1|x2|y2' records separated by ';'. A single string, not
+// an array, so it reads with JSONLineValue: the server writes only digits,
+// '-', '|' and ';' into it.
+function ExecuteCreateRouteTracks(RequestData: TStringList): String;
+var
+    i           : Integer;
+    NetName     : String;
+    LayerName   : String;
+    SegmentText : String;
+    Width       : Integer;
+    Segments    : TStringList;
+begin
+    NetName := '';
+    LayerName := '';
+    SegmentText := '';
+    Width := 0;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos('"net_name"', RequestData[i]) > 0 then
+            NetName := JSONLineValue(RequestData[i])
+        else if Pos('"layer"', RequestData[i]) > 0 then
+            LayerName := JSONLineValue(RequestData[i])
+        else if Pos('"width"', RequestData[i]) > 0 then
+            Width := StrToInt(JSONLineValue(RequestData[i]))
+        else if Pos('"segments"', RequestData[i]) > 0 then
+            SegmentText := JSONLineValue(RequestData[i]);
+    end;
+    if (NetName = '') or (LayerName = '') or (Width <= 0) or (SegmentText = '') then
+    begin
+        Result := 'ERROR: create_route_tracks needs net_name, layer, width and segments';
+        Exit;
+    end;
+
+    Segments := TStringList.Create;
+    try
+        Segments.Text := StringReplace(SegmentText, ';', #13#10, REPLACEALL);
+        Result := CreateRouteTracks(NetName, LayerName, Width, Segments);
+    finally
+        Segments.Free;
+    end;
+end;
+
 function ExecuteCommand(CommandName: String): String;
 var
     ViewHint   : String;
@@ -1189,6 +1232,10 @@ begin
             Result := GetBoardSummary(ROOT_DIR);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
+        'get_routing_geometry':
+            Result := GetRoutingGeometry(0);
+        'create_route_tracks':
+            Result := ExecuteCreateRouteTracks(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;
