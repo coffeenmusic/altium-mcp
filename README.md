@@ -26,7 +26,7 @@ The easiest way to install is to use Claude Code, point it to this repo and ask 
 
 [Watch on YouTube](https://youtu.be/HKQMK-hluLs)
 
-1. Make sure Claude has Python 3.10+ installed: `drop down > File > Settings > Extensions > Advanced > Python`. If not, install Python and add it to PATH.
+1. Make sure Claude has Python 3.10 to 3.14 installed: `drop down > File > Settings > Extensions > Advanced > Python`. If not, install Python and add it to PATH. Python 3.15 does not work yet (see [Bootstrap Venv](#bootstrap-venv-recommended)).
 2. Download the `altium-mcp.dxt` desktop extension file from [releases](https://github.com/coffeenmusic/altium-mcp/releases)
 3. In Claude Desktop on Windows: `drop down > File > Settings > Extensions > Advanced > Install Extension...` Select the .dxt file
 
@@ -38,7 +38,9 @@ You shouldn't need to restart Claude and you should now see altium-mcp in the to
 
 ### Bootstrap Venv (Recommended)
 
-This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is tiny (~60 KB) and works across any Python 3.10+ version.
+This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is tiny (~60 KB) and works on Python 3.10 to 3.14.
+
+**Python versions:** 3.10 to 3.13 install the hash-locked `requirements.txt`. 3.14 has no wheel for the locked pillow, so it installs the fallback list instead. 3.15 cannot install: `mcp` 1.5.0 needs pydantic below 2.14, and pydantic below 2.14 has no 3.15 wheels.
 
 The older approach of bundling pre-compiled packages in `server/lib/` is no longer recommended — it breaks when the user's Python version doesn't match the version used to build the bundled `.pyd` files (e.g. pydantic_core compiled for 3.11 fails on 3.13).
 
