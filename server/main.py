@@ -2341,7 +2341,9 @@ async def create_net_class(ctx: Context, class_name: str, net_names: list) -> st
         net_names (list): List of net names to add to the class
     
     Returns:
-        str: JSON object with the result of the operation
+        str: JSON object with the result of the operation. nets_added counts
+        the nets that were not in the class before; names the board has no
+        net for are listed in nets_not_found and not added.
     """
     logger.info(f"Creating net class '{class_name}' with {len(net_names)} nets")
     

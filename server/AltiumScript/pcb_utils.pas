@@ -806,11 +806,19 @@ var
     i           : Integer;
     ResultProps : TStringList;
     AddedCount  : Integer;
-    WasMember   : Boolean;
+    BoardNets   : TStringList;
+    Members     : TStringList;
+    NotFound    : TStringList;
+    Net         : IPCB_Net;
+    NetIterator : IPCB_BoardIterator;
+    NetIndex    : Integer;
     OutputLines : TStringList;
 begin
     // Initialize result
     ResultProps := TStringList.Create;
+    BoardNets := TStringList.Create;
+    Members := TStringList.Create;
+    NotFound := TStringList.Create;
     AddedCount := 0;
     ClassExists := False;
     
@@ -859,16 +867,42 @@ begin
             PCBServer.PostProcess;
         end;
         
+        // AddMemberByName returns nothing and takes any name, and IsMember
+        // takes a net object: compare names. A net already in the class is
+        // skipped (AddMemberByName would list it twice), and so is a name
+        // the board has no net for.
+        NetIterator := Board.BoardIterator_Create;
+        NetIterator.AddFilter_ObjectSet(MkSet(eNetObject));
+        NetIterator.AddFilter_LayerSet(AllLayers);
+        NetIterator.AddFilter_Method(eProcessAll);
+        Net := NetIterator.FirstPCBObject;
+        while (Net <> nil) do
+        begin
+            BoardNets.Add(Net.Name);
+            Net := NetIterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(NetIterator);
+
+        i := 0;
+        while (NetClass.MemberName[i] <> '') do
+        begin
+            Members.Add(NetClass.MemberName[i]);
+            i := i + 1;
+        end;
+
         // Add nets to the class
         PCBServer.PreProcess;
         for i := 0 to NetNames.Count - 1 do
         begin
-            // AddMemberByName returns nothing: count the nets that were not
-            // members before and are now
-            WasMember := NetClass.IsMember(NetNames[i]);
-            NetClass.AddMemberByName(NetNames[i]);
-            if (not WasMember) and NetClass.IsMember(NetNames[i]) then
+            NetIndex := BoardNets.IndexOf(NetNames[i]);
+            if (NetIndex < 0) then
+                NotFound.Add('"' + JSONEscapeString(NetNames[i]) + '"')
+            else if (Members.IndexOf(BoardNets[NetIndex]) < 0) then
+            begin
+                NetClass.AddMemberByName(BoardNets[NetIndex]);
+                Members.Add(BoardNets[NetIndex]);
                 AddedCount := AddedCount + 1;
+            end;
         end;
         PCBServer.PostProcess;
         
@@ -880,6 +914,10 @@ begin
         AddJSONProperty(ResultProps, 'class_name', ClassName);
         AddJSONBoolean(ResultProps, 'class_created', not ClassExists);
         AddJSONInteger(ResultProps, 'nets_added', AddedCount);
+        if (NotFound.Count > 0) then
+            ResultProps.Add(BuildJSONArray(NotFound, 'nets_not_found'))
+        else
+            ResultProps.Add('"nets_not_found": []');
         
         OutputLines := TStringList.Create;
         try
@@ -890,6 +928,9 @@ begin
         end;
     finally
         ResultProps.Free;
+        BoardNets.Free;
+        Members.Free;
+        NotFound.Free;
     end;
 end;
 
