@@ -87,7 +87,7 @@ class CheckTest(unittest.TestCase):
 class LintTest(unittest.TestCase):
     def lint(self, script):
         sp = sandbox.split_var_block(script)
-        return sandbox.lint_script(sp.body, sp.body_offset)
+        return sandbox.lint_script(sp.body, sp.body_offset, sp.decls)
 
     def test_clean_edit_passes(self):
         script = ("Obj1 := OpenSchDoc('C:\\x.SchDoc');\nSchServer.ProcessControl.PreProcess(Obj1, '');\n"
@@ -100,6 +100,14 @@ class LintTest(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("line 4", problems[0])
         self.assertIn("Corner", problems[0])
+
+    def test_record_reads_through_typed_variables_allowed(self):
+        # Read live on Altium 26.10 from a schematic rectangle and a PCB
+        # component; the production units read them the same way
+        script = ("var\n  Prim : ISch_GraphicalObject;\n  Comp : IPCB_Component;\n  R : TCoordRect;\n"
+                  "I1 := Prim.Corner.X;\nR := Comp.BoundingRectangle;\nI2 := Comp.BoundingRectangle.Left;")
+        self.assertEqual(self.lint(script), [])
+        self.assertEqual(len(self.lint("I1 := Obj3.BoundingRectangle.Left;")), 1)
 
     def test_case_insensitive(self):
         self.assertEqual(len(self.lint("S1 := Obj1.getstate_descriptionstring;")), 1)
@@ -123,6 +131,9 @@ class LintTest(unittest.TestCase):
         problems = self.lint("SchServer.ProcessControl.PreProcess(Obj1, '');\nObj1.GraphicallyInvalidate;")
         self.assertEqual(len(problems), 1)
         self.assertIn("PostProcess", problems[0])
+        # PCBServer's take no parameters and are written without parentheses
+        self.assertEqual(len(self.lint("PCBServer.PreProcess;\nI1 := 1;")), 1)
+        self.assertEqual(self.lint("PCBServer.PreProcess;\nI1 := 1;\nPCBServer.PostProcess;"), [])
 
     def test_template_creates_and_frees_lists(self):
         code = sandbox.strip_strings_and_comments(TEMPLATE)

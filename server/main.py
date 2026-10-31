@@ -1595,11 +1595,11 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
       Free them), IntMan, DbDoc. Assigning an undeclared plain name is
       refused before Altium is called. Do not assign to a for-loop variable
       inside its loop (compile error).
-    - Calls known to crash Altium (SCHM_PrimitiveRegistration,
-      GetState_DescriptionString, reading .Corner, ...) and a PreProcess
-      without PostProcess are refused before Altium is called: a script that
-      dies between PreProcess and PostProcess leaves Altium's undo history
-      broken until Altium is restarted.
+    - Calls known to crash Altium (GetState_DescriptionString, reading
+      .Corner or .BoundingRectangle through an IDispatch variable, ...) and
+      a PreProcess without PostProcess are refused before Altium is called:
+      a script that dies between PreProcess and PostProcess leaves Altium's
+      undo history broken until Altium is restarted.
     - Every dialog the tool answers is saved as a picture first, listed in
       "dialog_snapshots": Altium's own message boxes cannot be read from
       outside, so open the picture to see the message.
@@ -1664,7 +1664,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                            "error": "refused before execution: the script would not compile",
                            "problems": problems, "executor_wedged": False}, indent=2)
     if not skip_lint:
-        problems = sandbox.lint_script(split.body, split.body_offset)
+        problems = sandbox.lint_script(split.body, split.body_offset, split.decls)
         if problems:
             return json.dumps({"success": False,
                                "error": "refused before execution: the script uses a call known to "

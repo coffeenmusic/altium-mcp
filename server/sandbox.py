@@ -296,8 +296,6 @@ def check_script(body_lines: List[str], extra_names: List[str], line_offset: int
 # down without raising anything the script could catch.
 KNOWN_CRASHES = [
     (r"\bGetState_DescriptionString\b", "crashes when called on objects from a schematic iterator"),
-    (r"\bBoundingRectangle\b", "a record: reading its fields crashes"),
-    (r"\.Corner\b(?!\s*:=)", "reading .Corner crashes; writing '.Corner := Point(..)' works"),
     (r"\bDM_PortObjects\b", "crashes"),
     (r"\bDM_PartDesignator\b", "does not exist; use DM_LogicalPartDesignator"),
     (r"\.Tag\b", "schematic objects have no Tag property"),
@@ -309,20 +307,36 @@ KNOWN_CRASHES = [
 ]
 
 
-def lint_script(body_lines: List[str], line_offset: int = 0) -> List[str]:
+def lint_script(body_lines: List[str], line_offset: int = 0, decls: List[str] = ()) -> List[str]:
     """Calls known to crash Altium, and document edits that are never closed.
 
-    Strings and comments are ignored. Returns a list of problems; empty means
-    the script may run.
+    decls are the script's own declarations: a variable declared IDispatch is
+    checked as Obj1..Obj9 are. Strings and comments are ignored. Returns a
+    list of problems; empty means the script may run.
     """
     code = strip_strings_and_comments("\n".join(body_lines))
+    untyped = ["Obj%d" % i for i in range(1, 10)] + [
+        name for d in decls if re.search(r":\s*IDispatch\s*;", d, re.IGNORECASE)
+        for name in declared_names([d])]
+    # A record property (TLocation, TCoordRect) read through an IDispatch
+    # variable crashed Altium; through a typed variable (ISch_GraphicalObject,
+    # IPCB_Component, ...) it reads fine, and the production units do so
+    record_read = re.compile(r"\b(" + "|".join(map(re.escape, untyped)) + r")\s*\.\s*"
+                             r"(Corner|BoundingRectangle\w*)\b(?!\s*:=)", re.IGNORECASE)
     problems = []
     for lineno, line in enumerate(code.splitlines(), 1):
         for pat, why in KNOWN_CRASHES:
             if re.search(pat, line, re.IGNORECASE):
                 problems.append(f"line {lineno + line_offset}: {why}")
-    pre = len(re.findall(r"\.PreProcess\s*\(", code, re.IGNORECASE))
-    post = len(re.findall(r"\.PostProcess\s*\(", code, re.IGNORECASE))
+        m = record_read.search(line)
+        if m:
+            problems.append(f"line {lineno + line_offset}: reading .{m.group(2)} through an IDispatch "
+                            f"variable ({m.group(1)}) crashes; declare it with its interface type, "
+                            f"e.g. ISch_GraphicalObject or IPCB_Component. Writing "
+                            f"'.Corner := Point(..)' works")
+    # PCBServer.PreProcess is usually written without parentheses
+    pre = len(re.findall(r"\.PreProcess\b", code, re.IGNORECASE))
+    post = len(re.findall(r"\.PostProcess\b", code, re.IGNORECASE))
     if pre != post:
         problems.append(f"{pre} PreProcess but {post} PostProcess call(s): an edit that is never "
                         "closed breaks Altium's undo history")
