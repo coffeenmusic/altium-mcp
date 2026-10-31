@@ -443,7 +443,7 @@ class AltiumScriptTest(unittest.TestCase):
         # Define pins for the test symbol
         pins = [
             "1|VCC|eElectricPower|eRotate90|0|1000",     # Power pin at top
-            "2|GND|eElectricPower|eRotate90|0|900",      # Power pin at bottom
+            "2|GND|eElectricPower|eRotate270|0|900",     # Power pin at bottom
             "3|IN1|eElectricInput|eRotate180|100|300",   # Input pin on left
             "4|IN2|eElectricInput|eRotate180|100|500",   # Input pin on left
             "5|OUT|eElectricOutput|eRotate0|800|400"     # Output pin on right

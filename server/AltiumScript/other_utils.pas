@@ -1,10 +1,37 @@
 const
     DEFAULT = 'Blank';
     SCRIPT_ERROR_LOG = 'C:\Users\Public\altium_mcp\script_errors.log';
+    PROGRESS_FILE = 'C:\Users\Public\altium_mcp\progress.txt';
+    // The board the PCB tools last ran on, see FocusBoardForCommand
+    LAST_BOARD_FILE = 'C:\Users\Public\altium_mcp\last_board.txt';
 
 var
     // Why the last EnsureDocumentFocused call failed; reported to the server.
     FocusFailure : String;
+    // When ReportProgress last wrote PROGRESS_FILE
+    LastProgress : Double;
+    // The last message passed to LogScriptError during this run. A command
+    // that gives up with an empty result has logged why; Run replies with it.
+    LastScriptError : String;
+
+// Tell the server a long command is still working. The server waits as long
+// as this file keeps changing, instead of stopping the command after a fixed
+// time. Writes at most once a second, so it is cheap to call on every item
+// of a batch.
+procedure ReportProgress;
+var
+    L : TStringList;
+begin
+    if Now - LastProgress < 1 / 86400 then Exit;
+    LastProgress := Now;
+    L := TStringList.Create;
+    try
+        L.Text := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+        L.SaveToFile(PROGRESS_FILE);
+    except
+    end;
+    L.Free;
+end;
 
 // Errors must never be modal. The server is driven by an agent with no hands:
 // a ShowMessage box blocks this script before it writes its response, every
@@ -14,6 +41,7 @@ procedure LogScriptError(Msg: String);
 var
     L : TStringList;
 begin
+    LastScriptError := Msg;
     L := TStringList.Create;
     try
         if FileExists(SCRIPT_ERROR_LOG) then L.LoadFromFile(SCRIPT_ERROR_LOG);
@@ -183,6 +211,142 @@ begin
         Result := Copy(S, FieldStart, Length(S) - FieldStart + 1);
 end;
 
+// The focused PCB document when it is a board. A focused PCB library also
+// has a board, which the PCB server reports as current; it does not count.
+function FocusedBoard(Dummy: Integer): IPCB_Board;
+var
+    Board : IPCB_Board;
+begin
+    Result := nil;
+    Board := GetBoardSafe(0);
+    if (Board <> nil) and (UpperCase(ExtractFileExt(Board.FileName)) = '.PCBDOC') then
+        Result := Board;
+end;
+
+procedure RememberBoard(Path: String);
+var
+    Store : TStringList;
+begin
+    Store := TStringList.Create;
+    try
+        Store.Text := Path;
+        try
+            Store.SaveToFile(LAST_BOARD_FILE);
+        except
+        end;
+    finally
+        Store.Free;
+    end;
+end;
+
+function RememberedBoard(Dummy: Integer): String;
+var
+    Store : TStringList;
+begin
+    Result := '';
+    if not FileExists(LAST_BOARD_FILE) then Exit;
+    Store := TStringList.Create;
+    try
+        try
+            Store.LoadFromFile(LAST_BOARD_FILE);
+            if Store.Count > 0 then Result := Trim(Store[0]);
+        except
+        end;
+    finally
+        Store.Free;
+    end;
+end;
+
+// Bring a board to the front for a PCB command when none is focused: the
+// board the PCB tools last ran on while it is still open, else the only
+// board in the focused project (or, when that has none, in all open
+// projects). With several to choose from it does not guess: a project often
+// holds a panel or assembly drawing besides the board, and a command run on
+// the wrong one returns empty or wrong data (#33).
+function FocusBoardForCommand(CommandName: String): Boolean;
+var
+    P, I    : Integer;
+    Project : IProject;
+    Doc     : IDocument;
+    Only    : IDocument;
+    Last    : String;
+    Names   : String;
+    Count   : Integer;
+    Shown   : IServerDocument;
+begin
+    Result := False;
+    Last := RememberedBoard(0);
+    if Last <> '' then
+    begin
+        // The path as Altium reported it, so an exact lookup finds it. Not
+        // FindOpenDocument: it is defined further down this unit, and a
+        // routine can only call those defined above it.
+        Shown := Client.GetDocumentByPath(Last);
+        if Shown <> nil then
+        begin
+            Client.ShowDocument(Shown);
+            if FocusedBoard(0) <> nil then
+            begin
+                Result := True;
+                Exit;
+            end;
+        end;
+    end;
+
+    Count := 0;
+    Names := '';
+    Only := nil;
+    for P := -1 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        if P < 0 then
+            Project := GetWorkspace.DM_FocusedProject
+        else
+        begin
+            // The focused project's boards come first; only without any
+            // are the other open projects searched
+            if Count > 0 then Break;
+            Project := GetWorkspace.DM_Projects(P);
+            if Project = GetWorkspace.DM_FocusedProject then Continue;
+        end;
+        if Project = nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Doc := Project.DM_LogicalDocuments(I);
+            if Doc.DM_DocumentKind = 'PCB' then
+            begin
+                Count := Count + 1;
+                Only := Doc;
+                if Count <= 6 then
+                    Names := Names + ', ' + ExtractFileName(Doc.DM_FullPath);
+            end;
+        end;
+    end;
+
+    if Count = 1 then
+    begin
+        Only.DM_OpenAndFocusDocument;
+        Sleep(500);
+        if FocusedBoard(0) <> nil then
+        begin
+            RememberBoard(FocusedBoard(0).FileName);
+            Result := True;
+            Exit;
+        end;
+        FocusFailure := 'Found a PCB document but could not focus it';
+    end
+    else if Count = 0 then
+        FocusFailure := 'No PCB document found in any open project'
+    else
+    begin
+        if Count > 6 then Names := Names + ', ...';
+        FocusFailure := 'The focused document is not a PCB, and ' + IntToStr(Count) +
+            ' PCB documents could be meant (' + Copy(Names, 3, Length(Names)) + '). ' +
+            'Not guessing: click the board''s tab in Altium (or ask the user to), then retry; ' +
+            'the PCB tools then keep using that board.';
+    end;
+    LogScriptError('EnsureDocumentFocused(' + CommandName + '): ' + FocusFailure);
+end;
+
 // Modify the EnsureDocumentFocused function to handle all document types
 // and return more detailed information.
 // ViewTypeHint is only consulted by commands that can target more than one
@@ -312,11 +476,14 @@ begin
     // Check if the correct document type is already focused
     if (DocumentKind = 'PCB') and (PCBServer <> Nil) then
     begin
-        if GetBoardSafe(0) <> Nil then
+        if FocusedBoard(0) <> Nil then
         begin
+            RememberBoard(FocusedBoard(0).FileName);
             Result := True;
-            Exit;
-        end;
+        end
+        else
+            Result := FocusBoardForCommand(CommandName);
+        Exit;
     end
     else if (DocumentKind = 'SCH') and (SchServer <> Nil) then
     begin

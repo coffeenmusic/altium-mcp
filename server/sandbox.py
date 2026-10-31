@@ -22,6 +22,15 @@ which DelphiScript reports as "Undeclared identifier: <method>") both open a
 #32770 dialog owned by X2.EXE whose text ends in "Continue execution?". While
 it is open every later script run is ignored. Answering it with Cancel stops
 the script; -REditScript:Stop then clears any paused debugger state.
+
+Why loops are guarded
+---------------------
+A script that is still running cannot be stopped at all: it runs on Altium's
+UI thread, and both -REditScript:Stop and answering dialogs are window
+messages that thread no longer reads. A loop that never ends therefore
+freezes Altium until X2.EXE is killed (issue #37). build_script makes every
+while and repeat loop also call the template's SandboxTick, which ends all
+loops once a deadline has passed, so the script finishes on its own.
 """
 
 import ctypes
@@ -39,8 +48,12 @@ BODY_END = "// === END EXPERIMENT"
 VARS_BEGIN = "// === USER VARS"
 VARS_END = "// === END USER VARS"
 EXCEPTION_PREFIX = "EXCEPTION: "   # logged by the template's except block
+GUARD_PREFIX = "LOOP GUARD: "       # logged by SandboxTick when it ends the loops
+UNDO_PREFIX = "UNDO GROUP LEFT OPEN: "  # logged by SbxCloseUndo
 LOG_TOKEN = "%LOG_PATH%"
 OUT_TOKEN = "%OUT_PATH%"
+GUARD_TOKEN = "%GUARD_SECONDS%"
+UNDO_TOKEN = "%UNDO_PATH%"
 BODY_INDENT = " " * 8
 VARS_INDENT = " " * 4
 
@@ -133,6 +146,126 @@ def strip_strings_and_comments(code: str) -> str:
     return "".join(out)
 
 
+def _blank_strings_and_comments(code: str) -> str:
+    """Pascal source with string literals and comments replaced by spaces.
+
+    Unlike strip_strings_and_comments every character keeps its offset, so a
+    position found in the result is the same position in `code`.
+    """
+    out = list(code)
+    i, n = 0, len(code)
+    while i < n:
+        c = code[i]
+        if c == "'":
+            j = i + 1
+            while j < n and code[j] != "\n":
+                if code[j] == "'" and j + 1 < n and code[j + 1] == "'":
+                    j += 2
+                    continue
+                if code[j] == "'":
+                    break
+                j += 1
+            end = min(j + 1, n)
+        elif code.startswith("//", i):
+            j = code.find("\n", i)
+            end = n if j < 0 else j
+        elif c == "{" or code.startswith("(*", i):
+            close = "}" if c == "{" else "*)"
+            j = code.find(close, i + 1)
+            end = n if j < 0 else j + len(close)
+        else:
+            i += 1
+            continue
+        for k in range(i, end):
+            if out[k] != "\n":
+                out[k] = " "
+        i = end
+    return "".join(out)
+
+
+_LOOP_RE = re.compile(r"(?<![\w.])(while|until)\b", re.IGNORECASE)
+_DO_RE = re.compile(r"\bdo\b", re.IGNORECASE)
+# What can follow the condition of `until`: the statement's end
+_UNTIL_END_RE = re.compile(r"[()\[\];]|\b(?:end|else|except|finally|until)\b", re.IGNORECASE)
+
+
+def _until_end(blank: str, start: int) -> int:
+    depth = 0
+    for m in _UNTIL_END_RE.finditer(blank, start):
+        tok = m.group(0)
+        if tok in "([":
+            depth += 1
+        elif tok in ")]":
+            depth -= 1
+        elif depth <= 0:
+            return m.start()
+    return len(blank)
+
+
+def guard_loops(code: str, first_line: int) -> str:
+    """Make every while and repeat loop in `code` also call SandboxTick.
+
+        while C do        ->  while SandboxTick(L) and (C) do
+        repeat .. until C ->  repeat .. until (not SandboxTick(L)) or (C)
+
+    L is the line of the loop's `while` or `until` in the submitted script
+    (`first_line` is the line of the first line of `code`). The condition keeps its own lines, so line
+    numbers in Altium's messages still map back to the submitted script; only
+    the column moves on a line that holds a loop condition. for loops are left
+    alone: their bounds are fixed when they start.
+    """
+    blank = _blank_strings_and_comments(code)
+    edits = []
+    for m in _LOOP_RE.finditer(blank):
+        start = m.end()
+        if m.group(1).lower() == "while":
+            do = _DO_RE.search(blank, start)
+            if not do:
+                continue  # incomplete: leave it to the compiler
+            end = do.start()
+        else:
+            end = _until_end(blank, start)
+        while start < end and code[start].isspace():
+            start += 1
+        while end > start and code[end - 1].isspace():
+            end -= 1
+        if start == end:
+            continue
+        line = first_line + code.count("\n", 0, m.start())
+        cond = code[start:end]
+        if m.group(1).lower() == "while":
+            edits.append((start, end, f"SandboxTick({line}) and ({cond})"))
+        else:
+            edits.append((start, end, f"(not SandboxTick({line})) or ({cond})"))
+    for start, end, new in reversed(edits):
+        code = code[:start] + new + code[end:]
+    return code
+
+
+_UNDO_RE = re.compile(r"(?<![\w.])(SchServer\s*\.\s*ProcessControl|PCBServer)\s*\.\s*(Pre|Post)Process\b",
+                      re.IGNORECASE)
+
+
+def track_undo(code: str) -> str:
+    """Route the script's PreProcess/PostProcess calls through the template's
+    SbxPreProcess/SbxPostProcess (SbxPcb... for PCBServer), which remember
+    the undo groups left open so the template can close them at the end.
+
+        SchServer.ProcessControl.PreProcess(Doc, '')  ->  SbxPreProcess(Doc, '')
+        PCBServer.PostProcess                         ->  SbxPcbPostProcess
+
+    Strings and comments are left alone, and nothing moves to another line.
+    """
+    blank = _blank_strings_and_comments(code)
+    edits = []
+    for m in _UNDO_RE.finditer(blank):
+        pcb = m.group(1).lower() == "pcbserver"
+        edits.append((m.start(), m.end(), f"Sbx{'Pcb' if pcb else ''}{m.group(2).capitalize()}Process"))
+    for start, end, new in reversed(edits):
+        code = code[:start] + new + code[end:]
+    return code
+
+
 def check_script(body_lines: List[str], extra_names: List[str], line_offset: int = 0) -> List[str]:
     """Problems that would stop the script from compiling, found before Altium sees it.
 
@@ -156,6 +289,46 @@ def check_script(body_lines: List[str], extra_names: List[str], line_offset: int
     return problems
 
 
+# Calls that crashed Altium (AD26) in real sessions. The template's except block
+# catches most run-time errors, but a script that fails between
+# SchServer.ProcessControl.PreProcess and PostProcess leaves Altium's undo
+# history broken until Altium is restarted, and some of these calls take Altium
+# down without raising anything the script could catch.
+KNOWN_CRASHES = [
+    (r"\bGetState_DescriptionString\b", "crashes when called on objects from a schematic iterator"),
+    (r"\bBoundingRectangle\b", "a record: reading its fields crashes"),
+    (r"\.Corner\b(?!\s*:=)", "reading .Corner crashes; writing '.Corner := Point(..)' works"),
+    (r"\bDM_PortObjects\b", "crashes"),
+    (r"\bDM_PartDesignator\b", "does not exist; use DM_LogicalPartDesignator"),
+    (r"\.Tag\b", "schematic objects have no Tag property"),
+    (r"\bObj\d\s*:=\s*TStringList\.Create\b",
+     "a TStringList held in an IDispatch variable (Obj1..Obj9) crashes when indexed; "
+     "use List1..List3 or declare a TStringList in a var block"),
+    (r"\bList[123]\s*\.\s*Free\b|\bList[123]\s*:=\s*nil\b",
+     "List1..List3 are created and freed by the sandbox; empty them with .Clear"),
+]
+
+
+def lint_script(body_lines: List[str], line_offset: int = 0) -> List[str]:
+    """Calls known to crash Altium, and document edits that are never closed.
+
+    Strings and comments are ignored. Returns a list of problems; empty means
+    the script may run.
+    """
+    code = strip_strings_and_comments("\n".join(body_lines))
+    problems = []
+    for lineno, line in enumerate(code.splitlines(), 1):
+        for pat, why in KNOWN_CRASHES:
+            if re.search(pat, line, re.IGNORECASE):
+                problems.append(f"line {lineno + line_offset}: {why}")
+    pre = len(re.findall(r"\.PreProcess\s*\(", code, re.IGNORECASE))
+    post = len(re.findall(r"\.PostProcess\s*\(", code, re.IGNORECASE))
+    if pre != post:
+        problems.append(f"{pre} PreProcess but {post} PostProcess call(s): an edit that is never "
+                        "closed breaks Altium's undo history")
+    return problems
+
+
 @dataclass
 class BuiltScript:
     text: str
@@ -164,15 +337,20 @@ class BuiltScript:
     vars_first_line: int          # 1-based line in `text` of the first user declaration
 
 
-def build_script(template: str, script: str, log_path: str, out_path: str) -> BuiltScript:
-    """Fill the template: user declarations, script body and the log/result paths."""
+def build_script(template: str, script: str, log_path: str, out_path: str,
+                 guard_seconds: int = 60, undo_path: str = "") -> BuiltScript:
+    """Fill the template: user declarations, script body with its loops
+    guarded and its undo groups tracked, the log/result/undo paths and the
+    loop guard's deadline."""
     split = split_var_block(script)
-    decls, body = split.decls, split.body
+    decls = split.decls
+    body = track_undo(guard_loops("\n".join(split.body), split.body_offset + 1)).split("\n")
     if template.count(BODY_BEGIN) != 1 or template.count(BODY_END) != 1:
         raise ValueError("template must contain the experiment markers exactly once")
     if template.count(VARS_BEGIN) != 1 or template.count(VARS_END) != 1:
         raise ValueError("template must contain the user-vars markers exactly once")
-    text = template.replace(LOG_TOKEN, log_path).replace(OUT_TOKEN, out_path)
+    text = (template.replace(LOG_TOKEN, log_path).replace(OUT_TOKEN, out_path)
+            .replace(GUARD_TOKEN, str(int(guard_seconds))).replace(UNDO_TOKEN, undo_path))
 
     def fill(src, begin, end, lines, indent):
         pre, rest = src.split(begin, 1)
@@ -299,6 +477,99 @@ def altium_dialogs() -> List[Dialog]:
     return found
 
 
+def altium_hung() -> bool:
+    """True while Altium's UI thread is not answering window messages.
+
+    That is the case while a script (or a long command) is still running, and
+    for good when a script loops forever. Nothing sent to Altium then has any
+    effect: script launches queue up, and dialogs cannot be answered.
+    """
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    hung = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def top(hwnd, _):
+        if user32.IsWindowVisible(hwnd) and _process_name(hwnd).lower() == "x2.exe":
+            if user32.IsHungAppWindow(hwnd):
+                hung.append(hwnd)
+                return False
+        return True
+
+    user32.EnumWindows(proto(top), 0)
+    return bool(hung)
+
+
+def snapshot_dialog(d: Dialog, directory: Path, keep: int = 50) -> Optional[str]:
+    """Save a picture of a dialog before it is answered; return the file path.
+
+    Altium's own message boxes (TMessageForm) draw their text as a label that
+    is not a window, so the message cannot be read from outside Altium - the
+    picture is the only record of it. PrintWindow lets the dialog paint itself
+    into a bitmap, so windows covering it do not end up in the picture.
+    """
+    from ctypes import wintypes
+    from PIL import Image
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    # Physical pixels, so the bitmap is not cropped on scaled displays
+    old_ctx = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    try:
+        rect = wintypes.RECT()
+        user32.GetWindowRect(d.hwnd, ctypes.byref(rect))
+    finally:
+        if old_ctx:
+            user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old_ctx))
+    w, h = rect.right - rect.left, rect.bottom - rect.top
+    if w < 20 or h < 20:
+        return None
+    # A freshly opened dialog may not have painted yet
+    # (RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW)
+    user32.RedrawWindow(d.hwnd, None, None, 0x0001 | 0x0080 | 0x0100)
+    time.sleep(0.15)
+    hdc_win = user32.GetWindowDC(d.hwnd)
+    hdc = gdi32.CreateCompatibleDC(hdc_win)
+    bmp = gdi32.CreateCompatibleBitmap(hdc_win, w, h)
+    old = gdi32.SelectObject(hdc, bmp)
+    try:
+        if not (user32.PrintWindow(d.hwnd, hdc, 2) or user32.PrintWindow(d.hwnd, hdc, 0)):  # 2 = PW_RENDERFULLCONTENT
+            return None
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                        ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD),
+                        ("biCompression", wintypes.DWORD), ("biSizeImage", wintypes.DWORD),
+                        ("biXPelsPerMeter", wintypes.LONG), ("biYPelsPerMeter", wintypes.LONG),
+                        ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.biWidth, bi.biHeight = w, -h          # negative height: rows top-down
+        bi.biPlanes, bi.biBitCount = 1, 32
+        buf = ctypes.create_string_buffer(w * h * 4)
+        gdi32.GetDIBits(hdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
+        img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+        # A window that is not per-monitor DPI aware paints at its logical
+        # size and leaves the rest of the bitmap black
+        box = img.getbbox()
+        if box:
+            img = img.crop(box)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"dialog_{time.strftime('%Y%m%d_%H%M%S')}_{d.hwnd}.png"
+        img.save(path)
+    finally:
+        gdi32.SelectObject(hdc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(hdc)
+        user32.ReleaseDC(d.hwnd, hdc_win)
+    try:
+        pics = sorted(directory.glob("dialog_*.png"), key=lambda p: p.stat().st_mtime)
+        for p in pics[:-keep]:
+            p.unlink()
+    except OSError:
+        pass
+    return str(path)
+
+
 def answer_dialog(d: Dialog) -> None:
     """Cancel a script-error dialog; close any other dialog."""
     user32 = ctypes.windll.user32
@@ -336,6 +607,12 @@ class RunFiles:
     log: Path
     result: Path
 
+    @property
+    def undo(self) -> Path:
+        """Undo groups the script has open, one per line, kept current by the
+        template while it runs."""
+        return self.script.with_name(self.script.stem + "_undo.txt")
+
 
 @dataclass
 class Sandbox:
@@ -351,8 +628,9 @@ class Sandbox:
         return RunFiles(self.runs_dir / f"{stem}.pas", self.runs_dir / f"{stem}_log.txt",
                         self.runs_dir / f"{stem}_result.txt")
 
-    def write(self, files: RunFiles, script: str) -> BuiltScript:
-        built = build_script(self.template.read_text(encoding="utf-8"), script, str(files.log), str(files.result))
+    def write(self, files: RunFiles, script: str, guard_seconds: int = 60) -> BuiltScript:
+        built = build_script(self.template.read_text(encoding="utf-8"), script, str(files.log),
+                             str(files.result), guard_seconds, str(files.undo))
         files.script.write_text(built.text, encoding="utf-8")
         return built
 
@@ -364,10 +642,8 @@ class Sandbox:
     def stop_debugger(self) -> None:
         subprocess.Popen(f'"{self.altium_exe}" -REditScript:Stop', shell=True)
 
-    def probe(self, timeout: float = 15.0) -> bool:
-        """Run a trivial script and report whether it finished."""
-        files = self.new_run_files("Probe")
-        self.write(files, "ResultText := 'probe';")
+    def _run_until_done(self, files: RunFiles, script: str, timeout: float) -> bool:
+        self.write(files, script)
         self.launch(files)
         end = time.time() + timeout
         while time.time() < end:
@@ -378,6 +654,35 @@ class Sandbox:
                     answer_dialog(d)
             time.sleep(0.5)
         return False
+
+    def probe(self, timeout: float = 15.0) -> bool:
+        """Run a trivial script and report whether it finished."""
+        return self._run_until_done(self.new_run_files("Probe"), "ResultText := 'probe';", timeout)
+
+    def close_leftover_undo(self, files: RunFiles, timeout: float = 15.0) -> List[str]:
+        """Close the undo groups a script left open when it died before its
+        end (stopped in the debugger), from the list it kept in files.undo.
+        Returns what was closed."""
+        try:
+            open_groups = [ln.strip() for ln in files.undo.read_text(encoding="utf-8", errors="replace")
+                           .splitlines() if ln.strip()]
+        except OSError:
+            return []
+        if not open_groups:
+            return []
+        lines = []
+        for entry in reversed(open_groups):
+            kind, _, path = entry.partition("|")
+            if kind == "PCB":
+                lines.append("PCBServer.PostProcess;")
+            else:
+                quoted = path.replace("'", "''")
+                lines += [f"Obj1 := SchServer.GetSchDocumentByPath('{quoted}');",
+                          "if Obj1 <> nil then SchServer.ProcessControl.PostProcess(Obj1, '');"]
+        lines.append("ResultText := 'closed';")
+        if self._run_until_done(self.new_run_files("Undo"), "\n".join(lines), timeout):
+            return open_groups
+        return []
 
     def recover(self, attempts: int = 3) -> dict:
         """Answer Altium's error boxes, stop the debugger and confirm with a probe run.
@@ -406,7 +711,8 @@ class Sandbox:
         try:
             files = sorted(self.runs_dir.glob("*.pas"), key=lambda p: p.stat().st_mtime)
             for old in files[:-self.keep_runs]:
-                for p in (old, old.with_name(old.stem + "_log.txt"), old.with_name(old.stem + "_result.txt")):
+                for p in (old, old.with_name(old.stem + "_log.txt"), old.with_name(old.stem + "_result.txt"),
+                          old.with_name(old.stem + "_undo.txt")):
                     try:
                         p.unlink()
                     except OSError:

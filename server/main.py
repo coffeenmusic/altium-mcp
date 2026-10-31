@@ -1,10 +1,12 @@
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.utilities.types import Image as MCPImage
+from mcp.types import ToolAnnotations
 import json
 import os
 import time
 import asyncio
 import logging
+import logging.handlers
 import subprocess
 import tkinter as tk
 from tkinter import filedialog
@@ -17,9 +19,8 @@ import win32con
 import win32api
 import win32process
 from PIL import Image
-import io
-import base64
 import glob
+import io
 import re
 import silkscreen
 import label_blocks
@@ -28,19 +29,11 @@ import pcblib_file
 import uuid
 
 from altium_files import read_altium_text, write_altium_text
+from exchange_lock import ExchangeLock
+from altium_install import find_altium_exe
 import sandbox
+import win_processes
 from outjob_parser import parse_outjob
-
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Change to DEBUG for more detailed logs
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # Output to console
-        logging.FileHandler(str(Path(__file__).with_name('altium_mcp.log')))  # Also log to file
-    ]
-)
-logger = logging.getLogger("AltiumMCPServer")
 
 # Set MCP_DIR to the directory of the current Python file
 MCP_DIR = Path(__file__).parent
@@ -53,6 +46,44 @@ MCP_DIR = Path(__file__).parent
 def _data_dir() -> Path:
     override = os.environ.get("ALTIUM_MCP_HOME")
     return Path(override) if override else Path.home() / ".altium-mcp"
+
+
+class _RotatingLog(logging.handlers.RotatingFileHandler):
+    """Rotates like its base class, but keeps logging when it cannot.
+
+    Windows will not rename a file another process has open, and two servers
+    (two Claude sessions) often share this log. The base class then fails
+    on every record; this one keeps appending and leaves the rotation to the
+    next server that starts alone.
+    """
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except OSError:
+            self.maxBytes = 0
+            if self.stream is None:
+                self.stream = self._open()
+
+
+# The log sits beside config.json, for the same reasons, and rotates at
+# 1 MB with 3 backups. INFO by default: DEBUG adds a line for every MCP
+# protocol message. Set ALTIUM_MCP_LOG_LEVEL=DEBUG to get them back.
+LOG_FILE = _data_dir() / "altium_mcp.log"
+_log_level = logging.getLevelName(os.environ.get("ALTIUM_MCP_LOG_LEVEL", "INFO").upper())
+_log_handlers = [logging.StreamHandler()]  # stderr: stdout carries the MCP protocol
+try:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _log_handlers.append(_RotatingLog(str(LOG_FILE), maxBytes=1_000_000, backupCount=3,
+                                      encoding="utf-8"))
+except OSError:
+    pass  # no log file is no reason not to start
+logging.basicConfig(
+    level=_log_level if isinstance(_log_level, int) else logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=_log_handlers
+)
+logger = logging.getLogger("AltiumMCPServer")
 
 LEGACY_CONFIG_FILE = MCP_DIR / "config.json"
 CONFIG_FILE = _data_dir() / "config.json"
@@ -68,11 +99,55 @@ EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
 
+# Written by the bridge script when it starts a command and, at most once a
+# second, while a long command (a batch) is still working
+PROGRESS_FILE = EXCHANGE_DIR / "progress.txt"
+
+# Copies of command results (design data) that older bridge scripts left in
+# this folder, which every account on the machine can read. Nothing reads
+# them. Named one by one: users keep their own script output here too.
+LEFTOVER_TEMP_FILES = (
+    "temp_board_summary.json", "temp_component_data.json",
+    "temp_component_primitives.json", "temp_erc.json",
+    "temp_footprint_primitives.json", "temp_json_output.json",
+    "temp_layers_data.json", "temp_net_connections.json", "temp_nets_data.json",
+    "temp_pins_data.json", "temp_project_components.json",
+    "temp_project_info.json", "temp_rules_data.json",
+    "temp_schematic_data.json", "temp_search_symbol.json",
+    "temp_selected_components.json", "temp_stackup_data.json",
+    "temp_symbol_primitives.json", "temp_symbol_reference.json",
+)
+
+
+def _remove_leftover_temp_files(folder: Path = EXCHANGE_DIR):
+    for name in LEFTOVER_TEMP_FILES:
+        try:
+            (folder / name).unlink()
+        except OSError:
+            pass  # absent, or held open: best effort
+
+
+_remove_leftover_temp_files()
+
 # Seconds for a running Altium to pick up a request (normally ~1-5 s), for a
-# cold Altium launch to get that far, and for a started command to finish
+# cold Altium launch to get that far, for a started command to go without
+# reporting progress, and for any command to finish at all
 START_TIMEOUT = 20
 START_TIMEOUT_COLD = 240
 RESPONSE_TIMEOUT = 120
+RESPONSE_TIMEOUT_MAX = 30 * 60
+
+# How long to wait while another server's command holds the exchange folder
+LOCK_TIMEOUT = START_TIMEOUT_COLD + RESPONSE_TIMEOUT
+
+# Commands that change the design or write files. When one of them times out
+# it may have done some or all of its work, so it must not just be retried.
+MUTATING_COMMANDS = {
+    "create_net_class", "create_schematic_symbol", "set_component_position",
+    "move_components", "place_components", "create_symbols_batch", "build_circuit",
+    "create_footprints_batch", "layout_duplicator", "layout_duplicator_apply",
+    "run_output_jobs", "create_pcb_footprint",
+}
 
 # Present while a script the MCP launched is stuck (paused in Altium's
 # debugger). Only then is the debugger stopped, so a script the user is
@@ -94,8 +169,49 @@ def _clear_script_stuck():
     except OSError:
         pass
 
+
+ALTIUM_HUNG_ERROR = (
+    "Not run: Altium is not responding. A script or a long command is still running in it, or "
+    "a script is stuck in a loop. Nothing can be sent to Altium until it finishes. Scripts "
+    "started by run_altium_script stop their while/repeat loops at their deadline; if Altium "
+    "stays frozen, only ending X2.EXE frees it, and unsaved work is then lost.")
+
+
+def _lift_failed_result(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Make a command's own failure the response's failure.
+
+    Several bridge commands report failure as their result, e.g.
+    {"success": false, "error": "No layer names provided"}, and the bridge
+    wraps any result in "success": true. Tools then took the failure for
+    success: get_screenshot even captured after its focus step had failed.
+    Fields besides the message (per-container results of run_output_jobs,
+    for instance) are kept in the error text.
+    """
+    result = response.get("result")
+    if response.get("success") and isinstance(result, dict) and result.get("success") is False:
+        error = result.get("error") or result.get("message") or "the command reported failure"
+        details = {k: v for k, v in result.items() if k not in ("success", "error", "message")}
+        if details:
+            error = f"{error} {json.dumps(details)[:2000]}"
+        return {**response, "success": False, "error": error}
+    return response
+
+
 # Initialize FastMCP server
-mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
+mcp = FastMCP("AltiumMCP", instructions="Altium integration through the Model Context Protocol")
+
+READ_ONLY = ToolAnnotations(readOnlyHint=True)
+
+
+def _tool(read_only: bool = False):
+    """Register a tool.
+
+    read_only marks a tool that only reads from Altium, so clients can tell it
+    from the tools that change a design. Results stay plain text content: by
+    default mcp would infer an output schema from "-> str" and send every
+    result twice, once more as structuredContent.
+    """
+    return mcp.tool(annotations=READ_ONLY if read_only else None, structured_output=False)
 
 class AltiumConfig:
     def __init__(self):
@@ -130,38 +246,8 @@ class AltiumConfig:
             self._create_default_config()
 
     def _create_default_config(self):
-        """Create a default configuration file with improved Altium executable discovery"""
-        
-        # Try to find Altium directories dynamically
-        altium_base_path = r"C:\Program Files\Altium"
-        altium_exe_path = None
-        
-        if os.path.exists(altium_base_path):
-            # Find all directories that match the pattern AD*
-            ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
-            
-            if ad_dirs:
-                # Sort directories by version number (extract the number after "AD")
-                def get_version_number(dir_path):
-                    match = re.search(r"AD(\d+)", os.path.basename(dir_path))
-                    if match:
-                        return int(match.group(1))
-                    return 0
-                
-                # Sort directories by version number (highest first)
-                ad_dirs.sort(key=get_version_number, reverse=True)
-                
-                # Try each directory until we find one with X2.EXE
-                for ad_dir in ad_dirs:
-                    potential_exe = os.path.join(ad_dir, "X2.EXE")
-                    if os.path.exists(potential_exe):
-                        altium_exe_path = potential_exe
-                        break
-        
-        # Set the found path (or empty string if nothing found)
-        self.altium_exe_path = altium_exe_path if altium_exe_path else ""
-        
-        # Save the configuration
+        """Create a default configuration file, with Altium's path if it can be found"""
+        self.altium_exe_path = find_altium_exe()
         self.save_config()
     
     def _as_dict(self):
@@ -188,94 +274,74 @@ class AltiumConfig:
         except Exception as e:
             logger.error(f"Error saving configuration: {e}")
 
+    def discover_altium(self) -> bool:
+        """Keep the saved Altium path if it still exists, else look for one.
+
+        Never asks the user, so it is safe at import time. Called again
+        before commands, so an Altium started after the server, or one
+        updated to a new folder, is picked up without a restart.
+        """
+        if self.altium_exe_path and os.path.exists(self.altium_exe_path):
+            return True
+        found = find_altium_exe()
+        if not found:
+            return False
+        logger.info(f"Automatically found Altium at: {found}")
+        self.altium_exe_path = found
+        self.save_config()
+        return True
+
     def verify_paths(self):
-        """Verify that the paths in the configuration exist, prompt for input if they don't"""
+        """Verify that the paths in the configuration exist, prompt for input if they don't
+
+        Shows file dialogs, so it must not run on the event loop, and never
+        before the server has answered the client's initialize request: a
+        dialog nobody sees would hold the startup until the client gives up.
+        Messages go to the log only; under the stdio transport stdout is the
+        protocol channel.
+        """
 
         # Initialize variables
         root = None
         paths_verified = True
-        
+
         # Check Altium executable
-        if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
-            paths_verified = False
-            
-            # Before prompting, try an automatic discovery
-            altium_base_path = r"C:\Program Files\Altium"
-            if os.path.exists(altium_base_path):
-                logger.info(f"Attempting automatic discovery in {altium_base_path}")
-                # Find all directories that match the pattern AD*
-                ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
-                
-                if ad_dirs:
-                    # Sort directories by version number (extract the number after "AD")
-                    def get_version_number(dir_path):
-                        match = re.search(r"AD(\d+)", os.path.basename(dir_path))
-                        if match:
-                            return int(match.group(1))
-                        return 0
-                    
-                    # Sort directories by version number (highest first)
-                    ad_dirs.sort(key=get_version_number, reverse=True)
-                    
-                    # Try each directory until we find one with X2.EXE
-                    for ad_dir in ad_dirs:
-                        potential_exe = os.path.join(ad_dir, "X2.EXE")
-                        if os.path.exists(potential_exe):
-                            self.altium_exe_path = potential_exe
-                            logger.info(f"Automatically found Altium at: {self.altium_exe_path}")
-                            print(f"Automatically found Altium at: {self.altium_exe_path}")
-                            paths_verified = True
-                            break
-            
-            # If automatic discovery failed, prompt for input
-            if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
-                if root is None:
-                    import tkinter as tk
-                    from tkinter import filedialog
-                    root = tk.Tk()
-                    root.withdraw()  # Hide the main window
-                
-                logger.info("Altium executable not found. Prompting user for selection...")
-                print(f"Altium executable not found. Searched in:")
-                print(f"  - Automatically scanned C:\\Program Files\\Altium\\AD*\\X2.EXE")
-                print(f"  - Last known path: {self.altium_exe_path}")
-                print("Please select the Altium X2.EXE file...")
-                
-                self.altium_exe_path = filedialog.askopenfilename(
-                    title="Select Altium Executable",
-                    filetypes=[("Executable files", "*.exe")],  # Only allow .exe files
-                    initialdir="C:/Program Files/Altium"
-                )
-                
-                if not self.altium_exe_path:
-                    logger.error("No Altium executable selected. Some functionality may not work.")
-                    print("Warning: No Altium executable selected. Automatic script execution will be disabled.")
-                    paths_verified = False
-        
+        if not self.discover_altium():
+            root = self._dialog_root()
+            logger.info("Altium executable not found in the registry, among running "
+                        "processes or under C:\\Program Files\\Altium. Prompting user for selection...")
+
+            self.altium_exe_path = filedialog.askopenfilename(
+                parent=root,
+                title="Select Altium Executable (X2.EXE)",
+                filetypes=[("Executable files", "*.exe")],  # Only allow .exe files
+                initialdir="C:/Program Files/Altium"
+            )
+
+            if not self.altium_exe_path:
+                logger.error("No Altium executable selected. Some functionality may not work.")
+                paths_verified = False
+
         # Check script path
         if not os.path.exists(self.script_path):
             paths_verified = False
-            
+
             if root is None:
-                import tkinter as tk
-                from tkinter import filedialog
-                root = tk.Tk()
-                root.withdraw()  # Hide the main window
-            
+                root = self._dialog_root()
+
             logger.info(f"Script file not found at {self.script_path}. Prompting user for selection...")
-            print(f"Script file not found at {self.script_path}. Please select the Altium project file...")
-            
+
             selected_path = filedialog.askopenfilename(
+                parent=root,
                 title="Select Altium Project File",
                 filetypes=[("Altium Project files", "*.PrjScr")],  # Changed to PrjScr for script project
                 initialdir=str(MCP_DIR)
             )
-            
+
             if selected_path:
                 self.script_path = selected_path
             else:
                 logger.error("No script file selected. Some functionality may not work.")
-                print("Warning: No script file selected. Please make sure to create one.")
                 paths_verified = False
         
         # Clean up tkinter root if created
@@ -284,8 +350,18 @@ class AltiumConfig:
         
         # Save the updated configuration
         self.save_config()
-        
+
         return paths_verified
+
+    @staticmethod
+    def _dialog_root():
+        # A hidden, topmost owner window, so the file dialog opens in front of
+        # the client instead of behind it where nobody notices it
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        return root
+
 
 # Two Altium resources run out over a long session, and at either limit
 # Altium fails and then crashes, losing unsaved work:
@@ -376,25 +452,80 @@ class AltiumBridge:
         # Ensure the MCP directory exists
         MCP_DIR.mkdir(exist_ok=True)
 
-        # Load configuration
+        # Load configuration. Finding Altium needs nobody, so it happens now;
+        # asking for a path waits for the first command (see ensure_paths)
         self.config = AltiumConfig()
-        self.config.verify_paths()
+        self.config.discover_altium()
+        self._asked_for_paths = False
 
         # Commands share a single request.json/response.json pair, so
-        # concurrent tool calls must be serialized or they clobber each other
+        # concurrent tool calls must be serialized or they clobber each other:
+        # within this server by the asyncio lock, and against other servers
+        # using the same exchange folder by the file lock
         self._command_lock = asyncio.Lock()
+        self._exchange_lock = ExchangeLock(EXCHANGE_DIR / "bridge.lock")
+
+    async def ensure_paths(self, need_script: bool = True) -> Optional[str]:
+        """None when Altium (and the bridge script project) can be found,
+        else what is missing and where to set it.
+
+        The file dialogs of verify_paths are shown at most once per server
+        run, in a worker thread so the event loop keeps answering the
+        client; after that a missing path is reported straight away.
+        """
+        def missing():
+            if not self.config.discover_altium():
+                return "altium_exe_path"
+            if need_script and not os.path.exists(self.config.script_path):
+                return "script_path"
+            return None
+
+        if missing() and not self._asked_for_paths:
+            self._asked_for_paths = True
+            await asyncio.to_thread(self.config.verify_paths)
+        what = missing()
+        if what == "altium_exe_path":
+            return (f"Altium Designer was not found (looked in the registry, at running "
+                    f"processes and under C:\\Program Files\\Altium). Set \"altium_exe_path\" "
+                    f"in {CONFIG_FILE} to the full path of X2.EXE, then retry. The folder "
+                    f"holding config.json can be changed with the ALTIUM_MCP_HOME "
+                    f"environment variable.")
+        if what == "script_path":
+            return (f"The bridge script project was not found at {self.config.script_path}. "
+                    f"Reinstall the extension, or set \"script_path\" in {CONFIG_FILE} to "
+                    f"Altium_API.PrjScr, then retry.")
+        return None
 
     async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
         async with self._command_lock:
-            return await self._execute_command_locked(command, params, timeout)
+            problem = await self.ensure_paths()
+            if problem:
+                return {"success": False, "error": problem}
+            if not await self._exchange_lock.acquire(LOCK_TIMEOUT):
+                return {"success": False,
+                        "error": f"Not run: another Altium MCP server (another Claude session) "
+                                 f"has had a command running in Altium for over {LOCK_TIMEOUT} s. "
+                                 f"Retry when it has finished."}
+            try:
+                # A launch sent to a hung Altium only queues up behind whatever
+                # holds its UI thread; say so now instead of after the start
+                # timeout. Checked with the exchange lock held: while waiting
+                # for it, Altium is busy with another server's command, which
+                # is no reason to give up.
+                if await asyncio.to_thread(sandbox.altium_hung):
+                    return {"success": False, "error": ALTIUM_HUNG_ERROR}
+                response = await self._execute_command_locked(command, params, timeout)
+            finally:
+                self._exchange_lock.release()
+        return _lift_failed_result(response)
 
     @staticmethod
     def _altium_running() -> bool:
+        # Read in-process: starting tasklist took about 110 ms on every
+        # command and held up the event loop while it ran
         try:
-            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq X2.EXE", "/NH"],
-                                 capture_output=True, text=True, timeout=10).stdout
-            return "X2.EXE" in out.upper()
+            return bool(win_processes.pids_by_name("X2.EXE"))
         except Exception:
             return True  # unknown: assume running and use the normal timeouts
 
@@ -433,7 +564,7 @@ class AltiumBridge:
         for _ in range(12):
             try:
                 text = read_altium_text(RESPONSE_FILE)
-                json.loads(text)
+                json.loads(text, strict=False)
                 return text
             except (OSError, json.JSONDecodeError):
                 await asyncio.sleep(0.25)
@@ -445,9 +576,14 @@ class AltiumBridge:
             if problem:
                 return {"success": False, "error": f"Not running '{command}': {problem}"}
 
-            # Clean up any existing response file
-            if RESPONSE_FILE.exists():
-                RESPONSE_FILE.unlink()
+            # Holding the exchange lock, any reply or progress mark still
+            # here is left over from a command that timed out. A late writer
+            # may still hold it open; the request_id check below covers that.
+            for leftover in (RESPONSE_FILE, PROGRESS_FILE):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
 
             # The script echoes request_id so a late reply to an earlier,
             # timed-out command is never mistaken for this command's result
@@ -508,34 +644,60 @@ class AltiumBridge:
             _clear_script_stuck()
 
             logger.info("Bridge script started, waiting for response file...")
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                if RESPONSE_FILE.exists():
+            # Wait as long as the command keeps reporting progress, up to
+            # RESPONSE_TIMEOUT_MAX: a large batch is not stopped mid-way
+            start_time = last_progress = time.monotonic()
+            progress_mark = None
+            response_text = None
+            ignored_reply = None
+            while response_text is None:
+                try:
+                    reply_mark = RESPONSE_FILE.stat().st_mtime
+                except OSError:
+                    reply_mark = None
+                if reply_mark is not None and reply_mark != ignored_reply:
                     response_text = await self._read_response_text()
                     try:
-                        rid = json.loads(response_text).get("request_id")
+                        rid = json.loads(response_text, strict=False).get("request_id")
                     except (json.JSONDecodeError, AttributeError):
                         rid = None
                     if rid is None or rid == request_id:
                         break
-                    logger.warning(f"Discarding stale response for request_id={rid}")
-                    try:
-                        RESPONSE_FILE.unlink()
-                    except OSError:
-                        pass
+                    # Someone else's reply: a late one, or that of a server
+                    # still without the exchange lock. Leave it for its owner;
+                    # ours overwrites it when it comes.
+                    logger.warning(f"Ignoring a reply for request_id={rid}")
+                    response_text, ignored_reply = None, reply_mark
+                now = time.monotonic()
+                try:
+                    mark = PROGRESS_FILE.stat().st_mtime
+                except OSError:
+                    mark = None
+                if mark != progress_mark:
+                    progress_mark, last_progress = mark, now
+                if now - last_progress > timeout or now - start_time > max(RESPONSE_TIMEOUT_MAX, timeout):
+                    break
                 await asyncio.sleep(0.25)
-            else:
+
+            if response_text is None:
                 logger.error("Timeout waiting for response from Altium")
                 # The script started but never finished: it is most likely
                 # paused in the debugger now. Unblock it for the next command.
                 _mark_script_stuck(f"bridge command {command}")
                 await self.stop_script_debugger()
+                # A command that changes the design may have done some or all
+                # of its work; a plain retry would then do it twice
+                outcome = (f" '{command}' changes the design and may have done some or all of "
+                           f"its work, so its outcome is unknown: check the design before "
+                           f"running it again." if command in MUTATING_COMMANDS else "")
                 return {"success": False,
-                        "error": f"No response from Altium within {timeout:g}s: command "
-                                 f"'{command}' started but did not finish. It probably hit a "
-                                 f"runtime error and paused in Altium's debugger (now stopped, "
-                                 f"so the next command can run), or it is still working on a "
-                                 f"very large design."}
+                        "error": f"No response from Altium after "
+                                 f"{int(time.monotonic() - start_time)} s, the last "
+                                 f"{timeout:g} s without progress: command '{command}' "
+                                 f"started but did not finish. It probably hit a runtime error "
+                                 f"and paused in Altium's debugger (now stopped, so the next "
+                                 f"command can run), or it is still working on a very large "
+                                 f"design.{outcome}"}
 
             if recovered:
                 logger.info("Command succeeded after automatic executor recovery")
@@ -543,37 +705,17 @@ class AltiumBridge:
             # Log the raw response for debugging
             logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
 
-            # Parse the JSON response with detailed error handling
+            # Parse the JSON response. strict=False accepts control characters
+            # inside strings: JSONEscapeString escapes only CR, LF and TAB, and
+            # Altium text (descriptions, parameters) can hold others.
             try:
-                response = json.loads(response_text)
+                response = json.loads(response_text, strict=False)
                 logger.info(f"Successfully parsed JSON response")
                 return response
             except json.JSONDecodeError as e:
                 logger.error(f"Error parsing JSON response: {e}")
                 logger.error(f"Error at position {e.pos}, line {e.lineno}, column {e.colno}")
                 logger.error(f"Character at error position: '{response_text[e.pos:e.pos+10]}...'")
-                
-                # Try to manually fix common JSON issues
-                logger.info("Attempting to fix JSON response...")
-                fixed_text = response_text
-                
-                # Fix 1: If there's a quoted JSON array, try to fix it
-                if '"[' in fixed_text and ']"' in fixed_text:
-                    fixed_text = fixed_text.replace('"[', '[').replace(']"', ']')
-                    logger.info("Fixed double-quoted JSON array")
-                
-                # Fix 2: Handle escaped quotes in JSON strings
-                fixed_text = fixed_text.replace('\\"', '"')
-                
-                # Try to parse the fixed JSON
-                try:
-                    fixed_response = json.loads(fixed_text)
-                    logger.info("Successfully parsed fixed JSON response")
-                    return fixed_response
-                except json.JSONDecodeError as e2:
-                    logger.error(f"Still failed to parse JSON after fixes: {e2}")
-                
-                # If all else fails, return a structured error
                 return {
                     "success": False, 
                     "error": f"Invalid JSON response: {e}",
@@ -621,12 +763,10 @@ class AltiumBridge:
         """Run the Altium bridge script"""
         if not os.path.exists(self.config.altium_exe_path):
             logger.error(f"Altium executable not found at: {self.config.altium_exe_path}")
-            print(f"Error: Altium executable not found. Please check the configuration.")
             return False
 
         if not os.path.exists(self.config.script_path):
             logger.error(f"Script file not found at: {self.config.script_path}")
-            print(f"Error: Script file not found. Please check the configuration.")
             return False
 
         try:
@@ -662,7 +802,7 @@ class AltiumBridge:
 # Create a global bridge instance
 altium_bridge = AltiumBridge()
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_all_component_property_names(ctx: Context) -> str:
     """
     Get all available component property names (JSON keys) from all components
@@ -712,7 +852,7 @@ async def get_all_component_property_names(ctx: Context) -> str:
         logger.error(f"Error processing component data: {e}")
         return json.dumps({"error": f"Failed to process component data: {str(e)}"})
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_component_property_values(ctx: Context, property_name: str) -> str:
     """
     Get values of a specific property for all components
@@ -767,7 +907,7 @@ async def get_component_property_values(ctx: Context, property_name: str) -> str
         logger.error(f"Error processing component data: {e}")
         return json.dumps({"error": f"Failed to process component data: {str(e)}"})
     
-@mcp.tool()
+@_tool(read_only=True)
 async def get_symbol_placement_rules(ctx: Context) -> str:
     """
     Get schematic symbol placement rules from a local configuration file
@@ -825,7 +965,7 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
             "error": f"Failed to read rules file: {str(e)}"
         }, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_library_symbol_reference(ctx: Context) -> str:
     """
     Get the currently open symbol from a schematic library to use as reference for creating a new symbol.
@@ -858,7 +998,7 @@ async def get_library_symbol_reference(ctx: Context) -> str:
     logger.info(f"Retrieved symbol reference data")
     return json.dumps(symbol_data, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def search_library_symbol(ctx: Context, symbol_name: str, library_path: str = "") -> str:
     """
     Search for a symbol by name in a schematic library (.SchLib) and navigate to it.
@@ -906,7 +1046,7 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
     logger.info(f"Symbol search complete. Found: {result.get('found', False)}")
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+@_tool()
 async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1, graphics: list = None) -> str:
     r"""
     Before executing, run get_symbol_placement_rules first.
@@ -941,7 +1081,9 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                     "pin_number|pin_name|pin_type|pin_orientation|x|y[|owner_part_id[|length[|show_name[|show_designator]]]]"
                     Pin types: eElectricHiZ, eElectricInput, eElectricIO, eElectricOpenCollector,
                                eElectricOpenEmitter, eElectricOutput, eElectricPassive, eElectricPower
-                    Pin orientations: eRotate0 (right), eRotate90 (down), eRotate180 (left), eRotate270 (up)
+                    Pin orientations: eRotate0 (right), eRotate90 (up), eRotate180 (left), eRotate270 (down)
+                    x, y is where the pin meets the body; the pin extends from there
+                    in its orientation's direction (left-side pins eRotate180, top pins eRotate90)
                     X,Y coordinates in mils
                     owner_part_id (optional): Part number the pin belongs to (1-based).
                                Use 0 for pins shared across all parts (e.g. power/GND).
@@ -1000,7 +1142,7 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     logger.info(f"Symbol {symbol_name} created successfully with {len(pins)} pins")
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
     """
     Get schematic data for components in Altium
@@ -1068,7 +1210,7 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
         logger.error(f"Error processing schematic data: {e}")
         return json.dumps({"error": f"Failed to process schematic data: {str(e)}"})
     
-@mcp.tool()
+@_tool(read_only=True)
 async def get_pcb_layers(ctx: Context) -> str:
     """
     Get detailed information about all layers in the current Altium PCB
@@ -1101,14 +1243,20 @@ async def get_pcb_layers(ctx: Context) -> str:
     logger.info(f"Retrieved PCB layers data")
     return json.dumps(layers_data, indent=2)
 
-@mcp.tool()
-async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: bool) -> str:
+@_tool()
+async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: bool, exclusive: bool = True) -> str:
     """
     Set visibility for specified PCB layers
-    
+
+    Showing layers is exclusive by default: the listed layers are shown and
+    every other layer is hidden, which suits a screenshot of just those
+    layers. Pass exclusive=False to show the listed layers and leave the rest
+    as they are. Hiding only ever hides the listed layers.
+
     Args:
         layer_names (list): List of layer names to modify (e.g., ["Top Layer", "Bottom Layer", "Mechanical 1"])
         visible (bool): Whether to show (True) or hide (False) the specified layers
+        exclusive (bool): With visible=True, hide every layer not listed (default True)
         
     Returns:
         str: JSON object with the result of the operation
@@ -1120,7 +1268,8 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: boo
         "set_pcb_layer_visibility",
         {
             "layer_names": layer_names,
-            "visible": visible
+            "visible": visible,
+            "exclusive": exclusive
         }
     )
     
@@ -1136,7 +1285,7 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: boo
     logger.info(f"Layer visibility set successfully")
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_component_data(ctx: Context, cmp_designators: list) -> str:
     """
     Get all data for components in Altium
@@ -1204,7 +1353,7 @@ async def get_component_data(ctx: Context, cmp_designators: list) -> str:
         logger.error(f"Error processing component data: {e}")
         return json.dumps({"error": f"Failed to process component data: {str(e)}"})
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_selected_components_coordinates(ctx: Context) -> str:
     """
     Get coordinates and positioning information for selected components in Altium layout
@@ -1236,7 +1385,7 @@ async def get_selected_components_coordinates(ctx: Context) -> str:
     logger.info(f"Retrieved positioning data for selected components")
     return json.dumps(components_coords, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_all_designators(ctx: Context) -> str:
     """
     Get all component designators from the current Altium board
@@ -1281,7 +1430,7 @@ async def get_all_designators(ctx: Context) -> str:
         logger.error(f"Error processing component data: {e}")
         return json.dumps({"error": f"Failed to process component data: {str(e)}"})
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     """
     Get pin data for components in Altium
@@ -1331,6 +1480,8 @@ SANDBOX_PAS = SANDBOX_DIR / "Sandbox.pas"
 # Run files live in the exchange folder: Altium runs outside Claude Desktop's
 # MSIX package and cannot see the virtualized AppData path (issue #19)
 SANDBOX_RUNS = EXCHANGE_DIR / "runs"
+# Pictures of the dialogs a run answered (their text is often not readable)
+SANDBOX_DIALOGS = EXCHANGE_DIR / "dialogs"
 
 
 def _window_process_name(hwnd) -> str:
@@ -1412,8 +1563,9 @@ def _sandbox() -> sandbox.Sandbox:
                            template=SANDBOX_PAS, runs_dir=SANDBOX_RUNS)
 
 
-@mcp.tool()
-async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120) -> str:
+@_tool()
+async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120,
+                            skip_lint: bool = False) -> str:
     """
     Run a DelphiScript snippet inside an isolated Altium sandbox and report
     what happened, step by step.
@@ -1439,9 +1591,18 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
               X, Y : Integer;
       or reuse the scratch variables S1..S9 (String), I1..I9 and B1..B3
       (Integer), F1..F4 (Double), Obj1..Obj9 (IDispatch), List1..List3
-      (TStringList), IntMan, DbDoc. Assigning an undeclared plain name is
+      (TStringList, created empty by the sandbox - reuse with .Clear, never
+      Free them), IntMan, DbDoc. Assigning an undeclared plain name is
       refused before Altium is called. Do not assign to a for-loop variable
       inside its loop (compile error).
+    - Calls known to crash Altium (SCHM_PrimitiveRegistration,
+      GetState_DescriptionString, reading .Corner, ...) and a PreProcess
+      without PostProcess are refused before Altium is called: a script that
+      dies between PreProcess and PostProcess leaves Altium's undo history
+      broken until Altium is restarted.
+    - Every dialog the tool answers is saved as a picture first, listed in
+      "dialog_snapshots": Altium's own message boxes cannot be read from
+      outside, so open the picture to see the message.
     - Helpers: MM(mm) converts millimetres to internal units;
       OpenSchDoc(path) returns the ISch_Document, opening the file if needed
       (GetSchDocumentByPath alone returns nil for a closed file, and a call on
@@ -1449,8 +1610,24 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     - Errors inside the script (undeclared identifiers, calls on nil, bad
       conversions) are caught by the sandbox and come back as "script error"
       with Altium's message and the last step; no try/except is needed.
+    - Loops: a running script cannot be stopped from outside, so a loop that
+      never ends would freeze Altium until it is killed. Every while and
+      repeat loop is therefore guarded: about 10 s before timeout_seconds all
+      loops exit, the rest of the script still runs (so a PostProcess after
+      the loop is not skipped), SaveDoc no longer saves, and the tool returns
+      "loop guard" with the loop's line. Make loops that delete or retry
+      objects bounded anyway (a fixed count, never the same object twice).
+      for loops are not guarded.
     - The sandbox is standalone: helpers and constants from the production
       units (TrimJSON, AddJSONProperty, ...) are NOT available; REPLACEALL is.
+    - Undo: wrap each edit in SchServer.ProcessControl.PreProcess(Doc, '') /
+      PostProcess(Doc, '') (PCBServer.PreProcess / PostProcess on a PCB), and
+      report changes to the robot manager (SCHM_PrimitiveRegistration for a new
+      object, SCHM_BeginModify / SCHM_EndModify around a change). An undo group
+      left open makes the user's own later edits in that document impossible
+      to undo until Altium restarts, so the sandbox closes any group the script
+      leaves open, even after an error, and reports it as
+      "undo_groups_closed": fix the script when you see it.
     - Never register objects into a library document and never write to shared
       or network library paths. Verify the target document kind first
       (ObjectID 32 = schematic, 33 = symbol library).
@@ -1463,6 +1640,8 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         script (str): DelphiScript statements to execute (body only, optionally
             preceded by a var block).
         timeout_seconds (int): How long to wait for completion (default 120).
+        skip_lint (bool): Run even though the known-crash check refused the
+            script. Only for a false positive.
 
     Returns:
         str: JSON with success, the step log and the script's ResultText; on
@@ -1484,6 +1663,22 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         return json.dumps({"success": False,
                            "error": "refused before execution: the script would not compile",
                            "problems": problems, "executor_wedged": False}, indent=2)
+    if not skip_lint:
+        problems = sandbox.lint_script(split.body, split.body_offset)
+        if problems:
+            return json.dumps({"success": False,
+                               "error": "refused before execution: the script uses a call known to "
+                                        "crash Altium or leaves a document edit open",
+                               "problems": problems,
+                               "note": "Altium was not touched. Pass skip_lint=True only for a false positive.",
+                               "executor_wedged": False}, indent=2)
+
+    problem = await altium_bridge.ensure_paths(need_script=False)
+    if problem:
+        return json.dumps({"success": False, "error": problem, "executor_wedged": False}, indent=2)
+
+    if await asyncio.to_thread(sandbox.altium_hung):
+        return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR, "executor_wedged": False}, indent=2)
 
     sb = _sandbox()
     report = {}
@@ -1500,9 +1695,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         if report["recovered_before_run"]["recovered"]:
             _clear_script_stuck()
 
+    # The loops stop early enough for the script to finish and its result to
+    # arrive before this tool gives up on it
+    guard_seconds = max(5, timeout_seconds - 10)
     try:
         files = sb.new_run_files()
-        built = sb.write(files, script)
+        built = sb.write(files, script, guard_seconds)
     except Exception as e:
         return json.dumps({"success": False, "error": f"could not write the run file: {e}"})
     sb.launch(files)
@@ -1512,7 +1710,17 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     # Keyed by window: a dialog that ignores WM_CLOSE (Yes/No boxes do) is
     # found again on every pass and must be reported once
     dismissed = {}
+    snapshots = {}
     error_dialog = None
+
+    def snapshot(d):
+        if d.hwnd not in snapshots:
+            try:
+                snapshots[d.hwnd] = sandbox.snapshot_dialog(d, SANDBOX_DIALOGS)
+            except Exception as e:
+                logger.warning(f"dialog snapshot failed: {e}")
+                snapshots[d.hwnd] = None
+
     while not files.result.exists() and time.time() - start < timeout_seconds:
         await asyncio.sleep(0.5)
         for d in sandbox.altium_dialogs():
@@ -1522,9 +1730,11 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             if d.is_script_error or (d.cls == "TMessageForm" and d.title == "Error"
                                      and not files.log.exists()):
                 error_dialog = d
+                snapshot(d)
                 sandbox.answer_dialog(d)
                 break
             if time.time() - start > 6:
+                snapshot(d)
                 sandbox.answer_dialog(d)
                 dismissed[d.hwnd] = d
         if error_dialog:
@@ -1532,6 +1742,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     report["dialogs_dismissed"] = len(dismissed)
     report["dismissed_dialog_titles"] = [d.title for d in dismissed.values()]
+    report["dialog_snapshots"] = [p for p in snapshots.values() if p]
     steps = (sandbox.read_when_ready(files.log, read_altium_text).splitlines()
              if files.log.exists() else [])
 
@@ -1539,6 +1750,27 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         _clear_script_stuck()  # our script ran to the end: Altium is free
         result_text = sandbox.read_when_ready(files.result, read_altium_text).strip()
         sb.prune()
+        closed = [s[len(sandbox.UNDO_PREFIX):] for s in steps if s.startswith(sandbox.UNDO_PREFIX)]
+        if closed:
+            report["undo_groups_closed"] = closed
+            report["undo_warning"] = (
+                "The script called PreProcess without a matching PostProcess (or failed between "
+                "them). The sandbox closed the group so the user can still undo their own edits "
+                "in that document; pair every PreProcess with a PostProcess.")
+        guard = next((s for s in steps if s.startswith(sandbox.GUARD_PREFIX)), None)
+        if guard is not None:
+            m = re.search(r"line (\d+)", guard)
+            return json.dumps({
+                "success": False,
+                "error": "loop guard",
+                "altium_message": guard[len(sandbox.GUARD_PREFIX):],
+                "line": int(m.group(1)) if m else None,
+                "diagnosis": f"A while or repeat loop was still running after {guard_seconds} s, "
+                             "so every loop was cut short and the script ran to its end; Altium is "
+                             "free again. Statements after the loops ran on partial results and "
+                             "SaveDoc did not save: check the document before saving it. Make the "
+                             "loop bounded (a fixed count, never retrying the same object).",
+                "result": result_text, "steps": steps, "executor_wedged": False, **report}, indent=2)
         exc = next((s for s in steps if s.startswith(sandbox.EXCEPTION_PREFIX)), None)
         if exc is not None:
             before = steps[:steps.index(exc)]
@@ -1559,14 +1791,21 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         recovery = await asyncio.to_thread(sb.recover)
         if recovery["recovered"]:
             _clear_script_stuck()
+            # The script stopped before its end, so the template could not
+            # close the undo groups it had opened; a group left open makes
+            # the user's own edits in that document impossible to undo
+            closed = await asyncio.to_thread(sb.close_leftover_undo, files)
+            if closed:
+                report["undo_groups_closed"] = closed
         started = bool(steps)
         return json.dumps({
             "success": False,
             "error": "run-time error" if started else "compile error",
             "altium_message": error_dialog.text or (
                 "Altium showed an Error box before the script started; its text cannot be read "
-                "from outside Altium. This is usually a syntax error (for example a construct "
-                "DelphiScript does not support, such as 'on E: Exception do')."),
+                "from outside Altium - open the picture in 'dialog_snapshots'. This is usually "
+                "a syntax error (for example a construct DelphiScript does not support, such "
+                "as 'on E: Exception do')."),
             "location": sandbox.map_error_line(built, error_dialog.text),
             "last_step_reached": steps[-1] if steps else None,
             "diagnosis": ("The script started; the statement at 'location' failed while running "
@@ -1583,6 +1822,22 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
             "diagnosis": f"Altium was asked to run {files.script} and showed 'Select Item To "
                          "Run' instead, so it cannot open that path.",
             "executor_wedged": False, **report}, indent=2)
+
+    # Still running: Stop and the recovery probe are window messages Altium
+    # is not reading, and each probe launch would only queue up behind it
+    if steps and await asyncio.to_thread(sandbox.altium_hung):
+        _mark_script_stuck("run_altium_script")
+        return json.dumps({
+            "success": False,
+            "error": f"no result after {timeout_seconds} s: the script is still running and "
+                     "Altium is not responding",
+            "last_step_reached": steps[-1],
+            "diagnosis": f"The script's while/repeat loops stop at {guard_seconds} s, so the time "
+                         "is going into a for loop or a single long Altium call. A running script "
+                         "cannot be stopped from outside. Wait for Altium; if it stays frozen, only "
+                         "ending X2.EXE frees it (unsaved work is lost). Do not retry until "
+                         "Altium responds.",
+            "steps": steps, "executor_wedged": True, **report}, indent=2)
 
     # No result and no error dialog. If our script started, it is ours: stop
     # it. If it never started, something else holds Altium - possibly a
@@ -1613,7 +1868,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         "steps": steps, **report}, indent=2)
 
 
-@mcp.tool()
+@_tool()
 async def ensure_altium_script_skill(ctx: Context, install: bool = False) -> str:
     """
     Check whether the "altium-script" skill is installed, and optionally
@@ -1670,7 +1925,7 @@ async def ensure_altium_script_skill(ctx: Context, install: bool = False) -> str
                            "error": str(e)[:300]}, indent=2)
 
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_footprint_primitives(ctx: Context, library_path: str = "", footprint_name: str = "") -> str:
     """
     Read the primitives of footprints in a PCB library (.PcbLib).
@@ -1732,7 +1987,7 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
         pcblib_file.add_body_placements(result)
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+@_tool()
 async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
     """
     Create many PCB footprints in a single Altium script run.
@@ -1795,7 +2050,7 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
     result = response.get("result", {})
     return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
-@mcp.tool()
+@_tool()
 async def build_schematic(ctx: Context, parts: list, wires: list = None,
                           junctions: list = None, net_labels: list = None,
                           power_ports: list = None, notes: list = None) -> str:
@@ -1921,7 +2176,7 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
                               "wires from these, not from predicted offsets.")
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+@_tool()
 async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     """
     Create many schematic symbols, or edit existing ones, in a single
@@ -2005,7 +2260,7 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     result = response.get("result", {})
     return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_name: str = "") -> str:
     """
     Read the graphic primitives of symbols in a schematic library (.SchLib).
@@ -2054,7 +2309,7 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
     result = response.get("result", {})
     return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_all_nets(ctx: Context) -> str:
     """
     Return every unique net name in the active PCB document.
@@ -2076,7 +2331,7 @@ async def get_all_nets(ctx: Context) -> str:
     # Result is already a JSON‑serialisable Python list
     return json.dumps(response.get("result", []), indent=2)
 
-@mcp.tool()
+@_tool()
 async def create_net_class(ctx: Context, class_name: str, net_names: list) -> str:
     """
     Create a new net class and add specified nets to it
@@ -2111,7 +2366,7 @@ async def create_net_class(ctx: Context, class_name: str, net_names: list) -> st
     logger.info(f"Net class '{class_name}' created/modified successfully")
     return json.dumps(result, indent=2)
     
-@mcp.tool()
+@_tool()
 async def set_component_position(ctx: Context, cmp_designator: str, x: float, y: float, rotation: float = -1) -> str:
     """
     Set a component's absolute position in the PCB layout
@@ -2146,7 +2401,7 @@ async def set_component_position(ctx: Context, cmp_designator: str, x: float, y:
     logger.info(f"Component position set successfully")
     return json.dumps({"success": True, "result": result}, indent=2)
 
-@mcp.tool()
+@_tool()
 async def move_components(ctx: Context, cmp_designators: list, x_offset: float, y_offset: float, rotation: float = 0) -> str:
     """
     Move components by RELATIVE offset from their current position (not absolute positioning)
@@ -2188,7 +2443,7 @@ async def move_components(ctx: Context, cmp_designators: list, x_offset: float, 
     logger.info(f"Components moved successfully")
     return json.dumps({"success": True, "result": result}, indent=2)
 
-@mcp.tool()
+@_tool()
 async def place_components(ctx: Context, placements: list) -> str:
     """
     Place multiple components at absolute positions in a single Altium transaction.
@@ -2296,7 +2551,7 @@ def _mst_length(points: list) -> float:
                     best[v] = d
     return total
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_net_connections(ctx: Context, cmp_designators: list = None, max_pads_per_net: int = 40) -> str:
     """
     Get net connectivity and airline (unrouted connection) lengths for the
@@ -2380,7 +2635,7 @@ def _rotate_offset(dx: float, dy: float, degrees: float) -> tuple:
     return (dx * math.cos(rad) - dy * math.sin(rad),
             dx * math.sin(rad) + dy * math.cos(rad))
 
-@mcp.tool()
+@_tool(read_only=True)
 async def check_orientation(ctx: Context, cmp_designators: list = None, min_improvement_mils: float = 25) -> str:
     """
     Advisory check: find 2-pad passives whose rotation could be improved.
@@ -2521,7 +2776,7 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
         "suggestions": suggestions,
     }, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6) -> str:
     """
     Verify component placement: find overlaps and clearance violations.
@@ -2702,7 +2957,7 @@ def _saved_autoplacer_settings() -> dict:
     }
     return out
 
-@mcp.tool()
+@_tool()
 async def auto_place_silkscreen(ctx: Context, designators: list = None, selected_only: bool = False,
                                 failed_action: str = None, avoid_vias: bool = None,
                                 rotation_strategy: str = None, positions: list = None,
@@ -2836,7 +3091,7 @@ async def auto_place_silkscreen(ctx: Context, designators: list = None, selected
                       "get_designator_options and set_designator_positions.")
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def check_silkscreen(ctx: Context, designators: list = None, preview: bool = False):
     """
     Find the designators that need work. Start and finish silkscreen cleanup
@@ -2919,7 +3174,7 @@ async def check_silkscreen(ctx: Context, designators: list = None, preview: bool
                 board, side_boxes, side=side, problems=attention, max_px=1600), format="png"))
     return [text] + images
 
-@mcp.tool()
+@_tool(read_only=True)
 async def view_silkscreen(ctx: Context, designators: list = None, region: list = None,
                           side: str = None, grid_mils: float = 0, refresh: bool = False):
     """
@@ -2987,7 +3242,7 @@ async def view_silkscreen(ctx: Context, designators: list = None, region: list =
         info["view_mils"] = [round(v, 1) for v in view]
     return [json.dumps(info, indent=2), MCPImage(data=png, format="png")]
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_designator_options(ctx: Context, designators: list, count: int = 5,
                                  max_gap_mils: float = 50, min_height_mils: float = 0,
                                  refresh: bool = False):
@@ -3070,7 +3325,7 @@ async def get_designator_options(ctx: Context, designators: list, count: int = 5
         images.append(MCPImage(data=png, format="png"))
     return [json.dumps(out, indent=2)] + images
 
-@mcp.tool()
+@_tool()
 async def set_designator_positions(ctx: Context, placements: list, dry_run: bool = False,
                                    verify: bool = True) -> str:
     """
@@ -3283,7 +3538,7 @@ def _block_image(board, option) -> bytes:
     return silkscreen.render_view(board, boxes, focus=focus, side=side, targets=option.members,
                                   margin=60.0, graphics=option.graphics)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_label_block_options(ctx: Context, designators: list, count: int = 3,
                                   min_height_mils: float = 25, max_distance_mils: float = 500,
                                   link: str = "auto", whole_row: bool = True, refresh: bool = False):
@@ -3345,7 +3600,7 @@ async def get_label_block_options(ctx: Context, designators: list, count: int = 
                        "other designators out of the way first")
     return [json.dumps(out, indent=2)] + [MCPImage(data=_block_image(board, o), format="png") for o in options]
 
-@mcp.tool()
+@_tool()
 async def place_label_block(ctx: Context, designators: list, option: int = 1,
                             whole_row: bool = True) -> str:
     """
@@ -3430,7 +3685,7 @@ async def place_label_block(ctx: Context, designators: list, option: int = 1,
         out["note"] = note
     return json.dumps(out, indent=2)
 
-@mcp.tool()
+@_tool()
 async def remove_label_block(ctx: Context, designators: list) -> str:
     """
     Remove the label block of these parts: its link graphics (leader or
@@ -3463,7 +3718,36 @@ async def remove_label_block(ctx: Context, designators: list) -> str:
     _save_blocks(board.file, [r for r in records if r not in old])
     return json.dumps({"removed": [{"parts": r["members"], "link": r["link"]} for r in old]}, indent=2)
 
-@mcp.tool()
+def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
+    """Copy a window's pixels, frame included, into an RGB image.
+
+    Every GDI object is released even when a step fails, so a failed capture
+    does not leak device contexts or the bitmap.
+    """
+    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    mfc_dc = save_dc = bitmap = None
+    try:
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+        save_dc.SelectObject(bitmap)
+        save_dc.BitBlt((0, 0), (width, height), mfc_dc, (0, 0), win32con.SRCCOPY)
+        info = bitmap.GetInfo()
+        return Image.frombuffer('RGB', (info['bmWidth'], info['bmHeight']),
+                                bitmap.GetBitmapBits(True), 'raw', 'BGRX', 0, 1)
+    finally:
+        # The memory DC goes first: a bitmap still selected into a DC is not deleted
+        if save_dc is not None:
+            save_dc.DeleteDC()
+        if bitmap is not None and bitmap.GetHandle():
+            win32gui.DeleteObject(bitmap.GetHandle())
+        if mfc_dc is not None:
+            mfc_dc.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwnd_dc)
+
+
+@_tool(read_only=True)
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
     """
     Take a screenshot of the Altium window, returned as viewable image content.
@@ -3518,32 +3802,34 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                 "focused_kind": focused_kind,
                 "focused_document": focused_document})
 
-        # Run the screenshot capture in a separate thread
-        import threading
-        import queue
-        import datetime
-        from PIL import Image
-        
-        result_queue = queue.Queue()
-        
-        def capture_screenshot_thread():
-            try:
-                # Work in physical pixels. Python is not DPI aware, so on a
-                # scaled display Windows hands this process window rects
-                # divided by the scale factor (1080x902 for a 2160x1804
-                # window at 200%), while the BitBlt below copies the window's
-                # real pixels: the capture came back as only the top-left
-                # part of the window. Per-monitor awareness for this thread
-                # alone gives GetWindowRect the physical size and ends with
-                # the thread. V2 (-4) needs Windows 10 1703; V1 (-3) is the
-                # fallback.
-                import ctypes
-                set_dpi_context = ctypes.windll.user32.SetThreadDpiAwarenessContext
-                set_dpi_context.restype = ctypes.c_void_p
-                set_dpi_context.argtypes = [ctypes.c_void_p]
-                if not (set_dpi_context(-4) or set_dpi_context(-3)):
-                    logger.warning("Could not make the capture thread DPI aware; on a scaled display the capture may show only part of the window")
+        # The capture runs in a worker thread: it waits for Altium to come to
+        # the front and paint, which must not block the server's event loop
+        import ctypes
 
+        def capture_in_physical_pixels():
+            # Work in physical pixels. Python is not DPI aware, so on a
+            # scaled display Windows hands this process window rects
+            # divided by the scale factor (1080x902 for a 2160x1804
+            # window at 200%), while the BitBlt copies the window's real
+            # pixels: the capture came back as only the top-left part of
+            # the window. Per-monitor awareness for this thread gives
+            # GetWindowRect the physical size. The worker thread is pooled
+            # and reused, so its previous setting is restored afterwards.
+            # V2 (-4) needs Windows 10 1703; V1 (-3) is the fallback.
+            set_dpi_context = ctypes.windll.user32.SetThreadDpiAwarenessContext
+            set_dpi_context.restype = ctypes.c_void_p
+            set_dpi_context.argtypes = [ctypes.c_void_p]
+            previous_dpi_context = set_dpi_context(-4) or set_dpi_context(-3)
+            if not previous_dpi_context:
+                logger.warning("Could not make the capture thread DPI aware; on a scaled display the capture may show only part of the window")
+            try:
+                return capture_screenshot()
+            finally:
+                if previous_dpi_context:
+                    set_dpi_context(previous_dpi_context)
+
+        def capture_screenshot():
+            try:
                 # Find Altium windows
                 altium_windows = []
                 altium_fallback_windows = []
@@ -3577,12 +3863,11 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                     altium_windows = altium_fallback_windows
                 
                 if not altium_windows:
-                    result_queue.put({
-                        "success": False, 
+                    return {
+                        "success": False,
                         "error": f"No Altium windows found for {view_type} view"
-                    })
-                    return
-                
+                    }
+
                 # Altium owns several top-level windows with its name in the
                 # title, and while it switches documents a small transient one
                 # can come first. Take the largest window that is not
@@ -3640,55 +3925,33 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                 width = right - left
                 height = bottom - top
                 if width < 200 or height < 150:
-                    result_queue.put({"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"})
-                    return
-                
+                    return {"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"}
+
                 # Take screenshot using GDI functions instead of ImageGrab
                 try:
-                    # Get device context
-                    hwndDC = win32gui.GetWindowDC(hwnd)
-                    mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-                    saveDC = mfcDC.CreateCompatibleDC()
-                    
-                    # Create a bitmap object
-                    saveBitMap = win32ui.CreateBitmap()
-                    saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
-                    saveDC.SelectObject(saveBitMap)
-                    
-                    # Copy the screen into the bitmap
-                    saveDC.BitBlt((0, 0), (width, height), mfcDC, (0, 0), win32con.SRCCOPY)
-                    
-                    # Convert the bitmap to an Image
-                    bmpinfo = saveBitMap.GetInfo()
-                    bmpstr = saveBitMap.GetBitmapBits(True)
-                    img = Image.frombuffer(
-                        'RGB',
-                        (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
-                        bmpstr, 'raw', 'BGRX', 0, 1)
-                    
-                    # Save a local copy of the screenshot for debugging (non-fatal if it fails)
-                    try:
-                        debug_filename = str(MCP_DIR / f"screenshot_{view_type}.png")
-                        img.save(debug_filename)
-                        logger.info(f"Saved debug screenshot to {debug_filename}")
-                    except Exception as save_error:
-                        logger.warning(f"Could not save debug screenshot to {debug_filename}: {save_error}")
-                        debug_filename = None  # Clear it since save failed
-                    
-                    # Clean up GDI resources
-                    win32gui.DeleteObject(saveBitMap.GetHandle())
-                    saveDC.DeleteDC()
-                    mfcDC.DeleteDC()
-                    win32gui.ReleaseDC(hwnd, hwndDC)
-                    
-                    # Convert to base64
+                    img = _grab_window_image(hwnd, width, height)
+
+                    # Encode once: the same PNG bytes are returned and, when
+                    # asked for, kept as a debug copy
                     buffer = io.BytesIO()
                     img.save(buffer, format='PNG')
-                    buffer.seek(0)
-                    img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-                    
-                    # Put result in queue
-                    result_queue.put({
+                    png_bytes = buffer.getvalue()
+
+                    # A debug copy only on request, and with the per-user
+                    # data: the install folder is replaced on every update
+                    # (non-fatal if it fails)
+                    debug_filename = None
+                    if os.environ.get("ALTIUM_MCP_DEBUG_SCREENSHOTS", "") not in ("", "0"):
+                        try:
+                            debug_path = _data_dir() / f"screenshot_{view_type}.png"
+                            debug_path.parent.mkdir(parents=True, exist_ok=True)
+                            debug_path.write_bytes(png_bytes)
+                            debug_filename = str(debug_path)
+                            logger.info(f"Saved debug screenshot to {debug_filename}")
+                        except Exception as save_error:
+                            logger.warning(f"Could not save debug screenshot: {save_error}")
+
+                    return {
                         "success": True,
                         "width": width,
                         "height": height,
@@ -3697,47 +3960,35 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                         "view_type": view_type,
                         "foreground_confirmed": activated,
                         "image_format": "PNG",
-                        "encoding": "base64",
                         "debug_file": debug_filename,
-                        "image_data": img_base64
-                    })
-                    
+                        "image_data": png_bytes
+                    }
+
                 except Exception as e:
                     import traceback
                     trace = traceback.format_exc()
                     logger.error(f"GDI screenshot error: {e}\n{trace}")
-                    result_queue.put({
-                        "success": False, 
+                    return {
+                        "success": False,
                         "error": f"GDI screenshot failed: {str(e)}",
                         "traceback": trace
-                    })
-                
+                    }
+
             except Exception as e:
                 import traceback
-                result_queue.put({
-                    "success": False, 
+                return {
+                    "success": False,
                     "error": f"Screenshot thread error: {str(e)}",
                     "traceback": traceback.format_exc()
-                })
-        
-        # Start the thread
-        thread = threading.Thread(target=capture_screenshot_thread)
-        thread.daemon = True
-        thread.start()
-        
-        # Wait for the thread to complete
-        thread.join(timeout=10)  # 10 second timeout
-        
-        if thread.is_alive():
+                }
+
+        # A capture that hangs (Altium never painting, a stuck window call)
+        # gives up after 10 s; the worker thread then finishes on its own
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(capture_in_physical_pixels), timeout=10)
+        except asyncio.TimeoutError:
             logger.error("Screenshot thread timed out")
             return json.dumps({"success": False, "error": "Screenshot operation timed out"})
-        
-        # Get the result from the queue
-        if result_queue.empty():
-            logger.error("Screenshot thread did not return a result")
-            return json.dumps({"success": False, "error": "Screenshot thread did not return a result"})
-        
-        result = result_queue.get()
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -3750,8 +4001,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         # base64 text: raw base64 in the text result exceeds client token
         # limits (a full-window capture is ~300 KB), while image blocks are
         # rendered natively by clients
-        image_base64 = result.pop("image_data")
-        result.pop("encoding", None)
+        png_bytes = result.pop("image_data")
         zoom_info = response.get("result", {})
         if isinstance(zoom_info, dict) and "zoomed_component_count" in zoom_info:
             result["zoomed_component_count"] = zoom_info["zoomed_component_count"]
@@ -3760,14 +4010,14 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         result["captured_document"] = focused_document or None
         return [
             json.dumps(result),
-            MCPImage(data=base64.b64decode(image_base64), format="png"),
+            MCPImage(data=png_bytes, format="png"),
         ]
 
     except Exception as e:
         logger.error(f"Error in screenshot function: {str(e)}")
         return json.dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
     
-@mcp.tool()
+@_tool()
 async def layout_duplicator(ctx: Context) -> str:
     """
     First step of layout duplication. Selects source components and returns data to match with destination components.
@@ -3809,7 +4059,7 @@ async def layout_duplicator(ctx: Context) -> str:
     logger.info(f"Retrieved layout duplicator component data")
     return json.dumps(components_data, indent=2)
 
-@mcp.tool()
+@_tool()
 async def layout_duplicator_apply(ctx: Context, source_designators: list, destination_designators: list) -> str:
     """
     Second step of layout duplication. Applies the layout of source components to destination components.
@@ -3844,7 +4094,7 @@ async def layout_duplicator_apply(ctx: Context, source_designators: list, destin
     logger.info(f"Layout duplication applied successfully")
     return json.dumps(result, indent=2)
     
-@mcp.tool()
+@_tool(read_only=True)
 async def get_pcb_rules(ctx: Context) -> str:
     """
     Get all design rules from the current Altium PCB
@@ -3876,7 +4126,7 @@ async def get_pcb_rules(ctx: Context) -> str:
     logger.info(f"Retrieved PCB rules data")
     return json.dumps(rules_data, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_pcb_layer_stackup(ctx: Context) -> str:
     """
     Get the detailed layer stackup information from the current Altium PCB including
@@ -3909,7 +4159,7 @@ async def get_pcb_layer_stackup(ctx: Context) -> str:
     logger.info(f"Retrieved PCB layer stackup data")
     return json.dumps(stackup_data, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_output_job_containers(ctx: Context, outjob_path: str = "") -> str:
     """
     Get all available output job containers from a specified OutJob file
@@ -3946,7 +4196,7 @@ async def get_output_job_containers(ctx: Context, outjob_path: str = "") -> str:
     logger.info(f"Retrieved output job containers data")
     return containers_data  # Already in JSON format
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_outjob_settings(ctx: Context, outjob_path: str) -> str:
     """
     Read an .OutJob file from disk and return its outputs, containers and settings.
@@ -3991,7 +4241,7 @@ async def _simple_command(command: str, params: dict, what: str) -> str:
     return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
 
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_project_info(ctx: Context) -> str:
     """
     Get the focused Altium project: parameters, documents and variants.
@@ -4010,7 +4260,7 @@ async def get_project_info(ctx: Context) -> str:
     return await _simple_command("get_project_info", {}, "project info")
 
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_project_components(ctx: Context, include_parameters: bool = False) -> str:
     """
     List every component of the compiled project (schematic side).
@@ -4032,7 +4282,7 @@ async def get_project_components(ctx: Context, include_parameters: bool = False)
                                  {"include_parameters": include_parameters}, "project components")
 
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
     """
     Compile the focused project and list its ERC/compiler violations.
@@ -4051,7 +4301,7 @@ async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
     return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
 
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_board_summary(ctx: Context) -> str:
     """
     Summarise the focused PCB for fabrication checks.
@@ -4069,7 +4319,7 @@ async def get_board_summary(ctx: Context) -> str:
     return await _simple_command("get_board_summary", {}, "board summary")
 
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_component_primitives(ctx: Context, designators: list) -> str:
     """
     List the primitives of PCB components with the layer each one is on.
@@ -4090,7 +4340,7 @@ async def get_component_primitives(ctx: Context, designators: list) -> str:
                                  "component primitives")
 
 
-@mcp.tool()
+@_tool()
 async def run_output_jobs(ctx: Context, container_names: list, outjob_path: str = "") -> str:
     """
     Run specified output job containers
@@ -4140,7 +4390,7 @@ async def run_output_jobs(ctx: Context, container_names: list, outjob_path: str 
     # Otherwise, convert to JSON
     return json.dumps(result_data, indent=2)
 
-@mcp.tool()
+@_tool()
 async def create_pcb_footprint(ctx: Context, footprint_name: str, description: str, pads: list, courtyard_x_mm: float = 0, courtyard_y_mm: float = 0) -> str:
     """
     Create a new PCB footprint in the currently active PcbLib document.
@@ -4187,9 +4437,10 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
     logger.info(f"Footprint {footprint_name} created successfully")
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+@_tool(read_only=True)
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
+    altium_bridge.config.discover_altium()
     status = {
         "server": "Running",
         "altium_exe": altium_bridge.config.altium_exe_path,
@@ -4211,13 +4462,11 @@ if __name__ == "__main__":
     script_dir = MCP_DIR / "AltiumScript"
     script_dir.mkdir(exist_ok=True)
     
-    # Verify configuration before starting
-    if not altium_bridge.config.verify_paths():
-        print("Warning: Configuration not complete. Some functionality may not work.")
-    
-    # Print status
-    print(f"Altium executable: {altium_bridge.config.altium_exe_path}")
-    print(f"Script path: {altium_bridge.config.script_path}")
+    # Paths are verified, with a file dialog if need be, on the first command
+    # that needs Altium: a dialog here would hold up the client's initialize.
+    # Logged, not printed: under the stdio transport stdout is the protocol.
+    logger.info(f"Altium executable: {altium_bridge.config.altium_exe_path or '(not found yet)'}")
+    logger.info(f"Script path: {altium_bridge.config.script_path}")
     
     # Run the server
     mcp.run(transport='stdio')

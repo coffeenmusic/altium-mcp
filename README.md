@@ -27,7 +27,7 @@ The easiest way to install is to use Claude Code, point it to this repo and ask 
 
 [Watch on YouTube](https://youtu.be/HKQMK-hluLs)
 
-1. Make sure Claude has Python 3.10+ installed: `drop down > File > Settings > Extensions > Advanced > Python`. If not, install Python and add it to PATH.
+1. Make sure Claude has Python 3.10 to 3.14 installed: `drop down > File > Settings > Extensions > Advanced > Python`. If not, install Python and add it to PATH. Python 3.15 is untested (see [Bootstrap Venv](#bootstrap-venv-recommended)).
 2. Download the `altium-mcp.dxt` desktop extension file from [releases](https://github.com/coffeenmusic/altium-mcp/releases)
 3. In Claude Desktop on Windows: `drop down > File > Settings > Extensions > Advanced > Install Extension...` Select the .dxt file
 
@@ -39,7 +39,9 @@ You shouldn't need to restart Claude and you should now see altium-mcp in the to
 
 ### Bootstrap Venv (Recommended)
 
-This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is tiny (~60 KB) and works across any Python 3.10+ version.
+This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is tiny (~60 KB) and works on Python 3.10 to 3.14.
+
+**Python versions:** 3.10 to 3.13 install the hash-locked `requirements.txt`. 3.14 has no wheel for the locked pillow, so it installs the fallback list in `start_server.py` instead. With `mcp` 1.30 that list no longer caps pydantic, so it also resolves on 3.15, but 3.15 has not been tested.
 
 The older approach of bundling pre-compiled packages in `server/lib/` is no longer recommended — it breaks when the user's Python version doesn't match the version used to build the bundled `.pyd` files (e.g. pydantic_core compiled for 3.11 fails on 3.13).
 
@@ -51,7 +53,7 @@ The older approach of bundling pre-compiled packages in `server/lib/` is no long
 4. It then launches `server/main.py` using the venv's Python
 5. First launch takes ~20-30 seconds; subsequent launches are instant
 
-The venv, `config.json` and `build.log` live in `%USERPROFILE%\.altium-mcp`, not in the extension folder, because Claude Desktop replaces the extension folder on every update. The slow build therefore happens once per machine (and again only when the requirements or Python version change), and a hand-picked Altium path survives updates. AppData is deliberately avoided: Claude Desktop is an MSIX package, and writes its child processes make under AppData are redirected into `...\Packages\Claude_...\LocalCache`, so a venv built from a terminal and one built by the server would end up in different places. Set the `ALTIUM_MCP_HOME` environment variable to use a different folder. A `config.json` left beside `server/main.py` by an older version is migrated automatically on first start.
+The venv, `config.json`, `build.log` and the server log `altium_mcp.log` live in `%USERPROFILE%\.altium-mcp`, not in the extension folder, because Claude Desktop replaces the extension folder on every update. The slow build therefore happens once per machine (and again only when the requirements or Python version change), and a hand-picked Altium path survives updates. AppData is deliberately avoided: Claude Desktop is an MSIX package, and writes its child processes make under AppData are redirected into `...\Packages\Claude_...\LocalCache`, so a venv built from a terminal and one built by the server would end up in different places. Set the `ALTIUM_MCP_HOME` environment variable to use a different folder. A `config.json` left beside `server/main.py` by an older version is migrated automatically on first start. The server log rotates at 1 MB (three backups) and records INFO and above; set `ALTIUM_MCP_LOG_LEVEL=DEBUG` to include every MCP protocol message.
 
 On a slow network the first build can exceed the client's 60-second startup timeout. The build carries on in the background, so restarting the extension once it has finished is enough; `build.log` shows progress.
 
@@ -88,7 +90,7 @@ These are hard-won lessons from debugging DXT builds. Violating any of these wil
 
 1. **Do NOT use `os.execv()` in `start_server.py`.** The DXT installs to a path containing spaces (`Claude Extensions`). On Windows, `os.execv` splits the path at the space and fails. Use `sys.exit(subprocess.call([...]))` instead.
 
-2. **Pin `mcp` to `==1.5.0`.** Using `>=1.5.0` pulls in the latest version, which has breaking API changes (`FastMCP.__init__()` dropped the `description` kwarg). The server code was written against 1.5.0.
+2. **Pin `mcp` to an exact version (now `==1.30.0`) and upgrade it deliberately.** An open range pulls in whatever is newest, and FastMCP has changed under the server before: 1.x dropped the `description` kwarg of `FastMCP.__init__()`, and in later 1.x releases a tool declared `-> str` sends its result a second time as `structuredContent` unless it is registered with `structured_output=False` (what `_tool()` in `main.py` does). mcp 2.x is not supported.
 
 3. **Do NOT use `manifest_version: "0.4"` with `"type": "uv"`.** Claude Desktop does not support it yet. You will get `Invalid manifest: server: Required`. Use `"type": "python"` with `manifest_version: "0.3"`.
 

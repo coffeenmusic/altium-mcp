@@ -576,6 +576,8 @@ begin
     SchServer.RobotManager.SendMessage(CurrentLib.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, SchComponent.I_ObjectAddress);
     SchServer.ProcessControl.PostProcess(CurrentLib, '');
     CurrentLib.CurrentSchComponent := SchComponent;
+    // Adding a symbol from a script does not set the library's modified
+    // flag, so closing it would drop the symbol without asking (#30)
     MarkDocumentModified(CurrentLib.DocumentName);
 
     // Refresh library
@@ -912,6 +914,7 @@ begin
         // One extra pass: a final line that flushes the last symbol
         for i := 0 to Lines.Count do
         begin
+            ReportProgress;
             if (i < Lines.Count) then
             begin
                 Line := Lines[i];
@@ -1413,7 +1416,8 @@ begin
     Project := GetWorkspace.DM_FocusedProject;
     If (Project = Nil) Then
     begin
-        ShowMessage('Error: No project is currently open');
+        // Never a ShowMessage: it would block the bridge until someone clicks OK
+        Result := 'ERROR: No project is currently open';
         Exit;
     end;
 

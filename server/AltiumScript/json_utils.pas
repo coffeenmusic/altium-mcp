@@ -106,40 +106,14 @@ begin
     end;
 end;
 
-// Function to write JSON to a file and return as string
+// Return the JSON lines as one string. This used to save them to FileName
+// and load them back, which changed nothing (WriteResponse saves the result
+// the same way) but left temp_*.json copies of design data in the shared,
+// world-readable exchange folder. Nothing reads those files; FileName is
+// kept so the callers stay unchanged.
 function WriteJSONToFile(JSON: TStringList; FileName: String = ''): String;
-var
-    TempFile: String;
-    IsTemp: Boolean;
 begin
-    // Use provided filename or generate temp filename. Callers also pass a
-    // folder (ROOT_DIR); that gets the temp file too, which must not be left
-    // behind in the shared exchange folder.
-    IsTemp := Not(AnsiEndsStr('.json', LowerCase(FileName)));
-    if IsTemp then
-    begin
-        TempFile := ROOT_DIR + 'temp_json_output.json';
-    end
-    else
-    begin
-        TempFile := FileName;
-    end;
-    
-    try
-        // Save to file
-        JSON.SaveToFile(TempFile);
-        
-        // Load back the complete JSON data
-        JSON.Clear;
-        JSON.LoadFromFile(TempFile);
-        Result := JSON.Text;
-        
-        // Clean up temporary file if auto-generated
-        if IsTemp and FileExists(TempFile) then
-            DeleteFile(TempFile);
-    except
-        Result := '{"error": "Failed to write JSON to file"}';
-    end;
+    Result := JSON.Text;
 end;
 
 // Locale-safe StrToFloat: normalizes '.' to the system decimal separator before parsing.
@@ -225,4 +199,31 @@ begin
     if (Length(S) >= 2) and (Copy(S, 1, 1) = '"') and (Copy(S, Length(S), 1) = '"') then
         S := Copy(S, 2, Length(S) - 2);
     Result := JSONUnescape(S);
+end;
+
+// Read the string array whose key is on RequestData[KeyLine] into List and
+// return the index of the array's closing line, so the caller's scan goes on
+// after it. The server writes '"key": [', one element per line and a line
+// with just ']', or '"key": []' when the list is empty. Each element has its
+// JSON escapes decoded, so backslashes (Altium's overbar notation), quotes,
+// commas and brackets inside a value arrive exactly as sent.
+function ReadJSONStringArray(RequestData: TStringList; KeyLine: Integer; List: TStringList): Integer;
+var
+    Line : String;
+begin
+    Result := KeyLine;
+    if Pos('[]', RequestData[KeyLine]) > 0 then Exit;
+    Result := KeyLine + 1;
+    while Result < RequestData.Count do
+    begin
+        Line := Trim(RequestData[Result]);
+        if (Line = ']') or (Line = '],') then Exit;
+        if Copy(Line, Length(Line), 1) = ',' then
+            Line := Copy(Line, 1, Length(Line) - 1);
+        if (Length(Line) >= 2) and (Copy(Line, 1, 1) = '"') and (Copy(Line, Length(Line), 1) = '"') then
+            Line := Copy(Line, 2, Length(Line) - 2);
+        if Line <> '' then
+            List.Add(JSONUnescape(Line));
+        Result := Result + 1;
+    end;
 end;
