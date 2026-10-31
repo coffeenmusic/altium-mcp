@@ -778,7 +778,7 @@ class AltiumBridge:
             # project leaks window handles in Altium (see script_bundle.py).
             # The project stays the source, and the fallback.
             try:
-                bundle = script_bundle.ensure_bundle(script_path, EXCHANGE_DIR / "Altium_API_bundle.pas")
+                bundle = script_bundle.ensure_bundle(script_path, EXCHANGE_DIR / "bridge")
                 command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScriptFile('
                            f'FileName={bundle}^|ProcName=Run)')
             except (OSError, ValueError) as e:

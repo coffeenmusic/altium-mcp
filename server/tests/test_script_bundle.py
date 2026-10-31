@@ -62,13 +62,29 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             unit = self.write(d, "u.pas", "procedure Run;\nbegin\nend;\n")
             prj = self.write(d, "p.PrjScr", "[Document1]\nDocumentPath=u.pas\n")
-            out = Path(d) / "bundle.pas"
-            sb.ensure_bundle(prj, out)
+            out = Path(d) / "bridge"
+            first = sb.ensure_bundle(prj, out)
+            self.assertEqual(sb.ensure_bundle(prj, out), first)
             self.write(d, "u.pas", "procedure Run;\nbegin\n    ShowMessage('new');\nend;\n")
-            later = out.stat().st_mtime + 5
+            later = first.stat().st_mtime + 5
             os.utime(unit, (later, later))
-            sb.ensure_bundle(prj, out)
-            self.assertIn("ShowMessage('new')", out.read_text(encoding="latin-1"))
+            second = sb.ensure_bundle(prj, out)
+            # New content, new name: Altium never runs an editor copy of the old one
+            self.assertNotEqual(second, first)
+            self.assertIn("ShowMessage('new')", second.read_text(encoding="latin-1"))
+
+    def test_keeps_the_newest_bundles(self):
+        with tempfile.TemporaryDirectory() as d:
+            unit = self.write(d, "u.pas", "procedure Run;\nbegin\nend;\n")
+            prj = self.write(d, "p.PrjScr", "[Document1]\nDocumentPath=u.pas\n")
+            out = Path(d) / "bridge"
+            for n in range(5):
+                self.write(d, "u.pas", f"procedure Run;\nbegin\n    I := {n};\nend;\n")
+                t = 1_000_000 + n * 10
+                os.utime(unit, (t, t))
+                built = sb.ensure_bundle(prj, out, keep=3)
+                os.utime(built, (t, t))
+            self.assertEqual(len(list(out.glob("p_*.pas"))), 3)
 
 
 if __name__ == "__main__":

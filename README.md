@@ -232,7 +232,7 @@ Altium pitfalls the tools work around:
 The server communicates with Altium Designer using a scripting bridge:
 
 1. It writes command requests to `C:\Users\Public\altium_mcp\request.json`
-2. It launches Altium with instructions to run the bridge script: the units of `server/AltiumScript/Altium_API.PrjScr` merged into one file, `C:\Users\Public\altium_mcp\Altium_API_bundle.pas` (`ScriptingSystem:RunScriptFile`)
+2. It launches Altium with instructions to run the bridge script: the units of `server/AltiumScript/Altium_API.PrjScr` merged into one file in `C:\Users\Public\altium_mcp\bridge`, named after its content so Altium never runs a stale copy it still holds open (`ScriptingSystem:RunScriptFile`)
 3. The script processes the request and writes results to `C:\Users\Public\altium_mcp\response.json`
 4. The server reads and returns the response
 

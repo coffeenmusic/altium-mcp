@@ -8,6 +8,7 @@ it is used, so the units are split into top-level chunks and ordered:
 global var/const blocks first, then routines with their callees first.
 """
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -99,13 +100,40 @@ def project_units(project_file):
             if p.strip().lower().endswith(".pas")]
 
 
-def ensure_bundle(project_file, out_file):
-    """(Re)build out_file when it is missing or older than a unit. Returns it."""
+# Per project file: the units' (path, mtime, size) and the bundle built from them
+_built = {}
+
+
+def ensure_bundle(project_file, out_dir, keep=3):
+    """The bundle of the project's units, as a file in out_dir named after its
+    content. Built again only when a unit changes.
+
+    The name follows the content because Altium runs the copy of a script file
+    it still holds open in its editor (after a run stopped in the debugger, for
+    instance): a changed bundle under the old name could run old code. The
+    newest `keep` bundles stay, as another server may still be running one.
+    """
+    project_file = Path(project_file)
     units = project_units(project_file)
-    out_file = Path(out_file)
-    newest = max(p.stat().st_mtime for p in units + [Path(project_file), Path(__file__)])
-    if not out_file.exists() or out_file.stat().st_mtime < newest:
-        tmp = out_file.with_suffix(".tmp")
-        tmp.write_bytes(bundle_text(units).encode("latin-1"))
-        tmp.replace(out_file)
-    return out_file
+    stamp = tuple((str(p), p.stat().st_mtime, p.stat().st_size)
+                  for p in units + [project_file, Path(__file__)])
+    cached = _built.get(str(project_file))
+    if cached and cached[0] == stamp and cached[1].exists():
+        return cached[1]
+    data = bundle_text(units).encode("latin-1")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{project_file.stem}_{hashlib.sha256(data).hexdigest()[:12]}.pas"
+    if not path.exists():
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    try:
+        old = sorted(out_dir.glob(f"{project_file.stem}_*.pas"), key=lambda p: p.stat().st_mtime)
+        for p in old[:-keep]:
+            if p != path:
+                p.unlink()
+    except OSError:
+        pass  # another server may hold one open
+    _built[str(project_file)] = (stamp, path)
+    return path
