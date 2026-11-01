@@ -257,6 +257,47 @@ begin
     end;
 end;
 
+// The net named Name on Board (not case-sensitive), or nil
+function FindBoardNet(Board: IPCB_Board; Name: String): IPCB_Net;
+var
+    Iterator : IPCB_BoardIterator;
+    Net      : IPCB_Net;
+begin
+    Result := nil;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Net := Iterator.FirstPCBObject;
+    while (Net <> nil) and (Result = nil) do
+    begin
+        if UpperCase(Net.Name) = UpperCase(Name) then Result := Net;
+        Net := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// The copper layer of Board called Name: its name in the layer stack
+// ("Inner 1") or Altium's layer name ("Mid Layer 1"), not case-sensitive.
+// eNoLayer when the board has no such copper layer. Not String2Layer alone:
+// it accepts layers the board does not have ("Mid Layer 30" on a four-layer
+// board) and does not know names given in the stack.
+function ResolveBoardLayer(Board: IPCB_Board; Name: String): Integer;
+var
+    Iterator : IPCB_LayerObjectIterator;
+    Layer    : IPCB_LayerObject;
+begin
+    Result := eNoLayer;
+    Name := UpperCase(Trim(Name));
+    Iterator := Board.ElectricalLayerIterator;
+    while (Result = eNoLayer) and Iterator.Next do
+    begin
+        Layer := Iterator.LayerObject;
+        if (UpperCase(Layer.Name) = Name) or (UpperCase(Layer2String(Layer.LayerID)) = Name) then
+            Result := Layer.LayerID;
+    end;
+end;
+
 // Bring a board to the front for a PCB command when none is focused: the
 // board the PCB tools last ran on while it is still open, else the only
 // board in the focused project (or, when that has none, in all open
@@ -347,6 +388,38 @@ begin
     LogScriptError('EnsureDocumentFocused(' + CommandName + '): ' + FocusFailure);
 end;
 
+// Bring the board at Path to the front, opening it when it is not open, for a
+// command whose request names its board (board_path) instead of acting on
+// whichever board has focus. That is what keeps an edit meant for one board,
+// say a copy being tested, off another. '' when it worked, else why not.
+function FocusBoardByPath(Path: String): String;
+var
+    Doc   : IServerDocument;
+    Board : IPCB_Board;
+begin
+    Result := '';
+    Doc := Client.GetDocumentByPath(Path);
+    if Doc = nil then
+    begin
+        if not FileExists(Path) then
+        begin
+            Result := 'Board not found: ' + Path;
+            Exit;
+        end;
+        Doc := Client.OpenDocument('PCB', Path);
+    end;
+    if Doc = nil then
+    begin
+        Result := 'Could not open the board ' + Path;
+        Exit;
+    end;
+    Client.ShowDocument(Doc);
+    Board := FocusedBoard(0);
+    if (Board = nil) or
+       (UpperCase(ExpandFileName(Board.FileName)) <> UpperCase(ExpandFileName(Path))) then
+        Result := 'Could not bring the board ' + Path + ' to the front';
+end;
+
 // Modify the EnsureDocumentFocused function to handle all document types
 // and return more detailed information.
 // ViewTypeHint is only consulted by commands that can target more than one
@@ -399,6 +472,7 @@ begin
        (CommandName = 'check_placement')                     or
        (CommandName = 'get_net_connections')                 or
        (CommandName = 'set_component_position')              or
+       (CommandName = 'create_vias')                         or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'get_pcb_layer_stackup')               or
        (CommandName = 'get_board_summary')                   or

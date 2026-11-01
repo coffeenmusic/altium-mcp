@@ -130,5 +130,23 @@ class RouteTest(unittest.TestCase):
                 self.assert_clean(routing.route(pts, diagonal_first=first, chamfer=rnd.randint(1, 10**6)), pts)
 
 
+class ViaRecordsTest(unittest.TestCase):
+    def test_defaults_and_overrides(self):
+        recs, err = routing.via_records([[100, 200.5], {"x": 0, "y": 0, "net": "", "diameter_mils": 30,
+                                                       "hole_mils": 15, "end_layer": "Inner 1"}],
+                                        20, 10, net="GND")
+        self.assertEqual(err, "")
+        self.assertEqual(recs, ["1000000|2005000|200000|100000|GND|Top Layer|Bottom Layer",
+                                "0|0|300000|150000||Top Layer|Inner 1"])
+
+    def test_rejects_bad_input(self):
+        self.assertIn("smaller than", routing.via_records([[0, 0]], 10, 10)[1])
+        self.assertIn("expected", routing.via_records([[0]], 20, 10)[1])
+        self.assertIn("expected", routing.via_records([{"x": 0, "y": 0, "size": 1}], 20, 10)[1])
+        self.assertIn("numbers", routing.via_records([["a", 0]], 20, 10)[1])
+        self.assertIn("cannot be sent", routing.via_records([[0, 0]], 20, 10, net="A|B")[1])
+        self.assertEqual(routing.via_records([], 20, 10), (None, "vias is empty"))
+
+
 if __name__ == "__main__":
     unittest.main()

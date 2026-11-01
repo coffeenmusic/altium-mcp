@@ -2834,6 +2834,53 @@ async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float
     return json.dumps({"success": True, **result}, indent=2)
 
 
+@_tool()
+async def place_vias(ctx: Context, vias: list, diameter_mils: float, hole_mils: float,
+                     net: str = "", start_layer: str = "Top Layer", end_layer: str = "Bottom Layer",
+                     board_path: str = "") -> str:
+    """
+    Add vias to a PCB: stitching, fan-out, or a via at the end of a track.
+
+    Args:
+        vias (list): Via positions in mils relative to the board origin,
+            each [x, y] or an object {"x": .., "y": .., "net": ..,
+            "diameter_mils": .., "hole_mils": .., "start_layer": ..,
+            "end_layer": ..} whose keys override the defaults below for
+            that via.
+        diameter_mils (float): Via pad diameter.
+        hole_mils (float): Drill diameter, smaller than diameter_mils.
+        net (str): Net of the vias; it must exist on the board. Empty for
+            vias without a net.
+        start_layer (str): Layer the via starts on, e.g. "Top Layer".
+        end_layer (str): Layer it ends on, e.g. "Bottom Layer". Set both for
+            a blind or buried via.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Every net and layer is checked before anything is added, so a bad entry
+    adds nothing. Run run_drc afterwards: a via is not checked against
+    clearance when it is placed.
+
+    Returns:
+        str: JSON with how many vias were added.
+    """
+    records, error = routing.via_records(vias, diameter_mils, hole_mils, net, start_layer, end_layer)
+    if error:
+        return json.dumps({"success": False, "error": error})
+
+    logger.info(f"Placing {len(records)} vias")
+    response = await altium_bridge.execute_command("create_vias", {
+        "vias": ";".join(records), "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to add the vias: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+# Changes the design: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("create_vias")
+
+
 def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
     """Copy a window's pixels, frame included, into an RGB image.
 

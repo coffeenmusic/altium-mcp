@@ -171,3 +171,42 @@ def route(points: List[Tuple[int, int]], diagonal_first: bool = False, chamfer: 
         clean = out
 
     return [(a[0], a[1], b[0], b[1]) for a, b in zip(clean, clean[1:]) if a != b]
+
+
+VIA_KEYS = {"net", "diameter_mils", "hole_mils", "start_layer", "end_layer"}
+
+
+def via_records(vias, diameter_mils, hole_mils, net="", start_layer="Top Layer",
+                end_layer="Bottom Layer"):
+    """place_vias' records for Altium, 'x|y|diameter|hole|net|start|end' in
+    internal units, or (None, error). Each via is [x, y] in mils or a dict
+    with x, y and any of VIA_KEYS overriding the defaults."""
+    def coord(v):
+        return int(round(float(v) * COORD_PER_MIL))
+
+    records = []
+    for i, v in enumerate(vias or []):
+        if isinstance(v, dict):
+            item = dict(v)
+            pos = (item.pop("x", None), item.pop("y", None))
+        else:
+            item, pos = {}, tuple(v) if isinstance(v, (list, tuple)) else (None, None)
+        if len(pos) != 2 or None in pos or set(item) - VIA_KEYS:
+            return None, (f"via {i + 1}: expected [x, y] or "
+                          f"{{x, y, net, diameter_mils, hole_mils, start_layer, end_layer}}: {v}")
+        try:
+            x, y = coord(pos[0]), coord(pos[1])
+            diameter = coord(item.get("diameter_mils", diameter_mils))
+            hole = coord(item.get("hole_mils", hole_mils))
+        except (TypeError, ValueError):
+            return None, f"via {i + 1}: positions and sizes must be numbers"
+        if hole <= 0 or diameter <= hole:
+            return None, f"via {i + 1}: the hole must be positive and smaller than the diameter"
+        names = [str(item.get("net", net) or ""), str(item.get("start_layer", start_layer)),
+                 str(item.get("end_layer", end_layer))]
+        if any(c in n for n in names for c in "|;"):
+            return None, f"via {i + 1}: '|' and ';' cannot be sent in names"
+        records.append("|".join([str(x), str(y), str(diameter), str(hole)] + names))
+    if not records:
+        return None, "vias is empty"
+    return records, ""

@@ -164,6 +164,10 @@
       "description": "Add a track through waypoints with every segment exactly 0, 45 or 90 degrees"
     },
     {
+      "name": "place_vias",
+      "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
+    },
+    {
       "name": "layout_duplicator",
       "description": "First step of layout duplication. Selects source components and returns data to match with destination components"
     },

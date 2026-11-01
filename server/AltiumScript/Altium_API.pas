@@ -661,6 +661,22 @@ begin
     end;
 end;
 
+// The board a PCB command names in "board_path", or '' to use the focused one
+function RequestBoardPath(RequestData: TStringList): String;
+var
+    i: Integer;
+begin
+    Result := '';
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"board_path"', RequestData[i]) > 0) then
+        begin
+            Result := Trim(JSONLineValue(RequestData[i]));
+            break;
+        end;
+    end;
+end;
+
 // Function to execute get output job containers
 function ExecuteGetOutputJobContainers(RequestData: TStringList): String;
 begin
@@ -862,6 +878,32 @@ begin
     Result := GetProjectComponents(ROOT_DIR, IncludeParams);
 end;
 
+// create_vias: one string of 'x|y|diameter|hole|net|start|end' records
+// separated by ';', in internal units, read with JSONLineValue
+function ExecuteCreateVias(RequestData: TStringList): String;
+var
+    i       : Integer;
+    Text    : String;
+    Records : TStringList;
+begin
+    Text := '';
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"vias"', RequestData[i]) > 0 then
+            Text := JSONLineValue(RequestData[i]);
+    if Text = '' then
+    begin
+        Result := 'ERROR: create_vias needs vias';
+        Exit;
+    end;
+    Records := TStringList.Create;
+    try
+        Records.Text := StringReplace(Text, ';', #13#10, REPLACEALL);
+        Result := CreateVias(Records);
+    finally
+        Records.Free;
+    end;
+end;
+
 // Function to execute a command with parameters
 // create_route_tracks: net_name, layer, width (internal units) and segments,
 // one string of 'x1|y1|x2|y2' records separated by ';'. A single string, not
@@ -936,7 +978,18 @@ begin
     // 'ERROR: ' prefix into success=false with this message.
     // An OutJob command that names its file needs no OutJob open in a
     // project: the command resolves and opens the named file itself.
-    if not (((CommandName = 'get_output_job_containers') or
+    // A command that names its board acts on that board, never on whichever
+    // one happens to have focus
+    if RequestBoardPath(RequestData) <> '' then
+    begin
+        FocusFailure := FocusBoardByPath(RequestBoardPath(RequestData));
+        if FocusFailure <> '' then
+        begin
+            Result := 'ERROR: ' + FocusFailure;
+            Exit;
+        end;
+    end
+    else if not (((CommandName = 'get_output_job_containers') or
              (CommandName = 'run_output_jobs')) and
             (RequestOutJobPath(RequestData) <> '')) then
     begin
@@ -1022,6 +1075,8 @@ begin
             Result := GetRoutingGeometry(0);
         'create_route_tracks':
             Result := ExecuteCreateRouteTracks(RequestData);
+        'create_vias':
+            Result := ExecuteCreateVias(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;

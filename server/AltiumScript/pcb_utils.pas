@@ -3014,6 +3014,102 @@ begin
     end;
 end;
 
+// Add the vias of place_vias to the focused board. Each record is
+// 'x|y|diameter|hole|net|start layer|end layer', x and y in internal units
+// relative to the board origin, sizes in internal units, an empty net for a
+// via without one. Every net and layer is checked before anything is added,
+// so a bad record adds nothing.
+function CreateVias(Records: TStringList): String;
+var
+    Board       : IPCB_Board;
+    Via         : IPCB_Via;
+    Net         : IPCB_Net;
+    i, Created  : Integer;
+    NetName, StartName, EndName : String;
+    StartLayer, EndLayer : Integer;
+    ResultProps : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+
+    for i := 0 to Records.Count - 1 do
+    begin
+        if Trim(Records[i]) = '' then Continue;
+        NetName := GetFieldFromPipeString(Records[i], 4);
+        StartName := GetFieldFromPipeString(Records[i], 5);
+        EndName := GetFieldFromPipeString(Records[i], 6);
+        if (NetName <> '') and (FindBoardNet(Board, NetName) = nil) then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NetName + ' (via ' + IntToStr(i + 1) + '); nothing was added';
+            Exit;
+        end;
+        StartLayer := ResolveBoardLayer(Board, StartName);
+        EndLayer := ResolveBoardLayer(Board, EndName);
+        if (StartLayer = eNoLayer) or (EndLayer = eNoLayer) or
+           (StartLayer > eBottomLayer) or (EndLayer > eBottomLayer) or (StartLayer = EndLayer) then
+        begin
+            Result := 'ERROR: A via spans two different signal layers of the board; ' + StartName + ' to ' +
+                      EndName + ' is not that (via ' + IntToStr(i + 1) + '); nothing was added';
+            Exit;
+        end;
+    end;
+
+    // PostProcess must run whatever happens, or Altium's undo stays broken
+    Created := 0;
+    PCBServer.PreProcess;
+    try
+        for i := 0 to Records.Count - 1 do
+        begin
+            if Trim(Records[i]) = '' then Continue;
+            NetName := GetFieldFromPipeString(Records[i], 4);
+            StartLayer := ResolveBoardLayer(Board, GetFieldFromPipeString(Records[i], 5));
+            EndLayer := ResolveBoardLayer(Board, GetFieldFromPipeString(Records[i], 6));
+            Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+            Via.X := Board.XOrigin + StrToInt(GetFieldFromPipeString(Records[i], 0));
+            Via.Y := Board.YOrigin + StrToInt(GetFieldFromPipeString(Records[i], 1));
+            Via.Size := StrToInt(GetFieldFromPipeString(Records[i], 2));
+            Via.HoleSize := StrToInt(GetFieldFromPipeString(Records[i], 3));
+            // LowLayer and HighLayer are the lower and higher layer numbers
+            // (Top Layer is 1), whichever end the caller named first
+            if StartLayer < EndLayer then
+            begin
+                Via.LowLayer := StartLayer;
+                Via.HighLayer := EndLayer;
+            end
+            else
+            begin
+                Via.LowLayer := EndLayer;
+                Via.HighLayer := StartLayer;
+            end;
+            if NetName <> '' then
+            begin
+                Net := FindBoardNet(Board, NetName);
+                Via.Net := Net;
+            end;
+            Board.AddPCBObject(Via);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Via.I_ObjectAddress);
+            Created := Created + 1;
+        end;
+    finally
+        PCBServer.PostProcess;
+    end;
+    Board.ViewManager_FullUpdate;
+
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'created', Created);
+        AddJSONProperty(ResultProps, 'board', Board.FileName);
+        Result := BuildJSONObject(ResultProps);
+    finally
+        ResultProps.Free;
+    end;
+end;
+
 // The focused board's routed copper for check_routing, one record per line
 // in internal units: O|x origin|y origin, then T|layer|net|x1|y1|x2|y2|width
 // for each track with a net outside components and polygon pours, A|layer|net
