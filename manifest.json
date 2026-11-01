@@ -88,6 +88,10 @@
       "description": "Build a wired schematic on a new sheet from .SchLib parts, wires, junctions, net labels and power ports; returns each placed pin's connection point"
     },
     {
+      "name": "check_schematic",
+      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires"
+    },
+    {
       "name": "get_symbol_placement_rules",
       "description": "Get schematic symbol placement rules from a local configuration file"
     },

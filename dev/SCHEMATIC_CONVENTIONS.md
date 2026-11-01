@@ -199,6 +199,38 @@ What the checker distinguishes now:
 Branch counting: a wire *ending* at a point is one branch, a wire *passing
 through* is two, a pin landing there is one more.
 
+## 13. Net labels go at the free end, reading back along the wire
+
+A label next to its pin, with the wire running on past it to a dead end,
+reads as two things. Put the label **at the free end** of its wire. Then
+justify it so the text sits on the wire and runs back towards the pin:
+bottom-right (2) when the wire ends to the right, bottom-left (0) when it
+ends to the left. A middle-justified label (3/5) anchored on the end, with
+its text continuing past the end like a port, is the other accepted style.
+What reads wrong is bottom-justified text hanging off the end of the wire.
+
+## 14. Part text: beside the body, never on a wire
+
+A designator or value must not touch a wire, a pin, another part or other
+text. For a vertical two-pin part with nets above and below, put the
+designator left of the body and the value right of it rather than stacking
+both on one side, where they run into the rail.
+
+## 15. Sheet symbols: entries close to the top, text above
+
+Keep Altium's default look. The first sheet entry sits one grid below the
+top edge (100 mil, or 3 mm on a 1 mm grid), not several grids down; the
+bottom may keep more room. The designator and the file name both go above
+the symbol, bottom-left justified at its left edge: the file name on the top
+edge and the designator one line (100 mil) above it.
+
+## 16. Check the saved sheet
+
+`check_schematic` (server/schematic_check.py) reads a saved `.SchDoc`, a
+`.PrjPcb` or a folder without Altium and reports rules 3, 6, 8, 13, 14 and 15
+with coordinates, plus suggested label positions and a text arrangement
+that collides with nothing. Run it after every drawing pass.
+
 ## DelphiScript hazards that bit repeatedly
 
 - **Shared scratch variables.** The sandbox convention (`I1..I5`, `S1..S5`) is

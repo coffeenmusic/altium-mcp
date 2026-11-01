@@ -2080,6 +2080,8 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
       * A ground port's "GND" label is always drawn (ShowNetName cannot hide it)
         and occupies ~300 mil below the port. Keep wires out of that band.
 
+    Once the sheet is saved, run check_schematic on it and fix what it finds.
+
     Args:
         parts: component dicts. Required keys: designator, symbol_library
             (full path of a .SchLib file; .IntLib is not supported),
@@ -2178,6 +2180,85 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
     result["pin_map_note"] = ("Absolute electrical connection points. Route "
                               "wires from these, not from predicted offsets.")
     return json.dumps(result, indent=2)
+
+@_tool(read_only=True)
+async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 150) -> str:
+    """
+    Check a schematic sheet for drafting problems that make it hard to read.
+
+    Run it after drawing or editing a sheet (build_schematic, run_altium_script
+    or by hand), fix what it reports, and run it again. It reads the SAVED
+    file and does not need Altium, so save the sheet first; unsaved edits are
+    not seen.
+
+    Issue types, most important first:
+      * pin_tap - a two-pin part (decoupling cap, pull-up) joins its net AT its
+        own pin. Move the part so a short wire (a couple of grids) runs from
+        the pin to a junction on the net; suggest.junction_at shows where.
+      * label_not_at_end - a net label sits along a wire, away from the wire's
+        free end. Put it at the end (suggest gives the point).
+      * label_justification - a label at the free end whose text hangs off
+        the end of the wire. Justify it so the text runs back along the wire:
+        bottom-right (2) when the wire ends to the right, bottom-left (0)
+        when it ends to the left. A middle-justified (3/5) label anchored on
+        the end, reading outward like a port, is also accepted.
+      * sheet_entry_margin - a sheet symbol's first entry sits well below its
+        top edge. Altium's default is one grid (100 mil; 3 mm on a 1 mm grid);
+        extra room at the bottom is fine.
+      * sheet_symbol_text - a sheet symbol's designator or file name is not
+        above it. Both go above: file name on the top edge, designator a line
+        (100 mil) above it, both bottom-left justified at the left edge.
+      * label_orientation, label_off_wire, dangling_wire, wire_through_body.
+      * text_overlap - a designator, parameter, net label or port text
+        overlapping a wire, a pin, a part or other text. For part text the
+        issue carries suggest.texts: positions (x, y, justification) for the
+        designator and each visible parameter that collide with nothing, e.g.
+        designator left and value right of a vertical cap.
+
+    Coordinates are in the sheet's units ("unit": mm for a metric grid,
+    otherwise mil) with Altium's origin at the bottom left.
+
+    Args:
+        path: a .SchDoc, a .PrjPcb (every sheet it lists), or a folder (every
+            .SchDoc in it, not recursive).
+        max_issues_per_sheet: cap on issues listed per sheet; counts are
+            always complete.
+
+    Returns:
+        JSON: per sheet, the issue counts and the issues.
+    """
+    import schematic_check
+
+    p = Path(path)
+    if p.is_dir():
+        sheets = sorted(p.glob("*.SchDoc"))
+    elif p.suffix.lower() == ".prjpcb" and p.is_file():
+        sheets = schematic_check.project_sheets(p)
+    elif p.suffix.lower() == ".schdoc" and p.is_file():
+        sheets = [p]
+    else:
+        return json.dumps({"success": False,
+                           "error": f"not a .SchDoc, .PrjPcb or folder: {path}"})
+
+    results, totals = [], {}
+    for sheet in sheets:
+        if not Path(sheet).is_file():
+            results.append({"sheet": str(sheet),
+                            "error": "listed in the project but not on disk - save it in Altium first"})
+            continue
+        try:
+            r = schematic_check.check_sheet(sheet)
+        except Exception as e:
+            results.append({"sheet": str(sheet), "error": f"{type(e).__name__}: {e}"})
+            continue
+        for k, v in r["issue_counts"].items():
+            totals[k] = totals.get(k, 0) + v
+        if len(r["issues"]) > max_issues_per_sheet:
+            r["issues"] = r["issues"][:max_issues_per_sheet]
+            r["truncated"] = True
+        results.append(r)
+    return json.dumps({"success": True, "sheets": len(sheets), "issue_counts": totals,
+                       "results": results}, indent=1)
 
 @_tool()
 async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
