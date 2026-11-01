@@ -23,7 +23,7 @@ import io
 import re
 import uuid
 
-from altium_files import read_altium_text, write_altium_text
+from altium_files import long_path, read_altium_text, write_altium_text
 from exchange_lock import ExchangeLock
 from altium_install import find_altium_exe
 import routing
@@ -2104,6 +2104,12 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     """
     import sch_edit
 
+    # Long paths, or Altium opens a second copy of a sheet or library that
+    # is already open
+    sheet_path = long_path(sheet_path)
+    operations = [dict(op, library=long_path(op["library"]))
+                  if isinstance(op, dict) and op.get("op") == "place_component" and op.get("library") else op
+                  for op in (operations or [])]
     lines, error = sch_edit.encode_operations(operations, unit)
     if error:
         return json.dumps({"success": False, "error": error})
@@ -2894,6 +2900,7 @@ async def place_polygon_pour(ctx: Context, outline: list, layer: str, net: str =
     """
     import pcb_shapes
 
+    board_path = long_path(board_path)
     points, error = pcb_shapes.outline_points(outline)
     if error:
         return json.dumps({"success": False, "error": error})
@@ -2940,6 +2947,7 @@ async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer
     """
     import pcb_shapes
 
+    board_path = long_path(board_path)
     points, error = pcb_shapes.outline_points(outline)
     if error:
         return json.dumps({"success": False, "error": error})
@@ -3061,6 +3069,7 @@ async def place_vias(ctx: Context, vias: list, diameter_mils: float, hole_mils: 
     Returns:
         str: JSON with how many vias were added.
     """
+    board_path = long_path(board_path)
     records, error = routing.via_records(vias, diameter_mils, hole_mils, net, start_layer, end_layer)
     if error:
         return json.dumps({"success": False, "error": error})
@@ -3518,6 +3527,7 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
     """
     import drc
 
+    board_path = long_path(board_path)
     logger.info(f"Running DRC on {board_path or 'the focused board'}")
     started = time.time()
     outcome = drc.DialogOutcome()
@@ -3643,6 +3653,7 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
     """
     import pcb_rules
 
+    board_path = long_path(board_path)
     encoded, error = pcb_rules.encode_values(rule_type, values)
     if error:
         return json.dumps({"success": False, "error": error})
