@@ -4824,7 +4824,7 @@ async def get_output_job_containers(ctx: Context, outjob_path: str = "") -> str:
     return containers_data  # Already in JSON format
 
 @_tool(read_only=True)
-async def get_outjob_settings(ctx: Context, outjob_path: str) -> str:
+async def get_outjob_settings(ctx: Context, outjob_path: str, include_raw_settings: bool = False) -> str:
     """
     Read an .OutJob file from disk and return its outputs, containers and settings.
 
@@ -4840,16 +4840,20 @@ async def get_outjob_settings(ctx: Context, outjob_path: str) -> str:
 
     Args:
         outjob_path (str): Full path to the .OutJob file
+        include_raw_settings (bool): Also return raw_settings, the output's
+            settings as the file has them, for outputs with a decoded
+            summary. It doubles the reply. Outputs without a summary always
+            have raw_settings.
 
     Returns:
         str: JSON with path, group_name, variant, containers (name, type,
              output paths, file name expression, add_to_project) and outputs
              (type, name, document_path, variant, connected_containers and a
              decoded summary for Gerber, NC Drill, test points, pick and
-             place and print outputs, plus raw_settings)
+             place and print outputs, or sections by name for a BOM)
     """
     try:
-        data = parse_outjob(outjob_path)
+        data = parse_outjob(outjob_path, include_raw=include_raw_settings)
     except FileNotFoundError:
         return json.dumps({"error": f"OutJob not found: {outjob_path}"})
     except Exception as e:

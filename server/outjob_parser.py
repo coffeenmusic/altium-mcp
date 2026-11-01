@@ -26,6 +26,10 @@ _SPECIAL_LAYERS = {
 }
 
 
+# What parse_outjob decodes from an output's settings
+_SUMMARIES = ("gerber", "nc_drill", "test_points", "pick_place", "printouts", "sections")
+
+
 def layer_name(layer_id: int) -> str:
     """Best-effort name for an Altium V7 layer ID."""
     if layer_id in _SPECIAL_LAYERS:
@@ -100,8 +104,19 @@ def _gerber_summary(record: dict) -> dict:
     }
 
 
-def parse_outjob(path) -> dict:
-    """Return outputs, containers and decoded settings of an .OutJob file."""
+def _named_sections(items: list) -> dict:
+    """The items of an output that have a name of their own, as a BOM's do
+    (General, GroupOrder, SortOrder, VisibleOrder, a bare ColumnNameFormat)."""
+    return {name: parse_pipe_record(value) or value for name, value in items
+            if name and not name.startswith("OutputConfigurationParameter")}
+
+
+def parse_outjob(path, include_raw: bool = True) -> dict:
+    """Return outputs, containers and decoded settings of an .OutJob file.
+
+    Without include_raw, raw_settings is kept only for outputs with no
+    decoded summary: elsewhere it repeats the summary, and it is half of the
+    result."""
     path = Path(path)
     ini = _read_ini(path)
     if "OutputGroup1" not in ini:
@@ -116,14 +131,14 @@ def parse_outjob(path) -> dict:
             "index": m,
             "name": name,
             "type": group.get(f"OutputMedium{m}_Type"),
-            "output_path": publish.get(f"OutputFilePath{m}"),
-            "relative_output_path": generated.get(f"RelativeOutputPath{m}"),
-            "output_directory": publish.get(f"OutputDirectory{m}"),
-            "base_path": publish.get(f"OutputBasePath{m}"),
-            "path_media": publish.get(f"OutputPathMedia{m}"),
-            "path_outputer": publish.get(f"OutputPathOutputer{m}"),
-            "file_name": publish.get(f"OutputFileName{m}"),
-            "file_name_expression": publish.get(f"OutputFileNameMulti{m}"),
+            "output_path": publish.get(f"OutputFilePath{m}") or None,
+            "relative_output_path": generated.get(f"RelativeOutputPath{m}") or None,
+            "output_directory": publish.get(f"OutputDirectory{m}") or None,
+            "base_path": publish.get(f"OutputBasePath{m}") or None,
+            "path_media": publish.get(f"OutputPathMedia{m}") or None,
+            "path_outputer": publish.get(f"OutputPathOutputer{m}") or None,
+            "file_name": publish.get(f"OutputFileName{m}") or None,
+            "file_name_expression": publish.get(f"OutputFileNameMulti{m}") or None,
             "release_managed": publish.get(f"ReleaseManaged{m}") == "1",
             "add_to_project": generated.get(f"AddToProject{m}") == "1",
             "open_outputs": generated.get(f"OpenOutputs{m}") == "1",
@@ -131,7 +146,9 @@ def parse_outjob(path) -> dict:
 
     outputs = []
     for n, out_type in _numbered(group, "OutputType"):
-        records = [parse_pipe_record(v) for _, v in _numbered(group, f"Configuration{n}_Item")]
+        items = [(group.get(f"Configuration{n}_Name{m}", ""), value)
+                 for m, value in _numbered(group, f"Configuration{n}_Item")]
+        records = [parse_pipe_record(value) or {"value": value} for _, value in items]
         connected = [
             c["name"] for c in containers
             if group.get(f"OutputEnabled{n}_OutputMedium{c['index']}", "0") not in ("0", "")
@@ -170,7 +187,11 @@ def parse_outjob(path) -> dict:
                 "layers": [l.get("Layer") or l.get("LayerSet") for l in layers
                            if l.get("PrintOutIndex") == p.get("Index")],
             } for p in pages]
-        output["raw_settings"] = records
+        sections = _named_sections(items)
+        if sections:
+            output["sections"] = sections
+        if include_raw or not any(output.get(k) for k in _SUMMARIES):
+            output["raw_settings"] = records
         outputs.append(output)
 
     return {

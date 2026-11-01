@@ -43,6 +43,23 @@ OutputEnabled3=1
 OutputEnabled3_OutputMedium2=2
 Configuration3_Name1=OutputConfigurationParameter1
 Configuration3_Item1=GenerateIPCFormat=True|OriginPosition=Relative|OutputBoardOutline=False|Record=TestPointView|Units=Imperial
+OutputType4=BOM_PartType
+OutputName4=Bill of Materials
+OutputEnabled4=1
+OutputEnabled4_OutputMedium2=4
+Configuration4_Name1=ColumnNameFormat
+Configuration4_Item1=CaptionAsName
+Configuration4_Name2=General
+Configuration4_Item2=OpenExported=True|AddToProject=False|BatchMode=5
+Configuration4_Name3=GroupOrder
+Configuration4_Item3=LibRef=True
+Configuration4_Name4=SortOrder
+Configuration4_Item4=Designator=Up|Comment=Up
+OutputType5=Schematic Print
+OutputName5=Schematic Prints
+OutputEnabled5=1
+Configuration5_Name1=OutputConfigurationParameter1
+Configuration5_Item1=Record=SchPrintView|ShowComponentParameters=True
 
 [PublishSettings]
 OutputFilePath2=C:\Somewhere\Else\Project Outputs\Fabrication\
@@ -50,6 +67,7 @@ OutputFileNameMulti2==PCB_PART_NUMBER+'_'+PCB_REV
 ReleaseManaged2=0
 
 [GeneratedFilesSettings]
+RelativeOutputPath1=
 RelativeOutputPath2=C:\Somewhere\Else\Project Outputs\Fabrication\
 AddToProject2=1
 """
@@ -107,6 +125,24 @@ class OutJobParserTest(unittest.TestCase):
         self.assertEqual(outputs["ODB++ Files"]["connected_containers"], [])
         self.assertFalse(outputs["ODB++ Files"]["enabled"])
         self.assertEqual(outputs["Test Point Report"]["test_points"]["OriginPosition"], "Relative")
+
+    def test_bom_sections_keep_their_names(self):
+        bom = {o["name"]: o for o in self.data["outputs"]}["Bill of Materials"]
+        self.assertEqual(bom["sections"]["ColumnNameFormat"], "CaptionAsName")
+        self.assertEqual(bom["sections"]["General"]["BatchMode"], "5")
+        self.assertEqual(list(bom["sections"]["SortOrder"]), ["Designator", "Comment"])
+        self.assertEqual(bom["raw_settings"][0], {"value": "CaptionAsName"})
+
+    def test_unset_paths_are_null(self):
+        self.assertIsNone(self.data["containers"][0]["relative_output_path"])
+        self.assertIsNone(self.data["containers"][0]["output_path"])
+
+    def test_raw_settings_only_where_nothing_is_decoded(self):
+        lean = {o["name"]: o for o in parse_outjob(self.path, include_raw=False)["outputs"]}
+        for name in ("Gerber Files", "Test Point Report", "Bill of Materials"):
+            self.assertNotIn("raw_settings", lean[name], name)
+        self.assertEqual(lean["Schematic Prints"]["raw_settings"][0]["Record"], "SchPrintView")
+        self.assertIn("raw_settings", {o["name"]: o for o in self.data["outputs"]}["Gerber Files"])
 
     def test_byte_undefined_in_cp1252(self):
         fd, path = tempfile.mkstemp(suffix=".OutJob")
