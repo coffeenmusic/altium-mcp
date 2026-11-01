@@ -723,6 +723,153 @@ begin
     end;
 end;
 
+// Collect a string array parameter into OutList, decoded by the shared
+// reader (ReadJSONStringArray), as every other array parameter is.
+procedure ExtractRequestArray(RequestData: TStringList; Key: String; OutList: TStringList);
+var
+    i: Integer;
+begin
+    i := 0;
+    while (i < RequestData.Count) do
+    begin
+        if (Pos('"' + Key + '"', RequestData[i]) > 0) then
+            i := ReadJSONStringArray(RequestData, i, OutList);
+        i := i + 1;
+    end;
+end;
+
+// Designator placements arrive as pipe-delimited strings
+// ('Designator|CX|CY|Rotation|Height|StrokeWidth|Visible')
+// Same board file? Paths arrive with forward slashes and without commas (the
+// request parser strips them)
+function SameBoardFile(PathA: String; PathB: String): Boolean;
+var
+    A, B: String;
+begin
+    A := LowerCase(RemoveChar(StringReplace(PathA, '/', '\', REPLACEALL), ','));
+    B := LowerCase(RemoveChar(StringReplace(PathB, '/', '\', REPLACEALL), ','));
+    Result := (A = B);
+end;
+
+function ExecutePlaceDesignators(RequestData: TStringList): String;
+var
+    EntriesList: TStringList;
+    Expected: String;
+    Board: IPCB_Board;
+begin
+    // The placements were computed for one board: refuse to move anything on
+    // another one (focus can change between the snapshot and this call)
+    Expected := RequestParam('board', '');
+    Board := GetBoardSafe(0);
+    if (Expected <> '') and (Board <> nil) then
+        if not SameBoardFile(Board.FileName, Expected) then
+        begin
+            Result := 'ERROR: The focused PCB is ' + Board.FileName + ', not ' + Expected +
+                      ', the board these placements were computed for. Nothing was moved.';
+            Exit;
+        end;
+
+    EntriesList := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'placements', EntriesList);
+        if (EntriesList.Count > 0) then
+            Result := PlaceDesignatorsFromList(EntriesList)
+        else
+            Result := 'ERROR: No placements provided for place_designators';
+    finally
+        EntriesList.Free;
+    end;
+end;
+
+// Free silkscreen graphics (label-block links): "items" of +/- entries
+function ExecuteEditSilkGraphics(RequestData: TStringList): String;
+var
+    ItemsList: TStringList;
+    Expected: String;
+    Board: IPCB_Board;
+begin
+    Expected := RequestParam('board', '');
+    Board := GetBoardSafe(0);
+    if (Expected <> '') and (Board <> nil) then
+        if not SameBoardFile(Board.FileName, Expected) then
+        begin
+            Result := 'ERROR: The focused PCB is ' + Board.FileName + ', not ' + Expected +
+                      ', the board these graphics were computed for. Nothing was changed.';
+            Exit;
+        end;
+
+    ItemsList := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'items', ItemsList);
+        if (ItemsList.Count > 0) then
+            Result := EditSilkGraphics(ItemsList)
+        else
+            Result := 'ERROR: No items provided for edit_silk_graphics';
+    finally
+        ItemsList.Free;
+    end;
+end;
+
+// Designators to check (optional - empty means every visible designator)
+function ExecuteCheckSilkscreen(RequestData: TStringList): String;
+var
+    DesignatorsList: TStringList;
+begin
+    DesignatorsList := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'designators', DesignatorsList);
+        Result := CheckSilkscreen(DesignatorsList);
+    finally
+        DesignatorsList.Free;
+    end;
+end;
+
+// A scalar request parameter ("key": value), or Default when absent
+function RequestParam(Name: String; Default: String): String;
+begin
+    if (Params.IndexOfName(Name) >= 0) then
+        Result := Params.Values[Name]
+    else
+        Result := Default;
+end;
+
+// Run the ported Silkscreen Auto Placer (silk_autoplacer.pas)
+function ExecuteAutoPlaceSilkscreen(RequestData: TStringList): String;
+var
+    Scope, Positions, AutoHide, AllowUnder: TStringList;
+begin
+    Scope := TStringList.Create;
+    Positions := TStringList.Create;
+    AutoHide := TStringList.Create;
+    AllowUnder := TStringList.Create;
+    try
+        ExtractRequestArray(RequestData, 'designators', Scope);
+        ExtractRequestArray(RequestData, 'positions', Positions);
+        ExtractRequestArray(RequestData, 'auto_hide', AutoHide);
+        ExtractRequestArray(RequestData, 'allow_under', AllowUnder);
+        if (Positions.Count = 0) then
+            Result := 'ERROR: No autopositions enabled for auto_place_silkscreen'
+        else
+            Result := APS_Run(Scope, RequestParam('selected_only', 'false') = 'true', Positions,
+                RequestParam('failed_action', 'center'),
+                RequestParam('avoid_vias', 'true') = 'true',
+                StrToInt(RequestParam('rotation_strategy', '5')),
+                RequestParam('try_altered_rotation', 'true') = 'true',
+                RequestParam('second_pass', 'true') = 'true',
+                RequestParam('unhide_all', 'false') = 'true',
+                AutoHide, AllowUnder,
+                SafeStrToFloat(RequestParam('fixed_size_mils', '0')),
+                SafeStrToFloat(RequestParam('fixed_width_mils', '0')),
+                SafeStrToFloat(RequestParam('position_delta_mils', '16.535')),
+                RequestParam('outline_layer', ''));
+    finally
+        Scope.Free;
+        Positions.Free;
+        AutoHide.Free;
+        AllowUnder.Free;
+    end;
+end;
+
 // Extract the layout duplicator apply logic
 function ExecuteLayoutDuplicatorApply(RequestData: TStringList): String;
 var
@@ -1170,6 +1317,16 @@ begin
             Result := ExecuteCheckPlacement(RequestData);
         'get_net_connections':
             Result := ExecuteGetNetConnections(RequestData);
+        'export_silkscreen_data':
+            Result := ExportSilkscreenData(ROOT_DIR);
+        'place_designators':
+            Result := ExecutePlaceDesignators(RequestData);
+        'edit_silk_graphics':
+            Result := ExecuteEditSilkGraphics(RequestData);
+        'check_silkscreen':
+            Result := ExecuteCheckSilkscreen(RequestData);
+        'auto_place_silkscreen':
+            Result := ExecuteAutoPlaceSilkscreen(RequestData);
         'get_symbol_primitives':
             Result := ExecuteGetSymbolPrimitives(RequestData);
         'create_symbols_batch':

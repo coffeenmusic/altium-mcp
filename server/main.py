@@ -19,8 +19,13 @@ import win32con
 import win32api
 import win32process
 from PIL import Image
+import glob
 import io
 import re
+import silkscreen
+import label_blocks
+import script_bundle
+import pcblib_file
 import uuid
 
 from altium_files import long_path, read_altium_text, write_altium_text
@@ -358,6 +363,91 @@ class AltiumConfig:
         root.attributes("-topmost", True)
         return root
 
+
+# Two Altium resources run out over a long session, and at either limit
+# Altium fails and then crashes, losing unsaved work:
+# - USER objects (windows, menus), capped per process at 10,000 by default.
+#   Running a script PROJECT leaked about 105 per call (hidden copies of the
+#   forms of the user's menu scripts); the bridge now runs a script file,
+#   but the user's own menu scripts still leak.
+# - Memory: Altium's script engine leaks a little on every property read of
+#   a board object, about 25 MB per silkscreen export on a 40k-object board
+#   and 50 MB per full silkscreen check, and never gives it back.
+# Calls stop while there is still room to save.
+USER_OBJECT_RESERVE = 1000
+MEMORY_SHARE_LIMIT = 0.5        # of physical RAM
+
+def altium_resources() -> Optional[dict]:
+    """USER objects, their quota, private memory and the machine's RAM (MB)
+    for the running Altium, or None when it is not running."""
+    import ctypes
+    from ctypes import wintypes
+
+    class MemCounters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t)]
+
+    class MemStatus(ctypes.Structure):
+        _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows") as key:
+            quota = int(winreg.QueryValueEx(key, "USERProcessHandleQuota")[0])
+    except OSError:
+        quota = 10000
+    kernel32, user32, psapi = ctypes.windll.kernel32, ctypes.windll.user32, ctypes.windll.psapi
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    status = MemStatus()
+    status.dwLength = ctypes.sizeof(MemStatus)
+    kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    found = None
+    for pid in win32process.EnumProcesses():
+        handle = kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            continue
+        try:
+            name = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if (kernel32.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(size))
+                    and os.path.basename(name.value).upper() == "X2.EXE"):
+                counters = MemCounters()
+                counters.cb = ctypes.sizeof(MemCounters)
+                psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+                # Launcher instances are short-lived; the main one is the biggest
+                here = {"user_objects": user32.GetGuiResources(handle, 1),     # GR_USEROBJECTS
+                        "private_mb": counters.PrivateUsage / 2 ** 20}
+                if found is None or here["private_mb"] > found["private_mb"]:
+                    found = here
+        finally:
+            kernel32.CloseHandle(handle)
+    if found is not None:
+        found.update(quota=quota, ram_mb=status.ullTotalPhys / 2 ** 20)
+    return found
+
+def altium_limit_problem() -> Optional[str]:
+    """Why calling into Altium now would risk a crash, or None."""
+    r = altium_resources()
+    if r is None:
+        return None
+    if r["user_objects"] > r["quota"] - USER_OBJECT_RESERVE:
+        return (f"Altium is using {r['user_objects']} of its {r['quota']} window handles and will fail, "
+                "then crash, near the limit. Ask the user to save their work in Altium and restart it.")
+    if r["private_mb"] > MEMORY_SHARE_LIMIT * r["ram_mb"]:
+        return (f"Altium is using {r['private_mb'] / 1024:.1f} GB of memory ({r['ram_mb'] / 1024:.0f} GB in the "
+                "machine); its script engine leaks memory on every call and it will run out. Ask the user "
+                "to save their work in Altium and restart it.")
+    return None
+
 class AltiumBridge:
     def __init__(self):
         # Ensure the MCP directory exists
@@ -407,7 +497,7 @@ class AltiumBridge:
                     f"Altium_API.PrjScr, then retry.")
         return None
 
-    async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
         async with self._command_lock:
             problem = await self.ensure_paths()
@@ -426,7 +516,7 @@ class AltiumBridge:
                 # is no reason to give up.
                 if await asyncio.to_thread(sandbox.altium_hung):
                     return {"success": False, "error": ALTIUM_HUNG_ERROR}
-                response = await self._execute_command_locked(command, params)
+                response = await self._execute_command_locked(command, params, timeout)
             finally:
                 self._exchange_lock.release()
         return _lift_failed_result(response)
@@ -481,8 +571,12 @@ class AltiumBridge:
                 await asyncio.sleep(0.25)
         return text
 
-    async def _execute_command_locked(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
         try:
+            problem = altium_limit_problem()
+            if problem:
+                return {"success": False, "error": f"Not running '{command}': {problem}"}
+
             # Holding the exchange lock, any reply or progress mark still
             # here is left over from a command that timed out. A late writer
             # may still hold it open; the request_id check below covers that.
@@ -582,7 +676,7 @@ class AltiumBridge:
                     mark = None
                 if mark != progress_mark:
                     progress_mark, last_progress = mark, now
-                if now - last_progress > RESPONSE_TIMEOUT or now - start_time > RESPONSE_TIMEOUT_MAX:
+                if now - last_progress > timeout or now - start_time > max(RESPONSE_TIMEOUT_MAX, timeout):
                     break
                 await asyncio.sleep(0.25)
 
@@ -600,7 +694,7 @@ class AltiumBridge:
                 return {"success": False,
                         "error": f"No response from Altium after "
                                  f"{int(time.monotonic() - start_time)} s, the last "
-                                 f"{RESPONSE_TIMEOUT} s without progress: command '{command}' "
+                                 f"{timeout:g} s without progress: command '{command}' "
                                  f"started but did not finish. It probably hit a runtime error "
                                  f"and paused in Altium's debugger (now stopped, so the next "
                                  f"command can run), or it is still working on a very large "
@@ -681,8 +775,17 @@ class AltiumBridge:
             # outside the MSIX sandbox) can find the script files
             script_path = self._resolve_msix_path(self.config.script_path)
 
-            # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
-            command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
+            # Run the units merged into one script FILE: running the script
+            # project leaks window handles in Altium (see script_bundle.py).
+            # The project stays the source, and the fallback.
+            try:
+                bundle = script_bundle.ensure_bundle(script_path, EXCHANGE_DIR / "bridge")
+                command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScriptFile('
+                           f'FileName={bundle}^|ProcName=Run)')
+            except (OSError, ValueError) as e:
+                logger.warning(f"Could not build the script bundle ({e}); running the project")
+                command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript('
+                           f'ProjectName="{script_path}"^|ProcName="Altium_API>Run")')
             
             logger.info(f"Running command: {command}")
             
@@ -824,11 +927,8 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
         
         # Default rules content
         default_rules = (
-            "Only place pins on the left and right side of the symbol. "
-            "Place power rail pins at the upper right, ground pins in the bottom left, "
-            "no connect pins in the bottom right, inputs on the left, outputs on the right, "
-            "and try to group other pins together by similar functionality (for example, SPI, I2C, RGMII, etc.). "
-            "Always separate groups by 100mil gaps unless there is extra spacing, then space out groups equal distance from each other. "
+            "Your own pin placement rules, for example where power, ground, "
+            "inputs, outputs and no-connect pins go and how pin groups are spaced."
         )
         
         # Create a helpful message for the user
@@ -847,6 +947,8 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
             rules_content = f.read()
         
         logger.info("Successfully read symbol placement rules file")
+        if not rules_content.strip():
+            rules_content = """No symbol placement rules are configured. Follow the conventions of a comparable symbol in the user's library (find one with search_library_symbol and read it with get_symbol_primitives) and any instructions from the user. Keep pins on a 100 mil grid so wires connect to them."""
         
         # Return the rules with a message about how to modify them
         result = {
@@ -964,8 +1066,8 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     a missing reference as an error.
 
     Create a new schematic symbol in the current library with the specified pins
-    Instructions: pins should be grouped together via function and only placed on
-                  the left and right side in 100 mil increments
+    Instructions: follow the rules from get_symbol_placement_rules and the
+                  reference symbol's conventions; keep pins on a 100 mil grid
 
     Pin name inversion/overbar: To show an overbar on a pin name (for active-low signals),
                   place a backslash after EACH character that should be overbarred.
@@ -1554,6 +1656,10 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     if not SANDBOX_PAS.exists():
         return json.dumps({"success": False, "error": f"sandbox template missing: {SANDBOX_PAS}"})
 
+    problem = altium_limit_problem()
+    if problem:
+        return json.dumps({"success": False, "error": problem})
+
     split = sandbox.split_var_block(script)
     problems = sandbox.check_script(split.body, sandbox.declared_names(split.decls), split.body_offset)
     if problems:
@@ -1833,10 +1939,20 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
       component_bodies)
     - footprint_name given (exact, case-insensitive): full geometry dump -
       pads (position, rotation, layer, sizes/shape per stack, hole size/
-      type/width/rotation, plating), tracks, arcs, fills, texts, regions
-      (outline vertices). Coordinates in mils; shapes and hole types as raw
-      Altium enum ints; layers as names. 3D component bodies are models,
-      not 2D primitives, and are excluded.
+      type/width/rotation, plating, paste_mode/paste_expansion,
+      mask_mode/mask_expansion, locked), tracks, arcs, fills, texts,
+      regions (outline vertices). Coordinates in mils relative to the
+      footprint origin (also for the footprint shown in the editor, which
+      Altium holds offset by the library origin); shapes and hole types as
+      raw Altium enum ints; layers as names. 3D component bodies are listed
+      apart in bodies_3d, not among the primitives, so the
+      create_footprints_batch round-trip is unchanged: model_file,
+      model_embedded, model_x/model_y (offset from the footprint origin),
+      standoff_height and overall_height (mils), layer, and
+      rotation_x/y/z (degrees) and model_z_offset (mils). The rotations and
+      offset come from the saved library file (Altium's script API cannot
+      return them); "placement" says so, and they are null for a body that
+      is not saved yet.
     - footprint_name "*": full dump of every footprint
 
     Use as the reference when recreating or validating footprints, and to
@@ -1850,8 +1966,8 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
 
     Returns:
         str: JSON - inventory: {library_name, footprint_count, footprints:
-             [{name, description, <type counts>}]}; dump: primitives list
-             per footprint
+             [{name, description, <type counts>}]}; dump: primitives and
+             bodies_3d per footprint
     """
     logger.info(f"Getting footprint primitives (library={library_path}, footprint={footprint_name})")
 
@@ -1865,7 +1981,14 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
         return json.dumps({"success": False, "error": f"Failed to get footprint primitives: {error_msg}"})
 
     result = response.get("result", {})
-    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return result
+    if isinstance(result, dict):
+        pcblib_file.add_body_placements(result)
+    return json.dumps(result, indent=2)
 
 @_tool()
 async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
@@ -1886,15 +2009,35 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
             Altium enum ints, booleans as 1/0):
             FPLIB|<path to .PcbLib>   (optional first line: opens/focuses)
             FOOTPRINT|<name>|<description>
-            PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape]]
+            EDITFOOTPRINT|<name>      add MODEL3D records to an existing
+                                      footprint (never creates one; other
+                                      records under it are reported and
+                                      ignored)
+            PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape[|paste_mode|paste_expansion|mask_mode|mask_expansion]]]
+                Leave a field empty to skip it and still give a later one.
+                paste_mode/mask_mode are TMaskExpansionMode ints: 1 rule,
+                2 manual (with the expansion in mils). 0 (no mask) cannot
+                be set on a pad by script and is reported as a problem.
+                Omitted: rule. Every pad the tool creates is locked.
             TRACK|x1|y1|x2|y2|width|layer
             ARC|cx|cy|radius|start_angle|end_angle|width|layer
             FILL|x1|y1|x2|y2|rotation|layer
             TEXT|x|y|size|width|rotation|layer|mirror|ttf|text
             REGION|layer|kind|x1|y1|x2|y2|...
+            MODEL3D|<STEP file>|<layer>|<rot_x>|<rot_y>|<rot_z>|<z_offset>[|<x>|<y>[|<embed 1/0>]]
+                add a 3D body from a STEP file: rotations in degrees,
+                z_offset (model height above the board) and x|y (offset
+                from the footprint origin) in mils, embedded in the
+                library unless embed is 0. Read the result back with
+                get_footprint_primitives (bodies_3d); its rotations and
+                z offset appear only once the library is saved.
+
+    The library is left modified and unsaved; the user saves it.
 
     Returns:
-        str: JSON with created count, primitive_errors, failed names
+        str: JSON with created and edited counts, models_added,
+             primitive_errors, failed names and problems (e.g. a missing
+             model file, mask mode 0, a record EDITFOOTPRINT ignores)
     """
     logger.info(f"Creating footprints batch from {spec_file}")
 
@@ -2221,7 +2364,8 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
 @_tool()
 async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     """
-    Create many schematic symbols in a single Altium script run.
+    Create many schematic symbols, or edit existing ones, in a single
+    Altium script run.
 
     Use instead of repeated create_schematic_symbol calls when creating
     more than a handful of symbols (bulk library imports/migrations): one
@@ -2238,11 +2382,53 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
             SYMBOL|<name>|<description>|<part_count>
             PIN|<same pipe fields as create_schematic_symbol pins>
             GRAPHIC|<same entry format as create_schematic_symbol graphics>
-            Each SYMBOL line starts a new symbol; PIN/GRAPHIC lines belong
-            to the most recent SYMBOL.
+            EDITSYMBOL|<name>   edit an existing symbol instead (its pins
+                                and graphics are left alone; a missing
+                                symbol is reported as failed, never created)
+            COMMENT|<text>[|<visible 1/0>]   set the Comment (empty text
+                                is allowed); hidden unless visible is 1
+            DESCRIPTION|<text>  set the Description
+            SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification[|font]]]
+                                add a symbol parameter, or replace one with
+                                that name. By default, visible ones without
+                                x|y go below the body's bottom-left corner,
+                                left-aligned, 100 mil apart in record order
+                                (leave a field empty to skip it and still
+                                give a later one). justification:
+                                bottom_left, bottom_center, bottom_right,
+                                center_left, center, center_right, top_left,
+                                top_center or top_right. font: <font
+                                name>:<size>, e.g. "Arial:10" (resolved by
+                                name, so it works in any document). Omitted
+                                fields keep the parameter's own. A parameter
+                                the tool positions gets Autoposition off, so
+                                Altium does not move it later.
+            PINPARAM|<pin number>|<name>|<value>   add (or replace) a hidden
+                                parameter on every pin with that number
+            PINDESC|<pin number>|<text>   set the Description of every pin
+                                with that number
+            PINSYMBOL|<pin number>|<edge>|<symbol>   set an IEEE symbol of
+                                every pin with that number. edge: inside,
+                                inside_edge, outside_edge or outside.
+                                symbol: a TIeeeSymbol name without the
+                                leading "e", any case - none, dot, clock,
+                                activelowinput, activelowoutput, schmitt,
+                                analogsignalin, digitalsignalin, opencollector,
+                                hiz, ... (the full list is in the
+                                altium-script skill, SCH_API_Reference.md,
+                                TIeeeSymbol). An unknown edge or symbol is
+                                reported under problems.
+            These records work after SYMBOL and EDITSYMBOL alike.
+            Each SYMBOL or EDITSYMBOL line starts a new symbol; the other
+            records belong to the most recent one.
+
+    Every created or edited symbol is one undo step and marks the library
+    as modified; nothing is saved - the user saves the library.
 
     Returns:
-        str: JSON object with created count and a failed name list
+        str: JSON object with created and edited counts, a failed name list
+             and problems (e.g. a pin number not in the symbol, an unknown
+             IEEE symbol or justification)
     """
     logger.info(f"Creating symbols batch from {spec_file}")
 
@@ -2284,7 +2470,14 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
         str: JSON object - inventory mode: {library_name, symbol_count,
              symbols: [{name, description, part_count, <type counts>}]};
              dump mode: {library_name, symbol_name, description, part_count,
-             primitives: [...]}
+             comment: {text, visible}, parameters: [{name, value, visible,
+             x, y, justification, autoposition, font: {name, size}}],
+             primitives: [...]} - x and y are where Altium holds the
+             parameter now. Pins also carry
+             description, symbol_inside, symbol_inside_edge,
+             symbol_outside_edge and symbol_outside (IEEE symbol names as
+             PINSYMBOL takes them), and their parameters [{name, value}]
+             when they have any
     """
     logger.info(f"Getting symbol primitives (library={library_path}, symbol={symbol_name})")
 
@@ -3046,6 +3239,903 @@ async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float
         result.update({k: v for k, v in created.items() if k != "success"})
     return json.dumps({"success": True, **result}, indent=2)
 
+
+# Board snapshot for the silkscreen tools. An export takes a few seconds, so
+# views and option queries reuse it. Moves made through
+# set_designator_positions are written into it, check_silkscreen always
+# refreshes it, and it is re-exported once older than SILK_SNAPSHOT_SECONDS.
+# Edits made by hand in Altium are seen after that, or with refresh=True.
+SILK_SNAPSHOT_SECONDS = 900
+_silk_snapshot = {"board": None, "time": 0.0}
+
+async def _silk_board(refresh: bool = False):
+    """The board's silkscreen geometry, exported from Altium when needed."""
+    snap = _silk_snapshot
+    if refresh or snap["board"] is None or time.time() - snap["time"] > SILK_SNAPSHOT_SECONDS:
+        response = await altium_bridge.execute_command("export_silkscreen_data", {})
+        if not response.get("success", False):
+            raise RuntimeError(response.get("error", "Unknown error"))
+        result = response.get("result", {})
+        if isinstance(result, str):
+            result = json.loads(result)
+        text = read_altium_text(result["file"])
+        snap["board"], snap["time"] = silkscreen.Board(text), time.time()
+    return snap["board"]
+
+async def _check_silk_drc(designators: list = None) -> dict:
+    params = {"designators": designators} if designators else {}
+    response = await altium_bridge.execute_command("check_silkscreen", params)
+    if not response.get("success", False):
+        raise RuntimeError(response.get("error", "Unknown error"))
+    result = response.get("result", {})
+    return json.loads(result) if isinstance(result, str) else result
+
+def _group_silk_violations(drc: dict) -> dict:
+    """Altium's per-object silk violations as {designator: [description]}."""
+    grouped = {}
+    for v in drc.get("violations", []):
+        what = v.get("object", "")
+        if v.get("owner"):
+            what += f" {v['owner']}" + (f"-{v['detail']}" if v.get("object") == "Pad" and v.get("detail") else "")
+        elif v.get("detail"):
+            what += f" '{v['detail']}'"
+        if "distance_mils" in v:
+            what += f" ({v['distance_mils']} mil)"
+        grouped.setdefault(v["designator"], []).append(f"{v['rule']}: {what}")
+    return dict(sorted(grouped.items()))
+
+def _silk_side(side, designators, board) -> str:
+    """'T' or 'B' from a side argument, else from the first designator."""
+    if side:
+        s = str(side).strip().lower()
+        if s in ("top", "t"):
+            return "T"
+        if s in ("bottom", "b", "bot"):
+            return "B"
+        raise ValueError("side must be 'top' or 'bottom'")
+    for d in designators or ():
+        c = board.components.get(d)
+        if c is not None and c.side in ("T", "B"):
+            return c.side
+    return "T"
+
+def _current_boxes(board, side=None) -> dict:
+    return {d: (c.text_box, c.text_rotation) for d, c in board.components.items()
+            if c.visible and c.side in ("T", "B") and (side is None or c.side == side)}
+
+def _focus_around(board, designators, side, min_size=300.0):
+    """Area showing the parts, their current labels, and some surroundings."""
+    bb = silkscreen.focus_box(board, designators, side)
+    if bb is None:
+        return None
+    for d in designators:
+        c = board.components.get(d)
+        if c is not None and c.side == side and c.visible:
+            bb = silkscreen._union(bb, c.text_box)
+    cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+    hw, hh = max((bb[2] - bb[0]) / 2, min_size / 2), max((bb[3] - bb[1]) / 2, min_size / 2)
+    return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+def _box_info(rect, rotation) -> dict:
+    return {"x": round((rect[0] + rect[2]) / 2, 2), "y": round((rect[1] + rect[3]) / 2, 2),
+            "rotation": round(rotation) % 360,
+            "width": round(rect[2] - rect[0], 1), "height": round(rect[3] - rect[1], 1)}
+
+SILK_VIEW_LEGEND = ("grid lines labelled in mils (board origin); copper = solder mask openings "
+                    "(dark = vias); white = silk; grey names = part centres; yellow = designators; "
+                    "red = designators with problems; cyan = the designators asked about, with a line "
+                    "to their part; green numbered = options")
+
+AUTOPLACE_POSITIONS = ["TopCenter", "CenterRight", "BottomCenter", "CenterLeft",
+                       "TopLeft", "TopRight", "BottomLeft", "BottomRight"]
+AUTOPLACE_ROTATIONS = {"component": 0, "horizontal": 1, "along_side": 2,
+                       "along_axis": 3, "along_pins": 4, "klc": 5}
+# The script's GUI defaults, used when there is no saved settings file
+AUTOPLACE_DEFAULTS = {
+    "failed_action": "center", "avoid_vias": True, "rotation_strategy": 5,
+    "try_altered_rotation": True, "second_pass": True, "unhide_all": False,
+    "auto_hide": [], "text_height_mils": 31.496, "stroke_width_mils": 5.906,
+    "position_delta_mils": 16.535, "positions": AUTOPLACE_POSITIONS[:4],
+}
+
+def _to_mils(text: str):
+    """'30mil', '0.8mm', '0.05in' or a bare number (mils) -> mils."""
+    m = re.match(r"\s*([-+]?\d*\.?\d+)\s*(mil|mm|in)?\s*$", str(text), re.I)
+    if not m:
+        return None
+    value, unit = float(m.group(1)), (m.group(2) or "mil").lower()
+    return value * {"mil": 1.0, "mm": 1000 / 25.4, "in": 1000.0}[unit]
+
+def _saved_autoplacer_settings() -> dict:
+    """Options saved by the AutoPlaceSilkscreen GUI (AutoPlaceSilkscreen.ini in
+    Altium's application data folder), in this tool's terms. Empty if none."""
+    import configparser
+    files = glob.glob(os.path.join(os.environ.get("APPDATA", ""), "Altium", "*", "AutoPlaceSilkscreen.ini"))
+    if not files:
+        return {}
+    ini = configparser.ConfigParser()
+    try:
+        ini.read(max(files, key=os.path.getmtime))
+        g = ini["General"]
+    except (configparser.Error, KeyError):
+        return {}
+    flag = lambda key, default: g.get(key, "1" if default else "0").strip() in ("1", "true", "True")
+    out = {
+        "failed_action": {"0": "center", "1": "hide", "2": "restore"}.get(g.get("FailedPlacementOptions", "0"), "center"),
+        "avoid_vias": flag("AvoidVias", True),
+        "rotation_strategy": int(g.get("RotationStrategy", "5")),
+        "try_altered_rotation": flag("TryAlteredRotation", True),
+        "second_pass": flag("WiggleEnabled", True),
+        "unhide_all": flag("UnhideAllDesignators", False),
+        "auto_hide": [x.strip() for x in g.get("AutoHideList", "").split(",") if x.strip()]
+                     if flag("AutoHideEnabled", False) else [],
+        "text_height_mils": (_to_mils(g.get("FixedSize", "")) or 0) if flag("FixedSizeEnabled", True) else 0,
+        "stroke_width_mils": (_to_mils(g.get("FixedWidth", "")) or 0) if flag("FixedWidthEnabled", True) else 0,
+        "position_delta_mils": _to_mils(g.get("PositionDelta", "")) or AUTOPLACE_DEFAULTS["position_delta_mils"],
+        "positions": [p for i, p in enumerate(AUTOPLACE_POSITIONS, 1) if flag(f"Position{i}", i <= 4)],
+    }
+    return out
+
+@_tool()
+async def auto_place_silkscreen(ctx: Context, designators: list = None, selected_only: bool = False,
+                                failed_action: str = None, avoid_vias: bool = None,
+                                rotation_strategy: str = None, positions: list = None,
+                                try_altered_rotation: bool = None, second_pass: bool = None,
+                                unhide_all: bool = None, auto_hide: list = None,
+                                allow_under: list = None, text_height_mils: float = None,
+                                stroke_width_mils: float = None, position_delta_mils: float = None,
+                                component_outline_layer: str = None,
+                                use_saved_settings: bool = True) -> str:
+    """
+    Bulk-place designators with the Silkscreen Auto Placer script - step 1 of
+    silkscreen cleanup. Then finish by hand with the other silkscreen tools.
+
+    Runs a headless port of the AutoPlaceSilkscreen script inside Altium. For
+    every part, smallest first, it tries the enabled autopositions on an
+    offset grid with shrinking text, then a retry pass (rotation flip, wider
+    grid) and a 2nd-pass "wiggle" search up to 100 mil out. It avoids pads,
+    component bodies, other silk and (optionally) vias, and keeps the Board
+    Outline Clearance rule's distance from the board edge. Typically 80-95%
+    of designators end up placed; the rest are handled per failed_action.
+    Everything is one undo step. A whole-board run moves every designator:
+    ask the user to save the board first.
+
+    It is fast and good at the bulk, but it does not judge readability:
+    labels can land far from their part (2nd-pass label blocks), next to a
+    neighbour, or over open vias when avoid_vias is off. Always follow up:
+    1. check_silkscreen - lists what needs work (failed designators, DRC,
+       ambiguous or distant labels).
+    2. view_silkscreen / get_designator_options - look at each problem area
+       and find legal spots.
+    3. set_designator_positions - place them (dry_run first for neighbours).
+
+    Options default to the settings last saved by the script's GUI
+    (AutoPlaceSilkscreen.ini) when use_saved_settings is on, else the GUI's
+    defaults. Any argument given here overrides them.
+
+    Args:
+        designators (list, optional): Only place these designators. Omit for
+            the whole board (or the selection with selected_only).
+        selected_only (bool): Place only the components selected in Altium.
+        failed_action (str): What to do with designators that could not be
+            placed: "center" (centre them on their part, where
+            check_silkscreen flags them), "hide", or "restore" (put them back
+            where they were).
+        avoid_vias (bool): Treat vias as obstacles.
+        rotation_strategy (str): "component", "horizontal", "along_side",
+            "along_axis", "along_pins" or "klc" (KLC style).
+        positions (list): Autopositions to try, in order: TopCenter,
+            CenterRight, BottomCenter, CenterLeft, TopLeft, TopRight,
+            BottomLeft, BottomRight.
+        try_altered_rotation (bool): Also try the text turned 90 degrees.
+        second_pass (bool): Run the wider "wiggle" search for failures.
+        unhide_all (bool): Show hidden designators first so they get placed.
+        auto_hide (list): Designator prefixes to hide instead of placing,
+            e.g. ["TP", "MT", "FID"]; [] hides none.
+        allow_under (list): Designators whose bodies silk may cover.
+        text_height_mils (float): Fixed text height; 0 = size from the part
+            (shrinks to 25 mil when needed).
+        stroke_width_mils (float): Fixed stroke width; 0 = from the height.
+        position_delta_mils (float): Extra gap between autoposition and part.
+        component_outline_layer (str): Mechanical layer holding component
+            bodies (default "Mechanical 13" or a "Component Outline" layer).
+        use_saved_settings (bool): Start from the GUI's saved settings.
+
+    Returns:
+        str: JSON with placed/failed counts per pass, the failed designators,
+             the settings used and the next step.
+    """
+    settings = dict(AUTOPLACE_DEFAULTS)
+    source = "script defaults"
+    if use_saved_settings:
+        saved = _saved_autoplacer_settings()
+        if saved:
+            settings.update(saved)
+            source = "saved GUI settings (AutoPlaceSilkscreen.ini)"
+    overrides = {"failed_action": failed_action, "avoid_vias": avoid_vias,
+                 "try_altered_rotation": try_altered_rotation, "second_pass": second_pass,
+                 "unhide_all": unhide_all, "auto_hide": auto_hide,
+                 "text_height_mils": text_height_mils, "stroke_width_mils": stroke_width_mils,
+                 "position_delta_mils": position_delta_mils, "positions": positions}
+    settings.update({k: v for k, v in overrides.items() if v is not None})
+    if rotation_strategy is not None:
+        key = str(rotation_strategy).strip().lower().replace(" ", "_")
+        if key.isdigit() and 0 <= int(key) <= 5:
+            settings["rotation_strategy"] = int(key)
+        elif key in AUTOPLACE_ROTATIONS:
+            settings["rotation_strategy"] = AUTOPLACE_ROTATIONS[key]
+        else:
+            return json.dumps({"success": False, "error": f"rotation_strategy must be one of {list(AUTOPLACE_ROTATIONS)}"})
+    if settings["failed_action"] not in ("center", "hide", "restore"):
+        return json.dumps({"success": False, "error": "failed_action must be center, hide or restore"})
+    order = {p.lower(): p for p in AUTOPLACE_POSITIONS}
+    try:
+        settings["positions"] = [order[str(p).strip().lower()] for p in settings["positions"]]
+    except KeyError as e:
+        return json.dumps({"success": False, "error": f"unknown position {e}; use {AUTOPLACE_POSITIONS}"})
+    if not settings["positions"]:
+        return json.dumps({"success": False, "error": "enable at least one position"})
+
+    params = {k: v for k, v in settings.items() if k not in ("auto_hide", "positions",
+                                                             "text_height_mils", "stroke_width_mils")}
+    params.update({
+        "positions": settings["positions"],
+        "fixed_size_mils": float(settings["text_height_mils"] or 0),
+        "fixed_width_mils": float(settings["stroke_width_mils"] or 0),
+        "selected_only": bool(selected_only),
+    })
+    # Arrays are only sent when non-empty: the script reads '"key": []' as absent
+    for key, value in (("designators", designators), ("auto_hide", settings["auto_hide"]),
+                       ("allow_under", allow_under)):
+        if value:
+            params[key] = [str(v) for v in value]
+    if component_outline_layer:
+        params["outline_layer"] = component_outline_layer
+
+    logger.info(f"auto_place_silkscreen ({source}): {params}")
+    response = await altium_bridge.execute_command("auto_place_silkscreen", params, timeout=1800)
+    _silk_snapshot["board"] = None      # every designator may have moved
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": f"Auto placer failed: {response.get('error', 'Unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result)
+    if not result.get("outline_layer_found"):
+        result["warning"] = ("no component outline layer found - component bodies were not treated "
+                             "as obstacles; pass component_outline_layer")
+    result.pop("outline_layer_found", None)
+    names = {v: k for k, v in AUTOPLACE_ROTATIONS.items()}
+    result["settings"] = dict(settings, rotation_strategy=names[settings["rotation_strategy"]], source=source)
+    result["next"] = ("Run check_silkscreen, then fix what it lists with view_silkscreen, "
+                      "get_designator_options and set_designator_positions.")
+    return json.dumps(result, indent=2)
+
+@_tool(read_only=True)
+async def check_silkscreen(ctx: Context, designators: list = None, preview: bool = False):
+    """
+    Find the designators that need work. Start and finish silkscreen cleanup
+    with this.
+
+    Two parts:
+    - drc: each designator is tested with Altium's own Silk To Silk
+      Clearance, Silk To Solder Mask Clearance and Board Outline Clearance
+      rules (Rule.ActualCheck, the test a batch DRC runs) against nearby
+      silk, pads, vias, mask objects and the board edge. Ground truth for
+      fabrication.
+    - quality: problems DRC does not flag - text far from its part or closer
+      to another part of the same type, over another part's body or under its
+      own (e.g. left on top of its part by an auto-placer), off the board, or
+      rotated to read upside down.
+    needs_attention lists every designator with either kind of problem;
+    hidden lists designators whose display is turned off.
+
+    Args:
+        designators (list, optional): Designators to check. Omit for all.
+        preview (bool): Also return a whole-board view with the problem
+            designators in red (default False).
+
+    Returns:
+        JSON with needs_attention, drc and quality (both grouped by
+        designator), hidden, plus optional view image(s).
+    """
+    try:
+        drc = await _check_silk_drc(designators)
+        board = await _silk_board(refresh=True)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"Failed to check silkscreen: {e}"})
+
+    scope = designators or list(board.components)
+    boxes = {d: b for d, b in _current_boxes(board).items() if d in scope}
+    quality = {d: p for d, p in silkscreen.evaluate(board, boxes, geometry=False).items() if p}
+    # Labels in an intact label block are linked to their parts: distance and
+    # "reads as" problems do not apply. A disturbed block is a problem itself.
+    blocks = []
+    for rec in _load_blocks(board.file):
+        broken = label_blocks.check_record(board, rec)
+        blocks.append({"parts": rec["members"], "link": rec["link"], "intact": not broken,
+                       **({"marker": rec["marker"]} if rec.get("marker") else {}),
+                       **({"problems": broken} if broken else {})})
+        for d in rec["members"]:
+            if d not in scope:
+                continue
+            if broken:
+                quality.setdefault(d, []).append("label block broken: " + "; ".join(broken))
+            elif d in quality:
+                keep = [p for p in quality[d] if not label_blocks.is_association_problem(p)]
+                if keep:
+                    quality[d] = keep
+                else:
+                    del quality[d]
+    grouped = _group_silk_violations(drc)
+    attention = sorted(set(grouped) | set(quality))
+    summary = {
+        "board": board.file,
+        "checked_count": drc.get("checked_count"),
+        "needs_attention_count": len(attention),
+        "needs_attention": attention,
+        "drc_violation_count": drc.get("violation_count"),
+        "drc": grouped,
+        "quality": quality,
+        "hidden": sorted(d for d in scope if d in board.components and not board.components[d].visible),
+    }
+    if blocks:
+        summary["label_blocks"] = blocks
+    if drc.get("missing_designators"):
+        summary["missing_designators"] = drc["missing_designators"]
+    text = json.dumps(summary, indent=2)
+    if not preview:
+        return text
+    images = []
+    for side in ("T", "B"):
+        side_boxes = {d: b for d, b in boxes.items() if board.components[d].side == side}
+        if side_boxes:
+            images.append(MCPImage(data=silkscreen.render_view(
+                board, side_boxes, side=side, problems=attention, max_px=1600), format="png"))
+    return [text] + images
+
+@_tool(read_only=True)
+async def view_silkscreen(ctx: Context, designators: list = None, region: list = None,
+                          side: str = None, grid_mils: float = 0, refresh: bool = False):
+    """
+    Look at the silkscreen around some designators or in a region.
+
+    Renders one board side cleanly - no Altium UI, no copper clutter - with a
+    grid labelled in mils (board-origin coordinates, the same ones
+    set_designator_positions takes), so a free spot can be read straight off
+    the image. Shows solder mask openings, silk, part names at their centres,
+    every designator box, and marks designators whose current spot has a
+    problem in red. The designators asked about are cyan with a line to
+    their part.
+
+    Uses the board snapshot (refreshed by check_silkscreen, updated by
+    set_designator_positions, at most 5 minutes old). Pass refresh=True after
+    editing the board by hand in Altium.
+
+    Args:
+        designators (list, optional): Zoom to these parts and highlight them.
+        region (list, optional): [x_min, y_min, x_max, y_max] in mils to show
+            instead. Omit both for the whole board.
+        side (str, optional): "top" or "bottom". Default: the side of the
+            first designator, else top.
+        grid_mils (float): Grid spacing; 0 picks one to suit the zoom.
+        refresh (bool): Re-export the board from Altium first.
+
+    Returns:
+        JSON (view bounds, grid, legend, problems of the designators in view)
+        plus the image.
+    """
+    try:
+        board = await _silk_board(refresh)
+        s = _silk_side(side, designators, board)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    if region:
+        if len(region) != 4:
+            return json.dumps({"success": False, "error": "region must be [x_min, y_min, x_max, y_max]"})
+        x0, y0, x1, y1 = (float(v) for v in region)
+        focus, margin = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)), 0.0
+    elif designators:
+        focus, margin = _focus_around(board, designators, s), 60.0
+        if focus is None:
+            return json.dumps({"success": False, "error": f"none of {designators} is on the {s} side"})
+    else:
+        focus, margin = None, 40.0
+
+    boxes = _current_boxes(board, s)
+    if focus is not None:
+        view = (focus[0] - margin, focus[1] - margin, focus[2] + margin, focus[3] + margin)
+        boxes = {d: b for d, b in boxes.items()
+                 if not (b[0][2] < view[0] or b[0][0] > view[2] or b[0][3] < view[1] or b[0][1] > view[3])}
+    problems = _block_exempt(board, {d: p for d, p in silkscreen.evaluate(board, boxes).items() if p})
+    png = silkscreen.render_view(board, _current_boxes(board, s), focus=focus, side=s,
+                                 targets=designators or (), problems=problems,
+                                 margin=margin, grid=grid_mils or None)
+    info = {
+        "side": "top" if s == "T" else "bottom",
+        "designators_in_view": len(boxes),
+        "legend": SILK_VIEW_LEGEND,
+        "problems": problems,
+    }
+    if focus is not None:
+        info["view_mils"] = [round(v, 1) for v in view]
+    return [json.dumps(info, indent=2), MCPImage(data=png, format="png")]
+
+@_tool(read_only=True)
+async def get_designator_options(ctx: Context, designators: list, count: int = 5,
+                                 max_gap_mils: float = 50, min_height_mils: float = 0,
+                                 refresh: bool = False):
+    """
+    Legal spots for designators, ranked, drawn as numbered boxes.
+
+    For each designator: its current spot and what is wrong with it, then up
+    to `count` distinct legal positions around its part - clear of silk, solder
+    mask openings, untented vias, the board edge and every other designator
+    where it is now, readable, and nearer its own part than any other part of
+    the same type. Ranked by: close to the part, above > left/right > below,
+    text along the part's long axis, centred. Pick one (or use the image to
+    judge a better spot) and apply it with set_designator_positions using the
+    option's x, y and rotation.
+
+    The designators asked about are not obstacles to each other: when placing
+    neighbours, check the chosen spots together with
+    set_designator_positions(dry_run=True) first. When a designator has no
+    legal spot, blocked_by says what is in the way: ask again together with
+    the neighbouring designators (so they can move to make room), allow
+    smaller text (min_height_mils), or place its row's designators as a
+    block with get_label_block_options. Do not hide designators to get rid
+    of problems; only mounting holes and fiducials go without one.
+
+    Args:
+        designators (list): Designators to find spots for.
+        count (int): Options per designator (default 5).
+        max_gap_mils (float): Furthest the text may sit from its part's pads
+            and silk (default 50).
+        min_height_mils (float): Also offer smaller text, down to this height,
+            in 5 mil steps (0 = current size only).
+        refresh (bool): Re-export the board from Altium first.
+
+    Returns:
+        JSON per designator (current spot + problems, options with n, x, y,
+        rotation, side, gap_mils and height when reduced, or blocked_by) plus
+        an image per board side with the options numbered.
+    """
+    try:
+        board = await _silk_board(refresh)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"Failed to export silkscreen data: {e}"})
+    scope, skipped = silkscreen.split_scope(board, designators or [])
+    if not scope:
+        return json.dumps({"success": False, "error": "no placeable designators", "skipped": skipped})
+
+    opts = silkscreen.Options(max_gap=max_gap_mils, min_height=min_height_mils or None)
+    found = silkscreen.options_for(board, scope, count=max(1, count), options=opts)
+    current = silkscreen.evaluate(board, {d: (board.components[d].text_box,
+                                              board.components[d].text_rotation) for d in scope})
+    result = {}
+    for d in scope:
+        c = board.components[d]
+        entry = {"current": dict(_box_info(c.text_box, c.text_rotation), problems=current[d])}
+        entry["options"] = []
+        for i, cand in enumerate(found[d]["options"], 1):
+            o = {"n": i, "x": round(cand.center[0], 2), "y": round(cand.center[1], 2),
+                 "rotation": round(cand.rotation) % 360,
+                 "side": silkscreen.SIDE_NAMES.get(cand.side_name, cand.side_name),
+                 "gap_mils": round(silkscreen._rect_rect_dist(cand.rect, c.extent), 1)}
+            if cand.note == "reduced height":
+                o["height"] = cand.height
+                o["stroke_width"] = cand.stroke
+            entry["options"].append(o)
+        if found[d]["blocked_by"]:
+            entry["blocked_by"] = found[d]["blocked_by"]
+        result[d] = entry
+    out = {"designators": result, "legend": SILK_VIEW_LEGEND}
+    if skipped:
+        out["skipped"] = skipped
+    images = []
+    for side in ("T", "B"):
+        on_side = [d for d in scope if board.components[d].side == side]
+        if not on_side:
+            continue
+        png = silkscreen.render_view(board, _current_boxes(board, side),
+                                     focus=_focus_around(board, on_side, side), margin=60.0, side=side,
+                                     targets=on_side, problems=[d for d in on_side if current[d]],
+                                     options={d: found[d]["options"] for d in on_side})
+        images.append(MCPImage(data=png, format="png"))
+    return [json.dumps(out, indent=2)] + images
+
+@_tool()
+async def set_designator_positions(ctx: Context, placements: list, dry_run: bool = False,
+                                   verify: bool = True) -> str:
+    """
+    Place designators - by coordinates or relative to their part - and get a
+    verdict for each.
+
+    Each placement is either
+    - absolute: x, y = centre of the text box in mils (board origin), as read
+      off view_silkscreen or taken from get_designator_options, or
+    - relative: side = "above" | "below" | "left" | "right" | "inside" of its
+      own part, with gap (mils from the part's pads/silk; default just clear
+      of them) and offset (slide along that side, +x or +y).
+    Optional on both: rotation (0/90 top, 0/270 bottom read correctly;
+    default keeps a readable current rotation), height and stroke_width
+    (mils), visible (show/hide - hide only mounting holes and fiducials;
+    designators with no room go in a label block, see
+    get_label_block_options). A placement with only visible (or only
+    rotation/height) keeps the current centre.
+
+    dry_run=True changes nothing: every placement is checked against silk,
+    mask openings, the board edge, other designators where they are now and
+    each other, plus placement quality. Use it to test a set of neighbours
+    together before applying.
+
+    Otherwise all moves are one undo step, and with verify (default) each
+    moved designator is then checked with Altium's own silk rules and for
+    quality. ok=true means clean. The moves only go to the board the
+    snapshot was read from: if another PCB has been focused since, nothing
+    moves and the error names both boards.
+
+    Args:
+        placements (list): Dicts with designator plus x/y or side (gap,
+            offset), and optional rotation, height, stroke_width, visible.
+        dry_run (bool): Only check the placements.
+        verify (bool): After moving, run Altium's silk DRC on the moved
+            designators (default True).
+
+    Returns:
+        str: JSON with one verdict per designator: final x, y, rotation,
+             ok and problems.
+    """
+    try:
+        board = await _silk_board()
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"Failed to export silkscreen data: {e}"})
+
+    errors, resolved, entries = [], {}, []
+    for idx, p in enumerate(placements or []):
+        des = str(p.get("designator", "")).strip() if isinstance(p, dict) else ""
+        if not des or des not in board.components:
+            errors.append(f"placements[{idx}]: unknown designator {des!r}")
+            continue
+        if "|" in des:
+            errors.append(f"placements[{idx}]: designator must not contain '|'")
+            continue
+        if ("x" in p) != ("y" in p):
+            errors.append(f"placements[{idx}]: give both x and y, or neither")
+            continue
+        try:
+            rect, rot, height, stroke = silkscreen.resolve_placement(board, p)
+        except (TypeError, ValueError) as e:
+            errors.append(f"placements[{idx}]: {e}")
+            continue
+        visible = p.get("visible")
+        resolved[des] = (rect, rot, visible)
+        cx, cy = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+        size = f"{height:g}" if p.get("height") is not None else ""
+        width = f"{stroke:g}" if p.get("height") is not None or p.get("stroke_width") is not None else ""
+        vis = "" if visible is None else ("1" if visible else "0")
+        entries.append(f"{des}|{cx:.3f}|{cy:.3f}|{rot:g}|{size}|{width}|{vis}")
+    if errors:
+        return json.dumps({"success": False, "error": "; ".join(errors)})
+    if not entries:
+        return json.dumps({"success": False, "error": "No placements provided"})
+
+    shown = {d: (r, rot) for d, (r, rot, vis) in resolved.items()
+             if vis is not False and (vis or board.components[d].visible)}
+    if dry_run:
+        problems = silkscreen.evaluate(board, shown, hiding=set(resolved) - set(shown))
+        verdicts = {d: dict(_box_info(r, rot), ok=not problems.get(d), problems=problems.get(d, []))
+                    for d, (r, rot) in shown.items()}
+        for d in set(resolved) - set(shown):
+            verdicts[d] = {"hidden": True}
+        return json.dumps({"dry_run": True, "all_ok": all(v.get("ok", True) for v in verdicts.values()),
+                           "designators": verdicts}, indent=2)
+
+    params = {"placements": entries}
+    if board.file:
+        # Altium refuses the moves if another PCB is focused by now
+        params["board"] = board.file.replace("\\", "/")
+    response = await altium_bridge.execute_command("place_designators", params)
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": f"Failed to move designators: {response.get('error', 'Unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result)
+
+    # Keep the snapshot in step with what Altium reports
+    final = {}
+    for item in result.get("designators", []):
+        c = board.components.get(item["designator"])
+        if c is None:
+            continue
+        cx, cy, w, h = item["cx"], item["cy"], item["width"], item["height"]
+        c.text_rotation = item["rotation"]
+        c.text_height = item.get("text_height", c.text_height)
+        c.stroke = item.get("stroke_width", c.stroke)
+        c.text_box = silkscreen.ink_box((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2),
+                                        c.stroke, c.truetype)
+        c.visible = item.get("visible", c.visible)
+        c.autopos = 0
+        final[c.designator] = c
+
+    verdicts = {}
+    moved = sorted(d for d, c in final.items() if c.visible)
+    grouped = {}
+    if verify and moved:
+        try:
+            grouped = _group_silk_violations(await _check_silk_drc(moved))
+        except Exception as e:
+            grouped = {d: [f"DRC check failed: {e}"] for d in moved}
+    quality = silkscreen.evaluate(board, {d: (final[d].text_box, final[d].text_rotation) for d in moved},
+                                  geometry=False)
+    for d, c in sorted(final.items()):
+        if not c.visible:
+            verdicts[d] = {"hidden": True}
+            continue
+        problems = grouped.get(d, []) + quality.get(d, [])
+        verdicts[d] = dict(_box_info(c.text_box, c.text_rotation), ok=not problems, problems=problems)
+        if c.text_height:
+            verdicts[d]["text_height"] = c.text_height
+    out = {"moved_count": len(final), "verified": bool(verify),
+           "all_ok": all(v.get("ok", True) for v in verdicts.values()), "designators": verdicts}
+    if result.get("missing_designators"):
+        out["missing_designators"] = result["missing_designators"]
+    return json.dumps(out, indent=2)
+
+# Label blocks applied with place_label_block, per board file, so that
+# check_silkscreen can tell a block's labels from labels that wandered off.
+# Kept in the exchange folder, never next to the board.
+SILK_BLOCKS_FILE = EXCHANGE_DIR / "silk_label_blocks.json"
+_block_options_cache = {}
+
+def _load_blocks(board_file: str) -> list:
+    try:
+        data = json.loads(SILK_BLOCKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return data.get(board_file.lower(), [])
+
+def _save_blocks(board_file: str, records: list):
+    try:
+        data = json.loads(SILK_BLOCKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data[board_file.lower()] = records
+    SILK_BLOCKS_FILE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+
+def _update_snapshot_graphics(removed_records: list, added_option):
+    """Keep the board snapshot in step with link graphics just drawn or
+    deleted, instead of exporting the whole board again (every export leaks
+    memory in Altium's script engine)."""
+    board = _silk_snapshot["board"]
+    if board is None:
+        return
+    for r in removed_records:
+        label_blocks.drop_graphics(board, r["side"], r["graphics"])
+    if added_option is not None and added_option.graphics:
+        board._parse("\n".join(label_blocks.graphics_lines(added_option.side, added_option.graphics)))
+
+def _replaced_graphics(records: list, members: list) -> list:
+    """Link graphics of earlier blocks of these parts (placing replaces them)."""
+    return [g for r in records if set(r["members"]) & set(members) for g in r["graphics"]]
+
+def _block_members(board, designators: list, whole_row: bool = True) -> list:
+    """The parts of a block: one designator stands for its whole row unless
+    whole_row is off."""
+    names = [str(d).strip() for d in designators or []]
+    missing = [d for d in names if d not in board.components]
+    if missing:
+        raise ValueError(f"not on the board: {missing}")
+    if len(names) == 1 and whole_row:
+        return label_blocks.find_row(board, names[0])[1]
+    return names
+
+def _block_exempt(board, problems: dict) -> dict:
+    """problems without the distance and "reads as" problems of labels in
+    intact label blocks (their link answers those)."""
+    out = dict(problems)
+    for rec in _load_blocks(board.file):
+        if label_blocks.check_record(board, rec):
+            continue
+        for d in rec["members"]:
+            if d in out:
+                keep = [p for p in out[d] if not label_blocks.is_association_problem(p)]
+                if keep:
+                    out[d] = keep
+                else:
+                    del out[d]
+    return out
+
+def _block_image(board, option) -> bytes:
+    side = option.side
+    boxes = {d: b for d, b in _current_boxes(board, side).items() if d not in option.members}
+    for d, (rect, rot, _, _) in option.labels.items():
+        boxes[d] = (rect, rot)
+    focus = label_blocks._bounds(
+        [label_blocks._bounds(board.components[d].extent for d in option.members), option.rect] +
+        [r for g in option.graphics for r in label_blocks._graphic_rects(g)])
+    return silkscreen.render_view(board, boxes, focus=focus, side=side, targets=option.members,
+                                  margin=60.0, graphics=option.graphics)
+
+@_tool(read_only=True)
+async def get_label_block_options(ctx: Context, designators: list, count: int = 3,
+                                  min_height_mils: float = 25, max_distance_mils: float = 500,
+                                  link: str = "auto", whole_row: bool = True, refresh: bool = False):
+    """
+    Place a row of parts' designators together as a block, when they do not
+    fit next to their parts one by one. Use this instead of hiding
+    designators (only mounting holes and fiducials go without one).
+
+    Parts in a row get their designators in a row too, in the same order,
+    even some way off. Give one designator to use the whole row it belongs
+    to (parts side by side along x or y, similar size across the row, gaps
+    up to 50 mil), or list the parts yourself. For a block of just one part
+    (its label alone, linked to it), give it with whole_row=False.
+
+    Each option is a block of labels - across the row (in line with each
+    part when the pitch allows, else side by side) or end to end along it -
+    clear of silk, mask openings, the board edge, other designators and part
+    bodies, plus a link when it is not right against the row:
+    - leader: a silk line with an arrowhead from the block to the parts;
+    - index: matching markers - a capital letter in a circle (then square,
+      then triangle) - next to the block and next to the parts.
+    Ranked: no link, then leader, then index; nearer and larger text first.
+    Apply one with place_label_block.
+
+    Args:
+        designators (list): One designator (its row is used) or the block's parts.
+        count (int): Options to return (default 3).
+        min_height_mils (float): Smallest text allowed (default 25).
+        max_distance_mils (float): Furthest the block may sit from the parts (default 500).
+        link (str): "auto" (cheapest), "none", "leader" or "index".
+        whole_row (bool): With one designator, use its whole row (default)
+            or just that part.
+        refresh (bool): Re-export the board from Altium first.
+
+    Returns:
+        JSON with the parts in order and the numbered options, plus an image
+        per option (block labels cyan with lines to their parts, link magenta).
+    """
+    if link not in ("auto", "none", "leader", "index"):
+        return json.dumps({"success": False, "error": "link must be auto, none, leader or index"})
+    try:
+        board = await _silk_board(refresh)
+        members = _block_members(board, designators, whole_row)
+        records = _load_blocks(board.file)
+        used = label_blocks.used_markers(board, records)
+        axis, members, options = label_blocks.block_options(
+            board, members, count=max(1, count), min_height=min_height_mils,
+            max_distance=max_distance_mils, link=link, used_markers=used,
+            ignore=_replaced_graphics(records, members))
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    _block_options_cache[(board.file.lower(), tuple(members))] = {
+        "time": _silk_snapshot["time"], "options": options,
+        "params": dict(min_height=min_height_mils, max_distance=max_distance_mils, link=link)}
+    out = {"parts": members, "row_axis": axis,
+           "options": [o.to_dict(i) for i, o in enumerate(options, 1)]}
+    if not options:
+        out["note"] = ("no block fits; allow a longer max_distance_mils or smaller text, or move "
+                       "other designators out of the way first")
+    return [json.dumps(out, indent=2)] + [MCPImage(data=_block_image(board, o), format="png") for o in options]
+
+@_tool()
+async def place_label_block(ctx: Context, designators: list, option: int = 1,
+                            whole_row: bool = True) -> str:
+    """
+    Apply a label block from get_label_block_options: move the parts'
+    designators into the block (shown, at the block's text size) and draw
+    its link on the silkscreen, then check both with Altium's rules. An
+    earlier block of any of these parts is replaced (its link removed).
+
+    Args:
+        designators (list): The same designators given to get_label_block_options.
+        option (int): Which option (default 1).
+        whole_row (bool): As given to get_label_block_options.
+
+    Returns:
+        JSON: the block's parts, link and marker, ok, and any Altium
+        violations of the labels or the link graphics.
+    """
+    try:
+        board = await _silk_board()
+        members = _block_members(board, designators, whole_row)
+        axis = label_blocks.row_axis(board, members)
+        members = sorted(members, key=lambda d: label_blocks._reading_key(board.components[d], axis))
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    records = _load_blocks(board.file)
+    key = (board.file.lower(), tuple(members))
+    cached = _block_options_cache.get(key)
+    note = None
+    if cached is None or cached["time"] != _silk_snapshot["time"]:
+        params = cached["params"] if cached else {}
+        _, _, options = label_blocks.block_options(
+            board, members, count=max(3, option), used_markers=label_blocks.used_markers(board, records),
+            ignore=_replaced_graphics(records, members), **params)
+        note = "board changed since the options were listed - recomputed them"
+    else:
+        options = cached["options"]
+    if not 1 <= option <= len(options):
+        return json.dumps({"success": False, "error": f"option {option} does not exist ({len(options)} options)",
+                           "note": note})
+    opt = options[option - 1]
+
+    old = [r for r in records if set(r["members"]) & set(members)]
+    items = []
+    for r in old:
+        items += label_blocks.to_items(r["side"], r["graphics"], "-")
+    items += label_blocks.to_items(opt.side, opt.graphics, "+")
+
+    moved = json.loads(await set_designator_positions(ctx, opt.placements(), verify=False))
+    if "designators" not in moved:
+        return json.dumps({"success": False, "error": moved.get("error", "moving the labels failed")})
+    graphic_problems = []
+    if items:
+        response = await altium_bridge.execute_command(
+            "edit_silk_graphics", {"items": items, "board": board.file.replace("\\", "/")})
+        if not response.get("success", False):
+            _silk_snapshot["board"] = None
+            return json.dumps({"success": False, "error": f"labels moved, but drawing the link failed: "
+                                                          f"{response.get('error', 'Unknown error')}"})
+        result = response.get("result", {})
+        if isinstance(result, str):
+            result = json.loads(result)
+        graphic_problems = [f"{v['rule']}: {v['object']} {v.get('owner', '')} {v.get('detail', '')}".strip()
+                            for v in result.get("violations", [])]
+        if result.get("not_found"):
+            graphic_problems.append(f"old link graphics not found: {result['not_found']}")
+        _update_snapshot_graphics(old, opt)
+    try:
+        label_problems = _group_silk_violations(await _check_silk_drc(list(members)))
+    except Exception as e:
+        label_problems = {d: [f"DRC check failed: {e}"] for d in members}
+
+    records = [r for r in records if r not in old] + [label_blocks.record(opt)]
+    _save_blocks(board.file, records)
+    out = {"parts": members, "summary": opt.summary, "link": opt.link,
+           "ok": not label_problems and not graphic_problems,
+           "label_problems": label_problems, "link_problems": graphic_problems}
+    if opt.marker:
+        out["marker"] = {"letter": opt.marker[0], "shape": opt.marker[1]}
+    if old:
+        out["replaced_blocks"] = [r["members"] for r in old]
+    if note:
+        out["note"] = note
+    return json.dumps(out, indent=2)
+
+@_tool()
+async def remove_label_block(ctx: Context, designators: list) -> str:
+    """
+    Remove the label block of these parts: its link graphics (leader or
+    index markers) are deleted; the designators stay where they are, ready
+    to be placed again.
+
+    Args:
+        designators (list): Any of the block's parts.
+
+    Returns:
+        JSON with the removed block's parts and link.
+    """
+    try:
+        board = await _silk_board()
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+    records = _load_blocks(board.file)
+    names = {str(d).strip() for d in designators or []}
+    old = [r for r in records if names & set(r["members"])]
+    if not old:
+        return json.dumps({"success": False, "error": f"no label block holds any of {sorted(names)}"})
+    items = [i for r in old for i in label_blocks.to_items(r["side"], r["graphics"], "-")]
+    if items:
+        response = await altium_bridge.execute_command(
+            "edit_silk_graphics", {"items": items, "board": board.file.replace("\\", "/")})
+        if not response.get("success", False):
+            _silk_snapshot["board"] = None
+            return json.dumps({"success": False, "error": response.get("error", "Unknown error")})
+        _update_snapshot_graphics(old, None)
+    _save_blocks(board.file, [r for r in records if r not in old])
+    return json.dumps({"removed": [{"parts": r["members"], "link": r["link"]} for r in old]}, indent=2)
 
 @_tool()
 async def place_vias(ctx: Context, vias: list, diameter_mils: float, hole_mils: float,
@@ -3937,6 +5027,7 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
                 shape options: Rect (default), Round, Oval
                 Coordinates are in mm relative to component origin (0,0).
                 Pin 1 is indicated by a gap in the top-left silkscreen corner.
+                Pads are created locked.
 
     Courtyard & silkscreen are auto-generated from pad extents + 0.25 mm margin
     unless courtyard_x_mm / courtyard_y_mm are provided explicitly (half-dimensions).

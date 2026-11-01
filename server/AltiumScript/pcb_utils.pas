@@ -27,7 +27,12 @@ end;
 // as raw enum ints - symmetric with get_footprint_primitives):
 //   FPLIB|<path to .PcbLib>              (optional first line - focus/open)
 //   FOOTPRINT|<name>|<description>
-//   PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape]]
+//   EDITFOOTPRINT|<name>                 add MODEL3D records to an existing
+//                                        footprint (never creates one)
+//   PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape[|paste_mode|paste_exp|mask_mode|mask_exp]]]
+//       (mask modes are TMaskExpansionMode ints: 0 no mask, 1 rule, 2 manual;
+//        every pad created is locked)
+//   MODEL3D|<STEP file>|<layer>|<rot_x>|<rot_y>|<rot_z>|<z_offset>[|<x>|<y>[|<embed 1/0>]]
 //   TRACK|x1|y1|x2|y2|width|layer
 //   ARC|cx|cy|radius|start_angle|end_angle|width|layer
 //   FILL|x1|y1|x2|y2|rotation|layer
@@ -48,12 +53,22 @@ var
     Region      : IPCB_Region;
     Contour     : IPCB_Contour;
     Via         : IPCB_Via;
+    Body        : IPCB_ComponentBody;
+    Model       : IPCB_Model;
     Line, Kind  : String;
     LibPath     : String;
     FieldValue  : String;
+    CurMode     : String;
+    ModelPath   : String;
     CreatedCount: Integer;
+    EditedCount : Integer;
+    ModelCount  : Integer;
     PrimErrors  : Integer;
+    OX, OY      : Integer;
     i, V        : Integer;
+    Matched     : Boolean;
+    Shown       : Boolean;
+    Problems    : TStringList;
 
 
 begin
@@ -66,12 +81,24 @@ begin
     Lines := TStringList.Create;
     FailedArray := TStringList.Create;
     ResultProps := TStringList.Create;
+    Problems := TStringList.Create;
     LibComp := nil;
+    PcbLib := nil;
+    CurMode := '';
+    Shown := False;
+    OX := 0;
+    OY := 0;
     CreatedCount := 0;
+    EditedCount := 0;
+    ModelCount := 0;
     PrimErrors := 0;
 
     try
         Lines.LoadFromFile(SpecFilePath);
+
+        // One undo step for the whole batch; this is also what marks the
+        // library as modified (the user saves it)
+        PCBServer.PreProcess;
 
         for i := 0 to Lines.Count - 1 do
         begin
@@ -82,21 +109,23 @@ begin
             try
                 if (Kind = 'FPLIB') then
                 begin
-                    LibPath := GetFieldFromPipeString(Line, 1);
-                    if (LibPath <> '') and FileExists(LibPath) then
+                    // Stop unless that library is now the focused one -
+                    // never work on whatever else is focused
+                    LibPath := Trim(GetFieldFromPipeString(Line, 1));
+                    if FileExists(LibPath) then
+                        ServerDoc := OpenLibraryDocument('PcbLib', LibPath);
+                    PcbLib := GetPcbLibSafe(0);
+                    Matched := False;
+                    if (PcbLib <> nil) then
+                        Matched := (NormalizedPath(PcbLib.Board.FileName) = NormalizedPath(LibPath));
+                    if not Matched then
                     begin
-                        if Client.IsDocumentOpen(LibPath) then
-                            ServerDoc := Client.GetDocumentByPath(LibPath)
-                        else
-                            ServerDoc := Client.OpenDocument('PcbLib', LibPath);
-                        if (ServerDoc <> Nil) then
-                        begin
-                            Client.ShowDocument(ServerDoc);
-                            Sleep(500);
-                        end;
+                        PCBServer.PostProcess;
+                        Result := 'ERROR: Could not open and focus ' + LibPath + ' - nothing was created';
+                        Exit;
                     end;
                 end
-                else if (Kind = 'FOOTPRINT') then
+                else if (Kind = 'FOOTPRINT') or (Kind = 'EDITFOOTPRINT') then
                 begin
                     PcbLib := GetPcbLibSafe(0);
                     // Focus can drift between chunks - retry via the opened
@@ -109,15 +138,93 @@ begin
                     end;
                     if (PcbLib = nil) then
                     begin
+                        PCBServer.PostProcess;
                         Result := 'ERROR: No PCB library document is active';
                         Exit;
                     end;
-                    LibComp := PCBServer.CreatePCBLibComp;
-                    LibComp.Name := Trim(GetFieldFromPipeString(Line, 1));
-                    LibComp.Description := GetFieldFromPipeString(Line, 2);
-                    PcbLib.RegisterComponent(LibComp);
-                    CreatedCount := CreatedCount + 1;
+                    CurMode := Kind;
+                    OX := 0;
+                    OY := 0;
+                    Shown := False;
+                    if (Kind = 'EDITFOOTPRINT') then
+                    begin
+                        LibComp := FindLibFootprint(PcbLib, Trim(GetFieldFromPipeString(Line, 1)));
+                        if (LibComp = nil) then
+                        begin
+                            FailedArray.Add('"' + JSONEscapeString(Trim(GetFieldFromPipeString(Line, 1))) + '"');
+                            Problems.Add('"' + JSONEscapeString(Trim(GetFieldFromPipeString(Line, 1)) +
+                                ': not in the library (EDITFOOTPRINT never creates a footprint)') + '"');
+                        end
+                        else
+                        begin
+                            EditedCount := EditedCount + 1;
+                            // The library board holds the footprint shown in
+                            // the editor, in library coordinates (offset by the
+                            // library origin), and writes it back to the
+                            // footprint when another one is shown
+                            if (PcbLib.CurrentComponent <> nil) then
+                                if (PcbLib.CurrentComponent.I_ObjectAddress = LibComp.I_ObjectAddress) then
+                                begin
+                                    Shown := True;
+                                    OX := PcbLib.Board.XOrigin;
+                                    OY := PcbLib.Board.YOrigin;
+                                end;
+                        end;
+                    end
+                    else
+                    begin
+                        LibComp := PCBServer.CreatePCBLibComp;
+                        LibComp.Name := Trim(GetFieldFromPipeString(Line, 1));
+                        LibComp.Description := GetFieldFromPipeString(Line, 2);
+                        PcbLib.RegisterComponent(LibComp);
+                        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
+                        CreatedCount := CreatedCount + 1;
+                    end;
                 end
+                else if (LibComp <> nil) and (Kind = 'MODEL3D') then
+                begin
+                    ModelPath := Trim(GetFieldFromPipeString(Line, 1));
+                    if not FileExists(ModelPath) then
+                        Problems.Add('"' + JSONEscapeString(LibComp.Name + ': 3D model file not found: ' + ModelPath) + '"')
+                    else
+                    begin
+                        Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+                        Model := Body.ModelFactory_FromFilename(ModelPath, False);
+                        if (Model = nil) then
+                            Problems.Add('"' + JSONEscapeString(LibComp.Name + ': could not load 3D model ' + ModelPath) + '"')
+                        else
+                        begin
+                            // Embedded unless the embed field is 0
+                            if (Trim(GetFieldFromPipeString(Line, 9)) = '0') then
+                                Model.Embed := False;
+                            Model.SetState(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3))),
+                                           SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4))),
+                                           SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5))),
+                                           MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 6)))));
+                            Body.Model := Model;
+                            Body.SetState_FromModel;
+                            Body.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 2)));
+                            Body.MoveByXY(OX + MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 7)))),
+                                          OY + MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 8)))));
+                            // Added to the footprint itself, a body for the
+                            // shown footprint is lost when another is shown
+                            if Shown then
+                            begin
+                                PcbLib.Board.AddPCBObject(Body);
+                                PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+                            end
+                            else
+                            begin
+                                LibComp.AddPCBObject(Body);
+                                PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+                            end;
+                            ModelCount := ModelCount + 1;
+                        end;
+                    end;
+                end
+                else if (LibComp <> nil) and (CurMode = 'EDITFOOTPRINT') and (Kind <> '') then
+                    Problems.Add('"' + JSONEscapeString('line ' + IntToStr(i + 1) + ': ' + Kind +
+                        ' is ignored - only MODEL3D can be added to an existing footprint') + '"')
                 else if (LibComp <> nil) and (Kind = 'PAD') then
                 begin
                     Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
@@ -153,10 +260,18 @@ begin
                         Pad.BotYSize := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 20))));
                         Pad.BotShape := StrToInt(Trim(GetFieldFromPipeString(Line, 21)));
                     end;
+                    // Paste and solder mask expansion; omitted keeps the
+                    // default (rule)
+                    FieldValue := SetPadMaskExpansion(Pad, Trim(GetFieldFromPipeString(Line, 22)), Trim(GetFieldFromPipeString(Line, 23)),
+                                                      Trim(GetFieldFromPipeString(Line, 24)), Trim(GetFieldFromPipeString(Line, 25)));
+                    if (FieldValue <> '') then
+                        Problems.Add('"' + JSONEscapeString(LibComp.Name + ' pad ' + Pad.Name + ': ' + FieldValue) + '"');
                     // Rotation last: it rotates the pad about its location
                     Pad.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 4)));
+                    // Every pad the tool creates is locked
+                    Pad.Moveable := False;
                     LibComp.AddPCBObject(Pad);
-                    PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'TRACK') then
                 begin
@@ -168,7 +283,7 @@ begin
                     Track.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5))));
                     Track.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
                     LibComp.AddPCBObject(Track);
-                    PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'ARC') then
                 begin
@@ -181,7 +296,7 @@ begin
                     Arc.LineWidth := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 6))));
                     Arc.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 7)));
                     LibComp.AddPCBObject(Arc);
-                    PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Arc.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'FILL') then
                 begin
@@ -193,7 +308,7 @@ begin
                     Fill.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
                     Fill.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
                     LibComp.AddPCBObject(Fill);
-                    PCBServer.SendMessageToRobots(Fill.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Fill.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'VIA') then
                 begin
@@ -205,7 +320,7 @@ begin
                     Via.LowLayer := String2Layer(Trim(GetFieldFromPipeString(Line, 5)));
                     Via.HighLayer := String2Layer(Trim(GetFieldFromPipeString(Line, 6)));
                     LibComp.AddPCBObject(Via);
-                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Via.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'REGION') then
                 begin
@@ -222,7 +337,7 @@ begin
                     Region.Layer := String2Layer(Trim(GetFieldFromPipeString(Line, 1)));
                     Region.Kind := StrToInt(Trim(GetFieldFromPipeString(Line, 2)));
                     LibComp.AddPCBObject(Region);
-                    PCBServer.SendMessageToRobots(Region.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Region.I_ObjectAddress);
                 end
                 else if (LibComp <> nil) and (Kind = 'TEXT') then
                 begin
@@ -239,7 +354,7 @@ begin
                     Text.Text := StringReplace(GetFieldFromPipeString(Line, 9), '<NL>', #13#10, REPLACEALL);
                     Text.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
                     LibComp.AddPCBObject(Text);
-                    PCBServer.SendMessageToRobots(Text.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+                    PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Text.I_ObjectAddress);
                 end;
             except
                 PrimErrors := PrimErrors + 1;
@@ -248,20 +363,34 @@ begin
             end;
         end;
 
-        if (CreatedCount > 0) and (PcbLib <> nil) then
+        PCBServer.PostProcess;
+        if (LibComp <> nil) and (PcbLib <> nil) then
+        begin
+            PcbLib.CurrentComponent := LibComp;
+            PcbLib.Board.ViewManager_FullUpdate;
+        end;
+        if (CreatedCount + EditedCount > 0) and (PcbLib <> nil) then
             MarkDocumentModified(PcbLib.Board.FileName);
+
         AddJSONInteger(ResultProps, 'created', CreatedCount);
+        AddJSONInteger(ResultProps, 'edited', EditedCount);
+        AddJSONInteger(ResultProps, 'models_added', ModelCount);
         AddJSONInteger(ResultProps, 'primitive_errors', PrimErrors);
         if (FailedArray.Count > 0) then
             ResultProps.Add(BuildJSONArray(FailedArray, 'failed'))
         else
             ResultProps.Add('"failed": []');
+        if (Problems.Count > 0) then
+            ResultProps.Add(BuildJSONArray(Problems, 'problems'))
+        else
+            ResultProps.Add('"problems": []');
 
         Result := BuildJSONObject(ResultProps);
     finally
         Lines.Free;
         FailedArray.Free;
         ResultProps.Free;
+        Problems.Free;
     end;
 end;
 
@@ -289,6 +418,10 @@ var
     TypeName    : String;
     i, C, V     : Integer;
     Found       : Boolean;
+    BodiesArray : TStringList;
+    BodyProps   : TStringList;
+    Model       : IPCB_Model;
+    OX, OY      : Integer;
 begin
     Result := '';
 
@@ -321,6 +454,7 @@ begin
 
     try
         AddJSONProperty(ResultProps, 'library_name', ExtractFileName(PcbLib.Board.FileName));
+        AddJSONProperty(ResultProps, 'library_path', PcbLib.Board.FileName);
 
         for C := 0 to PcbLib.ComponentCount - 1 do
         begin
@@ -373,9 +507,22 @@ begin
                 Found := True;
                 FPProps := TStringList.Create;
                 PrimsArray := TStringList.Create;
+                BodiesArray := TStringList.Create;
                 try
                     AddJSONProperty(FPProps, 'footprint_name', LibComp.Name);
                     AddJSONProperty(FPProps, 'description', LibComp.Description);
+
+                    // The footprint shown in the editor is held in library
+                    // coordinates, offset by the library origin; report every
+                    // footprint relative to its own origin
+                    OX := 0;
+                    OY := 0;
+                    if (PcbLib.CurrentComponent <> nil) then
+                        if (PcbLib.CurrentComponent.I_ObjectAddress = LibComp.I_ObjectAddress) then
+                        begin
+                            OX := PcbLib.Board.XOrigin;
+                            OY := PcbLib.Board.YOrigin;
+                        end;
 
                     GrpIter := LibComp.GroupIterator_Create;
                     Prim := GrpIter.FirstPCBObject;
@@ -391,8 +538,8 @@ begin
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'pad');
                                     AddJSONProperty(PrimProps, 'name', Prim.Name);
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y));
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x - OX));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y - OY));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
                                     AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
                                     AddJSONBoolean(PrimProps, 'plated', Prim.Plated);
@@ -415,22 +562,27 @@ begin
                                     end;
                                     if (Prim.TopShape = eRoundedRectangular) then
                                         AddJSONInteger(PrimProps, 'corner_pct', Prim.StackCRPctOnLayer[eTopLayer]);
+                                    AddJSONInteger(PrimProps, 'paste_mode', Prim.PasteMaskExpansionMode);
+                                    AddJSONNumber(PrimProps, 'paste_expansion', CoordToMils(Prim.PasteMaskExpansion));
+                                    AddJSONInteger(PrimProps, 'mask_mode', Prim.SolderMaskExpansionMode);
+                                    AddJSONNumber(PrimProps, 'mask_expansion', CoordToMils(Prim.SolderMaskExpansion));
+                                    AddJSONBoolean(PrimProps, 'locked', not Prim.Moveable);
                                 end;
                                 eTrackObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'track');
-                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1));
-                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1));
-                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2));
-                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2));
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1 - OX));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1 - OY));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2 - OX));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2 - OY));
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
                                     AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
                                 end;
                                 eArcObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'arc');
-                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.XCenter));
-                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.YCenter));
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.XCenter - OX));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.YCenter - OY));
                                     AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
                                     AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
                                     AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
@@ -440,10 +592,10 @@ begin
                                 eFillObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'fill');
-                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1Location));
-                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1Location));
-                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2Location));
-                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2Location));
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.x1Location - OX));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.y1Location - OY));
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2Location - OX));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2Location - OY));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
                                     AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
                                 end;
@@ -451,8 +603,8 @@ begin
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'text');
                                     AddJSONProperty(PrimProps, 'text', Prim.Text);
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.XLocation));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.YLocation));
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.XLocation - OX));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.YLocation - OY));
                                     AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
@@ -471,8 +623,8 @@ begin
                                         begin
                                             PProps := TStringList.Create;
                                             try
-                                                AddJSONNumber(PProps, 'x', CoordToMils(Prim.MainContour.x[V]));
-                                                AddJSONNumber(PProps, 'y', CoordToMils(Prim.MainContour.y[V]));
+                                                AddJSONNumber(PProps, 'x', CoordToMils(Prim.MainContour.x[V] - OX));
+                                                AddJSONNumber(PProps, 'y', CoordToMils(Prim.MainContour.y[V] - OY));
                                                 PointsArray.Add(BuildJSONObject(PProps, 3));
                                             finally
                                                 PProps.Free;
@@ -487,17 +639,44 @@ begin
                                 eViaObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'via');
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y));
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x - OX));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y - OY));
                                     AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
                                     AddJSONNumber(PrimProps, 'hole_size', CoordToMils(Prim.HoleSize));
                                     AddJSONProperty(PrimProps, 'low_layer', Layer2String(Prim.LowLayer));
                                     AddJSONProperty(PrimProps, 'high_layer', Layer2String(Prim.HighLayer));
                                 end;
                                 eComponentBodyObject:
-                                    // 3D bodies are models, not 2D primitives -
-                                    // excluded from the graphics round-trip
+                                begin
+                                    // 3D bodies are models, not 2D primitives:
+                                    // reported apart, so the graphics
+                                    // round-trip is unchanged. The model's
+                                    // rotations and Z offset are added by the
+                                    // server from the saved file:
+                                    // Model.GetState returns them through out
+                                    // parameters, which DelphiScript never
+                                    // receives.
                                     AddJSONProperty(PrimProps, 'type', '');
+                                    BodyProps := TStringList.Create;
+                                    try
+                                        Model := Prim.Model;
+                                        if (Model <> nil) then
+                                        begin
+                                            AddJSONProperty(BodyProps, 'model_file', Model.FileName);
+                                            AddJSONBoolean(BodyProps, 'model_embedded', Model.Embed);
+                                            AddJSONNumber(BodyProps, 'model_x', CoordToMils(Model.Origin.X - OX));
+                                            AddJSONNumber(BodyProps, 'model_y', CoordToMils(Model.Origin.Y - OY));
+                                        end
+                                        else
+                                            AddJSONProperty(BodyProps, 'model_file', '');
+                                        AddJSONNumber(BodyProps, 'standoff_height', CoordToMils(Prim.StandoffHeight));
+                                        AddJSONNumber(BodyProps, 'overall_height', CoordToMils(Prim.OverallHeight));
+                                        AddJSONProperty(BodyProps, 'layer', Layer2String(Prim.Layer));
+                                        BodiesArray.Add(BuildJSONObject(BodyProps, 2));
+                                    finally
+                                        BodyProps.Free;
+                                    end;
+                                end;
                             else
                             begin
                                 AddJSONProperty(PrimProps, 'type', 'unknown');
@@ -522,6 +701,10 @@ begin
                     LibComp.GroupIterator_Destroy(GrpIter);
 
                     FPProps.Add(BuildJSONArray(PrimsArray, 'primitives', 1));
+                    if (BodiesArray.Count > 0) then
+                        FPProps.Add(BuildJSONArray(BodiesArray, 'bodies_3d', 1))
+                    else
+                        FPProps.Add('"bodies_3d": []');
 
                     if (FootprintName = '*') then
                         FPArray.Add(BuildJSONObject(FPProps, 1))
@@ -531,6 +714,7 @@ begin
                 finally
                     FPProps.Free;
                     PrimsArray.Free;
+                    BodiesArray.Free;
                 end;
             end;
         end;
@@ -2234,6 +2418,8 @@ begin
     SilkLayer := String2Layer('Top Overlay');
 
     try
+        // One undo step; this is also what marks the library as modified
+        PCBServer.PreProcess;
         LibComp := PCBServer.CreatePCBLibComp;
         LibComp.Name := FootprintName;
         LibComp.Description := Description;
@@ -2287,9 +2473,11 @@ begin
             Pad.TopXSize := MMsToCoord(WMM);
             Pad.TopYSize := MMsToCoord(HMM);
             Pad.TopShape := PadShape;
+            // Every pad the tool creates is locked
+            Pad.Moveable := False;
 
             LibComp.AddPCBObject(Pad);
-            PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+            PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
 
             if (XMM - WMM/2) < MinX then MinX := XMM - WMM/2;
             if (YMM - HMM/2) < MinY then MinY := YMM - HMM/2;
@@ -2320,7 +2508,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := ILayer.MechanicalLayer(15);
@@ -2328,7 +2516,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY2);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := ILayer.MechanicalLayer(15);
@@ -2336,7 +2524,7 @@ begin
         Track.x2 := MMsToCoord(CrtX1); Track.y2 := MMsToCoord(CrtY2);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := ILayer.MechanicalLayer(15);
@@ -2344,7 +2532,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2); Track.y2 := MMsToCoord(CrtY2);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Silkscreen on TopOverlay (inset 0.1mm from courtyard)
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
@@ -2353,7 +2541,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY1+0.1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
         Track.Layer := SilkLayer;
@@ -2361,7 +2549,7 @@ begin
         Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY2-0.1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Left silk — split to mark pin 1 (gap at top-left corner for pin 1 indicator)
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
@@ -2370,7 +2558,7 @@ begin
         Track.x2 := MMsToCoord(CrtX1+0.1); Track.y2 := MMsToCoord(CrtY2-0.6);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Right silk
         Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
@@ -2379,10 +2567,11 @@ begin
         Track.x2 := MMsToCoord(CrtX2-0.1); Track.y2 := MMsToCoord(CrtY2-0.1);
         Track.Width := TrackWidth;
         LibComp.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+        PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         // Register with library board, navigate, and refresh
         PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
+        PCBServer.PostProcess;
         PcbLib.CurrentComponent := LibComp;
         PcbLib.Board.ViewManager_FullUpdate;
         MarkDocumentModified(PcbLib.Board.FileName);
@@ -3004,6 +3193,1192 @@ begin
         MissingArray.Free;
         PlacedArray.Free;
     end;
+end;
+
+// ---------------------------------------------------------------------------
+// Silkscreen designator placement
+//
+// The placement itself is solved in Python (server/silkscreen.py) from a
+// geometry dump. These routines export that geometry, apply the solved
+// designator positions, and verify the result with Altium's own silk rules.
+// ---------------------------------------------------------------------------
+
+// Locale-safe mils string (3 decimals) for the silk dump
+function SilkNum(Value: Double): String;
+begin
+    Result := StringReplace(FloatToStr(Round(Value * 1000) / 1000), ',', '.', REPLACEALL);
+end;
+
+function SilkLen(C: Integer): String;
+begin
+    Result := SilkNum(CoordToMils(C));
+end;
+
+// 'T' / 'B' for an overlay or solder mask layer, '' for any other layer
+function SilkSideOfLayer(Layer: Integer): String;
+begin
+    Result := '';
+    if (Layer = eTopOverlay) or (Layer = eTopSolder) then
+        Result := 'T'
+    else if (Layer = eBottomOverlay) or (Layer = eBottomSolder) then
+        Result := 'B';
+end;
+
+function SilkRectStr(R: TCoordRect; XO, YO: Integer): String;
+begin
+    Result := SilkLen(R.Left - XO) + '|' + SilkLen(R.Bottom - YO) + '|' +
+              SilkLen(R.Right - XO) + '|' + SilkLen(R.Top - YO);
+end;
+
+// True for designator/comment strings that are switched off on the component
+function SilkTextHidden(Txt: IPCB_Text): Boolean;
+begin
+    Result := False;
+    if Txt.IsDesignator then
+    begin
+        if (Txt.Component <> nil) then
+            Result := not Txt.Component.NameOn;
+    end
+    else if Txt.IsComment then
+    begin
+        if (Txt.Component <> nil) then
+            Result := not Txt.Component.CommentOn;
+    end;
+end;
+
+// A pad's solder mask opening on MaskLayer as 'l|b|r|t|flag', or '' when it
+// has none there. BoundingRectangleOnLayer can come back shifted from the pad
+// for some shapes (seen on an offset SOT-89 tab, TopShape 10, 55 mil off), so
+// the result is its union with the pad's own rectangle. flag 1 marks pads
+// where the two disagree; the solver treats those as plain rectangles.
+function SilkPadMaskStr(Pad: IPCB_Pad; MaskLayer: Integer; XO, YO: Integer): String;
+var
+    R, C        : TCoordRect;
+    L, B, Rt, T : Integer;
+    Flag        : String;
+begin
+    Result := '';
+    R := Pad.BoundingRectangleOnLayer(MaskLayer);
+    if (R.Right <= R.Left) then
+        Exit;
+    C := Pad.BoundingRectangle;
+    L := R.Left;
+    B := R.Bottom;
+    Rt := R.Right;
+    T := R.Top;
+    Flag := '0';
+    if (C.Left < L) then begin L := C.Left; Flag := '1'; end;
+    if (C.Bottom < B) then begin B := C.Bottom; Flag := '1'; end;
+    if (C.Right > Rt) then begin Rt := C.Right; Flag := '1'; end;
+    if (C.Top > T) then begin T := C.Top; Flag := '1'; end;
+    Result := SilkLen(L - XO) + '|' + SilkLen(B - YO) + '|' + SilkLen(Rt - XO) + '|' +
+              SilkLen(T - YO) + '|' + Flag;
+end;
+
+// Export everything the silkscreen solver needs to ROOT_DIR\silk_data.txt,
+// one pipe-delimited line per object, mils relative to the board origin:
+//   B|file                                   the board's file path
+//   RULE|S2S|clearance, RULE|S2M|clearance   largest enabled silk rules
+//   RULE|EDGE|outline|cutout                 largest text-to-board-edge
+//                                            clearances (Board Outline Clearance)
+//   O|kind|vx|vy|cx|cy|radius|a1|a2          board outline (kind 0 line, 1 arc)
+//   K|x1|y1|x2|y2|...                        board cutout contour
+//   C|des|side|x|y|rot|nameon|l|b|r|t|tl|tb|tr|tt|trot|size|width|autopos|mirror|pattern|truetype
+//                                            component (bbox without name/comment,
+//                                            then the designator text box)
+//   Y|owner|l|b|r|t                          3D body extent
+//   ST|side|owner|x1|y1|x2|y2|w              silk track
+//   SA|side|owner|cx|cy|r|a1|a2|w            silk arc
+//   SX|side|owner|kind|l|b|r|t|stroke|tt|rot silk text (D designator, C comment, F free)
+//                                            free text adds |text
+//   SB|side|owner|l|b|r|t                    silk fill / region extent
+//   MP|side|owner|pin|x|y|rot|shape|xs|ys|l|b|r|t|shifted   pad solder mask opening
+//   MV|side|owner|x|y|diameter               untented via opening
+//   MT|side|owner|x1|y1|x2|y2|w, MB|side|owner|l|b|r|t   solder mask layer objects
+function ExportSilkscreenData(ROOT_DIR: String): String;
+var
+    Board     : IPCB_Board;
+    Iterator  : IPCB_BoardIterator;
+    Prim      : IPCB_Primitive;
+    Comp      : IPCB_Component;
+    Lines     : TStringList;
+    R, T      : TCoordRect;
+    XO, YO    : Integer;
+    I         : Integer;
+    Side      : String;
+    Owner     : String;
+    Kind      : String;
+    Flag      : String;
+    Flag2     : String;
+    Detail    : String;
+    ObjId     : Integer;
+    PrimLayer : Integer;
+    Wanted    : Boolean;
+    FileName  : String;
+    S2S, S2M  : Double;
+    EdgeOut   : Double;
+    EdgeCut   : Double;
+    IsSilk    : Boolean;
+    IsMask    : Boolean;
+    Diameter  : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    S2S := -1;
+    S2M := -1;
+    EdgeOut := -1;
+    EdgeCut := -1;
+    Lines := TStringList.Create;
+
+    try
+        Lines.Add('V|1');
+        Lines.Add('B|' + Board.FileName);
+
+        // Design rules: the largest enabled silk clearances
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while (Prim <> nil) do
+        begin
+            if Prim.Enabled then
+            begin
+                if (Prim.RuleKind = eRule_SilkToSilkClearance) then
+                begin
+                    if (CoordToMils(Prim.SilkToSilkClearance) > S2S) then
+                        S2S := CoordToMils(Prim.SilkToSilkClearance);
+                end
+                else if (Prim.RuleKind = eRule_SilkToSolderMaskClearance) then
+                begin
+                    if (CoordToMils(Prim.SilkToMaskGap) > S2M) then
+                        S2M := CoordToMils(Prim.SilkToMaskGap);
+                end
+                else if (Prim.RuleKind = eRule_BoardOutlineClearance) then
+                begin
+                    // Per-object table; the rule's Gap is only the generic value
+                    if (CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge)) > EdgeOut) then
+                        EdgeOut := CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge));
+                    if (CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_CutoutEdge)) > EdgeCut) then
+                        EdgeCut := CoordToMils(Prim.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_CutoutEdge));
+                end;
+            end;
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        Lines.Add('RULE|S2S|' + SilkNum(S2S));
+        Lines.Add('RULE|S2M|' + SilkNum(S2M));
+        if (EdgeOut >= 0) then
+            Lines.Add('RULE|EDGE|' + SilkNum(EdgeOut) + '|' + SilkNum(EdgeCut));
+
+        // Board outline, vertex by vertex (arcs start at their vertex)
+        for I := 0 to Board.BoardOutline.PointCount - 1 do
+            Lines.Add('O|' + IntToStr(Board.BoardOutline.Segments[I].Kind) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].vx - XO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].vy - YO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].cx - XO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].cy - YO) + '|' +
+                SilkLen(Board.BoardOutline.Segments[I].Radius) + '|' +
+                SilkNum(Board.BoardOutline.Segments[I].Angle1) + '|' +
+                SilkNum(Board.BoardOutline.Segments[I].Angle2));
+
+        // Components and their designator text boxes
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Comp := Iterator.FirstPCBObject;
+        while (Comp <> nil) do
+        begin
+            R := Comp.BoundingRectangleNoNameComment;
+            T := Comp.Name.BoundingRectangle;
+            if Comp.NameOn then Flag := '1' else Flag := '0';
+            Kind := '0';
+            if Comp.Name.MirrorFlag then Kind := '1';
+            Flag2 := '0';
+            if Comp.Name.UseTTFonts then Flag2 := '1';
+            Lines.Add('C|' + Comp.Name.Text + '|' + SilkSideOfLayer(Comp.Name.Layer) + '|' +
+                SilkLen(Comp.x - XO) + '|' + SilkLen(Comp.y - YO) + '|' +
+                SilkNum(Comp.Rotation) + '|' + Flag + '|' +
+                SilkRectStr(R, XO, YO) + '|' + SilkRectStr(T, XO, YO) + '|' +
+                SilkNum(Comp.Name.Rotation) + '|' + SilkLen(Comp.Name.Size) + '|' +
+                SilkLen(Comp.Name.Width) + '|' + IntToStr(Comp.NameAutoPosition) + '|' +
+                Kind + '|' + Comp.Pattern + '|' + Flag2);
+            Comp := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        // One pass over every other primitive kind the solver cares about
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject, eFillObject,
+                                           eRegionObject, ePadObject, eViaObject, eComponentBodyObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while (Prim <> nil) do
+        begin
+            // Every property read leaks a little memory in the script engine
+            // (about 40 MB per export on a 40k-object board), so each object's
+            // kind and layer are read once, objects that produce no line are
+            // skipped before anything else is read, and the owner is read
+            // only for the rest
+            ObjId := Prim.ObjectId;
+            PrimLayer := Prim.Layer;
+            IsSilk := (PrimLayer = eTopOverlay) or (PrimLayer = eBottomOverlay);
+            IsMask := (PrimLayer = eTopSolder) or (PrimLayer = eBottomSolder);
+            Wanted := IsSilk or IsMask or (ObjId = ePadObject) or (ObjId = eViaObject) or
+                      (ObjId = eComponentBodyObject) or (ObjId = eRegionObject);
+            Owner := '';
+            if Wanted then
+                if Prim.InComponent then
+                begin
+                    Comp := Prim.Component;
+                    if (Comp <> nil) then
+                        Owner := Comp.Name.Text;
+                end;
+            Side := SilkSideOfLayer(PrimLayer);
+
+            if not Wanted then
+                Side := Side        // nothing to export
+            else if (ObjId = eTrackObject) then
+            begin
+                if IsSilk or IsMask then
+                begin
+                    if IsSilk then Kind := 'ST' else Kind := 'MT';
+                    Lines.Add(Kind + '|' + Side + '|' + Owner + '|' +
+                        SilkLen(Prim.X1 - XO) + '|' + SilkLen(Prim.Y1 - YO) + '|' +
+                        SilkLen(Prim.X2 - XO) + '|' + SilkLen(Prim.Y2 - YO) + '|' +
+                        SilkLen(Prim.Width));
+                end;
+            end
+            else if (ObjId = eArcObject) then
+            begin
+                if IsSilk then
+                    Lines.Add('SA|' + Side + '|' + Owner + '|' +
+                        SilkLen(Prim.XCenter - XO) + '|' + SilkLen(Prim.YCenter - YO) + '|' +
+                        SilkLen(Prim.Radius) + '|' + SilkNum(Prim.StartAngle) + '|' +
+                        SilkNum(Prim.EndAngle) + '|' + SilkLen(Prim.LineWidth))
+                else if IsMask then
+                    Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end
+            else if (ObjId = eTextObject) then
+            begin
+                if IsSilk then
+                begin
+                    if (not SilkTextHidden(Prim)) then
+                    begin
+                        if Prim.IsDesignator then Kind := 'D'
+                        else if Prim.IsComment then Kind := 'C'
+                        else Kind := 'F';
+                        Flag := '0';
+                        if Prim.UseTTFonts then Flag := '1';
+                        Detail := '';
+                        if (Kind = 'F') then
+                            Detail := '|' + StringReplace(Prim.Text, '|', '/', REPLACEALL);
+                        Lines.Add('SX|' + Side + '|' + Owner + '|' + Kind + '|' +
+                            SilkRectStr(Prim.BoundingRectangle, XO, YO) + '|' +
+                            SilkLen(Prim.Width) + '|' + Flag + '|' + SilkNum(Prim.Rotation) + Detail);
+                    end;
+                end;
+            end
+            else if (ObjId = eFillObject) then
+            begin
+                if IsSilk then
+                    Lines.Add('SB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO))
+                else if IsMask then
+                    Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end
+            else if (ObjId = eRegionObject) then
+            begin
+                if (Prim.Kind = eRegionKind_BoardCutout) then
+                begin
+                    // Contour vertices; a 'Layer Stack Region' also reports this
+                    // kind and spans the whole board - the solver drops those
+                    Kind := 'K';
+                    for I := 0 to Prim.MainContour.Count - 1 do
+                        Kind := Kind + '|' + SilkLen(Prim.MainContour.x[I] - XO) + '|' +
+                                SilkLen(Prim.MainContour.y[I] - YO);
+                    Lines.Add(Kind);
+                end
+                else if IsSilk then
+                    Lines.Add('SB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO))
+                else if IsMask then
+                    Lines.Add('MB|' + Side + '|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end
+            else if (ObjId = ePadObject) then
+            begin
+                // Mask opening per side (see SilkPadMaskStr)
+                if ((PrimLayer = eTopLayer) or (PrimLayer = eMultiLayer)) and (not Prim.IsTenting_Top) then
+                begin
+                    Kind := SilkPadMaskStr(Prim, eTopSolder, XO, YO);
+                    if (Kind <> '') then
+                        Lines.Add('MP|T|' + Owner + '|' + Prim.Name + '|' +
+                            SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                            SilkNum(Prim.Rotation) + '|' + IntToStr(Prim.TopShape) + '|' +
+                            SilkLen(Prim.TopXSize) + '|' + SilkLen(Prim.TopYSize) + '|' + Kind);
+                end;
+                if ((PrimLayer = eBottomLayer) or (PrimLayer = eMultiLayer)) and (not Prim.IsTenting_Bottom) then
+                begin
+                    Kind := SilkPadMaskStr(Prim, eBottomSolder, XO, YO);
+                    if (Kind <> '') then
+                        Lines.Add('MP|B|' + Owner + '|' + Prim.Name + '|' +
+                            SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                            SilkNum(Prim.Rotation) + '|' + IntToStr(Prim.BotShape) + '|' +
+                            SilkLen(Prim.BotXSize) + '|' + SilkLen(Prim.BotYSize) + '|' + Kind);
+                end;
+            end
+            else if (ObjId = eViaObject) then
+            begin
+                Diameter := Prim.Size;
+                if (Prim.SolderMaskExpansion > 0) then
+                    Diameter := Diameter + 2 * Prim.SolderMaskExpansion;
+                if Prim.IntersectLayer(eTopLayer) and (not Prim.IsTenting_Top) then
+                    Lines.Add('MV|T|' + Owner + '|' + SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                        SilkLen(Diameter));
+                if Prim.IntersectLayer(eBottomLayer) and (not Prim.IsTenting_Bottom) then
+                    Lines.Add('MV|B|' + Owner + '|' + SilkLen(Prim.x - XO) + '|' + SilkLen(Prim.y - YO) + '|' +
+                        SilkLen(Diameter));
+            end
+            else if (ObjId = eComponentBodyObject) then
+            begin
+                if (Owner <> '') then
+                    Lines.Add('Y|' + Owner + '|' + SilkRectStr(Prim.BoundingRectangle, XO, YO));
+            end;
+
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        FileName := ROOT_DIR + 'silk_data.txt';
+        Lines.SaveToFile(FileName);
+        Result := '{"file": "' + JSONEscapeString(FileName) + '", "line_count": ' + IntToStr(Lines.Count) + '}';
+    finally
+        Lines.Free;
+    end;
+end;
+
+// Move designators so their text box is centred on a given point.
+// Each entry is 'Designator|CX|CY|Rotation|Height|StrokeWidth|Visible' in
+// mils relative to the board origin; an empty field keeps the current value
+// (Visible is 1 or 0). Positioning by box centre makes the result independent
+// of the text anchor, justification and bottom-side mirroring. The whole
+// batch is one undo step.
+function PlaceDesignatorsFromList(EntriesList: TStringList): String;
+var
+    Board        : IPCB_Board;
+    Comp         : IPCB_Component;
+    Txt          : IPCB_Text;
+    R            : TCoordRect;
+    Entry        : String;
+    Designator   : String;
+    FieldValue   : String;
+    ResultProps  : TStringList;
+    MissingArray : TStringList;
+    PlacedArray  : TStringList;
+    MovedTexts   : TStringList;
+    TextProps    : TStringList;
+    XO, YO       : Integer;
+    TargetX      : Integer;
+    TargetY      : Integer;
+    DX, DY       : Integer;
+    Pass         : Integer;
+    i            : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    ResultProps := TStringList.Create;
+    MissingArray := TStringList.Create;
+    PlacedArray := TStringList.Create;
+    MovedTexts := TStringList.Create;
+
+    try
+        PCBServer.PreProcess;
+
+        for i := 0 to EntriesList.Count - 1 do
+        begin
+            Entry := Trim(EntriesList[i]);
+            if (Entry <> '') then
+            begin
+                Designator := Trim(GetFieldFromPipeString(Entry, 0));
+                Comp := Board.GetPcbComponentByRefDes(Designator);
+
+                if (Comp = nil) then
+                    MissingArray.Add('"' + JSONEscapeString(Designator) + '"')
+                else
+                begin
+                    Txt := Comp.Name;
+                    PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 6));
+                    if (FieldValue = '0') then
+                        Comp.NameOn := False
+                    else if (FieldValue = '1') then
+                        Comp.NameOn := True;
+
+                    // Manual, or Altium re-autopositions the text on the next move
+                    Comp.NameAutoPosition := eAutoPos_Manual;
+
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 4));
+                    if (FieldValue <> '') then
+                        Txt.Size := MilsToCoord(SafeStrToFloat(FieldValue));
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 5));
+                    if (FieldValue <> '') then
+                        Txt.Width := MilsToCoord(SafeStrToFloat(FieldValue));
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 3));
+                    if (FieldValue <> '') then
+                        Txt.Rotation := SafeStrToFloat(FieldValue);
+
+                    PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                    // Move only after the rotation is committed: mid-modify the
+                    // box turns about its centre, but Altium can commit the
+                    // turn about another pivot, so measure the committed box.
+                    // A second pass corrects any residual shift.
+                    FieldValue := Trim(GetFieldFromPipeString(Entry, 1));
+                    if (FieldValue <> '') and (Trim(GetFieldFromPipeString(Entry, 2)) <> '') then
+                    begin
+                        TargetX := MilsToCoord(SafeStrToFloat(FieldValue)) + XO;
+                        TargetY := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + YO;
+                        for Pass := 1 to 2 do
+                        begin
+                            R := Txt.BoundingRectangle;
+                            DX := TargetX - (R.Left + (R.Right - R.Left) div 2);
+                            DY := TargetY - (R.Bottom + (R.Top - R.Bottom) div 2);
+                            if (Abs(DX) > 1) or (Abs(DY) > 1) then
+                            begin
+                                PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                Txt.MoveByXY(DX, DY);
+                                PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                            end;
+                        end;
+                    end;
+
+                    MovedTexts.AddObject(Designator, Txt);
+
+                    // Report the final text box as Altium sees it
+                    R := Txt.BoundingRectangle;
+                    TextProps := TStringList.Create;
+                    try
+                        AddJSONProperty(TextProps, 'designator', Comp.Name.Text);
+                        AddJSONNumber(TextProps, 'cx', CoordToMils(R.Left + (R.Right - R.Left) div 2 - XO));
+                        AddJSONNumber(TextProps, 'cy', CoordToMils(R.Bottom + (R.Top - R.Bottom) div 2 - YO));
+                        AddJSONNumber(TextProps, 'width', CoordToMils(R.Right - R.Left));
+                        AddJSONNumber(TextProps, 'height', CoordToMils(R.Top - R.Bottom));
+                        AddJSONNumber(TextProps, 'rotation', Txt.Rotation);
+                        AddJSONNumber(TextProps, 'text_height', CoordToMils(Txt.Size));
+                        AddJSONNumber(TextProps, 'stroke_width', CoordToMils(Txt.Width));
+                        AddJSONBoolean(TextProps, 'visible', Comp.NameOn);
+                        PlacedArray.Add(BuildJSONObject(TextProps, 2));
+                    finally
+                        TextProps.Free;
+                    end;
+                end;
+            end;
+        end;
+
+        PCBServer.PostProcess;
+
+        // Rebuild the stroke geometry of every moved text: batch DRC checks a
+        // cached copy that scripted moves and resizes leave stale, reporting
+        // collisions (and missing real ones) at the old spot. Done after the
+        // undo group closes: inside it the rebuild does not stick.
+        for i := 0 to MovedTexts.Count - 1 do
+        begin
+            Txt := MovedTexts.Objects[i];
+            Txt.BeginModify;
+            Txt.SetState_XSizeYSize;
+            Txt.EndModify;
+            Txt.GraphicallyInvalidate;
+        end;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONInteger(ResultProps, 'placed_count', PlacedArray.Count);
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'missing_designators'))
+        else
+            ResultProps.Add('"missing_designators": []');
+        if (PlacedArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(PlacedArray, 'designators', 1))
+        else
+            ResultProps.Add('"designators": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        ResultProps.Free;
+        MissingArray.Free;
+        PlacedArray.Free;
+        MovedTexts.Free;
+    end;
+end;
+
+// Verify designator silkscreen with Altium's own rule engine. Each visible
+// designator in the list (all visible designators when the list is empty) is
+// tested against nearby silk with the Silk To Silk Clearance rule and against
+// pads, vias and solder mask objects with the Silk To Solder Mask Clearance
+// rule, and against the board edge with the Board Outline Clearance rule,
+// through Rule.ActualCheck - the same test a batch DRC runs.
+function CheckSilkscreen(DesignatorsList: TStringList): String;
+var
+    Board           : IPCB_Board;
+    Iterator        : IPCB_BoardIterator;
+    SIter           : IPCB_SpatialIterator;
+    Comp            : IPCB_Component;
+    Txt             : IPCB_Text;
+    Prim            : IPCB_Primitive;
+    Rule            : IPCB_Rule;
+    Targets         : TStringList;
+    MissingArray    : TStringList;
+    ViolationsArray : TStringList;
+    VProps          : TStringList;
+    ResultProps     : TStringList;
+    R, PR           : TCoordRect;
+    XO, YO          : Integer;
+    Margin          : Integer;
+    SilkLayer       : Integer;
+    MaskLayer       : Integer;
+    CopperLayer     : Integer;
+    i               : Integer;
+    RuleName        : String;
+    Detail          : String;
+    Owner           : String;
+    HiddenCount     : Integer;
+    CheckedCount    : Integer;
+    DirtyCount      : Integer;
+    Dirty           : Boolean;
+    Skip            : Boolean;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    // Search radius around each text box; larger than any sane silk clearance
+    Margin := MilsToCoord(30);
+    HiddenCount := 0;
+    CheckedCount := 0;
+    DirtyCount := 0;
+
+    Targets := TStringList.Create;
+    MissingArray := TStringList.Create;
+    ViolationsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+
+    try
+        if (DesignatorsList.Count > 0) then
+        begin
+            for i := 0 to DesignatorsList.Count - 1 do
+            begin
+                if (Board.GetPcbComponentByRefDes(Trim(DesignatorsList[i])) <> nil) then
+                    Targets.Add(Trim(DesignatorsList[i]))
+                else
+                    MissingArray.Add('"' + JSONEscapeString(Trim(DesignatorsList[i])) + '"');
+            end;
+        end
+        else
+        begin
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Comp := Iterator.FirstPCBObject;
+            while (Comp <> nil) do
+            begin
+                Targets.Add(Comp.Name.Text);
+                Comp := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        end;
+
+        for i := 0 to Targets.Count - 1 do
+        begin
+            Comp := Board.GetPcbComponentByRefDes(Targets[i]);
+            Txt := Comp.Name;
+            SilkLayer := Txt.Layer;
+
+            if (not Comp.NameOn) or ((SilkLayer <> eTopOverlay) and (SilkLayer <> eBottomOverlay)) then
+                HiddenCount := HiddenCount + 1
+            else
+            begin
+                CheckedCount := CheckedCount + 1;
+                Dirty := False;
+                if (SilkLayer = eTopOverlay) then
+                begin
+                    MaskLayer := eTopSolder;
+                    CopperLayer := eTopLayer;
+                end
+                else
+                begin
+                    MaskLayer := eBottomSolder;
+                    CopperLayer := eBottomLayer;
+                end;
+
+                R := Txt.BoundingRectangle;
+                SIter := Board.SpatialIterator_Create;
+                SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject, eFillObject,
+                                                eRegionObject, ePadObject, eViaObject));
+                SIter.AddFilter_LayerSet(AllLayers);
+                SIter.AddFilter_Area(R.Left - Margin, R.Bottom - Margin, R.Right + Margin, R.Top + Margin);
+
+                Prim := SIter.FirstPCBObject;
+                while (Prim <> nil) do
+                begin
+                    RuleName := '';
+                    if (Prim.I_ObjectAddress <> Txt.I_ObjectAddress) then
+                    begin
+                        if (Prim.Layer = SilkLayer) then
+                        begin
+                            // No short-circuit evaluation in DelphiScript:
+                            // only ask text objects whether they are hidden
+                            Skip := False;
+                            if (Prim.ObjectId = eTextObject) then
+                                Skip := SilkTextHidden(Prim);
+                            if not Skip then
+                            begin
+                                Rule := Board.FindDominantRuleForObjectPair(Txt, Prim, eRule_SilkToSilkClearance);
+                                if (Rule <> nil) then
+                                    if (Rule.ActualCheck(Txt, Prim) <> nil) then
+                                        RuleName := 'silk_to_silk';
+                            end;
+                        end
+                        else if (((Prim.ObjectId = ePadObject) and
+                                  ((Prim.Layer = CopperLayer) or (Prim.Layer = eMultiLayer))) or
+                                 (Prim.ObjectId = eViaObject) or (Prim.Layer = MaskLayer)) then
+                        begin
+                            Rule := Board.FindDominantRuleForObjectPair(Txt, Prim, eRule_SilkToSolderMaskClearance);
+                            if (Rule <> nil) then
+                                if (Rule.ActualCheck(Txt, Prim) <> nil) or (Rule.ActualCheck(Prim, Txt) <> nil) then
+                                    RuleName := 'silk_to_mask';
+                        end;
+                    end;
+
+                    if (RuleName <> '') then
+                    begin
+                        Dirty := True;
+                        Owner := '';
+                        if Prim.InComponent then
+                            if (Prim.Component <> nil) then
+                                Owner := Prim.Component.Name.Text;
+                        Detail := '';
+                        if (Prim.ObjectId = ePadObject) then
+                            Detail := Prim.Name
+                        else if (Prim.ObjectId = eTextObject) then
+                            Detail := Prim.Text;
+
+                        PR := Prim.BoundingRectangle;
+                        VProps := TStringList.Create;
+                        try
+                            AddJSONProperty(VProps, 'designator', Comp.Name.Text);
+                            AddJSONProperty(VProps, 'rule', RuleName);
+                            AddJSONProperty(VProps, 'object', Prim.ObjectIDString);
+                            AddJSONProperty(VProps, 'owner', Owner);
+                            AddJSONProperty(VProps, 'detail', Detail);
+                            if (RuleName = 'silk_to_silk') then
+                                AddJSONNumber(VProps, 'distance_mils', Round(CoordToMils(Board.PrimPrimDistance(Txt, Prim)) * 100) / 100);
+                            AddJSONNumber(VProps, 'object_x', CoordToMils(PR.Left + (PR.Right - PR.Left) div 2 - XO));
+                            AddJSONNumber(VProps, 'object_y', CoordToMils(PR.Bottom + (PR.Top - PR.Bottom) div 2 - YO));
+                            ViolationsArray.Add(BuildJSONObject(VProps, 2));
+                        finally
+                            VProps.Free;
+                        end;
+                    end;
+
+                    Prim := SIter.NextPCBObject;
+                end;
+                Board.SpatialIterator_Destroy(SIter);
+
+                // Board Outline Clearance: text to the board edge and cutouts,
+                // measured from the text's bounding box
+                Rule := Board.FindDominantRuleForObject(Txt, eRule_BoardOutlineClearance);
+                if (Rule <> nil) then
+                    if (Rule.ActualCheck(Txt, Board.BoardOutline) <> nil) then
+                    begin
+                        Dirty := True;
+                        VProps := TStringList.Create;
+                        try
+                            AddJSONProperty(VProps, 'designator', Comp.Name.Text);
+                            AddJSONProperty(VProps, 'rule', 'board_edge');
+                            AddJSONProperty(VProps, 'object', 'Board outline');
+                            AddJSONProperty(VProps, 'owner', '');
+                            AddJSONProperty(VProps, 'detail', '');
+                            AddJSONNumber(VProps, 'distance_mils', Round(CoordToMils(Board.PrimPrimDistance(Txt, Board.BoardOutline)) * 100) / 100);
+                            ViolationsArray.Add(BuildJSONObject(VProps, 2));
+                        finally
+                            VProps.Free;
+                        end;
+                    end;
+
+                if Dirty then
+                    DirtyCount := DirtyCount + 1;
+            end;
+        end;
+
+        AddJSONInteger(ResultProps, 'checked_count', CheckedCount);
+        AddJSONInteger(ResultProps, 'hidden_count', HiddenCount);
+        AddJSONInteger(ResultProps, 'designators_with_violations', DirtyCount);
+        AddJSONInteger(ResultProps, 'violation_count', ViolationsArray.Count);
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'missing_designators'))
+        else
+            ResultProps.Add('"missing_designators": []');
+        if (ViolationsArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(ViolationsArray, 'violations', 1))
+        else
+            ResultProps.Add('"violations": []');
+
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Targets.Free;
+        MissingArray.Free;
+        ViolationsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// Check one free silk primitive (a label-block link) with Altium's silk
+// rules, as CheckSilkscreen does for designators: one JSON violation per
+// problem, tagged with the request item it came from.
+procedure SilkGraphicViolations(Board: IPCB_Board; Prim: IPCB_Primitive; ItemIndex: Integer; ViolationsArray: TStringList);
+var
+    SIter       : IPCB_SpatialIterator;
+    Other       : IPCB_Primitive;
+    Rule        : IPCB_Rule;
+    R           : TCoordRect;
+    Margin      : Integer;
+    MaskLayer   : Integer;
+    CopperLayer : Integer;
+    RuleName    : String;
+    Owner       : String;
+    Detail      : String;
+    Skip        : Boolean;
+    VProps      : TStringList;
+begin
+    if (Prim.Layer = eTopOverlay) then
+    begin
+        MaskLayer := eTopSolder;
+        CopperLayer := eTopLayer;
+    end
+    else
+    begin
+        MaskLayer := eBottomSolder;
+        CopperLayer := eBottomLayer;
+    end;
+    Margin := MilsToCoord(30);
+    R := Prim.BoundingRectangle;
+    SIter := Board.SpatialIterator_Create;
+    SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject, eFillObject,
+                                    eRegionObject, ePadObject, eViaObject));
+    SIter.AddFilter_LayerSet(AllLayers);
+    SIter.AddFilter_Area(R.Left - Margin, R.Bottom - Margin, R.Right + Margin, R.Top + Margin);
+    Other := SIter.FirstPCBObject;
+    while (Other <> nil) do
+    begin
+        RuleName := '';
+        if (Other.I_ObjectAddress <> Prim.I_ObjectAddress) then
+        begin
+            if (Other.Layer = Prim.Layer) then
+            begin
+                Skip := False;
+                if (Other.ObjectId = eTextObject) then
+                    Skip := SilkTextHidden(Other);
+                if not Skip then
+                begin
+                    Rule := Board.FindDominantRuleForObjectPair(Prim, Other, eRule_SilkToSilkClearance);
+                    if (Rule <> nil) then
+                        if (Rule.ActualCheck(Prim, Other) <> nil) then
+                            RuleName := 'silk_to_silk';
+                end;
+            end
+            else if (((Other.ObjectId = ePadObject) and
+                      ((Other.Layer = CopperLayer) or (Other.Layer = eMultiLayer))) or
+                     (Other.ObjectId = eViaObject) or (Other.Layer = MaskLayer)) then
+            begin
+                Rule := Board.FindDominantRuleForObjectPair(Prim, Other, eRule_SilkToSolderMaskClearance);
+                if (Rule <> nil) then
+                    if (Rule.ActualCheck(Prim, Other) <> nil) or (Rule.ActualCheck(Other, Prim) <> nil) then
+                        RuleName := 'silk_to_mask';
+            end;
+        end;
+        if (RuleName <> '') then
+        begin
+            Owner := '';
+            if Other.InComponent then
+                if (Other.Component <> nil) then
+                    Owner := Other.Component.Name.Text;
+            Detail := '';
+            if (Other.ObjectId = ePadObject) then
+                Detail := Other.Name
+            else if (Other.ObjectId = eTextObject) then
+                Detail := Other.Text;
+            VProps := TStringList.Create;
+            try
+                AddJSONInteger(VProps, 'item', ItemIndex);
+                AddJSONProperty(VProps, 'rule', RuleName);
+                AddJSONProperty(VProps, 'object', Other.ObjectIDString);
+                AddJSONProperty(VProps, 'owner', Owner);
+                AddJSONProperty(VProps, 'detail', Detail);
+                ViolationsArray.Add(BuildJSONObject(VProps, 2));
+            finally
+                VProps.Free;
+            end;
+        end;
+        Other := SIter.NextPCBObject;
+    end;
+    Board.SpatialIterator_Destroy(SIter);
+
+    Rule := Board.FindDominantRuleForObject(Prim, eRule_BoardOutlineClearance);
+    if (Rule <> nil) then
+        if (Rule.ActualCheck(Prim, Board.BoardOutline) <> nil) then
+        begin
+            VProps := TStringList.Create;
+            try
+                AddJSONInteger(VProps, 'item', ItemIndex);
+                AddJSONProperty(VProps, 'rule', 'board_edge');
+                AddJSONProperty(VProps, 'object', 'Board outline');
+                AddJSONProperty(VProps, 'owner', '');
+                AddJSONProperty(VProps, 'detail', '');
+                ViolationsArray.Add(BuildJSONObject(VProps, 2));
+            finally
+                VProps.Free;
+            end;
+        end;
+end;
+
+// The free silk primitive matching a '-' item (without the '-'), or nil.
+// Tracks match by end points (either direction), arcs by centre, radius and
+// angles, text by its string and the centre of its box.
+function FindSilkGraphic(Board: IPCB_Board; Entry: String; Layer: Integer): IPCB_Primitive;
+var
+    Iterator  : IPCB_BoardIterator;
+    Prim      : IPCB_Primitive;
+    Kind      : String;
+    R         : TCoordRect;
+    Tol       : Integer;
+    X1, Y1    : Integer;
+    X2, Y2    : Integer;
+    CR        : Integer;
+    A1, A2    : Integer;
+    TextValue : String;
+    Hit       : Boolean;
+begin
+    Result := nil;
+    Tol := MilsToCoord(0.2);
+    Kind := GetFieldFromPipeString(Entry, 0);
+    X1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + Board.XOrigin;
+    Y1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + Board.YOrigin;
+    X2 := 0;
+    Y2 := 0;
+    CR := 0;
+    A1 := 0;
+    A2 := 0;
+    TextValue := '';
+    if (Kind = 'T') then
+    begin
+        X2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4)))) + Board.XOrigin;
+        Y2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5)))) + Board.YOrigin;
+    end
+    else if (Kind = 'A') then
+    begin
+        CR := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4))));
+        A1 := Round(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5))) * 100);
+        A2 := Round(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6))) * 100);
+    end
+    else
+        TextValue := GetFieldFromPipeString(Entry, 7);
+
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eTextObject));
+    Iterator.AddFilter_IPCB_LayerSet(MkSet(Layer));
+    Iterator.AddFilter_Method(eProcessAll);
+    Prim := Iterator.FirstPCBObject;
+    while (Prim <> nil) do
+    begin
+        Hit := False;
+        if not Prim.InComponent then
+        begin
+            if (Kind = 'T') and (Prim.ObjectId = eTrackObject) then
+            begin
+                if (Abs(Prim.X1 - X1) <= Tol) and (Abs(Prim.Y1 - Y1) <= Tol) and
+                   (Abs(Prim.X2 - X2) <= Tol) and (Abs(Prim.Y2 - Y2) <= Tol) then
+                    Hit := True
+                else if (Abs(Prim.X1 - X2) <= Tol) and (Abs(Prim.Y1 - Y2) <= Tol) and
+                        (Abs(Prim.X2 - X1) <= Tol) and (Abs(Prim.Y2 - Y1) <= Tol) then
+                    Hit := True;
+            end
+            else if (Kind = 'A') and (Prim.ObjectId = eArcObject) then
+            begin
+                if (Abs(Prim.XCenter - X1) <= Tol) and (Abs(Prim.YCenter - Y1) <= Tol) and
+                   (Abs(Prim.Radius - CR) <= Tol) and (Abs(Round(Prim.StartAngle * 100) - A1) <= 1) and
+                   (Abs(Round(Prim.EndAngle * 100) - A2) <= 1) then
+                    Hit := True;
+            end
+            else if (Kind = 'X') and (Prim.ObjectId = eTextObject) then
+            begin
+                if (Prim.Text = TextValue) then
+                begin
+                    R := Prim.BoundingRectangle;
+                    if (Abs((R.Left + R.Right) div 2 - X1) <= MilsToCoord(1)) and
+                       (Abs((R.Bottom + R.Top) div 2 - Y1) <= MilsToCoord(1)) then
+                        Hit := True;
+                end;
+            end;
+        end;
+        if Hit then
+        begin
+            Result := Prim;
+            Break;
+        end;
+        Prim := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// Add or remove free silkscreen graphics (the links of label blocks) in one
+// undo step. Items, coordinates in mils from the board origin:
+//   +T|side|x1|y1|x2|y2|width                   track
+//   +A|side|cx|cy|radius|start|end|width        arc (degrees, CCW; 0 to 360 = circle)
+//   +X|side|cx|cy|height|stroke|rotation|text   stroke text, box centred on cx, cy
+// The same with '-' removes the matching free primitive. Every created
+// primitive is then checked with Altium's silk rules.
+function EditSilkGraphics(ItemsList: TStringList): String;
+var
+    Board           : IPCB_Board;
+    Prim            : IPCB_Primitive;
+    CreatedList     : TStringList;
+    RemoveList      : TStringList;
+    MissingArray    : TStringList;
+    ViolationsArray : TStringList;
+    ResultProps     : TStringList;
+    Entry           : String;
+    Op              : String;
+    Kind            : String;
+    Layer           : Integer;
+    XO, YO          : Integer;
+    TX, TY          : Integer;
+    R               : TCoordRect;
+    i               : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+    XO := Board.XOrigin;
+    YO := Board.YOrigin;
+    CreatedList := TStringList.Create;
+    RemoveList := TStringList.Create;
+    MissingArray := TStringList.Create;
+    ViolationsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        PCBServer.PreProcess;
+
+        // Removals first, so they can never match what this call creates
+        for i := 0 to ItemsList.Count - 1 do
+        begin
+            Entry := Trim(ItemsList[i]);
+            if (Copy(Entry, 1, 1) = '-') then
+            begin
+                Entry := Copy(Entry, 2, Length(Entry) - 1);
+                if (GetFieldFromPipeString(Entry, 1) = 'B') then
+                    Layer := eBottomOverlay
+                else
+                    Layer := eTopOverlay;
+                Prim := FindSilkGraphic(Board, Entry, Layer);
+                if (Prim <> nil) then
+                    RemoveList.AddObject(IntToStr(i), Prim)
+                else
+                    MissingArray.Add('"' + JSONEscapeString(Entry) + '"');
+            end;
+        end;
+        for i := 0 to RemoveList.Count - 1 do
+            Board.RemovePCBObject(RemoveList.Objects[i]);
+
+        for i := 0 to ItemsList.Count - 1 do
+        begin
+            Entry := Trim(ItemsList[i]);
+            Op := Copy(Entry, 1, 1);
+            Entry := Copy(Entry, 2, Length(Entry) - 1);
+            Kind := GetFieldFromPipeString(Entry, 0);
+            if (GetFieldFromPipeString(Entry, 1) = 'B') then
+                Layer := eBottomOverlay
+            else
+                Layer := eTopOverlay;
+            Prim := nil;
+            if (Op = '+') and (Kind = 'T') then
+            begin
+                Prim := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                Prim.Layer := Layer;
+                Prim.X1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + XO;
+                Prim.Y1 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + YO;
+                Prim.X2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4)))) + XO;
+                Prim.Y2 := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5)))) + YO;
+                Prim.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6))));
+                Board.AddPCBObject(Prim);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+            end
+            else if (Op = '+') and (Kind = 'A') then
+            begin
+                Prim := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+                Prim.Layer := Layer;
+                Prim.XCenter := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + XO;
+                Prim.YCenter := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + YO;
+                Prim.Radius := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4))));
+                Prim.StartAngle := SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5)));
+                Prim.EndAngle := SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6)));
+                Prim.LineWidth := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 7))));
+                Board.AddPCBObject(Prim);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+            end
+            else if (Op = '+') and (Kind = 'X') then
+            begin
+                TX := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 2)))) + XO;
+                TY := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 3)))) + YO;
+                Prim := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+                Prim.Layer := Layer;
+                Prim.UseTTFonts := False;
+                Prim.Text := GetFieldFromPipeString(Entry, 7);
+                Prim.Size := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 4))));
+                Prim.Width := MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 5))));
+                Prim.MirrorFlag := (Layer = eBottomOverlay);
+                Prim.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Entry, 6)));
+                Prim.XLocation := TX;
+                Prim.YLocation := TY;
+                Board.AddPCBObject(Prim);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+                // Centre its box on the target, then rebuild the stroke
+                // geometry that batch DRC uses
+                R := Prim.BoundingRectangle;
+                PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                Prim.MoveByXY(TX - (R.Left + R.Right) div 2, TY - (R.Bottom + R.Top) div 2);
+                Prim.SetState_XSizeYSize;
+                PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                Prim.GraphicallyInvalidate;
+            end
+            else if (Op <> '-') then
+                MissingArray.Add('"' + JSONEscapeString('cannot read ' + ItemsList[i]) + '"');
+            if (Prim <> nil) then
+                CreatedList.AddObject(IntToStr(i), Prim);
+        end;
+
+        PCBServer.PostProcess;
+
+        // As for designators: rebuild new text geometry outside the undo group
+        for i := 0 to CreatedList.Count - 1 do
+        begin
+            Prim := CreatedList.Objects[i];
+            if (Prim.ObjectId = eTextObject) then
+            begin
+                Prim.BeginModify;
+                Prim.SetState_XSizeYSize;
+                Prim.EndModify;
+            end;
+        end;
+        Board.ViewManager_FullUpdate;
+
+        for i := 0 to CreatedList.Count - 1 do
+            SilkGraphicViolations(Board, CreatedList.Objects[i], StrToInt(CreatedList[i]), ViolationsArray);
+
+        AddJSONInteger(ResultProps, 'created_count', CreatedList.Count);
+        AddJSONInteger(ResultProps, 'removed_count', RemoveList.Count);
+        if (MissingArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(MissingArray, 'not_found'))
+        else
+            ResultProps.Add('"not_found": []');
+        if (ViolationsArray.Count > 0) then
+            ResultProps.Add(BuildJSONArray(ViolationsArray, 'violations', 1))
+        else
+            ResultProps.Add('"violations": []');
+        Result := BuildJSONObject(ResultProps);
+    finally
+        CreatedList.Free;
+        RemoveList.Free;
+        MissingArray.Free;
+        ViolationsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// The footprint with this name in a PCB library (case-insensitive), or nil
+function FindLibFootprint(PcbLib: IPCB_Library; Name: String): IPCB_LibComponent;
+var
+    Iter : IPCB_LibraryIterator;
+    Comp : IPCB_LibComponent;
+begin
+    Result := nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Iter.SetState_FilterAll;
+    Comp := Iter.FirstPCBObject;
+    while (Comp <> nil) do
+    begin
+        if (UpperCase(Comp.Name) = UpperCase(Name)) then
+        begin
+            Result := Comp;
+            Break;
+        end;
+        Comp := Iter.NextPCBObject;
+    end;
+    PcbLib.LibraryIterator_Destroy(Iter);
+end;
+
+// Set a pad's paste and solder mask expansion before it is added to a
+// footprint. Modes are TMaskExpansionMode ints as text (0 no mask, 1 rule,
+// 2 manual), expansions in mils; '' leaves that setting alone. A manual
+// expansion goes through the pad cache: the PasteMaskExpansion and
+// SolderMaskExpansion setters stop the script. Mode 0 (no mask) cannot be set
+// on a pad by script: neither mode setter accepts it, and PasteMaskEnabled
+// and tenting are not kept. The result is then a problem to report,
+// otherwise ''.
+function SetPadMaskExpansion(Pad: IPCB_Pad; PasteMode, PasteExp, MaskMode, MaskExp: String): String;
+var
+    PadCache : IDispatch;
+begin
+    Result := '';
+    if ((PasteMode = '2') and (PasteExp <> '')) or ((MaskMode = '2') and (MaskExp <> '')) then
+    begin
+        PadCache := Pad.GetState_Cache;
+        if (PasteMode = '2') and (PasteExp <> '') then
+        begin
+            PadCache.PasteMaskExpansion := MilsToCoord(SafeStrToFloat(PasteExp));
+            PadCache.PasteMaskExpansionValid := eCacheManual;
+        end;
+        if (MaskMode = '2') and (MaskExp <> '') then
+        begin
+            PadCache.SolderMaskExpansion := MilsToCoord(SafeStrToFloat(MaskExp));
+            PadCache.SolderMaskExpansionValid := eCacheManual;
+        end;
+        Pad.SetState_Cache(PadCache);
+    end;
+    if (PasteMode = '1') then
+        Pad.PasteMaskExpansionMode := 1;
+    if (MaskMode = '1') then
+        Pad.SolderMaskExpansionMode := 1;
+    if (PasteMode = '0') and (MaskMode = '0') then
+        Result := 'paste and solder mask mode 0 (no mask) cannot be set on a pad by script; left at rule'
+    else if (PasteMode = '0') then
+        Result := 'paste mask mode 0 (no mask) cannot be set on a pad by script; left at rule'
+    else if (MaskMode = '0') then
+        Result := 'solder mask mode 0 (no mask) cannot be set on a pad by script; left at rule';
 end;
 
 // ---------------------------------------------------------------------------
