@@ -33,8 +33,21 @@ class EncodeTest(unittest.TestCase):
         self.assertEqual(encode_values("polygon_connect", {"connect_style": "direct"}),
                          ("connect_style=direct", ""))
         self.assertIn("one of", encode_values("polygon_connect", {"connect_style": "thermal"})[1])
-        self.assertIn("whole number", encode_values("polygon_connect", {"connect_style": "relief",
-                                                                        "entries": 2.5})[1])
+        self.assertIn("2 or 4", encode_values("polygon_connect", {"connect_style": "relief",
+                                                                  "entries": 2.5})[1])
+        self.assertIn("2 or 4", encode_values("polygon_connect", {"connect_style": "relief", "entries": 3})[1])
+
+    def test_preferred_between_min_and_max(self):
+        self.assertIn("between", encode_values("width", {"min_mils": 6, "max_mils": 10, "preferred_mils": 20})[1])
+        self.assertIn("between", encode_values("width", {"min_mils": 6, "max_mils": 10, "preferred_mils": 5})[1])
+
+    def test_via_holes_inside_their_range_and_smaller_than_the_via(self):
+        via = {"min_diameter_mils": 18, "max_diameter_mils": 40, "preferred_diameter_mils": 20,
+               "min_hole_mils": 8, "max_hole_mils": 20, "preferred_hole_mils": 10}
+        self.assertEqual(encode_values("routing_via", via)[1], "")
+        self.assertIn("between", encode_values("routing_via", dict(via, preferred_hole_mils=25))[1])
+        self.assertIn("smaller than preferred_diameter",
+                      encode_values("routing_via", dict(via, preferred_hole_mils=20))[1])
 
     def test_unknown_kind_and_key(self):
         self.assertIn("unknown rule_type", encode_values("fanout", {})[1])
