@@ -117,14 +117,21 @@ _RULE_RE = re.compile(r"^Processing Rule : (.*)$")
 _COUNT_RE = re.compile(r"^Rule Violations :\s*(\d+)")
 _TOTAL_RE = re.compile(r"^Violations Detected :\s*(\d+)")
 _WAIVED_RE = re.compile(r"^Waived Violations :\s*(\d+)")
+# "ERROR : More than 500 violations detected, DRC was stopped"
+_ERROR_RE = re.compile(r"^ERROR\s*:\s*(.*)$")
 
 
 def parse_report(text: str) -> dict:
-    """Per-rule violation counts and totals from a .drc report."""
-    rules, current = [], None
+    """Per-rule violation counts and totals from a .drc report, its errors,
+    and whether Altium stopped the check at its violation limit."""
+    rules, current, errors = [], None, []
     total = waived = None
     for line in text.splitlines():
         line = line.strip()
+        m = _ERROR_RE.match(line)
+        if m:
+            errors.append(m.group(1).strip())
+            continue
         m = _RULE_RE.match(line)
         if m:
             current = m.group(1).strip()
@@ -140,7 +147,8 @@ def parse_report(text: str) -> dict:
         m = _WAIVED_RE.match(line)
         if m:
             waived = int(m.group(1))
-    return {"violations": total, "waived": waived, "rules": rules}
+    return {"violations": total, "waived": waived, "rules": rules, "errors": errors,
+            "stopped": any("stopped" in e.lower() for e in errors)}
 
 
 def find_report(board_path: str, since: float) -> Optional[Path]:

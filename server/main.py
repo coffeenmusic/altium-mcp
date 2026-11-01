@@ -3525,13 +3525,17 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
         board_path (str): Full path of the .PcbDoc to check. It is opened if
             needed and brought to the front. Empty: the focused board, or
             the one the PCB tools last used.
-        max_violations (int): How many violations to list in full; the count
-            is always complete.
+        max_violations (int): How many violations to list in full.
+            violation_count counts every violation the check found, but
+            Altium stops the check at its own violation limit (500 unless
+            changed in its Design Rule Checker dialog); "complete": false
+            then says the board may have more.
 
     Returns:
         str: JSON with ran, violation_count, the violations (rule,
-             description, layer, x_mils/y_mils relative to the board origin,
-             and the primitives involved), and the report's per-rule counts.
+             description, x_mils/y_mils relative to the board origin, and
+             the primitives involved with their net and layer), and the
+             report's per-rule counts.
     """
     import drc
 
@@ -3577,6 +3581,10 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
                              **drc.parse_report(read_altium_text(report))}
         except OSError:
             pass
+    if out.get("report", {}).get("stopped"):
+        out["complete"] = False
+        out["note"] = ("Altium stopped the check at its violation limit (set in its Design Rule "
+                       "Checker dialog), so the board may have more violations than violation_count.")
     return json.dumps(out, indent=2)
 
 @_tool(read_only=True)

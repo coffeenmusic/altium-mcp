@@ -46,7 +46,16 @@ class ReportTest(unittest.TestCase):
         self.assertIn("StopLayer = 'Inner 1'", r["rules"][2]["rule"])
 
     def test_parse_empty(self):
-        self.assertEqual(drc.parse_report(""), {"violations": None, "waived": None, "rules": []})
+        self.assertEqual(drc.parse_report(""), {"violations": None, "waived": None, "rules": [],
+                                                 "errors": [], "stopped": False})
+
+    def test_stopped_at_the_violation_limit(self):
+        head, rest = REPORT.split("\n\n", 1)
+        r = drc.parse_report(head + "\n\nERROR : More than 500 violations detected, DRC was stopped\n\n" + rest)
+        self.assertTrue(r["stopped"])
+        self.assertEqual(r["errors"], ["More than 500 violations detected, DRC was stopped"])
+        self.assertEqual(len(r["rules"]), 3)
+        self.assertFalse(drc.parse_report(REPORT)["stopped"])
 
     def test_find_report_beside_board_or_in_output_folder(self):
         with tempfile.TemporaryDirectory() as d:
