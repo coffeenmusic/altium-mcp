@@ -26,4 +26,4 @@ jobs:
       # which looks for Altium at import and may open a file dialog.
       - name: Run unit tests
         working-directory: server
-        run: python -m unittest -v tests.test_altium_files tests.test_outjob_parser tests.test_sandbox tests.test_start_server tests.test_exchange_lock tests.test_request_format tests.test_win_processes tests.test_altium_install tests.test_routing tests.test_schematic_check
+        run: python -m unittest -v tests.test_altium_files tests.test_outjob_parser tests.test_sandbox tests.test_start_server tests.test_exchange_lock tests.test_request_format tests.test_win_processes tests.test_altium_install tests.test_routing tests.test_schematic_check tests.test_pcb_rules

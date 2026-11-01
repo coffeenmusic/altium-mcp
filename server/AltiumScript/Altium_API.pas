@@ -392,6 +392,40 @@ begin
     end;
 end;
 
+// Function to execute create PCB rule
+function ExecuteCreatePCBRule(RequestData: TStringList): String;
+var
+    i : Integer;
+    Kind, Name, Scope1, Scope2, Comment, ValueText : String;
+    Replace : Boolean;
+    Values  : TStringList;
+begin
+    Kind := ''; Name := ''; Scope1 := 'All'; Scope2 := 'All'; Comment := ''; ValueText := '';
+    Replace := False;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos('"rule_kind"', RequestData[i]) > 0 then Kind := JSONLineValue(RequestData[i])
+        else if Pos('"rule_name"', RequestData[i]) > 0 then Name := JSONLineValue(RequestData[i])
+        else if Pos('"scope1"', RequestData[i]) > 0 then Scope1 := JSONLineValue(RequestData[i])
+        else if Pos('"scope2"', RequestData[i]) > 0 then Scope2 := JSONLineValue(RequestData[i])
+        else if Pos('"comment"', RequestData[i]) > 0 then Comment := JSONLineValue(RequestData[i])
+        else if Pos('"values"', RequestData[i]) > 0 then ValueText := JSONLineValue(RequestData[i])
+        else if Pos('"replace"', RequestData[i]) > 0 then Replace := Pos('true', RequestData[i]) > 0;
+    end;
+    if (Kind = '') or (Name = '') then
+    begin
+        Result := 'ERROR: create_pcb_rule needs rule_kind and rule_name';
+        Exit;
+    end;
+    Values := TStringList.Create;
+    try
+        Values.Text := StringReplace(ValueText, ';', #13#10, REPLACEALL);
+        Result := CreatePCBRule(Kind, Name, Scope1, Scope2, Comment, Values, Replace);
+    finally
+        Values.Free;
+    end;
+end;
+
 // Extract the get footprint primitives logic
 function ExecuteGetFootprintPrimitives(RequestData: TStringList): String;
 var
@@ -1022,6 +1056,8 @@ begin
             Result := GetPCBLayers(ROOT_DIR);            
         'set_pcb_layer_visibility':
             Result := ExecuteSetPCBLayerVisibility(RequestData);   
+        'create_pcb_rule':
+            Result := ExecuteCreatePCBRule(RequestData);
         'get_pcb_layer_stackup':
             Result := GetPCBLayerStackup(ROOT_DIR);         
         'get_selected_components_coordinates':

@@ -3324,6 +3324,81 @@ async def get_pcb_layer_stackup(ctx: Context) -> str:
     logger.info(f"Retrieved PCB layer stackup data")
     return json.dumps(stackup_data, indent=2)
 
+@_tool()
+async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
+                          scope1: str = "All", scope2: str = "All", comment: str = "",
+                          replace: bool = False, board_path: str = "") -> str:
+    """
+    Add a design rule to a PCB.
+
+    Values per rule_type, distances in mils:
+      clearance              gap_mils (between scope1 and scope2)
+      width                  min_mils, max_mils, preferred_mils (all signal layers)
+      hole_size              min_mils, max_mils
+      routing_via            min/max/preferred_diameter_mils,
+                             min/max/preferred_hole_mils
+      solder_mask_expansion  expansion_mils (negative shrinks the opening)
+      paste_mask_expansion   expansion_mils
+      polygon_connect        connect_style ("relief", "direct", "none"), and
+                             optionally conductor_width_mils, air_gap_mils,
+                             entries (2 or 4)
+
+    Scopes are Altium query expressions, e.g. "All", "InNet('GND')",
+    "InNetClass('Power')", "IsVia", "HasFootprint('0402')". A one-scope
+    rule (width, hole size, via, mask, ...) uses scope1 only.
+
+    PRIORITY: Altium makes a rule added this way priority 1, the highest
+    of its kind, and moves the others down; a script cannot set priority.
+    So a new rule wins wherever its scope applies. Give it a narrow scope
+    (a net, class or object kind), or reorder priorities in Altium's PCB
+    Rules and Constraints Editor afterwards. get_pcb_rules lists all rules
+    with their priorities. Check the result's "descriptor": it is what
+    Altium stored.
+
+    Args:
+        rule_type (str): One of the kinds above.
+        name (str): Rule name, unique on the board.
+        values (dict): The values for that kind, e.g. {"gap_mils": 8}.
+        scope1 (str): First (or only) object scope.
+        scope2 (str): Second scope, for two-object rules such as clearance.
+        comment (str): Optional rule comment.
+        replace (bool): Replace an existing rule of the same name instead
+            of refusing.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the rule's name, descriptor, scopes, priority and
+             whether it replaced an existing rule.
+    """
+    import pcb_rules
+
+    encoded, error = pcb_rules.encode_values(rule_type, values)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if not name.strip():
+        return json.dumps({"success": False, "error": "name is empty"})
+    logger.info(f"Creating {rule_type} rule {name}")
+    response = await altium_bridge.execute_command("create_pcb_rule", {
+        "rule_kind": rule_type, "rule_name": name.strip(), "scope1": scope1 or "All",
+        "scope2": scope2 or "All", "comment": comment, "values": encoded,
+        "replace": bool(replace), "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to create the rule: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    others = result.get("other_rules_of_kind", 0)
+    if others and (scope1 or "All").strip().lower() == "all" and (scope2 or "All").strip().lower() == "all":
+        result["warning"] = (f"This rule applies to everything at priority 1, so it now overrides the "
+                             f"{others} other {rule_type} rule(s) on the board. Narrow its scope or "
+                             f"move it down in Altium's rules editor if that is not intended.")
+    return json.dumps(result, indent=2)
+
+# Changes the design: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("create_pcb_rule")
+
 @_tool(read_only=True)
 async def get_output_job_containers(ctx: Context, outjob_path: str = "") -> str:
     """

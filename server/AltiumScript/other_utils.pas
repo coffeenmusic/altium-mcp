@@ -475,6 +475,7 @@ begin
        (CommandName = 'create_vias')                         or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'get_pcb_layer_stackup')               or
+       (CommandName = 'create_pcb_rule')                     or
        (CommandName = 'get_board_summary')                   or
        (CommandName = 'get_component_primitives')            then
     begin

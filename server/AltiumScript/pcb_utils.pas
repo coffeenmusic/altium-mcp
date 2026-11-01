@@ -1400,6 +1400,211 @@ begin
     end;
 end;
 
+// A value of create_pcb_rule's "key=value" list, or Default when absent
+function RuleValue(Values: TStringList; Key: String; Default: Integer): Integer;
+var
+    i : Integer;
+begin
+    Result := Default;
+    i := Values.IndexOfName(Key);
+    if i >= 0 then Result := StrToInt(Values.ValueFromIndex[i]);
+end;
+
+function RuleHasValue(Values: TStringList; Key: String): Boolean;
+begin
+    Result := Values.IndexOfName(Key) >= 0;
+end;
+
+// How many rules of Kind are on Board besides Rule
+function OtherRulesOfKind(Board: IPCB_Board; Rule: IPCB_Rule): Integer;
+var
+    Iterator : IPCB_BoardIterator;
+    Other    : IPCB_Rule;
+begin
+    Result := 0;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Other := Iterator.FirstPCBObject;
+    while Other <> nil do
+    begin
+        if (Other.RuleKind = Rule.RuleKind) and (UpperCase(Other.Name) <> UpperCase(Rule.Name)) then
+            Result := Result + 1;
+        Other := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// The rule named Name on Board, or nil
+function FindRuleByName(Board: IPCB_Board; Name: String): IPCB_Rule;
+var
+    Iterator : IPCB_BoardIterator;
+    Rule     : IPCB_Rule;
+begin
+    Result := nil;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Rule := Iterator.FirstPCBObject;
+    while (Rule <> nil) and (Result = nil) do
+    begin
+        if UpperCase(Rule.Name) = UpperCase(Name) then Result := Rule;
+        Rule := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// Add a design rule to the focused board. Values holds "key=value" lines in
+// internal units (counts for entries, a word for connect_style), already
+// checked by the server for this kind. Constraint properties are only
+// reachable through a variable of the rule's own interface, hence one
+// variable per kind. Every value is read back into the result: Descriptor
+// shows what Altium actually stored.
+function CreatePCBRule(Kind: String; Name: String; Scope1: String; Scope2: String; Comment: String;
+                       Values: TStringList; Replace: Boolean): String;
+var
+    Board    : IPCB_Board;
+    Existing : IPCB_Rule;
+    Rule     : IPCB_Rule;
+    Clear    : IPCB_ClearanceConstraint;
+    Width    : IPCB_MaxMinWidthConstraint;
+    Hole     : IPCB_MaxMinHoleSizeConstraint;
+    Via      : IPCB_RoutingViaStyleRule;
+    SMask    : IPCB_SolderMaskExpansionRule;
+    PMask    : IPCB_PasteMaskExpansionRule;
+    Connect  : IPCB_PolygonConnectStyleRule;
+    L        : Integer;
+    Style    : String;
+    Props    : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Existing := FindRuleByName(Board, Name);
+    if (Existing <> nil) and (not Replace) then
+    begin
+        Result := 'ERROR: A rule named ' + Name + ' already exists (' + Existing.Descriptor +
+                  '). Pass replace=true to replace it, or choose another name';
+        Exit;
+    end;
+
+    Rule := nil;
+    if Kind = 'clearance' then
+    begin
+        Clear := PCBServer.PCBRuleFactory(eRule_Clearance);
+        Clear.Gap := RuleValue(Values, 'gap', 0);
+        Rule := Clear;
+    end
+    else if Kind = 'width' then
+    begin
+        Width := PCBServer.PCBRuleFactory(eRule_MaxMinWidth);
+        // Width is per layer; set it on every signal layer
+        for L := eTopLayer to eBottomLayer do
+        begin
+            Width.MinWidth(L) := RuleValue(Values, 'min', 0);
+            Width.MaxWidth(L) := RuleValue(Values, 'max', 0);
+            Width.FavoredWidth(L) := RuleValue(Values, 'preferred', 0);
+        end;
+        Rule := Width;
+    end
+    else if Kind = 'hole_size' then
+    begin
+        Hole := PCBServer.PCBRuleFactory(eRule_MaxMinHoleSize);
+        Hole.MinLimit := RuleValue(Values, 'min', 0);
+        Hole.MaxLimit := RuleValue(Values, 'max', 0);
+        Rule := Hole;
+    end
+    else if Kind = 'routing_via' then
+    begin
+        Via := PCBServer.PCBRuleFactory(eRule_RoutingViaStyle);
+        Via.MinWidth := RuleValue(Values, 'min_diameter', 0);
+        Via.MaxWidth := RuleValue(Values, 'max_diameter', 0);
+        Via.PreferedWidth := RuleValue(Values, 'preferred_diameter', 0);
+        Via.MinHoleWidth := RuleValue(Values, 'min_hole', 0);
+        Via.MaxHoleWidth := RuleValue(Values, 'max_hole', 0);
+        Via.PreferedHoleWidth := RuleValue(Values, 'preferred_hole', 0);
+        Rule := Via;
+    end
+    else if Kind = 'solder_mask_expansion' then
+    begin
+        SMask := PCBServer.PCBRuleFactory(eRule_SolderMaskExpansion);
+        SMask.Expansion := RuleValue(Values, 'expansion', 0);
+        Rule := SMask;
+    end
+    else if Kind = 'paste_mask_expansion' then
+    begin
+        PMask := PCBServer.PCBRuleFactory(eRule_PasteMaskExpansion);
+        PMask.Expansion := RuleValue(Values, 'expansion', 0);
+        Rule := PMask;
+    end
+    else if Kind = 'polygon_connect' then
+    begin
+        Connect := PCBServer.PCBRuleFactory(eRule_PolygonConnectStyle);
+        Style := Values.Values['connect_style'];
+        if Style = 'direct' then
+            Connect.ConnectStyle := eDirectConnectToPlane
+        else if Style = 'none' then
+            Connect.ConnectStyle := eNoConnect
+        else
+            Connect.ConnectStyle := eReliefConnectToPlane;
+        if RuleHasValue(Values, 'conductor_width') then
+            Connect.ReliefConductorWidth := RuleValue(Values, 'conductor_width', 0);
+        if RuleHasValue(Values, 'air_gap') then
+            Connect.ReliefAirGap := RuleValue(Values, 'air_gap', 0);
+        if RuleHasValue(Values, 'entries') then
+            Connect.ReliefEntries := RuleValue(Values, 'entries', 4);
+        Rule := Connect;
+    end;
+    if Rule = nil then
+    begin
+        Result := 'ERROR: Unknown rule kind: ' + Kind;
+        Exit;
+    end;
+
+    Rule.Name := Name;
+    Rule.Scope1Expression := Scope1;
+    Rule.Scope2Expression := Scope2;
+    if Comment <> '' then Rule.Comment := Comment;
+
+    // PostProcess must run whatever happens, or Altium's undo stays broken
+    PCBServer.PreProcess;
+    try
+        if Existing <> nil then
+        begin
+            Board.RemovePCBObject(Existing);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Existing.I_ObjectAddress);
+        end;
+        Board.AddPCBObject(Rule);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Rule.I_ObjectAddress);
+    finally
+        PCBServer.PostProcess;
+    end;
+
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'name', Rule.Name);
+        AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
+        AddJSONProperty(Props, 'scope1', Rule.Scope1Expression);
+        AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
+        // A rule added by script always becomes priority 1 of its kind, and
+        // Priority cannot be set from a script
+        AddJSONInteger(Props, 'priority', Rule.Priority);
+        AddJSONInteger(Props, 'other_rules_of_kind', OtherRulesOfKind(Board, Rule));
+        AddJSONBoolean(Props, 'enabled', Rule.Enabled);
+        AddJSONBoolean(Props, 'replaced', Existing <> nil);
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Function to get all PCB rules
 function GetPCBRules(ROOT_DIR: String): String;
 Var
