@@ -4888,25 +4888,54 @@ async def get_project_info(ctx: Context) -> str:
 
 
 @_tool(read_only=True)
-async def get_project_components(ctx: Context, include_parameters: bool = False) -> str:
+async def get_project_components(ctx: Context, include_parameters: bool = False, designators: list = None,
+                                 sheet: str = "", offset: int = 0, limit: int = 0,
+                                 parameter_names: list = None) -> str:
     """
-    List every component of the compiled project (schematic side).
+    List the components of the compiled project (schematic side).
 
     Compiles the focused project in memory first (nothing is saved). Unlike
     the PCB component tools, this returns the schematic Comment of each
     instance, which is where values of generic passives usually live.
 
+    A large project does not fit in one reply. A reply stops at about 60,000
+    characters: when next_offset is not null, call again with
+    offset=next_offset and the same filters for the rest. Filter first when
+    you can: all parameters of every part can come to megabytes.
+
     Args:
         include_parameters (bool): Also return every component parameter
             (e.g. Manufacturer_Part_Number). Default False - the output is
             much larger with parameters.
+        designators (list): Only these designators. Wildcards work and case
+            does not matter, e.g. ["R*", "U1", "C1?"].
+        sheet (str): Only this sheet, by file name ("Power.SchDoc");
+            wildcards work.
+        offset (int): Skip this many matching components.
+        limit (int): At most this many components; 0 for as many as fit.
+        parameter_names (list): Return only these parameters, e.g.
+            ["Manufacturer_Part_Number"]. Implies include_parameters.
 
     Returns:
-        str: JSON with component_count and components [{designator, comment,
-             footprint, library_reference, sheet, parameters?}]
+        str: JSON with project_path, component_count (the whole project),
+             matched, offset, returned, next_offset and components
+             [{designator, comment, footprint, library_reference, sheet,
+             parameters?}]
     """
-    return await _simple_command("get_project_components",
-                                 {"include_parameters": include_parameters}, "project components")
+    import project_components
+
+    text = await _simple_command("get_project_components",
+                                 {"include_parameters": include_parameters or bool(parameter_names)},
+                                 "project components")
+    try:
+        data = json.loads(text, strict=False)
+    except ValueError:
+        return text
+    if "components" not in data:
+        return text
+    return project_components.compact_json(project_components.select(
+        data, designators=designators, sheet=sheet, offset=offset, limit=limit,
+        parameter_names=parameter_names))
 
 
 @_tool(read_only=True)
