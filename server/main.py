@@ -28,7 +28,7 @@ import script_bundle
 import pcblib_file
 import uuid
 
-from altium_files import read_altium_text, write_altium_text
+from altium_files import long_path, read_altium_text, write_altium_text
 from exchange_lock import ExchangeLock
 from altium_install import find_altium_exe
 import routing
@@ -2098,11 +2098,22 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
             sheet rather than guessing: 5 = digital ground, 2 = supply bar.
         notes: [{"x":..,"y":..,"text":".."}] free text.
 
+        All coordinates are mils and keep their fractions, so a metric sheet
+        can be drawn exactly (1 mm = 39.3700787 mil). The pin_map has the
+        same precision: route from its values unrounded, or a wire ends up
+        a few microns out of level and turns diagonal when its part moves.
+
     Returns:
         JSON with the created sheet name, counts, and the pin map - every
         placed pin's true connection point, for routing a follow-up call.
     """
     logger.info(f"Building schematic: {len(parts)} parts")
+
+    # The spec carries Altium coords (10000 per mil). Whole mils missed a
+    # metric grid by up to half a mil, and a wire that far out of level turns
+    # diagonal when its part is dragged.
+    def c(v):
+        return str(int(round(float(v) * 10000)))
 
     lines = []
     for p in parts:
@@ -2112,7 +2123,7 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
                                    "error": f"part missing required key '{key}': {p}"})
         lines.append("PART|{}|{}|{}|{}|{}|{}|{}|{}".format(
             p["designator"], p["symbol_library"], p["symbol"],
-            p.get("design_item_id", ""), int(p["x"]), int(p["y"]),
+            p.get("design_item_id", ""), c(p["x"]), c(p["y"]),
             int(p.get("orientation", 0)), 1 if p.get("mirror") else 0))
         if p.get("comment"):
             lines.append(f"COMMENT|{p['comment']}")
@@ -2137,19 +2148,19 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         if len(route) < 4 or len(route) % 2:
             return json.dumps({"success": False,
                                "error": f"wire needs an even count of >=4 coords: {route}"})
-        lines.append("WIRE|" + "|".join(str(int(v)) for v in route))
+        lines.append("WIRE|" + "|".join(c(v) for v in route))
     for j in (junctions or []):
-        lines.append(f"JUNCTION|{int(j['x'])}|{int(j['y'])}")
+        lines.append(f"JUNCTION|{c(j['x'])}|{c(j['y'])}")
     for n in (net_labels or []):
         lines.append("NETLABEL|{}|{}|{}|{}".format(
-            int(n["x"]), int(n["y"]), int(n.get("orientation", 0)), n["text"]))
+            c(n["x"]), c(n["y"]), int(n.get("orientation", 0)), n["text"]))
     for pw in (power_ports or []):
         lines.append("POWER|{}|{}|{}|{}|{}|{}".format(
-            int(pw["x"]), int(pw["y"]), int(pw.get("orientation", 3)),
+            c(pw["x"]), c(pw["y"]), int(pw.get("orientation", 3)),
             int(pw.get("style", 5)), pw["text"],
             1 if pw.get("show_net_name") else 0))
     for nt in (notes or []):
-        lines.append(f"NOTE|{int(nt['x'])}|{int(nt['y'])}|{nt['text']}")
+        lines.append(f"NOTE|{c(nt['x'])}|{c(nt['y'])}|{nt['text']}")
 
     spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
     spec_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2175,11 +2186,95 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         for line in read_altium_text(pm).splitlines():
             f = line.strip().split("|")
             if len(f) == 5 and f[0] == "PIN":
-                pin_map.setdefault(f[1], {})[f[2]] = [int(f[3]), int(f[4])]
+                pin_map.setdefault(f[1], {})[f[2]] = [int(f[3]) / 10000, int(f[4]) / 10000]
     result["pin_map"] = pin_map
     result["pin_map_note"] = ("Absolute electrical connection points. Route "
                               "wires from these, not from predicted offsets.")
     return json.dumps(result, indent=2)
+
+@_tool()
+async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: str = "mil",
+                         save: bool = False) -> str:
+    """
+    Change an existing schematic sheet: move, rotate, delete or place parts,
+    set parameters, move designators and parameter text, add wires, net
+    labels, power ports, junctions and no-ERC markers, and delete objects.
+
+    The whole edit is one undo step in Altium (Ctrl+Z takes it all back),
+    and the user's own edits stay undoable. Operations run in order; one
+    that fails is reported in "errors" and the rest still run.
+
+    Coordinates are absolute sheet coordinates, Altium's origin at the
+    bottom left, in `unit` ("mil" or "mm"). check_schematic reports
+    positions and suggestions in the sheet's own unit (mm for a metric
+    grid), so pass the same unit to apply its suggestions directly.
+
+    Operations, each a dict with "op":
+      move_component    designator, [part], [x, y], [rotation 0/90/180/270],
+                        [mirror true/false]. x, y is the part's origin.
+      delete_component  designator, [part]
+      place_component   library (.SchLib path), symbol, designator, x, y,
+                        [rotation], [mirror], [comment]
+      set_parameter     designator, name, value, [part], [visible]
+                        (creates the parameter when missing)
+      move_text         designator, name ("Designator", "Comment" or a
+                        parameter), [part], [x, y], [justification 0-8:
+                        bottom-left, bottom-centre, bottom-right, middle-left,
+                        ..., top-right], [orientation 0-3], [visible]
+      add_wire          points [[x, y], ...] (a pin's connection point is
+                        its outer end, as build_schematic's pin_map gives)
+      add_net_label     x, y (on a wire), text, [orientation], [justification]
+      add_power_port    x, y, text, [style: bar, arrow, circle, wave,
+                        power_ground, signal_ground, earth], [orientation
+                        0-3, default 1 = up], [show_net_name]
+      add_junction      x, y
+      add_no_erc        x, y
+      delete_at         kind (wire, net_label, power_port, junction, no_erc,
+                        port, note), x, y, [text]: removes a wire passing
+                        through the point, or the object located there
+    "part" picks one part of a multi-part component (1 = A, ...).
+
+    Args:
+        sheet_path (str): Full path of the .SchDoc; opened if not open.
+        operations (list): The operations above, applied in order.
+        unit (str): "mil" (default) or "mm".
+        save (bool): Save the sheet afterwards (needed before
+            check_schematic, which reads the saved file). Otherwise it is
+            left modified for the user to review and save.
+
+    Returns:
+        str: JSON with how many operations were applied and the errors.
+    """
+    import sch_edit
+
+    # Long paths, or Altium opens a second copy of a sheet or library that
+    # is already open
+    sheet_path = long_path(sheet_path)
+    operations = [dict(op, library=long_path(op["library"]))
+                  if isinstance(op, dict) and op.get("op") == "place_component" and op.get("library") else op
+                  for op in (operations or [])]
+    lines, error = sch_edit.encode_operations(operations, unit)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if not sheet_path.lower().endswith(".schdoc"):
+        return json.dumps({"success": False, "error": "sheet_path must be a .SchDoc"})
+    logger.info(f"Editing {sheet_path}: {len(lines)} operations")
+    # Part names and parameter values may hold text that is not plain ASCII
+    write_altium_text(EXCHANGE_DIR / "sch_edit_spec.txt", "\n".join(lines) + "\n")
+    response = await altium_bridge.execute_command("edit_schematic", {
+        "sheet_path": sheet_path, "save": bool(save)})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to edit the sheet: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    if result.get("errors"):
+        result["success"] = False
+    return json.dumps(result, indent=2)
+
+# Changes the design: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("edit_schematic")
 
 @_tool(read_only=True)
 async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 150) -> str:
@@ -2209,6 +2304,12 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
         above it. Both go above: file name on the top edge, designator a line
         (100 mil) above it, both bottom-left justified at the left edge.
       * label_orientation, label_off_wire, dangling_wire, wire_through_body.
+      * slanted_wire - a wire segment a little (1 um to half a grid) out of
+        level or plumb. It looks straight, but dragging a part on it turns it
+        diagonal. Usually a symbol whose pins are off the grid (then the
+        issue names the pin) or coordinates rounded to whole mils.
+        suggest.move_end/to give the end to move, at full precision:
+        delete_at the wire and add_wire it again with the new end.
       * text_overlap - a designator, parameter, net label or port text
         overlapping a wire, a pin, a part or other text. For part text the
         issue carries suggest.texts: positions (x, y, justification) for the
@@ -2954,6 +3055,118 @@ async def check_routing(ctx: Context, nets: list = None, angle_tolerance_deg: fl
     logger.info(f"Routing check: {report['off_angle_count']} off-angle, "
                 f"{report['sharp_corners_count']} sharp corners in {report['segments']} segments")
     return json.dumps(report, indent=2)
+
+@_tool()
+async def place_polygon_pour(ctx: Context, outline: list, layer: str, net: str = "", name: str = "",
+                             hatch: str = "solid", pour_over_same_net: bool = True,
+                             remove_dead_copper: bool = True, track_width_mils: float = 0,
+                             grid_mils: float = 0, board_path: str = "") -> str:
+    """
+    Add a polygon pour (copper area, e.g. a ground pour) to a PCB and pour it.
+
+    The pour keeps the board's clearance rules from other nets and joins
+    same-net pads and tracks as the polygon connect rule says. Cut holes in
+    it with place_cutout.
+
+    Args:
+        outline (list): Corners [[x, y], ...] in mils relative to the board
+            origin, in order around the shape (at least three; it closes by
+            itself). Straight edges only.
+        layer (str): Signal layer, by its stack name or Altium's name, e.g.
+            "Top Layer".
+        net (str): Net to pour; it must exist on the board. Empty for an
+            unconnected pour.
+        name (str): Polygon name; empty lets Altium name it.
+        hatch (str): "solid" (default), "hatched_45", "hatched_90", or
+            "none" (outline only).
+        pour_over_same_net (bool): Pour over same-net tracks and pads.
+        remove_dead_copper (bool): Remove islands not connected to the net.
+        track_width_mils (float): Hatch track width; 0 for Altium's default.
+        grid_mils (float): Hatch grid; 0 for Altium's default.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the polygon's name, layer, net and what it poured:
+             poured_regions, one per separate piece of solid copper, and
+             hatch_tracks for a hatched pour. When nothing was poured it
+             says why it may be: no room, or every piece touched nothing on
+             its net and was removed as dead copper.
+    """
+    import pcb_shapes
+
+    board_path = long_path(board_path)
+    points, error = pcb_shapes.outline_points(outline)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if hatch not in ("solid", "hatched_45", "hatched_90", "none"):
+        return json.dumps({"success": False, "error": "hatch is solid, hatched_45, hatched_90 or none"})
+    if track_width_mils < 0 or grid_mils < 0:
+        return json.dumps({"success": False, "error": "track_width_mils and grid_mils cannot be negative"})
+    logger.info(f"Placing a polygon pour on {layer} ({net or 'no net'})")
+    response = await altium_bridge.execute_command("create_polygon_pour", {
+        "outline": pcb_shapes.encode(points), "layer": layer, "net": net, "name": name,
+        "hatch": hatch, "pour_over_same_net": "true" if pour_over_same_net else "false",
+        "remove_dead_copper": "true" if remove_dead_copper else "false",
+        "track_size": int(round(track_width_mils * pcb_shapes.COORD_PER_MIL)),
+        "grid": int(round(grid_mils * pcb_shapes.COORD_PER_MIL)), "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to add the polygon: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    if hatch != "none" and not result.get("poured_regions") and not result.get("hatch_tracks"):
+        result["warning"] = ("Nothing was poured: there is no room inside the outline, or every piece "
+                             "touched nothing on its net and was removed as dead copper "
+                             "(remove_dead_copper).")
+    return json.dumps(result, indent=2)
+
+@_tool()
+async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer: str = "",
+                       board_path: str = "") -> str:
+    """
+    Add a cutout to a PCB: a hole in polygon pours, or in the board itself.
+
+    kind "polygon" keeps polygon pours out of the area on one signal layer
+    (or on every signal layer with layer "all"), as Altium's Polygon Pour
+    Cutout does. kind "board" cuts the area out of the board (a slot or
+    opening). Either way the polygons the cutout overlaps are repoured.
+
+    Args:
+        outline (list): Corners [[x, y], ...] in mils relative to the board
+            origin, in order around the shape (at least three).
+        kind (str): "polygon" (default) or "board".
+        layer (str): For a polygon cutout, the signal layer ("Top Layer",
+            a stack name) or "all". Ignored for a board cutout.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with how many cutout regions were added and how many
+             polygons were repoured.
+    """
+    import pcb_shapes
+
+    board_path = long_path(board_path)
+    points, error = pcb_shapes.outline_points(outline)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if kind not in ("polygon", "board"):
+        return json.dumps({"success": False, "error": "kind is polygon or board"})
+    if kind == "polygon" and not layer.strip():
+        return json.dumps({"success": False, "error": "a polygon cutout needs a layer, or \"all\""})
+    logger.info(f"Placing a {kind} cutout")
+    response = await altium_bridge.execute_command("create_cutout", {
+        "outline": pcb_shapes.encode(points), "kind": kind, "layer": layer, "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to add the cutout: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+# Change the design: a timeout leaves their outcome unknown, so no blind retry
+MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout"})
 
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
@@ -3924,6 +4137,53 @@ async def remove_label_block(ctx: Context, designators: list) -> str:
     _save_blocks(board.file, [r for r in records if r not in old])
     return json.dumps({"removed": [{"parts": r["members"], "link": r["link"]} for r in old]}, indent=2)
 
+@_tool()
+async def place_vias(ctx: Context, vias: list, diameter_mils: float, hole_mils: float,
+                     net: str = "", start_layer: str = "Top Layer", end_layer: str = "Bottom Layer",
+                     board_path: str = "") -> str:
+    """
+    Add vias to a PCB: stitching, fan-out, or a via at the end of a track.
+
+    Args:
+        vias (list): Via positions in mils relative to the board origin,
+            each [x, y] or an object {"x": .., "y": .., "net": ..,
+            "diameter_mils": .., "hole_mils": .., "start_layer": ..,
+            "end_layer": ..} whose keys override the defaults below for
+            that via.
+        diameter_mils (float): Via pad diameter.
+        hole_mils (float): Drill diameter, smaller than diameter_mils.
+        net (str): Net of the vias; it must exist on the board. Empty for
+            vias without a net.
+        start_layer (str): Layer the via starts on, e.g. "Top Layer".
+        end_layer (str): Layer it ends on, e.g. "Bottom Layer". Set both for
+            a blind or buried via.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Every net and layer is checked before anything is added, so a bad entry
+    adds nothing. Run run_drc afterwards: a via is not checked against
+    clearance when it is placed.
+
+    Returns:
+        str: JSON with how many vias were added.
+    """
+    board_path = long_path(board_path)
+    records, error = routing.via_records(vias, diameter_mils, hole_mils, net, start_layer, end_layer)
+    if error:
+        return json.dumps({"success": False, "error": error})
+
+    logger.info(f"Placing {len(records)} vias")
+    response = await altium_bridge.execute_command("create_vias", {
+        "vias": ";".join(records), "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to add the vias: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+# Changes the design: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("create_vias")
+
 
 def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
     """Copy a window's pixels, frame included, into an RGB image.
@@ -4335,6 +4595,88 @@ async def get_pcb_rules(ctx: Context) -> str:
     logger.info(f"Retrieved PCB rules data")
     return json.dumps(rules_data, indent=2)
 
+@_tool()
+async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200) -> str:
+    """
+    Run the design rule check (DRC) on a PCB and list the violations.
+
+    Runs Altium's own batch DRC with the board's rules and the options last
+    set in its Design Rule Checker dialog. The dialog is answered from
+    outside Altium: it may flash on screen. Altium writes its usual report
+    beside the board (or in the project's output folder) and may open it.
+    The violations stay on the board, marked as Altium marks them.
+
+    A cancelled check leaves no violations, exactly like a clean board, so
+    "ran" says whether the check really ran: the Run button was pressed and
+    the dialog closed. "report" (when Altium wrote one) gives the per-rule
+    counts and confirms it independently.
+
+    Args:
+        board_path (str): Full path of the .PcbDoc to check. It is opened if
+            needed and brought to the front. Empty: the focused board, or
+            the one the PCB tools last used.
+        max_violations (int): How many violations to list in full.
+            violation_count counts every violation the check found, but
+            Altium stops the check at its own violation limit (500 unless
+            changed in its Design Rule Checker dialog); "complete": false
+            then says the board may have more.
+
+    Returns:
+        str: JSON with ran, violation_count, the violations (rule,
+             description, x_mils/y_mils relative to the board origin, and
+             the primitives involved with their net and layer), and the
+             report's per-rule counts.
+    """
+    import drc
+
+    board_path = long_path(board_path)
+    logger.info(f"Running DRC on {board_path or 'the focused board'}")
+    started = time.time()
+    outcome = drc.DialogOutcome()
+    driver = asyncio.create_task(drc.drive_dialog(outcome, PROGRESS_FILE))
+    try:
+        response = await altium_bridge.execute_command(
+            "run_drc", {"board_path": board_path, "max_violations": int(max_violations)})
+    finally:
+        driver.cancel()
+        try:
+            await driver
+        except asyncio.CancelledError:
+            pass
+
+    if not response.get("success", False):
+        return json.dumps({"success": False, "ran": outcome.pressed,
+                           "error": f"DRC failed: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return json.dumps({"success": False, "error": f"unexpected reply: {result[:200]}"})
+
+    out = {"success": True, "ran": outcome.pressed}
+    if not outcome.pressed:
+        out["success"] = False
+        out["error"] = ("The check did not run: " +
+                        ("the Design Rule Checker dialog could not be started and was closed. "
+                         if outcome.seen else "the Design Rule Checker dialog never appeared. ") +
+                        "violation_count is what was already on the board, not a result.")
+        if outcome.notes:
+            out["notes"] = outcome.notes
+    out.update({k: v for k, v in result.items() if k != "success"})
+    report = drc.find_report(result.get("board", board_path), started)
+    if report is not None:
+        try:
+            out["report"] = {"path": str(report),
+                             **drc.parse_report(read_altium_text(report))}
+        except OSError:
+            pass
+    if out.get("report", {}).get("stopped"):
+        out["complete"] = False
+        out["note"] = ("Altium stopped the check at its violation limit (set in its Design Rule "
+                       "Checker dialog), so the board may have more violations than violation_count.")
+    return json.dumps(out, indent=2)
+
 @_tool(read_only=True)
 async def get_pcb_layer_stackup(ctx: Context) -> str:
     """
@@ -4367,6 +4709,82 @@ async def get_pcb_layer_stackup(ctx: Context) -> str:
     
     logger.info(f"Retrieved PCB layer stackup data")
     return json.dumps(stackup_data, indent=2)
+
+@_tool()
+async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
+                          scope1: str = "All", scope2: str = "All", comment: str = "",
+                          replace: bool = False, board_path: str = "") -> str:
+    """
+    Add a design rule to a PCB.
+
+    Values per rule_type, distances in mils:
+      clearance              gap_mils (between scope1 and scope2)
+      width                  min_mils, max_mils, preferred_mils (all signal layers)
+      hole_size              min_mils, max_mils
+      routing_via            min/max/preferred_diameter_mils,
+                             min/max/preferred_hole_mils
+      solder_mask_expansion  expansion_mils (negative shrinks the opening)
+      paste_mask_expansion   expansion_mils
+      polygon_connect        connect_style ("relief", "direct", "none"), and
+                             optionally conductor_width_mils, air_gap_mils,
+                             entries (2 or 4)
+
+    Scopes are Altium query expressions, e.g. "All", "InNet('GND')",
+    "InNetClass('Power')", "IsVia", "HasFootprint('0402')". A one-scope
+    rule (width, hole size, via, mask, ...) uses scope1 only.
+
+    PRIORITY: Altium makes a rule added this way priority 1, the highest
+    of its kind, and moves the others down; a script cannot set priority.
+    So a new rule wins wherever its scope applies. Give it a narrow scope
+    (a net, class or object kind), or reorder priorities in Altium's PCB
+    Rules and Constraints Editor afterwards. get_pcb_rules lists all rules
+    with their priorities. Check the result's "descriptor": it is what
+    Altium stored.
+
+    Args:
+        rule_type (str): One of the kinds above.
+        name (str): Rule name, unique on the board.
+        values (dict): The values for that kind, e.g. {"gap_mils": 8}.
+        scope1 (str): First (or only) object scope.
+        scope2 (str): Second scope, for two-object rules such as clearance.
+        comment (str): Optional rule comment.
+        replace (bool): Replace an existing rule of the same name instead
+            of refusing.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the rule's name, descriptor, scopes, priority and
+             whether it replaced an existing rule.
+    """
+    import pcb_rules
+
+    board_path = long_path(board_path)
+    encoded, error = pcb_rules.encode_values(rule_type, values)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if not name.strip():
+        return json.dumps({"success": False, "error": "name is empty"})
+    logger.info(f"Creating {rule_type} rule {name}")
+    response = await altium_bridge.execute_command("create_pcb_rule", {
+        "rule_kind": rule_type, "rule_name": name.strip(), "scope1": scope1 or "All",
+        "scope2": scope2 or "All", "comment": comment, "values": encoded,
+        "replace": bool(replace), "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to create the rule: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    others = result.get("other_rules_of_kind", 0)
+    if others and (scope1 or "All").strip().lower() == "all" and (scope2 or "All").strip().lower() == "all":
+        result["warning"] = (f"This rule applies to everything at priority 1, so it now overrides the "
+                             f"{others} other {rule_type} rule(s) on the board. Narrow its scope or "
+                             f"move it down in Altium's rules editor if that is not intended.")
+    return json.dumps(result, indent=2)
+
+# Changes the design: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("create_pcb_rule")
 
 @_tool(read_only=True)
 async def get_output_job_containers(ctx: Context, outjob_path: str = "") -> str:

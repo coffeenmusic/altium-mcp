@@ -262,6 +262,40 @@ class TextBoxTest(unittest.TestCase):
         self.assertEqual(sc.text_box(0, 0, 100, 10, 1, 0).as_list(), [-10, 0, 0, 100])
 
 
+def exact_wire(*pts):
+    """A wire keeping fractions of a mil, as metric sheets store them."""
+    r = {"RECORD": 27, "LOCATIONCOUNT": len(pts)}
+    for k, (x, y) in enumerate(pts, 1):
+        for key, v in at(x, y, "").items():
+            r[key[0] + str(k) + key[1:]] = v
+    return r
+
+
+class SlantedWireTest(unittest.TestCase):
+    def test_wire_to_an_off_grid_pin_is_slanted(self):
+        # U1's pin ends 0.0866 mil (2.2 um) above the grid, as on a metric
+        # symbol whose pins were rounded
+        hot_y = 1000.0866
+        recs = [
+            {"HEADER": "x"},
+            {"RECORD": 31, "FONTIDCOUNT": 1, "SIZE1": 10, "FONTNAME1": "Times New Roman", "SNAPGRIDSIZE": 10},
+            {"RECORD": 1, "LIBREFERENCE": "CONN", **at(2000, 1000), "CURRENTPARTID": 1},
+            {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 2, "PINLENGTH": 20,
+             **at(2000, hot_y), "DESIGNATOR": "1"},
+            {"RECORD": 34, "OWNERINDEX": 1, **at(2100, 1300), "TEXT": "J1", "NAME": "Designator", "FONTID": 1},
+            exact_wire((1800, hot_y), (1000, 1000)), label("A", 1000, 1000),
+            # a deliberate diagonal and a wire a fraction of a micron out of level: not reported
+            exact_wire((3000, 3000), (3200, 3200)), label("B", 3000, 3000), label("C", 3200, 3200),
+            exact_wire((3000, 2000), (4000, 2000.001)), label("D", 3000, 2000), label("E", 4000, 2000.001),
+        ]
+        issues = [i for i in sc.Checker(sc.Sheet(parse_records(records_stream(recs)))).run()
+                  if i["type"] == "slanted_wire"]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual((issues[0]["designator"], issues[0]["pin"]), ("J1", "1"))
+        # keeps the pin end and moves the far end level with it, unrounded
+        self.assertEqual(issues[0]["suggest"], {"move_end": [1000, 1000], "to": [1000, hot_y]})
+
+
 class ProjectTest(unittest.TestCase):
     def test_project_sheets(self):
         with tempfile.TemporaryDirectory() as tmp:

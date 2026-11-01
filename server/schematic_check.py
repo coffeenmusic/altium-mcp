@@ -8,6 +8,8 @@ The sheet is read with schdoc_reader and every check works on its geometry:
   label_orientation   a horizontal label on a vertical wire, or the reverse
   label_off_wire      a net label touching no wire and no pin
   dangling_wire       a wire end that connects to nothing and carries no label
+  slanted_wire        a wire segment slightly out of level or plumb; Altium
+                      turns it diagonal when a part on it is dragged
   pin_tap             a wire branches right at a pin instead of a few grids
                       away from it (a decoupling cap sitting on its rail)
   wire_through_body   a wire crossing a component's drawn body
@@ -36,6 +38,9 @@ from schdoc_reader import coord, read_schdoc_streams
 EM_PER_POINT = 9.03
 # How far, in mils, things may overlap before it counts (rounding, line width)
 TOL = 2.0
+# A segment this far (mil, 1 um) out of level is reported as slanted. Smaller
+# offsets are common in hand-drawn sheets and are left alone.
+SLANT_MIN = 1 / 25.4
 TEXT_SHRINK = 8.0
 # Text may not even touch a wire or pin: a value whose bottom edge sits on a
 # wire reads as part of that net
@@ -595,6 +600,47 @@ class Checker:
                 continue
             self.add("dangling_wire", end, "wire end connects to nothing and carries no net label")
 
+    def exact(self, p):
+        # suggestions to copy into edit_schematic: fmt() rounds to 0.01 mm,
+        # which would rebuild the same slant
+        if self.s.metric:
+            return [round(p[0] * 0.0254, 6), round(p[1] * 0.0254, 6)]
+        return [round(p[0], 4), round(p[1], 4)]
+
+    def off_grid(self, p):
+        g = self.grid
+        return max(abs(v - round(v / g) * g) for v in p)
+
+    def check_slanted(self):
+        # Wires from metric symbols with off-grid pins, or from coordinates
+        # rounded to whole mils, end up microns out of level. Invisible, but
+        # dragging the part then turns the wire diagonal.
+        hot = {}
+        for pin in self.s.pins:
+            hot[(round(pin["hot"][0], 3), round(pin["hot"][1], 3))] = pin
+        for pts in self.s.wires:
+            for a, b in zip(pts, pts[1:]):
+                dx, dy = abs(a[0] - b[0]), abs(a[1] - b[1])
+                off = min(dx, dy)
+                if off < SLANT_MIN or off >= self.grid / 2:
+                    continue    # level, or a deliberate diagonal
+                pa = hot.get((round(a[0], 3), round(a[1], 3)))
+                pb = hot.get((round(b[0], 3), round(b[1], 3)))
+                # keep the end on a pin, else the end on the grid; move the other
+                if pb and not pa or not pa and self.off_grid(b) < self.off_grid(a):
+                    a, b, pa, pb = b, a, pb, pa
+                to = (b[0], a[1]) if dx > dy else (a[0], b[1])
+                size = f"{off * 25.4:.1f} um" if self.s.metric else f"{off:.3f} mil"
+                msg = f"wire is {size} out of {'level' if dx > dy else 'plumb'}; dragging a part on it turns it diagonal"
+                extra = {}
+                if pa and self.off_grid(a) > 1e-3:
+                    c = pa["comp"]
+                    msg += (f". It ends on {c['designator']} pin {pa['name']}, which is off the grid: "
+                            "fix the symbol's pins, or line the other end up with the pin")
+                    extra = {"designator": c["designator"], "pin": pa["name"]}
+                self.add("slanted_wire", b, msg, **extra,
+                         suggest={"move_end": self.exact(b), "to": self.exact(to)})
+
     def check_pin_taps(self):
         segs = list(self.s.segments())
         ports = self.s.attach
@@ -838,12 +884,13 @@ class Checker:
     def run(self):
         self.check_labels()
         self.check_dangling()
+        self.check_slanted()
         self.check_pin_taps()
         self.check_bodies()
         self.check_text()
         self.check_sheet_symbols()
         order = ["pin_tap", "label_not_at_end", "label_justification", "label_orientation", "label_off_wire",
-                 "dangling_wire", "wire_through_body", "sheet_entry_margin", "sheet_symbol_text", "text_overlap"]
+                 "dangling_wire", "slanted_wire", "wire_through_body", "sheet_entry_margin", "sheet_symbol_text", "text_overlap"]
         self.issues.sort(key=lambda i: (order.index(i["type"]), -i["at"][1], i["at"][0]))
         return self.issues
 

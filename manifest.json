@@ -89,7 +89,11 @@
     },
     {
       "name": "check_schematic",
-      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires"
+      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires"
+    },
+    {
+      "name": "edit_schematic",
+      "description": "Change an existing schematic sheet as one undo step: move, place or delete parts, set parameters, move text, add wires, labels, power ports and junctions"
     },
     {
       "name": "get_symbol_placement_rules",
@@ -128,6 +132,14 @@
       "description": "Get all design rules from the current Altium PCB"
     },
     {
+      "name": "create_pcb_rule",
+      "description": "Add a design rule (clearance, width, hole size, routing via, mask expansion or polygon connect) to a PCB"
+    },
+    {
+      "name": "run_drc",
+      "description": "Run the design rule check on a PCB and list the violations"
+    },
+    {
       "name": "get_selected_components_coordinates",
       "description": "Get coordinates and positioning information for selected components in Altium layout"
     },
@@ -162,6 +174,18 @@
     {
       "name": "route_track",
       "description": "Add a track through waypoints with every segment exactly 0, 45 or 90 degrees"
+    },
+    {
+      "name": "place_vias",
+      "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
+    },
+    {
+      "name": "place_polygon_pour",
+      "description": "Add a polygon pour from an outline to a PCB and pour it"
+    },
+    {
+      "name": "place_cutout",
+      "description": "Add a polygon pour cutout or a board cutout to a PCB and repour the polygons it overlaps"
     },
     {
       "name": "layout_duplicator",

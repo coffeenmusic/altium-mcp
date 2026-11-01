@@ -1584,6 +1584,211 @@ begin
     end;
 end;
 
+// A value of create_pcb_rule's "key=value" list, or Default when absent
+function RuleValue(Values: TStringList; Key: String; Default: Integer): Integer;
+var
+    i : Integer;
+begin
+    Result := Default;
+    i := Values.IndexOfName(Key);
+    if i >= 0 then Result := StrToInt(Values.ValueFromIndex[i]);
+end;
+
+function RuleHasValue(Values: TStringList; Key: String): Boolean;
+begin
+    Result := Values.IndexOfName(Key) >= 0;
+end;
+
+// How many rules of Kind are on Board besides Rule
+function OtherRulesOfKind(Board: IPCB_Board; Rule: IPCB_Rule): Integer;
+var
+    Iterator : IPCB_BoardIterator;
+    Other    : IPCB_Rule;
+begin
+    Result := 0;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Other := Iterator.FirstPCBObject;
+    while Other <> nil do
+    begin
+        if (Other.RuleKind = Rule.RuleKind) and (UpperCase(Other.Name) <> UpperCase(Rule.Name)) then
+            Result := Result + 1;
+        Other := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// The rule named Name on Board, or nil
+function FindRuleByName(Board: IPCB_Board; Name: String): IPCB_Rule;
+var
+    Iterator : IPCB_BoardIterator;
+    Rule     : IPCB_Rule;
+begin
+    Result := nil;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Rule := Iterator.FirstPCBObject;
+    while (Rule <> nil) and (Result = nil) do
+    begin
+        if UpperCase(Rule.Name) = UpperCase(Name) then Result := Rule;
+        Rule := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// Add a design rule to the focused board. Values holds "key=value" lines in
+// internal units (counts for entries, a word for connect_style), already
+// checked by the server for this kind. Constraint properties are only
+// reachable through a variable of the rule's own interface, hence one
+// variable per kind. Every value is read back into the result: Descriptor
+// shows what Altium actually stored.
+function CreatePCBRule(Kind: String; Name: String; Scope1: String; Scope2: String; Comment: String;
+                       Values: TStringList; Replace: Boolean): String;
+var
+    Board    : IPCB_Board;
+    Existing : IPCB_Rule;
+    Rule     : IPCB_Rule;
+    Clear    : IPCB_ClearanceConstraint;
+    Width    : IPCB_MaxMinWidthConstraint;
+    Hole     : IPCB_MaxMinHoleSizeConstraint;
+    Via      : IPCB_RoutingViaStyleRule;
+    SMask    : IPCB_SolderMaskExpansionRule;
+    PMask    : IPCB_PasteMaskExpansionRule;
+    Connect  : IPCB_PolygonConnectStyleRule;
+    L        : Integer;
+    Style    : String;
+    Props    : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Existing := FindRuleByName(Board, Name);
+    if (Existing <> nil) and (not Replace) then
+    begin
+        Result := 'ERROR: A rule named ' + Name + ' already exists (' + Existing.Descriptor +
+                  '). Pass replace=true to replace it, or choose another name';
+        Exit;
+    end;
+
+    Rule := nil;
+    if Kind = 'clearance' then
+    begin
+        Clear := PCBServer.PCBRuleFactory(eRule_Clearance);
+        Clear.Gap := RuleValue(Values, 'gap', 0);
+        Rule := Clear;
+    end
+    else if Kind = 'width' then
+    begin
+        Width := PCBServer.PCBRuleFactory(eRule_MaxMinWidth);
+        // Width is per layer; set it on every signal layer
+        for L := eTopLayer to eBottomLayer do
+        begin
+            Width.MinWidth(L) := RuleValue(Values, 'min', 0);
+            Width.MaxWidth(L) := RuleValue(Values, 'max', 0);
+            Width.FavoredWidth(L) := RuleValue(Values, 'preferred', 0);
+        end;
+        Rule := Width;
+    end
+    else if Kind = 'hole_size' then
+    begin
+        Hole := PCBServer.PCBRuleFactory(eRule_MaxMinHoleSize);
+        Hole.MinLimit := RuleValue(Values, 'min', 0);
+        Hole.MaxLimit := RuleValue(Values, 'max', 0);
+        Rule := Hole;
+    end
+    else if Kind = 'routing_via' then
+    begin
+        Via := PCBServer.PCBRuleFactory(eRule_RoutingViaStyle);
+        Via.MinWidth := RuleValue(Values, 'min_diameter', 0);
+        Via.MaxWidth := RuleValue(Values, 'max_diameter', 0);
+        Via.PreferedWidth := RuleValue(Values, 'preferred_diameter', 0);
+        Via.MinHoleWidth := RuleValue(Values, 'min_hole', 0);
+        Via.MaxHoleWidth := RuleValue(Values, 'max_hole', 0);
+        Via.PreferedHoleWidth := RuleValue(Values, 'preferred_hole', 0);
+        Rule := Via;
+    end
+    else if Kind = 'solder_mask_expansion' then
+    begin
+        SMask := PCBServer.PCBRuleFactory(eRule_SolderMaskExpansion);
+        SMask.Expansion := RuleValue(Values, 'expansion', 0);
+        Rule := SMask;
+    end
+    else if Kind = 'paste_mask_expansion' then
+    begin
+        PMask := PCBServer.PCBRuleFactory(eRule_PasteMaskExpansion);
+        PMask.Expansion := RuleValue(Values, 'expansion', 0);
+        Rule := PMask;
+    end
+    else if Kind = 'polygon_connect' then
+    begin
+        Connect := PCBServer.PCBRuleFactory(eRule_PolygonConnectStyle);
+        Style := Values.Values['connect_style'];
+        if Style = 'direct' then
+            Connect.ConnectStyle := eDirectConnectToPlane
+        else if Style = 'none' then
+            Connect.ConnectStyle := eNoConnect
+        else
+            Connect.ConnectStyle := eReliefConnectToPlane;
+        if RuleHasValue(Values, 'conductor_width') then
+            Connect.ReliefConductorWidth := RuleValue(Values, 'conductor_width', 0);
+        if RuleHasValue(Values, 'air_gap') then
+            Connect.ReliefAirGap := RuleValue(Values, 'air_gap', 0);
+        if RuleHasValue(Values, 'entries') then
+            Connect.ReliefEntries := RuleValue(Values, 'entries', 4);
+        Rule := Connect;
+    end;
+    if Rule = nil then
+    begin
+        Result := 'ERROR: Unknown rule kind: ' + Kind;
+        Exit;
+    end;
+
+    Rule.Name := Name;
+    Rule.Scope1Expression := Scope1;
+    Rule.Scope2Expression := Scope2;
+    if Comment <> '' then Rule.Comment := Comment;
+
+    // PostProcess must run whatever happens, or Altium's undo stays broken
+    PCBServer.PreProcess;
+    try
+        if Existing <> nil then
+        begin
+            Board.RemovePCBObject(Existing);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Existing.I_ObjectAddress);
+        end;
+        Board.AddPCBObject(Rule);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Rule.I_ObjectAddress);
+    finally
+        PCBServer.PostProcess;
+    end;
+
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'name', Rule.Name);
+        AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
+        AddJSONProperty(Props, 'scope1', Rule.Scope1Expression);
+        AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
+        // A rule added by script always becomes priority 1 of its kind, and
+        // Priority cannot be set from a script
+        AddJSONInteger(Props, 'priority', Rule.Priority);
+        AddJSONInteger(Props, 'other_rules_of_kind', OtherRulesOfKind(Board, Rule));
+        AddJSONBoolean(Props, 'enabled', Rule.Enabled);
+        AddJSONBoolean(Props, 'replaced', Existing <> nil);
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Function to get all PCB rules
 function GetPCBRules(ROOT_DIR: String): String;
 Var
@@ -1651,6 +1856,116 @@ begin
         end;
     finally
         RulesArray.Free;
+    end;
+end;
+
+// One primitive of a violation: what it is, its net, and where
+function ViolationPrimitiveJSON(Board: IPCB_Board; Prim: IPCB_Primitive): String;
+var
+    Props : TStringList;
+    Rect  : TCoordRect;
+    Detail, NetName : String;
+begin
+    Props := TStringList.Create;
+    try
+        Detail := '';
+        NetName := '';
+        try Detail := Prim.Detail; except end;
+        try if Prim.Net <> nil then NetName := Prim.Net.Name; except end;
+        AddJSONProperty(Props, 'object', Detail);
+        AddJSONProperty(Props, 'net', NetName);
+        try AddJSONProperty(Props, 'layer', Layer2String(Prim.Layer)); except end;
+        try
+            Rect := Prim.BoundingRectangle;
+            AddJSONNumber(Props, 'x_mils', CoordToMils((Rect.Left + Rect.Right) div 2 - Board.XOrigin));
+            AddJSONNumber(Props, 'y_mils', CoordToMils((Rect.Bottom + Rect.Top) div 2 - Board.YOrigin));
+        except
+        end;
+        Result := BuildJSONObject(Props, 2);
+    finally
+        Props.Free;
+    end;
+end;
+
+// Run the design rule check on the focused board and list the violations it
+// leaves on the board. PCB:DesignRuleCheck opens the modal Design Rule
+// Checker dialog and returns once it closes; run_drc presses its Run button
+// from outside Altium. Coordinates are mils relative to the board origin.
+function RunDRC(MaxViolations: Integer): String;
+var
+    Board     : IPCB_Board;
+    Iterator  : IPCB_BoardIterator;
+    Violation : IPCB_Violation;
+    Rect      : TCoordRect;
+    Items, Props, ResultProps : TStringList;
+    Count     : Integer;
+    RuleName  : String;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+
+    ResetParameters;
+    RunProcess('PCB:DesignRuleCheck');
+
+    Items := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        Count := 0;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViolationObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Violation := Iterator.FirstPCBObject;
+        while Violation <> nil do
+        begin
+            Count := Count + 1;
+            if Count <= MaxViolations then
+            begin
+                Props := TStringList.Create;
+                try
+                    RuleName := '';
+                    try if Violation.Rule <> nil then RuleName := Violation.Rule.Name; except end;
+                    AddJSONProperty(Props, 'rule', RuleName);
+                    // Description and the violation's own layer are empty;
+                    // Descriptor says what is wrong and by how much
+                    try AddJSONProperty(Props, 'description', Violation.Descriptor); except end;
+                    try
+                        Rect := Violation.BoundingRectangle;
+                        AddJSONNumber(Props, 'x_mils', CoordToMils((Rect.Left + Rect.Right) div 2 - Board.XOrigin));
+                        AddJSONNumber(Props, 'y_mils', CoordToMils((Rect.Bottom + Rect.Top) div 2 - Board.YOrigin));
+                    except
+                    end;
+                    try
+                        if Violation.Primitive1 <> nil then
+                            Props.Add('"primitive1": ' + ViolationPrimitiveJSON(Board, Violation.Primitive1));
+                    except
+                    end;
+                    try
+                        if Violation.Primitive2 <> nil then
+                            Props.Add('"primitive2": ' + ViolationPrimitiveJSON(Board, Violation.Primitive2));
+                    except
+                    end;
+                    Items.Add(BuildJSONObject(Props, 1));
+                finally
+                    Props.Free;
+                end;
+            end;
+            Violation := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'board', Board.FileName);
+        AddJSONInteger(ResultProps, 'violation_count', Count);
+        ResultProps.Add(BuildJSONArray(Items, 'violations'));
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Items.Free;
+        ResultProps.Free;
     end;
 end;
 
@@ -4389,6 +4704,102 @@ begin
     end;
 end;
 
+// Add the vias of place_vias to the focused board. Each record is
+// 'x|y|diameter|hole|net|start layer|end layer', x and y in internal units
+// relative to the board origin, sizes in internal units, an empty net for a
+// via without one. Every net and layer is checked before anything is added,
+// so a bad record adds nothing.
+function CreateVias(Records: TStringList): String;
+var
+    Board       : IPCB_Board;
+    Via         : IPCB_Via;
+    Net         : IPCB_Net;
+    i, Created  : Integer;
+    NetName, StartName, EndName : String;
+    StartLayer, EndLayer : Integer;
+    ResultProps : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+
+    for i := 0 to Records.Count - 1 do
+    begin
+        if Trim(Records[i]) = '' then Continue;
+        NetName := GetFieldFromPipeString(Records[i], 4);
+        StartName := GetFieldFromPipeString(Records[i], 5);
+        EndName := GetFieldFromPipeString(Records[i], 6);
+        if (NetName <> '') and (FindBoardNet(Board, NetName) = nil) then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NetName + ' (via ' + IntToStr(i + 1) + '); nothing was added';
+            Exit;
+        end;
+        StartLayer := ResolveBoardLayer(Board, StartName);
+        EndLayer := ResolveBoardLayer(Board, EndName);
+        if (StartLayer = eNoLayer) or (EndLayer = eNoLayer) or
+           (StartLayer > eBottomLayer) or (EndLayer > eBottomLayer) or (StartLayer = EndLayer) then
+        begin
+            Result := 'ERROR: A via spans two different signal layers of the board; ' + StartName + ' to ' +
+                      EndName + ' is not that (via ' + IntToStr(i + 1) + '); nothing was added';
+            Exit;
+        end;
+    end;
+
+    // PostProcess must run whatever happens, or Altium's undo stays broken
+    Created := 0;
+    PCBServer.PreProcess;
+    try
+        for i := 0 to Records.Count - 1 do
+        begin
+            if Trim(Records[i]) = '' then Continue;
+            NetName := GetFieldFromPipeString(Records[i], 4);
+            StartLayer := ResolveBoardLayer(Board, GetFieldFromPipeString(Records[i], 5));
+            EndLayer := ResolveBoardLayer(Board, GetFieldFromPipeString(Records[i], 6));
+            Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+            Via.X := Board.XOrigin + StrToInt(GetFieldFromPipeString(Records[i], 0));
+            Via.Y := Board.YOrigin + StrToInt(GetFieldFromPipeString(Records[i], 1));
+            Via.Size := StrToInt(GetFieldFromPipeString(Records[i], 2));
+            Via.HoleSize := StrToInt(GetFieldFromPipeString(Records[i], 3));
+            // LowLayer and HighLayer are the lower and higher layer numbers
+            // (Top Layer is 1), whichever end the caller named first
+            if StartLayer < EndLayer then
+            begin
+                Via.LowLayer := StartLayer;
+                Via.HighLayer := EndLayer;
+            end
+            else
+            begin
+                Via.LowLayer := EndLayer;
+                Via.HighLayer := StartLayer;
+            end;
+            if NetName <> '' then
+            begin
+                Net := FindBoardNet(Board, NetName);
+                Via.Net := Net;
+            end;
+            Board.AddPCBObject(Via);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Via.I_ObjectAddress);
+            Created := Created + 1;
+        end;
+    finally
+        PCBServer.PostProcess;
+    end;
+    Board.ViewManager_FullUpdate;
+
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'created', Created);
+        AddJSONProperty(ResultProps, 'board', Board.FileName);
+        Result := BuildJSONObject(ResultProps);
+    finally
+        ResultProps.Free;
+    end;
+end;
+
 // The focused board's routed copper for check_routing, one record per line
 // in internal units: O|x origin|y origin, then T|layer|net|x1|y1|x2|y2|width
 // for each track with a net outside components and polygon pours, A|layer|net
@@ -4528,5 +4939,243 @@ begin
         Result := BuildJSONObject(ResultProps);
     finally
         ResultProps.Free;
+    end;
+end;
+
+
+// The 'x|y' records of an outline (internal units, relative to the board
+// origin) as a contour in board coordinates
+function OutlineContour(Board: IPCB_Board; Points: TStringList): IPCB_Contour;
+var
+    i : Integer;
+begin
+    Result := PCBServer.PCBContourFactory;
+    for i := 0 to Points.Count - 1 do
+        if Trim(Points[i]) <> '' then
+            Result.AddPoint(Board.XOrigin + StrToInt(GetFieldFromPipeString(Points[i], 0)),
+                            Board.YOrigin + StrToInt(GetFieldFromPipeString(Points[i], 1)));
+end;
+
+// What a polygon poured: its regions, one per separate piece of solid
+// copper, or with Regions False the tracks and arcs of a hatched pour
+function PolygonPourCount(Poly: IPCB_Polygon; Regions: Boolean): Integer;
+var
+    Iterator : IPCB_GroupIterator;
+    Prim     : IPCB_Primitive;
+begin
+    Result := 0;
+    Iterator := Poly.GroupIterator_Create;
+    if Regions then
+        Iterator.AddFilter_ObjectSet(MkSet(eRegionObject))
+    else
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
+    Prim := Iterator.FirstPCBObject;
+    while Prim <> nil do
+    begin
+        Result := Result + 1;
+        Prim := Iterator.NextPCBObject;
+    end;
+    Poly.GroupIterator_Destroy(Iterator);
+end;
+
+// Add a polygon pour with the outline in Points to the focused board and pour
+// it. Hatch is solid, hatched_45, hatched_90 or none (outline only); TrackSize
+// and Grid (internal units, 0 for Altium's default) shape a hatched pour.
+function CreatePolygonPour(LayerName: String; NetName: String; PolyName: String; Hatch: String;
+                           PourOverSameNet: Boolean; RemoveDead: Boolean; TrackSize: Integer;
+                           Grid: Integer; Points: TStringList): String;
+var
+    Board  : IPCB_Board;
+    Poly   : IPCB_Polygon;
+    Net    : IPCB_Net;
+    Seg    : TPolySegment;
+    Layer, i, n : Integer;
+    Props  : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Layer := ResolveBoardLayer(Board, LayerName);
+    if (Layer = eNoLayer) or (Layer > eBottomLayer) then
+    begin
+        Result := 'ERROR: ' + LayerName + ' is not a signal layer of this board; a pour goes on one';
+        Exit;
+    end;
+    Net := nil;
+    if NetName <> '' then
+    begin
+        Net := FindBoardNet(Board, NetName);
+        if Net = nil then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NetName;
+            Exit;
+        end;
+    end;
+
+    // PostProcess must run whatever happens, or Altium's undo stays broken
+    PCBServer.PreProcess;
+    try
+        Poly := PCBServer.PCBObjectFactory(ePolyObject, eNoDimension, eCreate_Default);
+        Poly.Layer := Layer;
+        if Hatch = 'hatched_45' then Poly.PolyHatchStyle := ePolyHatch45
+        else if Hatch = 'hatched_90' then Poly.PolyHatchStyle := ePolyHatch90
+        else if Hatch = 'none' then Poly.PolyHatchStyle := ePolyNoHatch
+        else Poly.PolyHatchStyle := ePolySolid;
+        if TrackSize > 0 then Poly.TrackSize := TrackSize;
+        if Grid > 0 then Poly.Grid := Grid;
+        // A TPolySegment must be created with ':= TPolySegment' before its
+        // fields can be written
+        n := 0;
+        for i := 0 to Points.Count - 1 do
+            if Trim(Points[i]) <> '' then n := n + 1;
+        Poly.PointCount := n;
+        Seg := TPolySegment;
+        Seg.Kind := ePolySegmentLine;
+        n := 0;
+        for i := 0 to Points.Count - 1 do
+            if Trim(Points[i]) <> '' then
+            begin
+                Seg.vx := Board.XOrigin + StrToInt(GetFieldFromPipeString(Points[i], 0));
+                Seg.vy := Board.YOrigin + StrToInt(GetFieldFromPipeString(Points[i], 1));
+                Poly.Segments[n] := Seg;
+                n := n + 1;
+            end;
+        if Net <> nil then Poly.Net := Net;
+        if PourOverSameNet then
+            Poly.PourOver := ePolygonPourOver_SameNet
+        else
+            Poly.PourOver := ePolygonPourOver_None;
+        Poly.RemoveDead := RemoveDead;
+        if PolyName <> '' then Poly.Name := PolyName;
+        Board.AddPCBObject(Poly);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Poly.I_ObjectAddress);
+        Poly.Rebuild;
+    finally
+        PCBServer.PostProcess;
+    end;
+    Board.ViewManager_FullUpdate;
+
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'name', Poly.Name);
+        AddJSONProperty(Props, 'layer', Layer2String(Poly.Layer));
+        if Net <> nil then AddJSONProperty(Props, 'net', Net.Name) else AddJSONProperty(Props, 'net', '');
+        AddJSONInteger(Props, 'corners', Poly.PointCount);
+        AddJSONInteger(Props, 'poured_regions', PolygonPourCount(Poly, True));
+        AddJSONInteger(Props, 'hatch_tracks', PolygonPourCount(Poly, False));
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+// One cutout region with the outline in Points
+function AddCutoutRegion(Board: IPCB_Board; Points: TStringList; Layer: Integer; Kind: Integer): IPCB_Region;
+begin
+    Result := PCBServer.PCBObjectFactory(eRegionObject, eNoDimension, eCreate_Default);
+    Result.SetOutlineContour(OutlineContour(Board, Points));
+    Result.Layer := Layer;
+    Result.Kind := Kind;
+    Board.AddPCBObject(Result);
+    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Result.I_ObjectAddress);
+end;
+
+// Add a cutout with the outline in Points to the focused board, then repour
+// the polygons it overlaps so their copper leaves it free. Kind 'polygon' is
+// a polygon pour cutout on LayerName, or on every signal layer for 'all';
+// kind 'board' cuts the board itself.
+function CreateCutout(Kind: String; LayerName: String; Points: TStringList): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    LayerIt  : IPCB_LayerObjectIterator;
+    Poly     : IPCB_Polygon;
+    Region   : IPCB_Region;
+    Rect, PolyRect : TCoordRect;
+    Layer, Created, Repoured : Integer;
+    Layers, Props : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Layers := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        if Kind = 'board' then
+            Layers.Add(IntToStr(eMultiLayer))
+        else if UpperCase(Trim(LayerName)) = 'ALL' then
+        begin
+            LayerIt := Board.ElectricalLayerIterator;
+            while LayerIt.Next do
+                if LayerIt.LayerObject.LayerID <= eBottomLayer then
+                    Layers.Add(IntToStr(LayerIt.LayerObject.LayerID));
+        end
+        else
+        begin
+            Layer := ResolveBoardLayer(Board, LayerName);
+            if (Layer = eNoLayer) or (Layer > eBottomLayer) then
+            begin
+                Result := 'ERROR: ' + LayerName + ' is not a signal layer of this board';
+                Exit;
+            end;
+            Layers.Add(IntToStr(Layer));
+        end;
+
+        Created := 0;
+        Repoured := 0;
+        // PostProcess must run whatever happens, or Altium's undo stays broken
+        PCBServer.PreProcess;
+        try
+            for Layer := 0 to Layers.Count - 1 do
+            begin
+                if Kind = 'board' then
+                    Region := AddCutoutRegion(Board, Points, eMultiLayer, eRegionKind_BoardCutout)
+                else
+                    Region := AddCutoutRegion(Board, Points, StrToInt(Layers[Layer]), eRegionKind_Cutout);
+                Rect := Region.BoundingRectangle;
+                Created := Created + 1;
+            end;
+
+            // Repour every polygon the cutout overlaps on its layers
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Poly := Iterator.FirstPCBObject;
+            while Poly <> nil do
+            begin
+                PolyRect := Poly.BoundingRectangle;
+                if ((Kind = 'board') or (Layers.IndexOf(IntToStr(Poly.Layer)) >= 0)) and
+                   (PolyRect.Left < Rect.Right) and (Rect.Left < PolyRect.Right) and
+                   (PolyRect.Bottom < Rect.Top) and (Rect.Bottom < PolyRect.Top) then
+                begin
+                    Poly.Rebuild;
+                    Repoured := Repoured + 1;
+                end;
+                Poly := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        finally
+            PCBServer.PostProcess;
+        end;
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'kind', Kind);
+        AddJSONInteger(Props, 'regions', Created);
+        AddJSONInteger(Props, 'polygons_repoured', Repoured);
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Layers.Free;
+        Props.Free;
     end;
 end;

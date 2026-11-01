@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from altium_files import read_altium_text, write_altium_text  # noqa: E402
+from altium_files import long_path, read_altium_text, write_altium_text  # noqa: E402
 
 RESPONSE = '{\r\n  "success": true,\r\n  "result": "10µF"\r\n}\r\n'
 
@@ -56,6 +56,23 @@ class AltiumFilesTest(unittest.TestCase):
         with open(self.path, "rb") as f:
             self.assertTrue(f.read().startswith(codecs.BOM_UTF8))
         self.assertEqual(read_altium_text(self.path), "PART|R1|10µF Ω\n")
+
+
+class LongPathTest(unittest.TestCase):
+    def test_short_names_are_expanded(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "A long board name.PcbDoc")
+            open(path, "w").close()
+            buf = ctypes.create_unicode_buffer(32768)
+            ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf))
+            if "~" not in os.path.basename(buf.value):
+                self.skipTest("8.3 names are off on this volume")
+            self.assertEqual(os.path.normcase(long_path(buf.value)), os.path.normcase(os.path.realpath(path)))
+
+    def test_missing_and_empty_paths_unchanged(self):
+        missing = os.path.join(tempfile.gettempdir(), "NOSUCH~1", "x.PcbDoc")
+        self.assertEqual(long_path(missing), missing)
+        self.assertEqual(long_path(""), "")
 
 
 if __name__ == "__main__":

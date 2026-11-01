@@ -68,6 +68,28 @@ begin
     end;
 end;
 
+// edit_schematic: sheet_path and save; the edits are in sch_edit_spec.txt
+function ExecuteEditSchematic(RequestData: TStringList): String;
+var
+    i         : Integer;
+    SheetPath : String;
+    Save      : Boolean;
+begin
+    SheetPath := '';
+    Save := False;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos('"sheet_path"', RequestData[i]) > 0 then SheetPath := JSONLineValue(RequestData[i])
+        else if Pos('"save"', RequestData[i]) > 0 then Save := Pos('true', RequestData[i]) > 0;
+    end;
+    if SheetPath = '' then
+    begin
+        Result := 'ERROR: edit_schematic needs sheet_path';
+        Exit;
+    end;
+    Result := EditSchematic(SheetPath, ROOT_DIR + 'sch_edit_spec.txt', Save);
+end;
+
 // Extract the create net class logic
 function ExecuteCreateNetClass(RequestData: TStringList): String;
 var
@@ -392,6 +414,40 @@ begin
     end;
 end;
 
+// Function to execute create PCB rule
+function ExecuteCreatePCBRule(RequestData: TStringList): String;
+var
+    i : Integer;
+    Kind, Name, Scope1, Scope2, Comment, ValueText : String;
+    Replace : Boolean;
+    Values  : TStringList;
+begin
+    Kind := ''; Name := ''; Scope1 := 'All'; Scope2 := 'All'; Comment := ''; ValueText := '';
+    Replace := False;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos('"rule_kind"', RequestData[i]) > 0 then Kind := JSONLineValue(RequestData[i])
+        else if Pos('"rule_name"', RequestData[i]) > 0 then Name := JSONLineValue(RequestData[i])
+        else if Pos('"scope1"', RequestData[i]) > 0 then Scope1 := JSONLineValue(RequestData[i])
+        else if Pos('"scope2"', RequestData[i]) > 0 then Scope2 := JSONLineValue(RequestData[i])
+        else if Pos('"comment"', RequestData[i]) > 0 then Comment := JSONLineValue(RequestData[i])
+        else if Pos('"values"', RequestData[i]) > 0 then ValueText := JSONLineValue(RequestData[i])
+        else if Pos('"replace"', RequestData[i]) > 0 then Replace := Pos('true', RequestData[i]) > 0;
+    end;
+    if (Kind = '') or (Name = '') then
+    begin
+        Result := 'ERROR: create_pcb_rule needs rule_kind and rule_name';
+        Exit;
+    end;
+    Values := TStringList.Create;
+    try
+        Values.Text := StringReplace(ValueText, ';', #13#10, REPLACEALL);
+        Result := CreatePCBRule(Kind, Name, Scope1, Scope2, Comment, Values, Replace);
+    finally
+        Values.Free;
+    end;
+end;
+
 // Extract the get footprint primitives logic
 function ExecuteGetFootprintPrimitives(RequestData: TStringList): String;
 var
@@ -445,6 +501,70 @@ begin
         Result := CreateFootprintsBatch(SpecFile)
     else
         Result := 'ERROR: No spec_file provided for create_footprints_batch';
+end;
+
+// The outline records of a polygon or cutout request: one string of 'x|y'
+// records in internal units separated by ';', read with JSONLineValue
+function RequestOutline(RequestData: TStringList; Points: TStringList): Boolean;
+var
+    i : Integer;
+begin
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"outline"', RequestData[i]) > 0 then
+            Points.Text := StringReplace(JSONLineValue(RequestData[i]), ';', #13#10, REPLACEALL);
+    Result := Points.Count >= 3;
+end;
+
+function RequestText(RequestData: TStringList; Key: String; Default: String): String;
+var
+    i : Integer;
+begin
+    Result := Default;
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"' + Key + '"', RequestData[i]) > 0 then
+            Result := JSONLineValue(RequestData[i]);
+end;
+
+// Function to execute create polygon pour
+function ExecuteCreatePolygonPour(RequestData: TStringList): String;
+var
+    Points : TStringList;
+begin
+    Points := TStringList.Create;
+    try
+        if not RequestOutline(RequestData, Points) then
+        begin
+            Result := 'ERROR: create_polygon_pour needs an outline of at least three corners';
+            Exit;
+        end;
+        Result := CreatePolygonPour(RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'net', ''),
+            RequestText(RequestData, 'name', ''), RequestText(RequestData, 'hatch', 'solid'),
+            RequestText(RequestData, 'pour_over_same_net', 'true') = 'true',
+            RequestText(RequestData, 'remove_dead_copper', 'true') = 'true',
+            StrToInt(RequestText(RequestData, 'track_size', '0')),
+            StrToInt(RequestText(RequestData, 'grid', '0')), Points);
+    finally
+        Points.Free;
+    end;
+end;
+
+// Function to execute create cutout
+function ExecuteCreateCutout(RequestData: TStringList): String;
+var
+    Points : TStringList;
+begin
+    Points := TStringList.Create;
+    try
+        if not RequestOutline(RequestData, Points) then
+        begin
+            Result := 'ERROR: create_cutout needs an outline of at least three corners';
+            Exit;
+        end;
+        Result := CreateCutout(RequestText(RequestData, 'kind', 'polygon'),
+                               RequestText(RequestData, 'layer', ''), Points);
+    finally
+        Points.Free;
+    end;
 end;
 
 // Extract the create symbols batch logic
@@ -808,10 +928,38 @@ begin
     end;
 end;
 
+// The board a PCB command names in "board_path", or '' to use the focused one
+function RequestBoardPath(RequestData: TStringList): String;
+var
+    i: Integer;
+begin
+    Result := '';
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"board_path"', RequestData[i]) > 0) then
+        begin
+            Result := Trim(JSONLineValue(RequestData[i]));
+            break;
+        end;
+    end;
+end;
+
 // Function to execute get output job containers
 function ExecuteGetOutputJobContainers(RequestData: TStringList): String;
 begin
     Result := GetOutputJobContainers(RequestOutJobPath(RequestData), ROOT_DIR);
+end;
+
+// Function to execute run DRC
+function ExecuteRunDRC(RequestData: TStringList): String;
+var
+    i, MaxViolations : Integer;
+begin
+    MaxViolations := 200;
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"max_violations"', RequestData[i]) > 0 then
+            MaxViolations := StrToInt(JSONLineValue(RequestData[i]));
+    Result := RunDRC(MaxViolations);
 end;
 
 // Function to execute run output jobs
@@ -1009,6 +1157,32 @@ begin
     Result := GetProjectComponents(ROOT_DIR, IncludeParams);
 end;
 
+// create_vias: one string of 'x|y|diameter|hole|net|start|end' records
+// separated by ';', in internal units, read with JSONLineValue
+function ExecuteCreateVias(RequestData: TStringList): String;
+var
+    i       : Integer;
+    Text    : String;
+    Records : TStringList;
+begin
+    Text := '';
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"vias"', RequestData[i]) > 0 then
+            Text := JSONLineValue(RequestData[i]);
+    if Text = '' then
+    begin
+        Result := 'ERROR: create_vias needs vias';
+        Exit;
+    end;
+    Records := TStringList.Create;
+    try
+        Records.Text := StringReplace(Text, ';', #13#10, REPLACEALL);
+        Result := CreateVias(Records);
+    finally
+        Records.Free;
+    end;
+end;
+
 // Function to execute a command with parameters
 // create_route_tracks: net_name, layer, width (internal units) and segments,
 // one string of 'x1|y1|x2|y2' records separated by ';'. A single string, not
@@ -1083,7 +1257,18 @@ begin
     // 'ERROR: ' prefix into success=false with this message.
     // An OutJob command that names its file needs no OutJob open in a
     // project: the command resolves and opens the named file itself.
-    if not (((CommandName = 'get_output_job_containers') or
+    // A command that names its board acts on that board, never on whichever
+    // one happens to have focus
+    if RequestBoardPath(RequestData) <> '' then
+    begin
+        FocusFailure := FocusBoardByPath(RequestBoardPath(RequestData));
+        if FocusFailure <> '' then
+        begin
+            Result := 'ERROR: ' + FocusFailure;
+            Exit;
+        end;
+    end
+    else if not (((CommandName = 'get_output_job_containers') or
              (CommandName = 'run_output_jobs')) and
             (RequestOutJobPath(RequestData) <> '')) then
     begin
@@ -1116,6 +1301,8 @@ begin
             Result := GetPCBLayers(ROOT_DIR);            
         'set_pcb_layer_visibility':
             Result := ExecuteSetPCBLayerVisibility(RequestData);   
+        'create_pcb_rule':
+            Result := ExecuteCreatePCBRule(RequestData);
         'get_pcb_layer_stackup':
             Result := GetPCBLayerStackup(ROOT_DIR);         
         'get_selected_components_coordinates':
@@ -1144,6 +1331,8 @@ begin
             Result := ExecuteGetSymbolPrimitives(RequestData);
         'create_symbols_batch':
             Result := ExecuteCreateSymbolsBatch(RequestData);
+        'edit_schematic':
+            Result := ExecuteEditSchematic(RequestData);
         'build_circuit':
             Result := BuildCircuitFromSpec(ROOT_DIR + 'circuit_spec.txt',
                                           ROOT_DIR + 'param_placement.txt');
@@ -1155,6 +1344,8 @@ begin
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':
             Result := ExecuteLayoutDuplicatorApply(RequestData);            
+        'run_drc':
+            Result := ExecuteRunDRC(RequestData);
         'get_pcb_rules':
             Result := GetPCBRules(ROOT_DIR);
         'get_output_job_containers':
@@ -1173,12 +1364,18 @@ begin
             Result := ExecuteGetERCViolations(RequestData);
         'get_board_summary':
             Result := GetBoardSummary(ROOT_DIR);
+        'create_polygon_pour':
+            Result := ExecuteCreatePolygonPour(RequestData);
+        'create_cutout':
+            Result := ExecuteCreateCutout(RequestData);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':
             Result := GetRoutingGeometry(0);
         'create_route_tracks':
             Result := ExecuteCreateRouteTracks(RequestData);
+        'create_vias':
+            Result := ExecuteCreateVias(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;

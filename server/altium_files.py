@@ -10,6 +10,7 @@ code page. Python's own default encoding is not used: it follows neither
 rule (UTF-8 mode, or Python 3.15+, makes it UTF-8 on every machine).
 """
 import codecs
+import ctypes
 from pathlib import Path
 
 
@@ -26,3 +27,16 @@ def read_altium_text(path) -> str:
 def write_altium_text(path, text: str) -> None:
     """Write text for the Altium scripts to read."""
     Path(path).write_text(text, encoding="utf-8-sig")
+
+
+def long_path(path):
+    """path with its 8.3 short names (a folder such as ABCDEF~1) expanded.
+    Altium finds an open document by the path as written, so given a short
+    name it opens a second copy of a document that is already open. Unlike
+    os.path.realpath this leaves mapped drives and links as they are. A path
+    that does not exist comes back unchanged."""
+    if not path:
+        return path
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetLongPathNameW(str(path), buf, len(buf))
+    return buf.value if 0 < n < len(buf) else path
