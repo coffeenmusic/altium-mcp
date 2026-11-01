@@ -152,6 +152,14 @@
       "description": "For the nets touching the given components, list every pad on each net with airline (unrouted) lengths"
     },
     {
+      "name": "check_routing",
+      "description": "Find routed track segments that are not 0, 45 or 90 degrees, and right-angle or acute corners"
+    },
+    {
+      "name": "route_track",
+      "description": "Add a track through waypoints with every segment exactly 0, 45 or 90 degrees"
+    },
+    {
       "name": "layout_duplicator",
       "description": "First step of layout duplication. Selects source components and returns data to match with destination components"
     },
