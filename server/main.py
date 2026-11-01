@@ -2894,9 +2894,11 @@ async def place_polygon_pour(ctx: Context, outline: list, layer: str, net: str =
             board, or the one the PCB tools last used.
 
     Returns:
-        str: JSON with the polygon's name, layer, net and how many copper
-             pieces it poured into (0 means it found no room, or every
-             piece was dead copper and removed).
+        str: JSON with the polygon's name, layer, net and what it poured:
+             poured_regions, one per separate piece of solid copper, and
+             hatch_tracks for a hatched pour. When nothing was poured it
+             says why it may be: no room, or every piece touched nothing on
+             its net and was removed as dead copper.
     """
     import pcb_shapes
 
@@ -2919,7 +2921,13 @@ async def place_polygon_pour(ctx: Context, outline: list, layer: str, net: str =
         return json.dumps({"success": False,
                            "error": f"Failed to add the polygon: {response.get('error', 'unknown error')}"})
     result = response.get("result", {})
-    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+    if isinstance(result, str):
+        return result
+    if hatch != "none" and not result.get("poured_regions") and not result.get("hatch_tracks"):
+        result["warning"] = ("Nothing was poured: there is no room inside the outline, or every piece "
+                             "touched nothing on its net and was removed as dead copper "
+                             "(remove_dead_copper).")
+    return json.dumps(result, indent=2)
 
 @_tool()
 async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer: str = "",

@@ -3581,15 +3581,19 @@ begin
                             Board.YOrigin + StrToInt(GetFieldFromPipeString(Points[i], 1)));
 end;
 
-// The copper pieces a polygon poured into
-function PolygonPieces(Poly: IPCB_Polygon): Integer;
+// What a polygon poured: its regions, one per separate piece of solid
+// copper, or with Regions False the tracks and arcs of a hatched pour
+function PolygonPourCount(Poly: IPCB_Polygon; Regions: Boolean): Integer;
 var
     Iterator : IPCB_GroupIterator;
     Prim     : IPCB_Primitive;
 begin
     Result := 0;
     Iterator := Poly.GroupIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eRegionObject, eTrackObject, eArcObject));
+    if Regions then
+        Iterator.AddFilter_ObjectSet(MkSet(eRegionObject))
+    else
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
     Prim := Iterator.FirstPCBObject;
     while Prim <> nil do
     begin
@@ -3686,7 +3690,8 @@ begin
         AddJSONProperty(Props, 'layer', Layer2String(Poly.Layer));
         if Net <> nil then AddJSONProperty(Props, 'net', Net.Name) else AddJSONProperty(Props, 'net', '');
         AddJSONInteger(Props, 'corners', Poly.PointCount);
-        AddJSONInteger(Props, 'poured_pieces', PolygonPieces(Poly));
+        AddJSONInteger(Props, 'poured_regions', PolygonPourCount(Poly, True));
+        AddJSONInteger(Props, 'hatch_tracks', PolygonPourCount(Poly, False));
         AddJSONProperty(Props, 'board', Board.FileName);
         Result := BuildJSONObject(Props);
     finally
