@@ -68,6 +68,28 @@ begin
     end;
 end;
 
+// edit_schematic: sheet_path and save; the edits are in sch_edit_spec.txt
+function ExecuteEditSchematic(RequestData: TStringList): String;
+var
+    i         : Integer;
+    SheetPath : String;
+    Save      : Boolean;
+begin
+    SheetPath := '';
+    Save := False;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos('"sheet_path"', RequestData[i]) > 0 then SheetPath := JSONLineValue(RequestData[i])
+        else if Pos('"save"', RequestData[i]) > 0 then Save := Pos('true', RequestData[i]) > 0;
+    end;
+    if SheetPath = '' then
+    begin
+        Result := 'ERROR: edit_schematic needs sheet_path';
+        Exit;
+    end;
+    Result := EditSchematic(SheetPath, ROOT_DIR + 'sch_edit_spec.txt', Save);
+end;
+
 // Extract the create net class logic
 function ExecuteCreateNetClass(RequestData: TStringList): String;
 var
@@ -1152,6 +1174,8 @@ begin
             Result := ExecuteGetSymbolPrimitives(RequestData);
         'create_symbols_batch':
             Result := ExecuteCreateSymbolsBatch(RequestData);
+        'edit_schematic':
+            Result := ExecuteEditSchematic(RequestData);
         'build_circuit':
             Result := BuildCircuitFromSpec(ROOT_DIR + 'circuit_spec.txt',
                                           ROOT_DIR + 'param_placement.txt');

@@ -89,7 +89,11 @@
     },
     {
       "name": "check_schematic",
-      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires"
+      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires"
+    },
+    {
+      "name": "edit_schematic",
+      "description": "Change an existing schematic sheet as one undo step: move, place or delete parts, set parameters, move text, add wires, labels, power ports and junctions"
     },
     {
       "name": "get_symbol_placement_rules",

@@ -1955,11 +1955,22 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
             sheet rather than guessing: 5 = digital ground, 2 = supply bar.
         notes: [{"x":..,"y":..,"text":".."}] free text.
 
+        All coordinates are mils and keep their fractions, so a metric sheet
+        can be drawn exactly (1 mm = 39.3700787 mil). The pin_map has the
+        same precision: route from its values unrounded, or a wire ends up
+        a few microns out of level and turns diagonal when its part moves.
+
     Returns:
         JSON with the created sheet name, counts, and the pin map - every
         placed pin's true connection point, for routing a follow-up call.
     """
     logger.info(f"Building schematic: {len(parts)} parts")
+
+    # The spec carries Altium coords (10000 per mil). Whole mils missed a
+    # metric grid by up to half a mil, and a wire that far out of level turns
+    # diagonal when its part is dragged.
+    def c(v):
+        return str(int(round(float(v) * 10000)))
 
     lines = []
     for p in parts:
@@ -1969,7 +1980,7 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
                                    "error": f"part missing required key '{key}': {p}"})
         lines.append("PART|{}|{}|{}|{}|{}|{}|{}|{}".format(
             p["designator"], p["symbol_library"], p["symbol"],
-            p.get("design_item_id", ""), int(p["x"]), int(p["y"]),
+            p.get("design_item_id", ""), c(p["x"]), c(p["y"]),
             int(p.get("orientation", 0)), 1 if p.get("mirror") else 0))
         if p.get("comment"):
             lines.append(f"COMMENT|{p['comment']}")
@@ -1994,19 +2005,19 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         if len(route) < 4 or len(route) % 2:
             return json.dumps({"success": False,
                                "error": f"wire needs an even count of >=4 coords: {route}"})
-        lines.append("WIRE|" + "|".join(str(int(v)) for v in route))
+        lines.append("WIRE|" + "|".join(c(v) for v in route))
     for j in (junctions or []):
-        lines.append(f"JUNCTION|{int(j['x'])}|{int(j['y'])}")
+        lines.append(f"JUNCTION|{c(j['x'])}|{c(j['y'])}")
     for n in (net_labels or []):
         lines.append("NETLABEL|{}|{}|{}|{}".format(
-            int(n["x"]), int(n["y"]), int(n.get("orientation", 0)), n["text"]))
+            c(n["x"]), c(n["y"]), int(n.get("orientation", 0)), n["text"]))
     for pw in (power_ports or []):
         lines.append("POWER|{}|{}|{}|{}|{}|{}".format(
-            int(pw["x"]), int(pw["y"]), int(pw.get("orientation", 3)),
+            c(pw["x"]), c(pw["y"]), int(pw.get("orientation", 3)),
             int(pw.get("style", 5)), pw["text"],
             1 if pw.get("show_net_name") else 0))
     for nt in (notes or []):
-        lines.append(f"NOTE|{int(nt['x'])}|{int(nt['y'])}|{nt['text']}")
+        lines.append(f"NOTE|{c(nt['x'])}|{c(nt['y'])}|{nt['text']}")
 
     spec_path = Path("C:/Users/Public/altium_mcp/circuit_spec.txt")
     spec_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2032,11 +2043,89 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
         for line in read_altium_text(pm).splitlines():
             f = line.strip().split("|")
             if len(f) == 5 and f[0] == "PIN":
-                pin_map.setdefault(f[1], {})[f[2]] = [int(f[3]), int(f[4])]
+                pin_map.setdefault(f[1], {})[f[2]] = [int(f[3]) / 10000, int(f[4]) / 10000]
     result["pin_map"] = pin_map
     result["pin_map_note"] = ("Absolute electrical connection points. Route "
                               "wires from these, not from predicted offsets.")
     return json.dumps(result, indent=2)
+
+@_tool()
+async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: str = "mil",
+                         save: bool = False) -> str:
+    """
+    Change an existing schematic sheet: move, rotate, delete or place parts,
+    set parameters, move designators and parameter text, add wires, net
+    labels, power ports, junctions and no-ERC markers, and delete objects.
+
+    The whole edit is one undo step in Altium (Ctrl+Z takes it all back),
+    and the user's own edits stay undoable. Operations run in order; one
+    that fails is reported in "errors" and the rest still run.
+
+    Coordinates are absolute sheet coordinates, Altium's origin at the
+    bottom left, in `unit` ("mil" or "mm"). check_schematic reports
+    positions and suggestions in the sheet's own unit (mm for a metric
+    grid), so pass the same unit to apply its suggestions directly.
+
+    Operations, each a dict with "op":
+      move_component    designator, [part], [x, y], [rotation 0/90/180/270],
+                        [mirror true/false]. x, y is the part's origin.
+      delete_component  designator, [part]
+      place_component   library (.SchLib path), symbol, designator, x, y,
+                        [rotation], [mirror], [comment]
+      set_parameter     designator, name, value, [part], [visible]
+                        (creates the parameter when missing)
+      move_text         designator, name ("Designator", "Comment" or a
+                        parameter), [part], [x, y], [justification 0-8:
+                        bottom-left, bottom-centre, bottom-right, middle-left,
+                        ..., top-right], [orientation 0-3], [visible]
+      add_wire          points [[x, y], ...] (a pin's connection point is
+                        its outer end, as build_schematic's pin_map gives)
+      add_net_label     x, y (on a wire), text, [orientation], [justification]
+      add_power_port    x, y, text, [style: bar, arrow, circle, wave,
+                        power_ground, signal_ground, earth], [orientation
+                        0-3, default 1 = up], [show_net_name]
+      add_junction      x, y
+      add_no_erc        x, y
+      delete_at         kind (wire, net_label, power_port, junction, no_erc,
+                        port, note), x, y, [text]: removes a wire passing
+                        through the point, or the object located there
+    "part" picks one part of a multi-part component (1 = A, ...).
+
+    Args:
+        sheet_path (str): Full path of the .SchDoc; opened if not open.
+        operations (list): The operations above, applied in order.
+        unit (str): "mil" (default) or "mm".
+        save (bool): Save the sheet afterwards (needed before
+            check_schematic, which reads the saved file). Otherwise it is
+            left modified for the user to review and save.
+
+    Returns:
+        str: JSON with how many operations were applied and the errors.
+    """
+    import sch_edit
+
+    lines, error = sch_edit.encode_operations(operations, unit)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if not sheet_path.lower().endswith(".schdoc"):
+        return json.dumps({"success": False, "error": "sheet_path must be a .SchDoc"})
+    logger.info(f"Editing {sheet_path}: {len(lines)} operations")
+    # Part names and parameter values may hold text that is not plain ASCII
+    write_altium_text(EXCHANGE_DIR / "sch_edit_spec.txt", "\n".join(lines) + "\n")
+    response = await altium_bridge.execute_command("edit_schematic", {
+        "sheet_path": sheet_path, "save": bool(save)})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to edit the sheet: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    if result.get("errors"):
+        result["success"] = False
+    return json.dumps(result, indent=2)
+
+# Changes the design: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("edit_schematic")
 
 @_tool(read_only=True)
 async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 150) -> str:
@@ -2066,6 +2155,12 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
         above it. Both go above: file name on the top edge, designator a line
         (100 mil) above it, both bottom-left justified at the left edge.
       * label_orientation, label_off_wire, dangling_wire, wire_through_body.
+      * slanted_wire - a wire segment a little (1 um to half a grid) out of
+        level or plumb. It looks straight, but dragging a part on it turns it
+        diagonal. Usually a symbol whose pins are off the grid (then the
+        issue names the pin) or coordinates rounded to whole mils.
+        suggest.move_end/to give the end to move, at full precision:
+        delete_at the wire and add_wire it again with the new end.
       * text_overlap - a designator, parameter, net label or port text
         overlapping a wire, a pin, a part or other text. For part text the
         issue carries suggest.texts: positions (x, y, justification) for the
