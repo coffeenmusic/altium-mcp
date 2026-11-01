@@ -1620,6 +1620,9 @@ begin
             RuleProps := TStringList.Create;
             try
                 // Add rule descriptor
+                AddJSONProperty(RuleProps, 'name', Rule.Name);
+                AddJSONBoolean(RuleProps, 'enabled', Rule.Enabled);
+                AddJSONInteger(RuleProps, 'priority', Rule.Priority);
                 AddJSONProperty(RuleProps, 'descriptor', Rule.Descriptor);
                 AddJSONProperty(RuleProps, 'rule_kind', Rule.GetState_ShortDescriptorString);
                 AddJSONProperty(RuleProps, 'filter1', Rule.Scope1Expression);

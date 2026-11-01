@@ -4307,7 +4307,9 @@ async def get_pcb_rules(ctx: Context) -> str:
     Get all design rules from the current Altium PCB
     
     Returns:
-        str: JSON array of PCB design rules with their properties
+        str: JSON array of PCB design rules: name, enabled, priority (1 is
+             the highest within a rule kind), descriptor, rule_kind and the
+             two scope expressions (filter1, filter2)
     """
     logger.info("Getting PCB design rules")
     
