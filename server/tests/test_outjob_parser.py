@@ -60,6 +60,13 @@ OutputName5=Schematic Prints
 OutputEnabled5=1
 Configuration5_Name1=OutputConfigurationParameter1
 Configuration5_Item1=Record=SchPrintView|ShowComponentParameters=True
+OutputType6=Other
+OutputName6=Named And Unnamed
+OutputEnabled6=1
+Configuration6_Name1=General
+Configuration6_Item1=A=1
+Configuration6_Name2=OutputConfigurationParameter1
+Configuration6_Item2=B=2
 
 [PublishSettings]
 OutputFilePath2=C:\Somewhere\Else\Project Outputs\Fabrication\
@@ -143,6 +150,8 @@ class OutJobParserTest(unittest.TestCase):
             self.assertNotIn("raw_settings", lean[name], name)
         self.assertEqual(lean["Schematic Prints"]["raw_settings"][0]["Record"], "SchPrintView")
         self.assertIn("raw_settings", {o["name"]: o for o in self.data["outputs"]}["Gerber Files"])
+        # Sections that leave an item out do not replace the raw settings
+        self.assertEqual(lean["Named And Unnamed"]["raw_settings"], [{"A": "1"}, {"B": "2"}])
 
     def test_byte_undefined_in_cp1252(self):
         fd, path = tempfile.mkstemp(suffix=".OutJob")

@@ -27,7 +27,7 @@ _SPECIAL_LAYERS = {
 
 
 # What parse_outjob decodes from an output's settings
-_SUMMARIES = ("gerber", "nc_drill", "test_points", "pick_place", "printouts", "sections")
+_SUMMARIES = ("gerber", "nc_drill", "test_points", "pick_place", "printouts")
 
 
 def layer_name(layer_id: int) -> str:
@@ -190,7 +190,8 @@ def parse_outjob(path, include_raw: bool = True) -> dict:
         sections = _named_sections(items)
         if sections:
             output["sections"] = sections
-        if include_raw or not any(output.get(k) for k in _SUMMARIES):
+        decoded = any(output.get(k) for k in _SUMMARIES) or (sections and len(sections) == len(items))
+        if include_raw or not decoded:
             output["raw_settings"] = records
         outputs.append(output)
 
