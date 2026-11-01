@@ -3456,3 +3456,236 @@ begin
         ResultProps.Free;
     end;
 end;
+
+
+// The 'x|y' records of an outline (internal units, relative to the board
+// origin) as a contour in board coordinates
+function OutlineContour(Board: IPCB_Board; Points: TStringList): IPCB_Contour;
+var
+    i : Integer;
+begin
+    Result := PCBServer.PCBContourFactory;
+    for i := 0 to Points.Count - 1 do
+        if Trim(Points[i]) <> '' then
+            Result.AddPoint(Board.XOrigin + StrToInt(GetFieldFromPipeString(Points[i], 0)),
+                            Board.YOrigin + StrToInt(GetFieldFromPipeString(Points[i], 1)));
+end;
+
+// The copper pieces a polygon poured into
+function PolygonPieces(Poly: IPCB_Polygon): Integer;
+var
+    Iterator : IPCB_GroupIterator;
+    Prim     : IPCB_Primitive;
+begin
+    Result := 0;
+    Iterator := Poly.GroupIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRegionObject, eTrackObject, eArcObject));
+    Prim := Iterator.FirstPCBObject;
+    while Prim <> nil do
+    begin
+        Result := Result + 1;
+        Prim := Iterator.NextPCBObject;
+    end;
+    Poly.GroupIterator_Destroy(Iterator);
+end;
+
+// Add a polygon pour with the outline in Points to the focused board and pour
+// it. Hatch is solid, hatched_45, hatched_90 or none (outline only); TrackSize
+// and Grid (internal units, 0 for Altium's default) shape a hatched pour.
+function CreatePolygonPour(LayerName: String; NetName: String; PolyName: String; Hatch: String;
+                           PourOverSameNet: Boolean; RemoveDead: Boolean; TrackSize: Integer;
+                           Grid: Integer; Points: TStringList): String;
+var
+    Board  : IPCB_Board;
+    Poly   : IPCB_Polygon;
+    Net    : IPCB_Net;
+    Seg    : TPolySegment;
+    Layer, i, n : Integer;
+    Props  : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Layer := ResolveBoardLayer(Board, LayerName);
+    if (Layer = eNoLayer) or (Layer > eBottomLayer) then
+    begin
+        Result := 'ERROR: ' + LayerName + ' is not a signal layer of this board; a pour goes on one';
+        Exit;
+    end;
+    Net := nil;
+    if NetName <> '' then
+    begin
+        Net := FindBoardNet(Board, NetName);
+        if Net = nil then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NetName;
+            Exit;
+        end;
+    end;
+
+    // PostProcess must run whatever happens, or Altium's undo stays broken
+    PCBServer.PreProcess;
+    try
+        Poly := PCBServer.PCBObjectFactory(ePolyObject, eNoDimension, eCreate_Default);
+        Poly.Layer := Layer;
+        if Hatch = 'hatched_45' then Poly.PolyHatchStyle := ePolyHatch45
+        else if Hatch = 'hatched_90' then Poly.PolyHatchStyle := ePolyHatch90
+        else if Hatch = 'none' then Poly.PolyHatchStyle := ePolyNoHatch
+        else Poly.PolyHatchStyle := ePolySolid;
+        if TrackSize > 0 then Poly.TrackSize := TrackSize;
+        if Grid > 0 then Poly.Grid := Grid;
+        // A TPolySegment must be created with ':= TPolySegment' before its
+        // fields can be written
+        n := 0;
+        for i := 0 to Points.Count - 1 do
+            if Trim(Points[i]) <> '' then n := n + 1;
+        Poly.PointCount := n;
+        Seg := TPolySegment;
+        Seg.Kind := ePolySegmentLine;
+        n := 0;
+        for i := 0 to Points.Count - 1 do
+            if Trim(Points[i]) <> '' then
+            begin
+                Seg.vx := Board.XOrigin + StrToInt(GetFieldFromPipeString(Points[i], 0));
+                Seg.vy := Board.YOrigin + StrToInt(GetFieldFromPipeString(Points[i], 1));
+                Poly.Segments[n] := Seg;
+                n := n + 1;
+            end;
+        if Net <> nil then Poly.Net := Net;
+        if PourOverSameNet then
+            Poly.PourOver := ePolygonPourOver_SameNet
+        else
+            Poly.PourOver := ePolygonPourOver_None;
+        Poly.RemoveDead := RemoveDead;
+        if PolyName <> '' then Poly.Name := PolyName;
+        Board.AddPCBObject(Poly);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Poly.I_ObjectAddress);
+        Poly.Rebuild;
+    finally
+        PCBServer.PostProcess;
+    end;
+    Board.ViewManager_FullUpdate;
+
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'name', Poly.Name);
+        AddJSONProperty(Props, 'layer', Layer2String(Poly.Layer));
+        if Net <> nil then AddJSONProperty(Props, 'net', Net.Name) else AddJSONProperty(Props, 'net', '');
+        AddJSONInteger(Props, 'corners', Poly.PointCount);
+        AddJSONInteger(Props, 'poured_pieces', PolygonPieces(Poly));
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+// One cutout region with the outline in Points
+function AddCutoutRegion(Board: IPCB_Board; Points: TStringList; Layer: Integer; Kind: Integer): IPCB_Region;
+begin
+    Result := PCBServer.PCBObjectFactory(eRegionObject, eNoDimension, eCreate_Default);
+    Result.SetOutlineContour(OutlineContour(Board, Points));
+    Result.Layer := Layer;
+    Result.Kind := Kind;
+    Board.AddPCBObject(Result);
+    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Result.I_ObjectAddress);
+end;
+
+// Add a cutout with the outline in Points to the focused board, then repour
+// the polygons it overlaps so their copper leaves it free. Kind 'polygon' is
+// a polygon pour cutout on LayerName, or on every signal layer for 'all';
+// kind 'board' cuts the board itself.
+function CreateCutout(Kind: String; LayerName: String; Points: TStringList): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    LayerIt  : IPCB_LayerObjectIterator;
+    Poly     : IPCB_Polygon;
+    Region   : IPCB_Region;
+    Rect, PolyRect : TCoordRect;
+    Layer, Created, Repoured : Integer;
+    Layers, Props : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Layers := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        if Kind = 'board' then
+            Layers.Add(IntToStr(eMultiLayer))
+        else if UpperCase(Trim(LayerName)) = 'ALL' then
+        begin
+            LayerIt := Board.ElectricalLayerIterator;
+            while LayerIt.Next do
+                if LayerIt.LayerObject.LayerID <= eBottomLayer then
+                    Layers.Add(IntToStr(LayerIt.LayerObject.LayerID));
+        end
+        else
+        begin
+            Layer := ResolveBoardLayer(Board, LayerName);
+            if (Layer = eNoLayer) or (Layer > eBottomLayer) then
+            begin
+                Result := 'ERROR: ' + LayerName + ' is not a signal layer of this board';
+                Exit;
+            end;
+            Layers.Add(IntToStr(Layer));
+        end;
+
+        Created := 0;
+        Repoured := 0;
+        // PostProcess must run whatever happens, or Altium's undo stays broken
+        PCBServer.PreProcess;
+        try
+            for Layer := 0 to Layers.Count - 1 do
+            begin
+                if Kind = 'board' then
+                    Region := AddCutoutRegion(Board, Points, eMultiLayer, eRegionKind_BoardCutout)
+                else
+                    Region := AddCutoutRegion(Board, Points, StrToInt(Layers[Layer]), eRegionKind_Cutout);
+                Rect := Region.BoundingRectangle;
+                Created := Created + 1;
+            end;
+
+            // Repour every polygon the cutout overlaps on its layers
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Poly := Iterator.FirstPCBObject;
+            while Poly <> nil do
+            begin
+                PolyRect := Poly.BoundingRectangle;
+                if ((Kind = 'board') or (Layers.IndexOf(IntToStr(Poly.Layer)) >= 0)) and
+                   (PolyRect.Left < Rect.Right) and (Rect.Left < PolyRect.Right) and
+                   (PolyRect.Bottom < Rect.Top) and (Rect.Bottom < PolyRect.Top) then
+                begin
+                    Poly.Rebuild;
+                    Repoured := Repoured + 1;
+                end;
+                Poly := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        finally
+            PCBServer.PostProcess;
+        end;
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'kind', Kind);
+        AddJSONInteger(Props, 'regions', Created);
+        AddJSONInteger(Props, 'polygons_repoured', Repoured);
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Layers.Free;
+        Props.Free;
+    end;
+end;

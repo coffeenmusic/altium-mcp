@@ -2763,6 +2763,108 @@ async def check_routing(ctx: Context, nets: list = None, angle_tolerance_deg: fl
     return json.dumps(report, indent=2)
 
 @_tool()
+async def place_polygon_pour(ctx: Context, outline: list, layer: str, net: str = "", name: str = "",
+                             hatch: str = "solid", pour_over_same_net: bool = True,
+                             remove_dead_copper: bool = True, track_width_mils: float = 0,
+                             grid_mils: float = 0, board_path: str = "") -> str:
+    """
+    Add a polygon pour (copper area, e.g. a ground pour) to a PCB and pour it.
+
+    The pour keeps the board's clearance rules from other nets and joins
+    same-net pads and tracks as the polygon connect rule says. Cut holes in
+    it with place_cutout.
+
+    Args:
+        outline (list): Corners [[x, y], ...] in mils relative to the board
+            origin, in order around the shape (at least three; it closes by
+            itself). Straight edges only.
+        layer (str): Signal layer, by its stack name or Altium's name, e.g.
+            "Top Layer".
+        net (str): Net to pour; it must exist on the board. Empty for an
+            unconnected pour.
+        name (str): Polygon name; empty lets Altium name it.
+        hatch (str): "solid" (default), "hatched_45", "hatched_90", or
+            "none" (outline only).
+        pour_over_same_net (bool): Pour over same-net tracks and pads.
+        remove_dead_copper (bool): Remove islands not connected to the net.
+        track_width_mils (float): Hatch track width; 0 for Altium's default.
+        grid_mils (float): Hatch grid; 0 for Altium's default.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the polygon's name, layer, net and how many copper
+             pieces it poured into (0 means it found no room, or every
+             piece was dead copper and removed).
+    """
+    import pcb_shapes
+
+    points, error = pcb_shapes.outline_points(outline)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if hatch not in ("solid", "hatched_45", "hatched_90", "none"):
+        return json.dumps({"success": False, "error": "hatch is solid, hatched_45, hatched_90 or none"})
+    if track_width_mils < 0 or grid_mils < 0:
+        return json.dumps({"success": False, "error": "track_width_mils and grid_mils cannot be negative"})
+    logger.info(f"Placing a polygon pour on {layer} ({net or 'no net'})")
+    response = await altium_bridge.execute_command("create_polygon_pour", {
+        "outline": pcb_shapes.encode(points), "layer": layer, "net": net, "name": name,
+        "hatch": hatch, "pour_over_same_net": "true" if pour_over_same_net else "false",
+        "remove_dead_copper": "true" if remove_dead_copper else "false",
+        "track_size": int(round(track_width_mils * pcb_shapes.COORD_PER_MIL)),
+        "grid": int(round(grid_mils * pcb_shapes.COORD_PER_MIL)), "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to add the polygon: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+@_tool()
+async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer: str = "",
+                       board_path: str = "") -> str:
+    """
+    Add a cutout to a PCB: a hole in polygon pours, or in the board itself.
+
+    kind "polygon" keeps polygon pours out of the area on one signal layer
+    (or on every signal layer with layer "all"), as Altium's Polygon Pour
+    Cutout does. kind "board" cuts the area out of the board (a slot or
+    opening). Either way the polygons the cutout overlaps are repoured.
+
+    Args:
+        outline (list): Corners [[x, y], ...] in mils relative to the board
+            origin, in order around the shape (at least three).
+        kind (str): "polygon" (default) or "board".
+        layer (str): For a polygon cutout, the signal layer ("Top Layer",
+            a stack name) or "all". Ignored for a board cutout.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with how many cutout regions were added and how many
+             polygons were repoured.
+    """
+    import pcb_shapes
+
+    points, error = pcb_shapes.outline_points(outline)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if kind not in ("polygon", "board"):
+        return json.dumps({"success": False, "error": "kind is polygon or board"})
+    if kind == "polygon" and not layer.strip():
+        return json.dumps({"success": False, "error": "a polygon cutout needs a layer, or \"all\""})
+    logger.info(f"Placing a {kind} cutout")
+    response = await altium_bridge.execute_command("create_cutout", {
+        "outline": pcb_shapes.encode(points), "kind": kind, "layer": layer, "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to add the cutout: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+
+# Change the design: a timeout leaves their outcome unknown, so no blind retry
+MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout"})
+
+@_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
                       diagonal_first: bool = False, corner_chamfer_mils: float = 0,
                       dry_run: bool = False) -> str:

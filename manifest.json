@@ -172,6 +172,14 @@
       "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
     },
     {
+      "name": "place_polygon_pour",
+      "description": "Add a polygon pour from an outline to a PCB and pour it"
+    },
+    {
+      "name": "place_cutout",
+      "description": "Add a polygon pour cutout or a board cutout to a PCB and repour the polygons it overlaps"
+    },
+    {
       "name": "layout_duplicator",
       "description": "First step of layout duplication. Selects source components and returns data to match with destination components"
     },

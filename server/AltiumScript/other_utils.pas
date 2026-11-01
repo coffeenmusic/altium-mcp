@@ -477,6 +477,8 @@ begin
        (CommandName = 'get_pcb_layer_stackup')               or
        (CommandName = 'create_pcb_rule')                     or
        (CommandName = 'get_board_summary')                   or
+       (CommandName = 'create_polygon_pour')                 or
+       (CommandName = 'create_cutout')                       or
        (CommandName = 'get_component_primitives')            then
     begin
         DocumentKind := 'PCB';

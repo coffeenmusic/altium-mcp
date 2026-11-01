@@ -481,6 +481,70 @@ begin
         Result := 'ERROR: No spec_file provided for create_footprints_batch';
 end;
 
+// The outline records of a polygon or cutout request: one string of 'x|y'
+// records in internal units separated by ';', read with JSONLineValue
+function RequestOutline(RequestData: TStringList; Points: TStringList): Boolean;
+var
+    i : Integer;
+begin
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"outline"', RequestData[i]) > 0 then
+            Points.Text := StringReplace(JSONLineValue(RequestData[i]), ';', #13#10, REPLACEALL);
+    Result := Points.Count >= 3;
+end;
+
+function RequestText(RequestData: TStringList; Key: String; Default: String): String;
+var
+    i : Integer;
+begin
+    Result := Default;
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"' + Key + '"', RequestData[i]) > 0 then
+            Result := JSONLineValue(RequestData[i]);
+end;
+
+// Function to execute create polygon pour
+function ExecuteCreatePolygonPour(RequestData: TStringList): String;
+var
+    Points : TStringList;
+begin
+    Points := TStringList.Create;
+    try
+        if not RequestOutline(RequestData, Points) then
+        begin
+            Result := 'ERROR: create_polygon_pour needs an outline of at least three corners';
+            Exit;
+        end;
+        Result := CreatePolygonPour(RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'net', ''),
+            RequestText(RequestData, 'name', ''), RequestText(RequestData, 'hatch', 'solid'),
+            RequestText(RequestData, 'pour_over_same_net', 'true') = 'true',
+            RequestText(RequestData, 'remove_dead_copper', 'true') = 'true',
+            StrToInt(RequestText(RequestData, 'track_size', '0')),
+            StrToInt(RequestText(RequestData, 'grid', '0')), Points);
+    finally
+        Points.Free;
+    end;
+end;
+
+// Function to execute create cutout
+function ExecuteCreateCutout(RequestData: TStringList): String;
+var
+    Points : TStringList;
+begin
+    Points := TStringList.Create;
+    try
+        if not RequestOutline(RequestData, Points) then
+        begin
+            Result := 'ERROR: create_cutout needs an outline of at least three corners';
+            Exit;
+        end;
+        Result := CreateCutout(RequestText(RequestData, 'kind', 'polygon'),
+                               RequestText(RequestData, 'layer', ''), Points);
+    finally
+        Points.Free;
+    end;
+end;
+
 // Extract the create symbols batch logic
 function ExecuteCreateSymbolsBatch(RequestData: TStringList): String;
 var
@@ -1105,6 +1169,10 @@ begin
             Result := ExecuteGetERCViolations(RequestData);
         'get_board_summary':
             Result := GetBoardSummary(ROOT_DIR);
+        'create_polygon_pour':
+            Result := ExecuteCreatePolygonPour(RequestData);
+        'create_cutout':
+            Result := ExecuteCreateCutout(RequestData);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':
