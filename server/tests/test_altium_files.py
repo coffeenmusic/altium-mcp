@@ -69,6 +69,15 @@ class LongPathTest(unittest.TestCase):
                 self.skipTest("8.3 names are off on this volume")
             self.assertEqual(os.path.normcase(long_path(buf.value)), os.path.normcase(os.path.realpath(path)))
 
+    def test_forward_slashes_become_backslashes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "board.PcbDoc")
+            open(path, "w").close()
+            got = long_path(path.replace("\\", "/"))
+            self.assertNotIn("/", got)
+            self.assertEqual(os.path.normcase(got), os.path.normcase(os.path.realpath(path)))
+        self.assertEqual(long_path("C:/no such folder/x.PcbDoc"), "C:\\no such folder\\x.PcbDoc")
+
     def test_missing_and_empty_paths_unchanged(self):
         missing = os.path.join(tempfile.gettempdir(), "NOSUCH~1", "x.PcbDoc")
         self.assertEqual(long_path(missing), missing)

@@ -11,6 +11,7 @@ rule (UTF-8 mode, or Python 3.15+, makes it UTF-8 on every machine).
 """
 import codecs
 import ctypes
+import os
 from pathlib import Path
 
 
@@ -30,13 +31,15 @@ def write_altium_text(path, text: str) -> None:
 
 
 def long_path(path):
-    """path with its 8.3 short names (a folder such as ABCDEF~1) expanded.
-    Altium finds an open document by the path as written, so given a short
+    """path as Altium names the documents it opens: backslashes, and 8.3
+    short names (a folder such as ABCDEF~1) expanded. Altium finds an open
+    document by the path as written, so given forward slashes or a short
     name it opens a second copy of a document that is already open. Unlike
     os.path.realpath this leaves mapped drives and links as they are. A path
-    that does not exist comes back unchanged."""
+    that does not exist only gets backslashes."""
     if not path:
         return path
+    path = os.path.normpath(str(path))
     buf = ctypes.create_unicode_buffer(32768)
     n = ctypes.windll.kernel32.GetLongPathNameW(str(path), buf, len(buf))
     return buf.value if 0 < n < len(buf) else path
