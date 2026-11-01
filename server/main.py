@@ -4185,6 +4185,35 @@ async def place_vias(ctx: Context, vias: list, diameter_mils: float, hole_mils: 
 MUTATING_COMMANDS.add("create_vias")
 
 
+def _bring_to_front(hwnd):
+    """Give a window the foreground from this background process.
+
+    Windows usually refuses SetForegroundWindow from a background process.
+    While attached to the foreground thread, BringWindowToTop does the job
+    without a key press. A synthetic Alt also lifts the refusal, but it lands
+    on whichever window is in front: usually the program the user is typing
+    in, and if that is Altium, its menu bar stays active for the next keys.
+    """
+    this_thread = win32api.GetCurrentThreadId()
+    front = win32gui.GetForegroundWindow()
+    front_thread = win32process.GetWindowThreadProcessId(front)[0] if front else 0
+    attached = False
+    try:
+        if front_thread and front_thread != this_thread:
+            win32process.AttachThreadInput(this_thread, front_thread, True)
+            attached = True
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception as e:
+            logger.debug(f"SetForegroundWindow refused: {e}")
+        win32gui.BringWindowToTop(hwnd)
+    except Exception as e:
+        logger.debug(f"Could not bring the window to the front: {e}")
+    finally:
+        if attached:
+            win32process.AttachThreadInput(this_thread, front_thread, False)
+
+
 def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
     """Copy a window's pixels, frame included, into an RGB image.
 
@@ -4219,6 +4248,10 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
     """
     Take a screenshot of the Altium window, returned as viewable image content.
 
+    Altium comes to the front for about a second, because it only paints
+    what is on screen, and the window that was in front then gets the
+    foreground back.
+
     Args:
         view_type (str): Type of view to capture - 'pcb' or 'sch'
         zoom_to (list, optional): List of component designators (e.g. ["U12", "R42"]).
@@ -4231,6 +4264,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         (window title, size, zoomed component count)
     """
     logger.info(f"Taking screenshot of Altium {view_type} window (zoom_to={zoom_to})")
+    previous_window = win32gui.GetForegroundWindow()
 
     try:
         # First, execute the Altium command to ensure the right document type
@@ -4349,12 +4383,12 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                 # Bring Altium to the front and let it paint. Altium only
                 # renders a schematic view once it has actually been shown on
                 # screen, so a capture taken while it sits behind another
-                # window comes back with a blank canvas. Windows may refuse
-                # SetForegroundWindow from a process that neither is nor was
-                # started by the foreground process; a synthetic Alt press
-                # before the call is the standard unlock and is harmless.
+                # window comes back with a blank canvas. Letters typed while
+                # it is in front go to its menus (W then H tiles the
+                # documents), so whoever was in front gets the foreground back.
                 activated = False
                 altium_pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+                previous_pid = win32process.GetWindowThreadProcessId(previous_window)[1] if previous_window else 0
 
                 def altium_is_foreground():
                     # Altium owns several top-level windows; any of them
@@ -4363,21 +4397,12 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                     return bool(fg) and win32process.GetWindowThreadProcessId(fg)[1] == altium_pid
 
                 try:
-                    for attempt in range(2):
-                        if attempt:
-                            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
-                            ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
-                        try:
-                            win32gui.SetForegroundWindow(hwnd)
-                        except Exception:
-                            pass
-                        deadline = time.time() + 1.5
-                        while time.time() < deadline:
-                            time.sleep(0.1)
-                            if altium_is_foreground():
-                                activated = True
-                                break
-                        if activated:
+                    _bring_to_front(hwnd)
+                    deadline = time.time() + 1.5
+                    while time.time() < deadline:
+                        time.sleep(0.1)
+                        if altium_is_foreground():
+                            activated = True
                             break
                 except Exception as e:
                     logger.warning(f"Could not bring window to foreground: {e}")
@@ -4396,7 +4421,12 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
 
                 # Take screenshot using GDI functions instead of ImageGrab
                 try:
-                    img = _grab_window_image(hwnd, width, height)
+                    try:
+                        img = _grab_window_image(hwnd, width, height)
+                    finally:
+                        # Not when the user has already moved on by themselves
+                        if previous_pid not in (0, altium_pid) and altium_is_foreground():
+                            _bring_to_front(previous_window)
 
                     # Encode once: the same PNG bytes are returned and, when
                     # asked for, kept as a debug copy
