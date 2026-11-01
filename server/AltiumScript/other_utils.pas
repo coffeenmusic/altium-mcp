@@ -415,9 +415,13 @@ begin
     end;
     Client.ShowDocument(Doc);
     Board := FocusedBoard(0);
+    // Remembered like a board focused any other way, so a later command
+    // that names no board uses this one
     if (Board = nil) or
        (UpperCase(ExpandFileName(Board.FileName)) <> UpperCase(ExpandFileName(Path))) then
-        Result := 'Could not bring the board ' + Path + ' to the front';
+        Result := 'Could not bring the board ' + Path + ' to the front'
+    else
+        RememberBoard(Board.FileName);
 end;
 
 // Modify the EnsureDocumentFocused function to handle all document types
