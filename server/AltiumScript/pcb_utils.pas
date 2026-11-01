@@ -1675,6 +1675,116 @@ begin
     end;
 end;
 
+// One primitive of a violation: what it is, its net, and where
+function ViolationPrimitiveJSON(Board: IPCB_Board; Prim: IPCB_Primitive): String;
+var
+    Props : TStringList;
+    Rect  : TCoordRect;
+    Detail, NetName : String;
+begin
+    Props := TStringList.Create;
+    try
+        Detail := '';
+        NetName := '';
+        try Detail := Prim.Detail; except end;
+        try if Prim.Net <> nil then NetName := Prim.Net.Name; except end;
+        AddJSONProperty(Props, 'object', Detail);
+        AddJSONProperty(Props, 'net', NetName);
+        try AddJSONProperty(Props, 'layer', Layer2String(Prim.Layer)); except end;
+        try
+            Rect := Prim.BoundingRectangle;
+            AddJSONNumber(Props, 'x_mils', CoordToMils((Rect.Left + Rect.Right) div 2 - Board.XOrigin));
+            AddJSONNumber(Props, 'y_mils', CoordToMils((Rect.Bottom + Rect.Top) div 2 - Board.YOrigin));
+        except
+        end;
+        Result := BuildJSONObject(Props, 2);
+    finally
+        Props.Free;
+    end;
+end;
+
+// Run the design rule check on the focused board and list the violations it
+// leaves on the board. PCB:DesignRuleCheck opens the modal Design Rule
+// Checker dialog and returns once it closes; run_drc presses its Run button
+// from outside Altium. Coordinates are mils relative to the board origin.
+function RunDRC(MaxViolations: Integer): String;
+var
+    Board     : IPCB_Board;
+    Iterator  : IPCB_BoardIterator;
+    Violation : IPCB_Violation;
+    Rect      : TCoordRect;
+    Items, Props, ResultProps : TStringList;
+    Count     : Integer;
+    RuleName  : String;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+
+    ResetParameters;
+    RunProcess('PCB:DesignRuleCheck');
+
+    Items := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        Count := 0;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViolationObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Violation := Iterator.FirstPCBObject;
+        while Violation <> nil do
+        begin
+            Count := Count + 1;
+            if Count <= MaxViolations then
+            begin
+                Props := TStringList.Create;
+                try
+                    RuleName := '';
+                    try if Violation.Rule <> nil then RuleName := Violation.Rule.Name; except end;
+                    AddJSONProperty(Props, 'rule', RuleName);
+                    // Description and the violation's own layer are empty;
+                    // Descriptor says what is wrong and by how much
+                    try AddJSONProperty(Props, 'description', Violation.Descriptor); except end;
+                    try
+                        Rect := Violation.BoundingRectangle;
+                        AddJSONNumber(Props, 'x_mils', CoordToMils((Rect.Left + Rect.Right) div 2 - Board.XOrigin));
+                        AddJSONNumber(Props, 'y_mils', CoordToMils((Rect.Bottom + Rect.Top) div 2 - Board.YOrigin));
+                    except
+                    end;
+                    try
+                        if Violation.Primitive1 <> nil then
+                            Props.Add('"primitive1": ' + ViolationPrimitiveJSON(Board, Violation.Primitive1));
+                    except
+                    end;
+                    try
+                        if Violation.Primitive2 <> nil then
+                            Props.Add('"primitive2": ' + ViolationPrimitiveJSON(Board, Violation.Primitive2));
+                    except
+                    end;
+                    Items.Add(BuildJSONObject(Props, 1));
+                finally
+                    Props.Free;
+                end;
+            end;
+            Violation := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'board', Board.FileName);
+        AddJSONInteger(ResultProps, 'violation_count', Count);
+        ResultProps.Add(BuildJSONArray(Items, 'violations'));
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Items.Free;
+        ResultProps.Free;
+    end;
+end;
+
 // Function to get all component data from the PCB
 function GetAllComponentData(ROOT_DIR: String, SelectedOnly: Boolean = False): String;
 var

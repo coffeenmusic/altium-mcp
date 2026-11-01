@@ -464,6 +464,7 @@ begin
        (CommandName = 'get_component_pins')                  or
        (CommandName = 'get_pcb_layers')                      or
        (CommandName = 'get_pcb_rules')                       or
+       (CommandName = 'run_drc')                             or
        (CommandName = 'get_selected_components_coordinates') or
        (CommandName = 'layout_duplicator')                   or
        (CommandName = 'layout_duplicator_apply')             or

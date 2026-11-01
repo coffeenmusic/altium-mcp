@@ -781,6 +781,18 @@ begin
     Result := GetOutputJobContainers(RequestOutJobPath(RequestData), ROOT_DIR);
 end;
 
+// Function to execute run DRC
+function ExecuteRunDRC(RequestData: TStringList): String;
+var
+    i, MaxViolations : Integer;
+begin
+    MaxViolations := 200;
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"max_violations"', RequestData[i]) > 0 then
+            MaxViolations := StrToInt(JSONLineValue(RequestData[i]));
+    Result := RunDRC(MaxViolations);
+end;
+
 // Function to execute run output jobs
 function ExecuteRunOutputJobs(RequestData: TStringList): String;
 var
@@ -1151,6 +1163,8 @@ begin
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':
             Result := ExecuteLayoutDuplicatorApply(RequestData);            
+        'run_drc':
+            Result := ExecuteRunDRC(RequestData);
         'get_pcb_rules':
             Result := GetPCBRules(ROOT_DIR);
         'get_output_job_containers':

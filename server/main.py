@@ -3393,6 +3393,79 @@ async def get_pcb_rules(ctx: Context) -> str:
     logger.info(f"Retrieved PCB rules data")
     return json.dumps(rules_data, indent=2)
 
+@_tool()
+async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200) -> str:
+    """
+    Run the design rule check (DRC) on a PCB and list the violations.
+
+    Runs Altium's own batch DRC with the board's rules and the options last
+    set in its Design Rule Checker dialog. The dialog is answered from
+    outside Altium: it may flash on screen. Altium writes its usual report
+    beside the board (or in the project's output folder) and may open it.
+    The violations stay on the board, marked as Altium marks them.
+
+    A cancelled check leaves no violations, exactly like a clean board, so
+    "ran" says whether the check really ran: the Run button was pressed and
+    the dialog closed. "report" (when Altium wrote one) gives the per-rule
+    counts and confirms it independently.
+
+    Args:
+        board_path (str): Full path of the .PcbDoc to check. It is opened if
+            needed and brought to the front. Empty: the focused board, or
+            the one the PCB tools last used.
+        max_violations (int): How many violations to list in full; the count
+            is always complete.
+
+    Returns:
+        str: JSON with ran, violation_count, the violations (rule,
+             description, layer, x_mils/y_mils relative to the board origin,
+             and the primitives involved), and the report's per-rule counts.
+    """
+    import drc
+
+    logger.info(f"Running DRC on {board_path or 'the focused board'}")
+    started = time.time()
+    outcome = drc.DialogOutcome()
+    driver = asyncio.create_task(drc.drive_dialog(outcome, PROGRESS_FILE))
+    try:
+        response = await altium_bridge.execute_command(
+            "run_drc", {"board_path": board_path, "max_violations": int(max_violations)})
+    finally:
+        driver.cancel()
+        try:
+            await driver
+        except asyncio.CancelledError:
+            pass
+
+    if not response.get("success", False):
+        return json.dumps({"success": False, "ran": outcome.pressed,
+                           "error": f"DRC failed: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return json.dumps({"success": False, "error": f"unexpected reply: {result[:200]}"})
+
+    out = {"success": True, "ran": outcome.pressed}
+    if not outcome.pressed:
+        out["success"] = False
+        out["error"] = ("The check did not run: " +
+                        ("the Design Rule Checker dialog could not be started and was closed. "
+                         if outcome.seen else "the Design Rule Checker dialog never appeared. ") +
+                        "violation_count is what was already on the board, not a result.")
+        if outcome.notes:
+            out["notes"] = outcome.notes
+    out.update({k: v for k, v in result.items() if k != "success"})
+    report = drc.find_report(result.get("board", board_path), started)
+    if report is not None:
+        try:
+            out["report"] = {"path": str(report),
+                             **drc.parse_report(read_altium_text(report))}
+        except OSError:
+            pass
+    return json.dumps(out, indent=2)
+
 @_tool(read_only=True)
 async def get_pcb_layer_stackup(ctx: Context) -> str:
     """

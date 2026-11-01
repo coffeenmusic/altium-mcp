@@ -132,6 +132,10 @@
       "description": "Add a design rule (clearance, width, hole size, routing via, mask expansion or polygon connect) to a PCB"
     },
     {
+      "name": "run_drc",
+      "description": "Run the design rule check on a PCB and list the violations"
+    },
+    {
       "name": "get_selected_components_coordinates",
       "description": "Get coordinates and positioning information for selected components in Altium layout"
     },

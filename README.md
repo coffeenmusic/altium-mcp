@@ -160,6 +160,7 @@ The server provides several tools to interact with Altium Designer:
 - `get_pcb_layer_stackup`: Gets stackup info like dielectric, layer thickness, etc.
 - `set_pcb_layer_visibility` ([YouTube](https://youtu.be/XaWs5A6-h30)): Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
+- `run_drc`: Run Altium's design rule check on a board and list the violations, each with its rule, description, position and the objects involved, plus the per-rule counts from Altium's report. The Design Rule Checker dialog flashes on screen while the tool presses Run; `ran` says whether the check really ran. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #66](https://github.com/coffeenmusic/altium-mcp/pull/66)).
 - `create_pcb_rule`: Add a design rule: clearance, width, hole size, routing via, solder or paste mask expansion, or polygon connect, with values in mils and Altium query scopes such as `InNet('GND')`. A rule added by script becomes priority 1 of its kind, so give it a narrow scope; the result warns when a rule scoped to everything now overrides others. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #67](https://github.com/coffeenmusic/altium-mcp/pull/67)).
 - `get_selected_components_coordinates`: Get position, rotation, layer, and footprint information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
@@ -228,7 +229,6 @@ This is a third-party integration and not made by Altium. Made by [coffeenmusic]
   - `scripts-libraries\Scripts - PCB\FilterObjects\`
   - `scripts-libraries\Scripts - SCH\SelectionFilter\`
 - Show/Hide Panels: `DXP/ReportPCBViews.pas`
-- Run DRC: IPCB_Board.RunBatchDesignRuleCheck( 
 - Move cursor to position: IPCB_Board.XCursor, IPCB_Board.YCursor 
 - Add get schematic & pcb library path for footprint. 
 - log response time of each tool
