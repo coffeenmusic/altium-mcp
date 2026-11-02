@@ -864,6 +864,7 @@ end;
 //   PINPARAM|<pin number>|<name>|<value>
 //   PINDESC|<pin number>|<text>
 //   PINSYMBOL|<pin number>|<inside|inside_edge|outside_edge|outside>|<IEEE symbol>
+//   PINFUNC|<pin number>|<F1>/<F2>/...   (optional)
 // Records belong to the most recent SYMBOL or EDITSYMBOL line. Far fewer
 // Altium script launches than one create call per symbol.
 function CreateSymbolsBatch(SpecFilePath: String): String;
@@ -979,7 +980,8 @@ begin
                     ProblemsArray.Add('"' + JSONEscapeString('line ' + IntToStr(i + 1) + ': GRAPHIC only belongs to a SYMBOL') + '"');
             end
             else if (Kind = 'COMMENT') or (Kind = 'DESCRIPTION') or (Kind = 'SYMPARAM') or
-                    (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') then
+                    (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') or
+                    (Kind = 'PINFUNC') then
             begin
                 if (CurrentName <> '') then
                     EditsList.Add(Line)
@@ -1202,6 +1204,7 @@ begin
                                     AddJSONProperty(PrimProps, 'symbol_outside_edge', IeeeSymbolName(PinObj.Symbol_OuterEdge));
                                     AddJSONProperty(PrimProps, 'symbol_outside', IeeeSymbolName(PinObj.Symbol_Outer));
                                     AddPinParametersJSON(PrimProps, PinObj);
+                                    AddPinFunctionsJSON(PrimProps, PinObj);
                                 end;
                                 eRectangle:
                                 begin
@@ -2319,6 +2322,15 @@ end;
 //   PINSYMBOL|<pin number>|<edge>|<symbol>       set an IEEE symbol of every pin with that
 //                                                number; edge inside, inside_edge,
 //                                                outside_edge or outside
+//   PINFUNC|<pin number>|<F1>/<F2>/...           replace the Functions list (Properties
+//                                                panel > Pin > Functions) of every pin
+//                                                with that number, in that order. Only
+//                                                used when the spec has the record; no
+//                                                pin gets functions from its name. An
+//                                                empty list is refused: a script cannot
+//                                                clear the list. Altium merges repeated
+//                                                names; when the stored list differs,
+//                                                it is reported.
 // By default, visible symbol parameters without x|y go below the body's
 // bottom-left corner, 100 mil apart, in record order. Problems (e.g. no pin with that
 // number) are added to Problems as JSON strings. Returns the records applied.
@@ -2342,6 +2354,7 @@ var
     Edge      : String;
     FontID    : Integer;
     FontSpec  : String;
+    StoredList : String;
 begin
     Result := 0;
     if (Edits.Count = 0) then Exit;
@@ -2440,6 +2453,44 @@ begin
             end;
             Result := Result + 1;
         end
+        else if (Kind = 'PINFUNC') then
+        begin
+            PinNum := Trim(GetFieldFromPipeString(Line, 1));
+            Value := NormalizePinFunctions(GetFieldFromPipeString(Line, 2));
+            Matched := False;
+            StoredList := '';
+            if (Value = '') then
+                Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': PINFUNC for pin ' + PinNum +
+                    ' lists no functions. A script cannot clear a pin''s functions; clear them in the Properties panel') + '"')
+            else
+            begin
+                Iter := Comp.SchIterator_Create;
+                Iter.AddFilter_ObjectSet(MkSet(ePin));
+                Pin := Iter.FirstSchObject;
+                while (Pin <> nil) do
+                begin
+                    if (Pin.Designator = PinNum) then
+                    begin
+                        Matched := True;
+                        SchServer.RobotManager.SendMessage(Pin.I_ObjectAddress, c_BroadCast, SCHM_BeginModify, c_NoEventData);
+                        SetPinFunctions(Pin, Value);
+                        SchServer.RobotManager.SendMessage(Pin.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
+                        StoredList := PinFunctionsText(Pin);
+                    end;
+                    Pin := Iter.NextSchObject;
+                end;
+                Comp.SchIterator_Destroy(Iter);
+                if not Matched then
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': no pin ' + PinNum + ' for PINFUNC') + '"')
+                else
+                begin
+                    Result := Result + 1;
+                    if (StoredList <> Value) then
+                        Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': pin ' + PinNum + ' stored the functions ' +
+                            StoredList + ', not ' + Value + ' (Altium merges repeated names)') + '"');
+                end;
+            end;
+        end
         else if (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') then
         begin
             PinNum := Trim(GetFieldFromPipeString(Line, 1));
@@ -2517,6 +2568,106 @@ begin
     end;
     SchServer.ProcessControl.PostProcess(Lib, '');
     Lib.GraphicallyInvalidate;
+end;
+
+// The value of Key in a '|Key=Value|...|' record, or ''
+function PipeRecordValue(Rec: String; Key: String): String;
+var
+    Start : Integer;
+    Rest  : String;
+begin
+    Result := '';
+    Start := Pos('|' + Key + '=', Rec);
+    if (Start = 0) then Exit;
+    Rest := Copy(Rec, Start + Length(Key) + 2, Length(Rec));
+    if (Pos('|', Rest) > 0) then
+        Result := Copy(Rest, 1, Pos('|', Rest) - 1)
+    else
+        Result := Rest;
+end;
+
+// A pin's Functions list (Properties panel > Pin > Functions) joined with
+// '/', or '' when it has none. ISch_Pin has no property for it; the pin's
+// ExportToParameters lists it as PINDEFINEDFUNCTIONSCOUNT and
+// PINDEFINEDFUNCTION1..n.
+function PinFunctionsText(Pin: ISch_Pin): String;
+var
+    Exported : String;
+    CountText : String;
+    Count, i : Integer;
+begin
+    Result := '';
+    Exported := '|' + Pin.ExportToParameters + '|';
+    CountText := PipeRecordValue(Exported, 'PINDEFINEDFUNCTIONSCOUNT');
+    Count := 0;
+    if (CountText <> '') then Count := StrToInt(CountText);
+    for i := 1 to Count do
+    begin
+        if (i > 1) then Result := Result + '/';
+        Result := Result + PipeRecordValue(Exported, 'PINDEFINEDFUNCTION' + IntToStr(i));
+    end;
+end;
+
+// A PINFUNC list as it will be stored: names trimmed, empty ones dropped,
+// joined with '/'
+function NormalizePinFunctions(List: String): String;
+var
+    Parts : TStringList;
+    i     : Integer;
+begin
+    Result := '';
+    Parts := TStringList.Create;
+    try
+        Parts.Text := StringReplace(List, '/', #13#10, REPLACEALL);
+        for i := 0 to Parts.Count - 1 do
+            if (Trim(Parts[i]) <> '') then
+            begin
+                if (Result <> '') then Result := Result + '/';
+                Result := Result + Trim(Parts[i]);
+            end;
+    finally
+        Parts.Free;
+    end;
+end;
+
+// Replace a pin's Functions list with List ('/'-separated, at least one
+// name). There is no setter for it: SetState_FunctionsFromName rebuilds the
+// list from the pin's name, so the name is swapped for the list and put back.
+// A name with no '/' is ignored by it, so a single function gets a trailing
+// '/'. A name with no function in it is ignored too, which is why a script
+// cannot clear the list.
+procedure SetPinFunctions(Pin: ISch_Pin; List: String);
+var
+    Saved : String;
+begin
+    Saved := Pin.Name;
+    if (Pos('/', List) = 0) then
+        Pin.Name := List + '/'
+    else
+        Pin.Name := List;
+    Pin.SetState_FunctionsFromName;
+    Pin.Name := Saved;
+end;
+
+// Add a pin's Functions list to its JSON properties, when it has any
+procedure AddPinFunctionsJSON(Props: TStringList; Pin: ISch_Pin);
+var
+    Names : TStringList;
+    Items : TStringList;
+    i     : Integer;
+begin
+    Names := TStringList.Create;
+    Items := TStringList.Create;
+    try
+        Names.Text := StringReplace(PinFunctionsText(Pin), '/', #13#10, REPLACEALL);
+        for i := 0 to Names.Count - 1 do
+            Items.Add('"' + JSONEscapeString(Names[i]) + '"');
+        if (Items.Count > 0) then
+            Props.Add(BuildJSONArray(Items, 'functions', 2));
+    finally
+        Names.Free;
+        Items.Free;
+    end;
 end;
 
 // Add a pin's parameters (name, value) to its JSON properties, when it has any

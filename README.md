@@ -153,6 +153,7 @@ The server provides several tools to interact with Altium Designer:
   - `PINPARAM|<pin number>|<name>|<value>`: add or replace a hidden parameter on every pin with that number (every part of a multi-part symbol).
   - `PINDESC|<pin number>|<text>`: set the Description of every pin with that number.
   - `PINSYMBOL|<pin number>|<edge>|<symbol>`: set an IEEE symbol of every pin with that number. The edge is `inside`, `inside_edge`, `outside_edge` or `outside`. The symbol is a TIeeeSymbol name without the leading `e`, in any case: `none`, `dot`, `clock`, `activelowinput`, `schmitt` and so on (the full list is in the altium-script skill, SCH_API_Reference.md, under TIeeeSymbol).
+  - `PINFUNC|<pin number>|<F1>/<F2>/...` (optional): replace the Functions list (Properties panel > Pin > Functions) of every pin with that number, in the order given, for multi-function pins such as GPIOs. Nothing sets functions unless the spec has this record. A script cannot clear the list, so an empty one is listed under `problems`, and so is a stored list that differs, as when Altium merges a repeated name. `get_symbol_primitives` returns a pin's `functions` when it has any.
 
   These records work after `SYMBOL` and `EDITSYMBOL` alike. An unknown pin number, edge, symbol or justification is listed under `problems`; the rest of the batch still runs.
 

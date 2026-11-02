@@ -2418,6 +2418,18 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
                                 altium-script skill, SCH_API_Reference.md,
                                 TIeeeSymbol). An unknown edge or symbol is
                                 reported under problems.
+            PINFUNC|<pin number>|<F1>/<F2>/...   optional: replace the
+                                Functions list (Properties panel > Pin >
+                                Functions) of every pin with that number,
+                                in the order given, e.g.
+                                PINFUNC|23|ETH1_MDIO/USART2_TX/TIM2_CH3.
+                                Use it only when the user asks for pin
+                                functions; nothing sets them otherwise, not
+                                even from a pin name with '/' in it. Names
+                                cannot contain '/' or '|'. A script cannot
+                                clear the list, so an empty one is reported
+                                under problems; Altium merges repeated names,
+                                and a stored list that differs is reported.
             These records work after SYMBOL and EDITSYMBOL alike.
             Each SYMBOL or EDITSYMBOL line starts a new symbol; the other
             records belong to the most recent one.
@@ -2476,8 +2488,9 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
              parameter now. Pins also carry
              description, symbol_inside, symbol_inside_edge,
              symbol_outside_edge and symbol_outside (IEEE symbol names as
-             PINSYMBOL takes them), and their parameters [{name, value}]
-             when they have any
+             PINSYMBOL takes them), their parameters [{name, value}]
+             when they have any, and functions ["ETH1_MDIO", ...] (the
+             Functions list, as PINFUNC sets it) when they have any
     """
     logger.info(f"Getting symbol primitives (library={library_path}, symbol={symbol_name})")
 
