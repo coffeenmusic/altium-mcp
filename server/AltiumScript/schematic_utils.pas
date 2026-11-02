@@ -2238,6 +2238,11 @@ begin
         if not Found then
         begin
             Iter := Comp.SchIterator_Create;
+            // Only what is measured below: a footprint model (implementation)
+            // has no OwnerPartId, and reading it failed every edit of a
+            // symbol that has one
+            Iter.AddFilter_ObjectSet(MkSet(ePin, eRectangle, eRoundRectangle, eLine, ePolyline, ePolygon,
+                                           eBezier, eArc, ePie, eEllipticalArc, eEllipse));
             Prim := Iter.FirstSchObject;
             while (Prim <> nil) do
             begin
