@@ -8,6 +8,8 @@ The sheet is read with schdoc_reader and every check works on its geometry:
   label_orientation   a horizontal label on a vertical wire, or the reverse
   label_off_wire      a net label touching no wire and no pin
   dangling_wire       a wire end that connects to nothing and carries no label
+  pin_off_grid        a part whose pins sit a few microns off the grid, so
+                      wires drawn to them come out slanted
   slanted_wire        a wire segment slightly out of level or plumb; Altium
                       turns it diagonal when a part on it is dragged
   pin_tap             a wire branches right at a pin instead of a few grids
@@ -41,6 +43,10 @@ TOL = 2.0
 # A segment this far (mil, 1 um) out of level is reported as slanted. Smaller
 # offsets are common in hand-drawn sheets and are left alone.
 SLANT_MIN = 1 / 25.4
+# Pins this far off the grid (1 um to 1 mil) are a placement error: a symbol
+# drawn for another grid (imperial on metric) is off by more. Over 235 sheets
+# this band holds only parts whose contents were shifted from their origin.
+PIN_OFF_MAX = 1.0
 TEXT_SHRINK = 8.0
 # Text may not even touch a wire or pin: a value whose bottom edge sits on a
 # wire reads as part of that net
@@ -193,6 +199,10 @@ class Sheet:
         self.grid = grid or 100.0
         # A metric grid (1 mm = 39.37 mil) is not a whole number of 10 mils
         self.metric = abs(self.grid / 10 - round(self.grid / 10)) > 0.01
+        if self.metric:
+            # stored to 0.1 um (39.3701 mil for 1 mm): far from the origin that
+            # rounding alone puts on-grid objects microns off the grid
+            self.grid = round(self.grid * 0.0254, 3) / 0.0254
 
         self.components = {}   # record index -> dict
         self.pins = []         # {comp, name, hot, base, orient}
@@ -235,6 +245,7 @@ class Sheet:
                     "part": int(r.get("CURRENTPARTID", 1) or 1),
                     "mode": int(r.get("DISPLAYMODE", 0) or 0),
                     "orientation": int(r.get("ORIENTATION", 0) or 0),
+                    "location": (coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")),
                     "body": None, "pins": [], "texts": [],
                 }
 
@@ -641,6 +652,30 @@ class Checker:
                 self.add("slanted_wire", b, msg, **extra,
                          suggest={"move_end": self.exact(b), "to": self.exact(to)})
 
+    def check_pins_off_grid(self):
+        # Pins a few microns off the grid look fine, but every wire drawn to
+        # them is that far out of level and turns diagonal when the part is
+        # dragged. Seen when a part's drawing was shifted from its origin.
+        g = self.grid
+        for c in self.s.components.values():
+            offsets = [(p["hot"][0] - round(p["hot"][0] / g) * g, p["hot"][1] - round(p["hot"][1] / g) * g, p)
+                       for p in c["pins"]]
+            if not offsets:
+                continue
+            worst = max(max(abs(dx), abs(dy)) for dx, dy, _ in offsets)
+            if not SLANT_MIN <= worst <= PIN_OFF_MAX:
+                continue
+            dx, dy, pin = max(offsets, key=lambda o: max(abs(o[0]), abs(o[1])))
+            size = f"{worst * 25.4:.1f} um" if self.s.metric else f"{worst:.3f} mil"
+            # the same shift for every pin, give or take rounding of the stored fractions
+            same = all(abs(ox - dx) < 0.01 and abs(oy - dy) < 0.01 for ox, oy, _ in offsets)
+            msg = f"{c['designator']}'s pins are up to {size} off the grid; wires to them come out slanted"
+            if same and self.off_grid(c["location"]) < 1e-3:
+                msg += (" (the part sits on the grid but its drawing is shifted from its origin: "
+                        "move the drawing back, or update the part from its library and redraw its wires)")
+            self.add("pin_off_grid", pin["hot"], msg, designator=c["designator"], pin=pin["name"],
+                     suggest={"shift_contents_by": self.exact((-dx, -dy))})
+
     def check_pin_taps(self):
         segs = list(self.s.segments())
         ports = self.s.attach
@@ -884,13 +919,14 @@ class Checker:
     def run(self):
         self.check_labels()
         self.check_dangling()
+        self.check_pins_off_grid()
         self.check_slanted()
         self.check_pin_taps()
         self.check_bodies()
         self.check_text()
         self.check_sheet_symbols()
         order = ["pin_tap", "label_not_at_end", "label_justification", "label_orientation", "label_off_wire",
-                 "dangling_wire", "slanted_wire", "wire_through_body", "sheet_entry_margin", "sheet_symbol_text", "text_overlap"]
+                 "dangling_wire", "pin_off_grid", "slanted_wire", "wire_through_body", "sheet_entry_margin", "sheet_symbol_text", "text_overlap"]
         self.issues.sort(key=lambda i: (order.index(i["type"]), -i["at"][1], i["at"][0]))
         return self.issues
 
