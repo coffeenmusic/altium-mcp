@@ -5179,3 +5179,103 @@ begin
         Props.Free;
     end;
 end;
+
+// Repour the polygons of the focused board, all of them or those matching
+// the filters: Names is '|NAME1|NAME2|' (any case; names need not be unique),
+// NetName and LayerName a net and a signal layer, each '' for any. A shelved
+// polygon (Poured false) is skipped unless IncludeShelved: repouring it
+// unshelves it. Rebuild is what repours; PCB:PolygonActions RepourAll does
+// nothing when run from a script.
+function RepourPolygons(Names: String; NetName: String; LayerName: String; IncludeShelved: Boolean): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Poly     : IPCB_Polygon;
+    Net      : IPCB_Net;
+    Layer, Repoured : Integer;
+    Done, Shelved, Item, Props : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Net := nil;
+    if NetName <> '' then
+    begin
+        Net := FindBoardNet(Board, NetName);
+        if Net = nil then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NetName;
+            Exit;
+        end;
+    end;
+    Layer := eNoLayer;
+    if LayerName <> '' then
+    begin
+        Layer := ResolveBoardLayer(Board, LayerName);
+        if (Layer = eNoLayer) or (Layer > eBottomLayer) then
+        begin
+            Result := 'ERROR: ' + LayerName + ' is not a signal layer of this board';
+            Exit;
+        end;
+    end;
+    Names := UpperCase(Names);
+
+    Done := TStringList.Create;
+    Shelved := TStringList.Create;
+    Item := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Repoured := 0;
+        // PostProcess must run whatever happens, or Altium's undo stays broken
+        PCBServer.PreProcess;
+        try
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Poly := Iterator.FirstPCBObject;
+            while Poly <> nil do
+            begin
+                if ((Names = '') or (Pos('|' + UpperCase(Poly.Name) + '|', Names) > 0)) and
+                   ((Net = nil) or (Poly.Net = Net)) and
+                   ((Layer = eNoLayer) or (Poly.Layer = Layer)) then
+                begin
+                    if (not Poly.Poured) and (not IncludeShelved) then
+                        Shelved.Add('"' + JSONEscapeString(Poly.Name + ' (' + Layer2String(Poly.Layer) + ')') + '"')
+                    else
+                    begin
+                        Poly.Rebuild;
+                        Repoured := Repoured + 1;
+                        Item.Clear;
+                        AddJSONProperty(Item, 'name', Poly.Name);
+                        AddJSONProperty(Item, 'layer', Layer2String(Poly.Layer));
+                        if Poly.Net <> nil then AddJSONProperty(Item, 'net', Poly.Net.Name) else AddJSONProperty(Item, 'net', '');
+                        AddJSONInteger(Item, 'poured_regions', PolygonPourCount(Poly, True));
+                        AddJSONInteger(Item, 'hatch_tracks', PolygonPourCount(Poly, False));
+                        Done.Add(BuildJSONObject(Item, 1));
+                    end;
+                end;
+                Poly := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        finally
+            PCBServer.PostProcess;
+        end;
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'repoured', Repoured);
+        if Done.Count > 0 then Props.Add(BuildJSONArray(Done, 'polygons')) else Props.Add('"polygons": []');
+        if Shelved.Count > 0 then Props.Add(BuildJSONArray(Shelved, 'shelved_skipped')) else Props.Add('"shelved_skipped": []');
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Done.Free;
+        Shelved.Free;
+        Item.Free;
+        Props.Free;
+    end;
+end;

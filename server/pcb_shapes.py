@@ -1,4 +1,5 @@
-"""Checking and encoding the outlines of place_polygon_pour and place_cutout.
+"""Checking and encoding the outlines of place_polygon_pour and place_cutout,
+and the polygon names repour_polygons picks.
 
 An outline is a list of [x, y] corners in mils relative to the board origin,
 joined by straight edges and closed back to the first corner. It goes to
@@ -61,3 +62,20 @@ def outline_points(outline) -> Tuple[Optional[List[Tuple[int, int]]], str]:
 
 def encode(points) -> str:
     return ";".join(f"{x}|{y}" for x, y in points)
+
+
+def polygon_names(names) -> Tuple[List[str], str, str]:
+    """The names to repour, how they go to Altium ('|A|B|', '' for any) and
+    an error message ('' when fine)."""
+    out = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if any("|" in n for n in out):
+        return out, "", "a polygon name cannot contain '|'"
+    return out, ("|" + "|".join(out) + "|") if out else "", ""
+
+
+def unmatched_names(names, result) -> List[str]:
+    """Names that picked no polygon, repoured or shelved, in a repour result."""
+    found = {p.get("name", "").upper() for p in result.get("polygons", [])}
+    # shelved polygons are listed as 'NAME (Layer)'
+    found |= {s.rsplit(" (", 1)[0].upper() for s in result.get("shelved_skipped", [])}
+    return [n for n in names if n.upper() not in found]

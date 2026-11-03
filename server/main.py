@@ -3165,8 +3165,60 @@ async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer
     result = response.get("result", {})
     return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
+@_tool()
+async def repour_polygons(ctx: Context, names: list = None, net: str = "", layer: str = "",
+                          include_shelved: bool = False, board_path: str = "") -> str:
+    """
+    Repour polygon pours on a PCB: all of them, or the ones the filters pick.
+
+    Repour after moving parts, tracks or vias through a pour, or after
+    changing clearance or polygon connect rules; Altium does not repour by
+    itself. The whole repour is one undo step.
+
+    Filters combine; with none, every polygon on the board is repoured.
+
+    Args:
+        names (list): Polygon names, any case. Names need not be unique (a
+            "GND" pour on each layer is common), so add layer to pick one.
+        net (str): Only polygons on this net.
+        layer (str): Only polygons on this signal layer, by stack name or
+            Altium's name ("Top Layer").
+        include_shelved (bool): Also repour shelved polygons, which
+            unshelves them. By default they are left shelved and listed.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with how many polygons were repoured and, for each, its
+             name, layer, net and poured_regions (separate pieces of
+             copper) and hatch_tracks. shelved_skipped lists the shelved
+             polygons that matched and were left alone.
+    """
+    import pcb_shapes
+
+    board_path = long_path(board_path)
+    names, encoded, error = pcb_shapes.polygon_names(names)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    logger.info(f"Repouring polygons (names={names or 'any'}, net={net or 'any'}, layer={layer or 'any'})")
+    response = await altium_bridge.execute_command("repour_polygons", {
+        "names": encoded, "net": net, "layer": layer,
+        "include_shelved": "true" if include_shelved else "false", "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to repour: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    missing = pcb_shapes.unmatched_names(names, result)
+    if missing:
+        result["names_not_matched"] = missing
+    if not result.get("repoured") and not result.get("shelved_skipped"):
+        result["warning"] = "No polygon matched the filters."
+    return json.dumps(result, indent=2)
+
 # Change the design: a timeout leaves their outcome unknown, so no blind retry
-MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout"})
+MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout", "repour_polygons"})
 
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,

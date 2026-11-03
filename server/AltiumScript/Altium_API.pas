@@ -567,6 +567,13 @@ begin
     end;
 end;
 
+// Function to execute repour polygons
+function ExecuteRepourPolygons(RequestData: TStringList): String;
+begin
+    Result := RepourPolygons(RequestText(RequestData, 'names', ''), RequestText(RequestData, 'net', ''),
+        RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'include_shelved', 'false') = 'true');
+end;
+
 // Extract the create symbols batch logic
 function ExecuteCreateSymbolsBatch(RequestData: TStringList): String;
 var
@@ -1368,6 +1375,8 @@ begin
             Result := ExecuteCreatePolygonPour(RequestData);
         'create_cutout':
             Result := ExecuteCreateCutout(RequestData);
+        'repour_polygons':
+            Result := ExecuteRepourPolygons(RequestData);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':
