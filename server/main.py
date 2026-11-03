@@ -3475,6 +3475,377 @@ async def modify_pcb_objects(ctx: Context, kinds: list = None, net: str = "", la
 
 MUTATING_COMMANDS.add("edit_pcb_objects")
 
+async def _bridge_result(command: str, params: dict):
+    """The bridge's result as a dict, or (None, error)."""
+    response = await altium_bridge.execute_command(command, params)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, f"unexpected reply: {result[:200]}"
+    return result, ""
+
+async def _stitch_once(net: str, settings: dict, stagger, board_path: str, toggle: bool = False) -> dict:
+    """Run Altium's Add Stitching to Net with the dialog filled in from outside."""
+    import via_stitching
+
+    outcome = via_stitching.StitchOutcome()
+    driver = asyncio.create_task(via_stitching.drive_dialog(outcome, net, settings, stagger, PROGRESS_FILE,
+                                                            toggle_stagger=toggle))
+    try:
+        result, error = await _bridge_result("run_via_stitching", {"net": net, "board_path": board_path})
+    finally:
+        driver.cancel()
+        try:
+            await driver
+        except asyncio.CancelledError:
+            pass
+    if result is None:
+        return {"success": False, "error": f"Via stitching failed: {error}"}
+    rows = result.pop("rows", [])
+    out = {"success": outcome.pressed, **{k: v for k, v in result.items() if k != "success"}}
+    out["dialog"] = {"values": outcome.applied, "layer_pair": outcome.layer_pair}
+    grid = settings.get("grid_mils") or via_stitching.mils_of(outcome.applied.get("grid_mils", ""))
+    measured = via_stitching.staggered([(y / 10000, x / 10000) for y, x in rows], grid)
+    if measured is not None:
+        out["stagger"] = measured
+    if outcome.messages:
+        out["dialog"]["messages_closed"] = outcome.messages
+    if not outcome.pressed:
+        out["error"] = ("Altium's Add Stitching to Net dialog was closed without stitching: " +
+                        ("; ".join(outcome.notes) if outcome.notes else
+                         "it never appeared" if not outcome.seen else "it could not be confirmed"))
+    elif not result.get("vias_added"):
+        out["warning"] = ("Altium added no vias: the net has no room for them at this grid and "
+                          "clearance, or no copper on both layers of the via.")
+    if outcome.notes and outcome.pressed:
+        out["notes"] = outcome.notes
+    return out
+
+async def _run_stitching(net: str, settings: dict, stagger, board_path: str) -> dict:
+    """Stitch, then check the stagger Altium really used against the one asked
+    for. Its checkbox cannot always be read, but a click always flips it and
+    the dialog reopens with the setting last used: so on a mismatch the new
+    group is removed and the net stitched again with one click on Stagger."""
+    out = await _stitch_once(net, settings, stagger, board_path)
+    if stagger is None or out.get("stagger") is None or out["stagger"] == stagger or not out.get("success"):
+        if out.get("stagger") == stagger and out.get("notes"):
+            # the vias came out as asked, whatever the checkbox looked like
+            out["notes"] = [n for n in out["notes"] if "Stagger" not in n] or None
+            if out["notes"] is None:
+                del out["notes"]
+        return out
+    removed, error = await _bridge_result("remove_via_stitching", {
+        "union_index": out.get("union_index", 0), "board_path": board_path})
+    if removed is None:
+        out["warning"] = (f"Asked for stagger={stagger} but Altium placed the vias "
+                          f"{'staggered' if out['stagger'] else 'in straight rows'}, and they could not "
+                          f"be removed to try again: {error}")
+        return out
+    again = await _stitch_once(net, settings, stagger, board_path, toggle=True)
+    again["retried"] = "the first stitching came out " + ("staggered" if out["stagger"] else "in straight rows")         + " and was removed"
+    if again.get("success") and again.get("stagger") not in (None, stagger):
+        again["warning"] = f"Asked for stagger={stagger}, but Altium placed the vias otherwise twice."
+    return again
+
+@_tool()
+async def stitch_vias(ctx: Context, net: str, grid_mils: float = None, via_diameter_mils: float = None,
+                      via_hole_mils: float = None, via_pad_clearance_mils: float = None,
+                      pullback_mils: float = None, stagger: bool = None, board_path: str = "") -> str:
+    """
+    Stitch a net with vias using Altium's own Add Stitching to Net.
+
+    Altium places the vias on a grid wherever the net has copper on both
+    layers of the via and the design rules leave room, and keeps them as one
+    stitching group. The dialog is filled in and confirmed from outside
+    Altium, so it may flash on screen. Altium's command is one undo step.
+
+    A setting left out keeps what the dialog last used. The via goes from
+    the dialog's layer pair (normally top to bottom), reported in the result.
+    To change an existing group, use update_via_stitching: stitching a net
+    again adds a second group next to the first.
+
+    Args:
+        net (str): The net to stitch, e.g. "GND".
+        grid_mils (float): Spacing between vias.
+        via_diameter_mils (float): Via diameter.
+        via_hole_mils (float): Via hole size.
+        via_pad_clearance_mils (float): Clearance from stitching vias to
+            pads and other vias of the same net.
+        pullback_mils (float): Distance kept from the edge of the copper.
+        stagger (bool): Offset alternate rows by half the grid.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with vias_added, the group's union_index, the via size and
+             layers, and the values the dialog was given.
+    """
+    import via_stitching
+
+    board_path = long_path(board_path)
+    settings = {"grid_mils": grid_mils, "via_diameter_mils": via_diameter_mils, "via_hole_mils": via_hole_mils,
+                "via_pad_clearance_mils": via_pad_clearance_mils, "pullback_mils": pullback_mils}
+    error = via_stitching.check_settings(settings)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if not net.strip():
+        return json.dumps({"success": False, "error": "net is required"})
+    existing, error = await _bridge_result("get_via_stitching", {"net": net, "board_path": board_path})
+    if existing is None:
+        return json.dumps({"success": False, "error": f"Could not read the board: {error}"})
+    logger.info(f"Stitching net {net}")
+    out = await _run_stitching(net, settings, stagger, board_path)
+    before = [g["union_index"] for g in existing.get("groups", [])]
+    if before and out.get("success"):
+        out["note"] = (f"{net} already had stitching (groups {before}); this added another group. "
+                       "update_via_stitching changes a group instead.")
+    return json.dumps(out, indent=2)
+
+@_tool(read_only=True)
+async def get_via_stitching(ctx: Context, net: str = "", board_path: str = "") -> str:
+    """
+    List the via stitching and shielding groups on a PCB.
+
+    Each group is listed with its union_index (what update_via_stitching
+    takes), the net of its vias, via count, via size and layers. Its kind
+    and settings are read from the saved .PcbDoc: for stitching the grid,
+    stagger, via-pad clearance and pullback; for shielding the shielded net,
+    spacing, distance and rows. A group added since the last save has none
+    (settings_saved false).
+
+    Args:
+        net (str): Only groups on this net; empty for all.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the groups.
+    """
+    import via_stitching
+
+    board_path = long_path(board_path)
+    result, error = await _bridge_result("get_via_stitching", {"net": net, "board_path": board_path})
+    if result is None:
+        return json.dumps({"success": False, "error": f"Could not read the board: {error}"})
+    stored = via_stitching.read_stored_groups(result.get("board", ""))
+    shielding = via_stitching.read_stored_shielding(result.get("board", ""))
+    for g in result.get("groups", []):
+        s, sh = stored.get(g.get("union_index")), shielding.get(g.get("union_index"))
+        g["settings_saved"] = s is not None or sh is not None
+        if s is not None:
+            g["kind"] = "stitching"
+            g.update({k: s[k] for k in ("grid_mils", "stagger", "via_pad_clearance_mils",
+                                        "pullback_mils", "constrained_to_area")})
+        elif sh is not None:
+            g["kind"] = "shielding"
+            g.update(sh)
+    # A via union that is not a saved stitching group (a shielding group, a
+    # union made by hand, or stitching not saved yet) is still listed
+    return json.dumps(result, indent=2)
+
+@_tool()
+async def update_via_stitching(ctx: Context, union_index: int = 0, net: str = "", grid_mils: float = None,
+                               via_diameter_mils: float = None, via_hole_mils: float = None,
+                               via_pad_clearance_mils: float = None, pullback_mils: float = None,
+                               stagger: bool = None, board_path: str = "") -> str:
+    """
+    Change an existing via stitching group: its vias are removed and the net
+    is stitched again with Altium's Add Stitching to Net.
+
+    Settings left out keep the group's own, read from the saved .PcbDoc
+    (save the board first if the group is new). Use it after changing the
+    copper, or to change the grid or via size.
+
+    Two undo steps in Altium: the removal and the new stitching. If the new
+    stitching fails, the old vias are already gone; undo restores them.
+
+    A group limited to an area (Constrain Area) is refused: its area cannot
+    be given to Altium's dialog from outside.
+
+    Args:
+        union_index (int): The group, as get_via_stitching lists it. 0 to
+            pick by net instead.
+        net (str): The net whose only stitching group to change.
+        grid_mils, via_diameter_mils, via_hole_mils, via_pad_clearance_mils,
+        pullback_mils, stagger: New values, as for stitch_vias.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with vias_removed, the settings used and the new group as
+             stitch_vias reports it.
+    """
+    import via_stitching
+
+    board_path = long_path(board_path)
+    given = {"grid_mils": grid_mils, "via_diameter_mils": via_diameter_mils, "via_hole_mils": via_hole_mils,
+             "via_pad_clearance_mils": via_pad_clearance_mils, "pullback_mils": pullback_mils}
+    error = via_stitching.check_settings(given)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    listing, error = await _bridge_result("get_via_stitching", {"net": net, "board_path": board_path})
+    if listing is None:
+        return json.dumps({"success": False, "error": f"Could not read the board: {error}"})
+    groups = listing.get("groups", [])
+    if union_index:
+        group = next((g for g in groups if g.get("union_index") == union_index), None)
+        if group is None:
+            return json.dumps({"success": False, "error": f"No via group {union_index} on the board",
+                               "groups": groups})
+    elif len(groups) == 1:
+        group = groups[0]
+    else:
+        return json.dumps({"success": False, "groups": groups,
+                           "error": "Give union_index: " + ("no stitching found" if not groups else
+                                                            f"{len(groups)} groups match")})
+
+    stored = via_stitching.read_stored_groups(listing.get("board", "")).get(group["union_index"])
+    if stored is None and group["union_index"] in via_stitching.read_stored_shielding(listing.get("board", "")):
+        return json.dumps({"success": False, "error": (
+            f"Group {group['union_index']} is shielding: change it with shield_net and replace=true.")})
+    if stored is None:
+        return json.dumps({"success": False, "error": (
+            f"Group {group['union_index']} is not a stitching group in the saved board: it is not "
+            "stitching, or it was added after the last save. Save the board and try again.")})
+    if stored["constrained_to_area"]:
+        return json.dumps({"success": False, "error": (
+            f"Group {group['union_index']} is limited to an area (Constrain Area), which cannot be "
+            "given to Altium's dialog from outside. Change it in Altium.")})
+    settings = {k: (given[k] if given[k] is not None else stored[k]) for k in via_stitching.SETTINGS}
+    error = via_stitching.check_settings(settings)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    new_stagger = stored["stagger"] if stagger is None else stagger
+
+    logger.info(f"Updating via stitching group {group['union_index']} on {group['net']}")
+    removed, error = await _bridge_result("remove_via_stitching", {
+        "union_index": group["union_index"], "board_path": board_path})
+    if removed is None:
+        return json.dumps({"success": False, "error": f"Could not remove the old vias: {error}"})
+    out = await _run_stitching(group["net"], settings, new_stagger, board_path)
+    out["vias_removed"] = removed.get("vias_removed", 0)
+    out["replaced_union_index"] = group["union_index"]
+    out["settings"] = {**settings, "stagger": new_stagger}
+    if not out.get("success"):
+        out["error"] = (out.get("error", "") + " The old group's vias were already removed; "
+                        "undo in Altium restores them.").strip()
+    return json.dumps(out, indent=2)
+
+async def _shield_once(net: str, via_net: str, settings: dict, rows, toggle: list, replace: bool,
+                       board_path: str) -> dict:
+    """Run Altium's Add Shielding to Net with the dialog filled in from outside."""
+    import via_stitching
+
+    outcome = via_stitching.StitchOutcome()
+    driver = asyncio.create_task(via_stitching.drive_shield_dialog(
+        outcome, net, via_net, settings, rows, toggle, replace, PROGRESS_FILE))
+    try:
+        result, error = await _bridge_result("run_via_shielding", {"net": net, "board_path": board_path})
+    finally:
+        driver.cancel()
+        try:
+            await driver
+        except asyncio.CancelledError:
+            pass
+    if result is None:
+        return {"success": False, "error": f"Via shielding failed: {error}"}
+    out = {"success": outcome.pressed, **{k: v for k, v in result.items() if k != "success"}}
+    out["dialog"] = {"values": outcome.applied, "layer_pair": outcome.layer_pair}
+    if outcome.messages:
+        out["dialog"]["messages_closed"] = outcome.messages
+    if not outcome.pressed:
+        out["error"] = ("Altium's Add Shielding to Net dialog was closed without shielding: " +
+                        ("; ".join(outcome.notes) if outcome.notes else
+                         "it never appeared" if not outcome.seen else "it could not be confirmed"))
+    elif "Confirm" in outcome.messages and not replace and "union_index" not in result:
+        out["success"] = False
+        out["error"] = f"{net} already has shielding. Pass replace=true to replace it."
+    elif not result.get("vias_added"):
+        out["warning"] = ("Altium added no shielding vias: no room beside the net's tracks at this "
+                          "distance and spacing, or no copper of the via net there.")
+    return out
+
+@_tool()
+async def shield_net(ctx: Context, net: str, via_net: str = "GND", via_spacing_mils: float = None,
+                     distance_mils: float = None, rows: int = None, row_step_mils: float = None,
+                     via_diameter_mils: float = None, via_hole_mils: float = None,
+                     via_pad_clearance_mils: float = None, pullback_mils: float = None,
+                     add_copper: bool = False, add_cutout: bool = False, replace: bool = False,
+                     board_path: str = "") -> str:
+    """
+    Shield a net's tracks with a fence of vias, using Altium's own Add
+    Shielding to Net.
+
+    Altium places vias of via_net along both sides of every track of the net
+    and keeps them as one shielding group. The dialog is filled in and
+    confirmed from outside Altium, so it may flash on screen. A net already
+    shielded is only re-shielded with replace=true (Altium replaces the old
+    group): that is also how to change a shielding.
+
+    A setting left out keeps what the dialog last used. Altium's options to
+    add shielding copper or a clearance cutout are checked against what it
+    placed and corrected, so they end up as asked.
+
+    Args:
+        net (str): The net to shield, e.g. a clock or RF line.
+        via_net (str): The net of the shielding vias (default GND).
+        via_spacing_mils (float): Spacing between vias along the track.
+        distance_mils (float): Distance from the track to the vias.
+        rows (int): Rows of vias on each side.
+        row_step_mils (float): Extra spacing between rows.
+        via_diameter_mils, via_hole_mils (float): Via size.
+        via_pad_clearance_mils (float): Clearance from the vias to pads and
+            vias of their own net.
+        pullback_mils (float): Distance kept from the edge of copper.
+        add_copper (bool): Also add shielding copper around the track.
+        add_cutout (bool): Also add a clearance cutout in polygons.
+        replace (bool): Replace the net's existing shielding.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with vias_added, copper_polygons, cutout_regions, the
+             group's union_index and the via size and net.
+    """
+    import via_stitching
+
+    board_path = long_path(board_path)
+    settings = {"via_spacing_mils": via_spacing_mils, "distance_mils": distance_mils,
+                "row_step_mils": row_step_mils, "via_diameter_mils": via_diameter_mils,
+                "via_hole_mils": via_hole_mils, "via_pad_clearance_mils": via_pad_clearance_mils,
+                "pullback_mils": pullback_mils}
+    error = via_stitching.check_shield_settings(settings, rows)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if not net.strip() or not via_net.strip():
+        return json.dumps({"success": False, "error": "net and via_net are required"})
+    logger.info(f"Shielding net {net} with {via_net} vias")
+    out = await _shield_once(net, via_net, settings, rows, [], replace, board_path)
+    if not out.get("success"):
+        return json.dumps(out, indent=2)
+    # The checkboxes cannot be read reliably, but what Altium placed shows
+    # what they were; a click flips each one and a replace redoes the group
+    wrong = []
+    if bool(out.get("copper_polygons")) != add_copper:
+        wrong.append("Add shielding copper")
+    if bool(out.get("cutout_regions")) != add_cutout:
+        wrong.append("Add clearance cutout")
+    if wrong:
+        again = await _shield_once(net, via_net, settings, rows, wrong, True, board_path)
+        again["retried"] = f"the first shielding had the wrong {' and '.join(wrong)} and was replaced"
+        if again.get("success") and (bool(again.get("copper_polygons")) != add_copper or
+                                     bool(again.get("cutout_regions")) != add_cutout):
+            again["warning"] = "Altium's shielding copper or cutout still differs from what was asked."
+        out = again
+    return json.dumps(out, indent=2)
+
+# Change the design: a timeout leaves their outcome unknown, so no blind retry
+MUTATING_COMMANDS.update({"run_via_stitching", "remove_via_stitching", "run_via_shielding"})
+
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
                       diagonal_first: bool = False, corner_chamfer_mils: float = 0,

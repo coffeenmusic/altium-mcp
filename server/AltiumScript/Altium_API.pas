@@ -596,6 +596,19 @@ begin
         RequestText(RequestData, 'new_net', ''), RequestText(RequestData, 'new_layer', ''));
 end;
 
+// Function to execute the via stitching commands
+function ExecuteViaStitching(CommandName: String; RequestData: TStringList): String;
+begin
+    if CommandName = 'get_via_stitching' then
+        Result := GetViaStitchingGroups(RequestText(RequestData, 'net', ''))
+    else if CommandName = 'run_via_stitching' then
+        Result := RunViaStitching(RequestText(RequestData, 'net', ''))
+    else if CommandName = 'run_via_shielding' then
+        Result := RunViaShielding(RequestText(RequestData, 'net', ''))
+    else
+        Result := RemoveViaStitchingGroup(StrToInt(RequestText(RequestData, 'union_index', '0')));
+end;
+
 // Extract the create symbols batch logic
 function ExecuteCreateSymbolsBatch(RequestData: TStringList): String;
 var
@@ -1529,6 +1542,14 @@ begin
             Result := ExecutePourReport(RequestData);
         'edit_pcb_objects':
             Result := ExecuteEditPCBObjects(RequestData);
+        'get_via_stitching':
+            Result := ExecuteViaStitching(CommandName, RequestData);
+        'run_via_stitching':
+            Result := ExecuteViaStitching(CommandName, RequestData);
+        'remove_via_stitching':
+            Result := ExecuteViaStitching(CommandName, RequestData);
+        'run_via_shielding':
+            Result := ExecuteViaStitching(CommandName, RequestData);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':
