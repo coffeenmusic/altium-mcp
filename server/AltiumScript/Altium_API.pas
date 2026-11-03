@@ -567,6 +567,17 @@ begin
     end;
 end;
 
+// Function to execute delete_pcb_objects and modify_pcb_objects
+function ExecuteEditPCBObjects(RequestData: TStringList): String;
+begin
+    Result := EditPCBObjects(RequestText(RequestData, 'action', ''), RequestText(RequestData, 'kinds', ''),
+        RequestText(RequestData, 'net', ''), RequestText(RequestData, 'layer', ''),
+        RequestText(RequestData, 'area', ''), RequestText(RequestData, 'dry_run', 'true') = 'true',
+        StrToInt(RequestText(RequestData, 'width', '-1')), StrToInt(RequestText(RequestData, 'via_size', '-1')),
+        StrToInt(RequestText(RequestData, 'via_hole', '-1')), RequestText(RequestData, 'set_net', 'false') = 'true',
+        RequestText(RequestData, 'new_net', ''), RequestText(RequestData, 'new_layer', ''));
+end;
+
 // Extract the create symbols batch logic
 function ExecuteCreateSymbolsBatch(RequestData: TStringList): String;
 var
@@ -1368,6 +1379,8 @@ begin
             Result := ExecuteCreatePolygonPour(RequestData);
         'create_cutout':
             Result := ExecuteCreateCutout(RequestData);
+        'edit_pcb_objects':
+            Result := ExecuteEditPCBObjects(RequestData);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':
