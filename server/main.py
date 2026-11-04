@@ -4924,11 +4924,12 @@ async def get_project_info(ctx: Context) -> str:
 @_tool(read_only=True)
 async def get_project_components(ctx: Context, include_parameters: bool = False, designators: list = None,
                                  sheet: str = "", offset: int = 0, limit: int = 0,
-                                 parameter_names: list = None) -> str:
+                                 parameter_names: list = None, project_path: str = "") -> str:
     """
     List the components of the compiled project (schematic side).
 
-    Compiles the focused project in memory first (nothing is saved). Unlike
+    Compiles the project in memory first (nothing is saved): project_path,
+    or the focused project, as for get_erc_violations. Unlike
     the PCB component tools, this returns the schematic Comment of each
     instance, which is where values of generic passives usually live.
 
@@ -4949,6 +4950,7 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
         limit (int): At most this many components; 0 for as many as fit.
         parameter_names (list): Return only these parameters, e.g.
             ["Manufacturer_Part_Number"]. Implies include_parameters.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
         str: JSON with project_path, component_count (the whole project),
@@ -4959,7 +4961,8 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
     import project_components
 
     text = await _simple_command("get_project_components",
-                                 {"include_parameters": include_parameters or bool(parameter_names)},
+                                 {"include_parameters": include_parameters or bool(parameter_names),
+                                  "project_path": long_path(project_path)},
                                  "project components")
     try:
         data = json.loads(text, strict=False)
@@ -4973,22 +4976,277 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
 
 
 @_tool(read_only=True)
-async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
+async def get_erc_violations(ctx: Context, compile: bool = True, project_path: str = "") -> str:
     """
-    Compile the focused project and list its ERC/compiler violations.
+    Compile a project and list its ERC/compiler violations.
 
-    Compiling works in memory and does not save any document (Altium may
+    Give project_path to compile exactly that project (it is opened if
+    needed): without it the focused project is compiled, which is whatever
+    document last had focus, and "Free Documents" is refused. The result
+    names the project it compiled.
+
+    Compiling reads each sheet from disk, except a sheet open in Altium with
+    unsaved changes: that one is compiled from Altium's copy and listed in
+    unsaved_in_altium. Save it (or close it unsaved) for the file to count.
+    Sheets the project lists but that are not on disk are in
+    missing_on_disk. Compiling does not save any document (Altium may
     refresh the derived .PrjPcbStructure file).
 
     Args:
         compile (bool): Compile before reading (default True). False returns
             the violations of the last compilation.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
-        str: JSON with total, fatal, errors, warnings and violations
+        str: JSON with project_path, unsaved_in_altium, missing_on_disk,
+             total, fatal, errors, warnings and violations
              [{level, type, detail}]
     """
-    return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
+    return await _simple_command("get_erc_violations", {"compile": compile, "project_path": long_path(project_path)},
+                                 "ERC violations")
+
+
+async def _command_json(command: str, params: dict):
+    """(parsed result, error) of a bridge command that returns JSON."""
+    response = await altium_bridge.execute_command(command, params)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, result
+    return result, None
+
+
+async def _eco_compare(project_path: str, pcb_path: str):
+    """(source, target, diff, error): the compiled project against the board."""
+    import eco_preview
+
+    source, error = await _command_json("get_eco_source", {"project_path": long_path(project_path)})
+    if error:
+        return None, None, None, error
+    board = long_path(pcb_path) if pcb_path else source.get("pcb_path", "")
+    if not board:
+        return None, None, None, "the project has no PCB; give pcb_path"
+    target, error = await _command_json("get_eco_target", {"pcb_path": board})
+    if error:
+        return None, None, None, error
+    try:
+        prj_text = read_altium_text(Path(source["project_path"]))
+    except (OSError, KeyError):
+        prj_text = ""
+    single_pin = re.search(r"^NetlistSinglePinNets=1\s*$", prj_text, re.MULTILINE) is not None
+    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target), single_pin)
+    return source, target, diff, None
+
+
+@_tool()
+async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", execute: bool = False,
+                     allow_errors: bool = False, allow_room_removal: bool = False,
+                     link_by_designator: bool = False, max_changes: int = 200) -> str:
+    """
+    Import the schematic's changes into the board (Design > Import Changes /
+    Update PCB): validate them, and with execute=True apply them.
+
+    1. preview_eco's comparison is run first. Rooms the update would delete
+       stop it unless allow_room_removal.
+    2. Altium's Engineering Change Order dialog is opened on the board and
+       driven from here: Validate Changes, then the list of changes is read
+       with each failed one's message ('Class already exists: X', 'Footprint
+       not found', ...).
+    3. Only with execute=True, and when no change failed (or allow_errors,
+       which applies the rest), Execute Changes is pressed. The dialog is
+       always closed again.
+    4. After executing, the comparison is run again: what is still
+       different (failed or skipped changes) is reported. Altium's
+       validation does not check everything (a footprint missing from the
+       libraries fails only on execute): such changes are reported in
+       failed_on_execute, and success is false.
+
+    When parts on either side cannot be matched by unique id (a new part,
+    and board parts with no schematic link such as a logo), Altium first
+    asks how to link them. By default the question is cancelled, which
+    keeps unique-id matching: new parts are added, gone ones removed, as
+    preview_eco reports. link_by_designator answers "Automatically Create
+    Component Links" instead, which pairs unmatched parts by designator
+    (for a board placed without a link to these schematics).
+
+    The board is left modified, not saved, for review; Altium's undo
+    reverts the update. Altium comes to the front on the board while the
+    dialog is open.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; empty for the focused
+            project.
+        pcb_path (str): The board; default the project's board.
+        execute (bool): Apply the changes (default False: validate only).
+        allow_errors (bool): Execute even when some changes failed
+            validation; those are skipped.
+        allow_room_removal (bool): Go on when the update would remove rooms.
+        link_by_designator (bool): Let Altium link unmatched parts by
+            designator (see above).
+        max_changes (int): At most this many changes listed.
+
+    Returns:
+        str: JSON with the preview summary, the changes by group, the
+             failed ones with Altium's message, whether they were executed,
+             and the differences left afterwards.
+    """
+    import eco_dialog
+    import eco_preview
+
+    source, target, diff, error = await _eco_compare(project_path, pcb_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    project, board = source.get("project_path"), target.get("board_path") or long_path(pcb_path)
+    reply = {"project_path": project, "pcb_path": board, "preview": eco_preview.summary(diff)}
+    if source.get("unsaved_in_altium"):
+        reply["unsaved_in_altium"] = source["unsaved_in_altium"]
+    if not reply["preview"]:
+        reply.update({"success": True, "note": "Nothing to import: the board matches the schematic."})
+        return json.dumps(reply, indent=1)
+    rooms = diff.get("remove_rooms") or []
+    if rooms and not allow_room_removal:
+        reply.update({"success": False, "error": f"the update would remove {len(rooms)} room(s); "
+                                                 "pass allow_room_removal=true if that is intended",
+                      "remove_rooms": rooms[:50]})
+        return json.dumps(reply, indent=1)
+
+    outcome = eco_dialog.EcoOutcome()
+    driver = asyncio.create_task(eco_dialog.drive(outcome, Path(board).name, execute, allow_errors,
+                                                  link_by_designator))
+    try:
+        # The bridge waits for the dialog to close: validating and executing
+        # a large update takes a while
+        response = await altium_bridge.execute_command(
+            "run_update_pcb", {"project_path": project, "pcb_path": board}, timeout=1800)
+        result, error = None, None
+        if not response.get("success", False):
+            error = response.get("error", "unknown error")
+        else:
+            result = response.get("result", {})
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result, strict=False)
+                except ValueError:
+                    error = result
+    finally:
+        try:
+            await asyncio.wait_for(driver, 30)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            driver.cancel()
+    if error:
+        reply.update({"success": False, "error": f"Import Changes failed: {error}"})
+        return json.dumps(reply, indent=1)
+    if outcome.message and not outcome.found:
+        reply.update({"success": True, "altium_message": outcome.message, "executed": False})
+        return json.dumps(reply, indent=1)
+    if outcome.component_links:
+        reply["component_links"] = outcome.component_links
+    groups = {}
+    for r in outcome.rows:
+        groups[r["group"]] = groups.get(r["group"], 0) + 1
+    reply.update({"success": not outcome.problem and (not outcome.errors or allow_errors or not execute),
+                  "validated": outcome.validated, "changes": len(outcome.rows), "by_group": groups,
+                  "failed": outcome.errors[:max_changes], "executed": outcome.executed,
+                  "dialog_closed": outcome.closed})
+    if outcome.problem:
+        reply["error"] = outcome.problem
+    if not execute:
+        reply["change_list"] = outcome.rows[:max_changes]
+        reply["note"] = "Validated only; execute=true applies the changes."
+    elif outcome.errors and not allow_errors:
+        reply["note"] = "Not executed: some changes failed validation (allow_errors=true applies the rest)."
+    if outcome.executed:
+        reply["pcb_modified"] = bool(result and result.get("pcb_modified"))
+        if outcome.execute_errors:
+            reply["execute_errors"] = outcome.execute_errors[:max_changes]
+            # Validation does not check everything: a footprint missing from
+            # the libraries only fails when the part is added
+            known = {(r["change"], r["message"]) for r in outcome.errors}
+            new = [r for r in outcome.execute_errors if (r["change"], r["message"]) not in known]
+            if new:
+                reply["success"] = False
+                reply["failed_on_execute"] = new[:max_changes]
+        _, _, after, error = await _eco_compare(project, board)
+        reply["left_after"] = eco_preview.summary(after) if after is not None else f"could not compare: {error}"
+        reply["note"] = ("Executed; the board is modified and not saved. Altium's undo reverts it."
+                         + (" Some changes failed only when executed (failed_on_execute)."
+                            if reply.get("failed_on_execute") else ""))
+    return json.dumps(reply, indent=1)
+
+MUTATING_COMMANDS.add("run_update_pcb")
+
+
+@_tool(read_only=True)
+async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", max_per_kind: int = 50) -> str:
+    """
+    Show what Design > Update PCB would change, without running it: the
+    differences between the compiled schematics and the board, as data.
+
+    Run it before an Update PCB, in particular to catch rooms and classes the
+    ECO would remove (a room drawn for a class the schematics no longer make
+    disappears with the update), footprint changes and net renames.
+
+    Compiles the project in memory (nothing is saved) and reads the board
+    without bringing it to the front. Components match by unique id, nets by
+    their pins (a net whose pins stay together under a new name is a
+    rename), rooms and classes by name. The comparator's ignore settings are
+    not applied: every difference is listed, including kinds the ECO is set
+    to skip. Duplicate component class names (Altium's "Class already
+    exists" warning, usually from a sheet symbol that lists several files)
+    are explained in duplicate_component_classes.
+
+    As Altium's ECO does (checked on AD25): with the project's "Netlist
+    single pin nets" off, a pin that is alone on its net in the schematic is
+    left as it is on the board, and board parts with no schematic link
+    (logos, title blocks) are left alone; those are listed as
+    board_only_components, outside the summary. update_pcb runs the update.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        pcb_path (str): The board to compare; default the project's PCB.
+        max_per_kind (int): At most this many entries per kind (default 50);
+            "summary" always has the full counts.
+
+    Returns:
+        str: JSON with project_path, pcb_path, unsaved_in_altium (sheets
+             compiled from unsaved edits), summary {kind: count}, and per kind:
+             add_components, remove_components, change_designators,
+             change_footprints, change_comments, add_nets, remove_nets,
+             rename_nets, change_pin_nets, add/remove_component_classes,
+             change_component_class_members, add/remove_net_classes,
+             add_rooms, remove_rooms, duplicate_component_classes
+    """
+    import eco_preview
+
+    source, error = await _command_json("get_eco_source", {"project_path": long_path(project_path)})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    board = long_path(pcb_path) if pcb_path else source.get("pcb_path", "")
+    if not board:
+        return json.dumps({"success": False, "error": "the project has no PCB; give pcb_path"})
+    target, error = await _command_json("get_eco_target", {"pcb_path": board})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    try:
+        prj_text = read_altium_text(Path(source["project_path"]))
+    except (OSError, KeyError):
+        prj_text = ""
+    single_pin = re.search(r"^NetlistSinglePinNets=1\s*$", prj_text, re.MULTILINE) is not None
+    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target), single_pin)
+    shown, cut = eco_preview.limit(diff, max(1, int(max_per_kind)))
+    reply = {"project_path": source.get("project_path"), "pcb_path": target.get("board_path", board),
+             "unsaved_in_altium": source.get("unsaved_in_altium", []),
+             "summary": eco_preview.summary(diff)}
+    if not reply["summary"]:
+        reply["note"] = "No differences: an Update PCB would change nothing."
+    if cut:
+        reply["truncated"] = cut
+    reply.update(shown)
+    return json.dumps(reply, indent=1)
 
 
 @_tool(read_only=True)
