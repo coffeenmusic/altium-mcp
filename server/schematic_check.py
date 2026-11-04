@@ -8,6 +8,11 @@ The sheet is read with schdoc_reader and every check works on its geometry:
   label_orientation   a horizontal label on a vertical wire, or the reverse
   label_off_wire      a net label touching no wire and no pin
   dangling_wire       a wire end that connects to nothing and carries no label
+  wire_into_port      a wire ending inside a port's body instead of at its end:
+                      it does not connect (an auto-sized port shrunk away)
+  port_unconnected    a port that nothing meets at either end
+  single_pin_net      wires reaching only one pin, with no label, port or
+                      power port: a net of one pin
   slanted_wire        a wire segment slightly out of level or plumb; Altium
                       turns it diagonal when a part on it is dragged
   pin_tap             a wire branches right at a pin instead of a few grids
@@ -202,6 +207,9 @@ class Sheet:
         self.junctions = []
         self.labels = []       # net labels
         self.attach = []       # points a wire end may legitimately end on
+        self.ports = []        # {"name", "ends", "box"}
+        self.power_ports = []  # {"name", "at"}
+        self.no_erc = []
         self.glyphs = []       # {owner, box}: power-port and connector symbols
         self.sheet_symbols = {}  # record index -> {box, entries, name, file}
         self._parse()
@@ -303,6 +311,7 @@ class Sheet:
                 self.junctions.append((coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")))
             elif kind == "22":
                 self.attach.append((coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")))
+                self.no_erc.append((coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")))
             elif kind == "37":
                 self.attach.append((coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")))
                 self.attach.append((coord(r, "CORNER.X"), coord(r, "CORNER.Y")))
@@ -377,6 +386,7 @@ class Sheet:
         style = int(r.get("STYLE", 0) or 0)
         connector = r.get("ISCROSSSHEETCONNECTOR") == "T"
         self.attach.append((x, y))
+        self.power_ports.append({"name": text, "at": (x, y)})
         d = PIN_DIR[o]
         if connector:
             glyph_len, text_gap = 100.0, 120.0
@@ -406,12 +416,14 @@ class Sheet:
         height = coord(r, "HEIGHT") or 100.0
         vertical = int(r.get("STYLE", 0) or 0) >= 4
         if vertical:
-            self.attach += [(x, y), (x, y + width)]
+            ends = [(x, y), (x, y + width)]
             box = Box(x - height / 2, y, x + height / 2, y + width)
         else:
-            self.attach += [(x, y), (x + width, y)]
+            ends = [(x, y), (x + width, y)]
             box = Box(x, y - height / 2, x + width, y + height / 2)
+        self.attach += ends
         self.glyphs.append({"owner": f"port {r.get('NAME', '')}", "box": box, "port": True})
+        self.ports.append({"name": r.get("NAME", ""), "ends": ends, "box": box})
 
     # ---------------------------------------------------------- helpers
 
@@ -641,6 +653,90 @@ class Checker:
                 self.add("slanted_wire", b, msg, **extra,
                          suggest={"move_end": self.exact(b), "to": self.exact(to)})
 
+    def check_ports(self):
+        # A wire must end on one of a port's two ends. An auto-sized port
+        # shrinks when renamed, leaving the wire ending inside it: it looks
+        # attached and is not, and compiling does not say so.
+        segs = list(self.s.segments())
+        ends_of_wires = [p for pts in self.s.wires if len(pts) >= 2 for p in (pts[0], pts[-1])]
+        for port in self.s.ports:
+            inner = port["box"].shrink(TOL)
+            for p in ends_of_wires:
+                if inner.contains(*p) and not any(_near(p, e) for e in port["ends"]):
+                    end = min(port["ends"], key=lambda e: math.hypot(e[0] - p[0], e[1] - p[1]))
+                    self.add("wire_into_port", p,
+                             f"a wire ends inside port {port['name']}, not at its end, so it does not connect",
+                             port=port["name"], suggest={"move_end": self.exact(p), "to": self.exact(end)})
+            bus_segs = [(b[k], b[k + 1]) for b in self.s.buses for k in range(len(b) - 1)]
+            others = [a for a in self.s.attach if not any(_near(a, e) for e in port["ends"])]
+            touched = any(
+                any(_near(e, p) for p in ends_of_wires) or any(_on_segment(e, seg) for _, seg in segs)
+                or any(_on_segment(e, s) for s in bus_segs) or any(_near(e, a) for a in others)
+                or any(_near(e, pin["hot"]) for pin in self.s.pins)
+                for e in port["ends"])
+            if not touched:
+                self.add("port_unconnected", port["ends"][0], f"port {port['name']} connects to nothing",
+                         port=port["name"])
+
+    def check_single_pin_nets(self):
+        # Connectivity from the saved file: wires joined end to end or at a
+        # T (self.network), pins, labels, ports and power ports on them, and
+        # same-name labels and power ports joined by name.
+        wires = self.s.wires
+        parent = {}
+
+        def find(a):
+            parent.setdefault(a, a)
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        def join(a, b):
+            parent[find(a)] = find(b)
+
+        for wi, net in enumerate(self.network):
+            join(("w", wi), ("w", net))
+        segs = list(self.s.segments())
+        bus_segs = [(b[k], b[k + 1]) for b in self.s.buses for k in range(len(b) - 1)]
+        onward = [g for g in self.s.glyphs if g.get("wire_ends")]
+        for wi, pts in enumerate(wires):
+            if any(any(_near(p, a) for a in self.s.attach) or any(_on_segment(p, s) for s in bus_segs)
+                   or any(g["box"].contains(*p) for g in onward) for p in pts):
+                join(("w", wi), ("ext", 0))
+
+        def on_wire(p):
+            return [wi for wi, seg in segs if _on_segment(p, seg)]
+
+        for pi, pin in enumerate(self.s.pins):
+            for wi in on_wire(pin["hot"]):
+                join(("p", pi), ("w", wi))
+        for li, lab in enumerate(self.s.labels):
+            for wi in on_wire(lab["anchor"]):
+                join(("l", li), ("w", wi))
+            join(("l", li), ("name", lab["text"].upper()))
+        for k, pp in enumerate(self.s.power_ports):
+            for wi in on_wire(pp["at"]):
+                join(("pp", k), ("w", wi))
+            join(("pp", k), ("name", pp["name"].upper()))
+        for k, port in enumerate(self.s.ports):
+            for e in port["ends"]:
+                for wi in on_wire(e):
+                    join(("port", k), ("w", wi))
+        groups = {}
+        for node in list(parent):
+            groups.setdefault(find(node), []).append(node)
+        for nodes in groups.values():
+            pins = [n[1] for n in nodes if n[0] == "p"]
+            kinds = {n[0] for n in nodes}
+            if len(pins) == 1 and "w" in kinds and not kinds & {"l", "pp", "port", "name", "ext"}:
+                pin = self.s.pins[pins[0]]
+                if any(_near(pin["hot"], q) for q in self.s.no_erc):
+                    continue
+                self.add("single_pin_net", pin["hot"],
+                         f"{pin['comp']['designator']} pin {pin['name']} is wired to nothing else: "
+                         "a net of one pin", designator=pin["comp"]["designator"], pin=pin["name"])
+
     def check_pin_taps(self):
         segs = list(self.s.segments())
         ports = self.s.attach
@@ -796,7 +892,7 @@ class Checker:
         if best is None:
             return
         hits, name, layout = best
-        suggest = {"layout": name, "clear": hits == 0,
+        suggest = {"layout": name, "clear": hits == 0, "part": c["part"],
                    "texts": [{"parameter": t["name"], "x": self.fmt(x), "y": self.fmt(y),
                               "orientation": 0, "justification": j}
                              for t, (x, y, j) in zip(texts, layout)]}
@@ -884,13 +980,16 @@ class Checker:
     def run(self):
         self.check_labels()
         self.check_dangling()
+        self.check_ports()
+        self.check_single_pin_nets()
         self.check_slanted()
         self.check_pin_taps()
         self.check_bodies()
         self.check_text()
         self.check_sheet_symbols()
         order = ["pin_tap", "label_not_at_end", "label_justification", "label_orientation", "label_off_wire",
-                 "dangling_wire", "slanted_wire", "wire_through_body", "sheet_entry_margin", "sheet_symbol_text", "text_overlap"]
+                 "dangling_wire", "wire_into_port", "port_unconnected", "single_pin_net",
+                 "slanted_wire", "wire_through_body", "sheet_entry_margin", "sheet_symbol_text", "text_overlap"]
         self.issues.sort(key=lambda i: (order.index(i["type"]), -i["at"][1], i["at"][0]))
         return self.issues
 
@@ -904,6 +1003,34 @@ def check_sheet(path) -> dict:
         counts[i["type"]] += 1
     return {"sheet": str(path), "unit": checker.unit, "grid": checker.fmt(sheet.grid),
             "components": len(sheet.components), "issue_counts": dict(counts), "issues": issues}
+
+
+APPLY_KINDS = ("text", "labels")
+
+
+def fixes(issues: list, kinds) -> list:
+    """edit_schematic operations for the suggestions that are clear-cut:
+    "text" moves a part's designator and parameters to the suggested layout
+    that collides with nothing; "labels" moves a net label to its wire's
+    free end with the suggested justification (removed and placed again)."""
+    ops, done_parts = [], set()
+    for i in issues:
+        s = i.get("suggest") or {}
+        if "text" in kinds and i["type"] == "text_overlap" and s.get("clear") and i.get("designator"):
+            key = (i["designator"], s.get("part"))
+            if key in done_parts:
+                continue
+            done_parts.add(key)
+            for t in s["texts"]:
+                ops.append({"op": "move_text", "designator": i["designator"], "part": s.get("part") or 0,
+                            "name": t["parameter"], "x": t["x"], "y": t["y"],
+                            "justification": t["justification"], "orientation": t["orientation"]})
+        elif "labels" in kinds and i["type"] in ("label_not_at_end", "label_justification") and i.get("label"):
+            ops.append({"op": "delete_at", "kind": "net_label", "x": i["at"][0], "y": i["at"][1],
+                        "text": i["label"]})
+            ops.append({"op": "add_net_label", "x": s["x"], "y": s["y"], "text": i["label"],
+                        "orientation": s["orientation"], "justification": s["justification"]})
+    return ops
 
 
 def project_sheets(prjpcb) -> list:

@@ -2277,7 +2277,7 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
 MUTATING_COMMANDS.add("edit_schematic")
 
 @_tool(read_only=True)
-async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 150) -> str:
+async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 150, apply: list = None) -> str:
     """
     Check a schematic sheet for drafting problems that make it hard to read.
 
@@ -2304,6 +2304,13 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
         above it. Both go above: file name on the top edge, designator a line
         (100 mil) above it, both bottom-left justified at the left edge.
       * label_orientation, label_off_wire, dangling_wire, wire_through_body.
+      * Electrical, from the saved file without compiling:
+        wire_into_port - a wire ends inside a port's body, not at its end,
+        so it does not connect (an auto-sized port shrank away from it);
+        suggest.move_end/to give the end to move. port_unconnected - a port
+        nothing meets at either end. single_pin_net - wires reach one pin
+        and nothing else (no other pin, label, port, power port, bus or
+        sheet entry); a no-ERC marker on the pin silences it.
       * slanted_wire - a wire segment a little (1 um to half a grid) out of
         level or plumb. It looks straight, but dragging a part on it turns it
         diagonal. Usually a symbol whose pins are off the grid (then the
@@ -2324,6 +2331,13 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
             .SchDoc in it, not recursive).
         max_issues_per_sheet: cap on issues listed per sheet; counts are
             always complete.
+        apply: Fix what has a clear-cut suggestion, on one .SchDoc: "text"
+            moves each part's designator and parameters to the suggested
+            layout that collides with nothing; "labels" moves net labels to
+            their wire's free end with the suggested justification. Done
+            with edit_schematic (one undo step in Altium), saved, and
+            checked again: the result gives the issue counts before and
+            after. The sheet must not have unsaved changes in Altium.
 
     Returns:
         JSON: per sheet, the issue counts and the issues.
@@ -2340,6 +2354,41 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
     else:
         return json.dumps({"success": False,
                            "error": f"not a .SchDoc, .PrjPcb or folder: {path}"})
+
+    if apply:
+        kinds = [str(k).strip().lower() for k in apply]
+        bad = [k for k in kinds if k not in schematic_check.APPLY_KINDS]
+        if bad:
+            return json.dumps({"success": False, "error": f"apply takes {', '.join(schematic_check.APPLY_KINDS)}"})
+        if len(sheets) != 1:
+            return json.dumps({"success": False, "error": "apply works on one .SchDoc at a time"})
+        before = schematic_check.check_sheet(sheets[0])
+        out = {"success": True, "sheet": str(sheets[0]), "issue_counts_before": before["issue_counts"],
+               "operations": 0, "applied": 0}
+        # Labels first, then text from a fresh check: a label moved to its
+        # wire's end can land on a part's text, which the text pass then moves
+        current = before
+        for kind in [k for k in ("labels", "text") if k in kinds]:
+            ops = schematic_check.fixes(current["issues"], [kind])
+            if not ops:
+                continue
+            out["operations"] += len(ops)
+            edited = json.loads(await edit_schematic(ctx, str(sheets[0]), ops, unit=current["unit"], save=True))
+            out["applied"] += edited.get("applied", 0) or 0
+            if edited.get("errors"):
+                out.setdefault("errors", []).extend(edited["errors"])
+            if not edited.get("success", False) and not edited.get("applied"):
+                out["success"] = False
+                out["error"] = edited.get("error", "the edit failed")
+                return json.dumps(out, indent=1)
+            current = schematic_check.check_sheet(sheets[0])
+        if not out["operations"]:
+            out["note"] = "Nothing to apply: no clear-cut suggestion of those kinds."
+            return json.dumps(out, indent=1)
+        after = current
+        out["issue_counts_after"] = after["issue_counts"]
+        out["issues"] = after["issues"][:max_issues_per_sheet]
+        return json.dumps(out, indent=1)
 
     results, totals = [], {}
     for sheet in sheets:
