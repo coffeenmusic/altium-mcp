@@ -572,11 +572,12 @@ function ExecuteQuery(CommandName: String; RequestData: TStringList): String;
 begin
     if CommandName = 'query_objects' then
         Result := QueryObjects(RequestText(RequestData, 'expr_mm', ''), RequestText(RequestData, 'expr_mil', ''),
-                               StrToInt(RequestText(RequestData, 'limit', '200')))
+                               StrToInt(RequestText(RequestData, 'limit', '200')), RequestText(RequestData, 'area', ''))
     else
         Result := WhichRule(RequestText(RequestData, 'a_mm', ''), RequestText(RequestData, 'a_mil', ''),
                             RequestText(RequestData, 'b_mm', ''), RequestText(RequestData, 'b_mil', ''),
-                            RequestText(RequestData, 'rule_kind', 'clearance'));
+                            RequestText(RequestData, 'rule_kind', 'clearance'),
+                            RequestText(RequestData, 'area_a', ''), RequestText(RequestData, 'area_b', ''));
 end;
 
 // Extract the create symbols batch logic

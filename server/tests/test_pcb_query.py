@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from pcb_query import bare_numbers, check, with_units  # noqa: E402
+from pcb_query import area_text, bare_numbers, check, with_units  # noqa: E402
 
 
 class UnitsTest(unittest.TestCase):
@@ -35,6 +35,22 @@ class CheckTest(unittest.TestCase):
         self.assertIn("quote", check('InNet("GND")'))
         self.assertIn("dot", check("IsVia And (HoleSize > 0,3)"))
         self.assertEqual(check("IsVia And InNet('GND')"), "")
+
+    def test_position_is_refused(self):
+        self.assertIn("area", check("IsVia And (X > 74.9mm)"))
+        self.assertIn("area", check("IsVia And (y=800mil)"))
+        # names and other properties that end in X or Y are fine
+        self.assertEqual(check("InNet('X') And IsPad And (HoleSize > 1mm)"), "")
+        self.assertEqual(check("InComponent('Y') And (SizeX > 1mm)"), "")
+
+
+class AreaTest(unittest.TestCase):
+    def test_area(self):
+        self.assertEqual(area_text(None), ("", ""))
+        self.assertEqual(area_text([10, 20, 0, 5]), ("0|50000|100000|200000", ""))
+        self.assertEqual(area_text([0, 0, 1, 1], "mm")[0], "0|0|393701|393701")
+        self.assertIn("x1", area_text([1, 2, 3])[1])
+        self.assertIn("unit", area_text([1, 2, 3, 4], "inch")[1])
 
 
 if __name__ == "__main__":

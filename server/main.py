@@ -3202,7 +3202,8 @@ async def _run_query(command: str, params: dict) -> Tuple[Optional[dict], str]:
     return result, ""
 
 @_tool(read_only=True)
-async def query_objects(ctx: Context, expression: str, limit: int = 200, board_path: str = "") -> str:
+async def query_objects(ctx: Context, expression: str, area: list = None, unit: str = "mil", limit: int = 200,
+                        board_path: str = "") -> str:
     """
     Find PCB objects with Altium's own query language, as the PCB Filter
     panel and rule scopes use it.
@@ -3218,6 +3219,16 @@ async def query_objects(ctx: Context, expression: str, limit: int = 200, board_p
     Altium's message; the dialog it raises is answered, so Altium is not
     left waiting.
 
+    Layers are named as the board names them in its layer stack
+    (OnLayer('GND1')); Altium's generic names ('Mid Layer 1') are translated
+    to the board's, so both work. Each object gives both: layer (generic) and
+    layer_name (the board's, when it has its own).
+
+    The engine has no position properties (X, Y): give a box as area
+    instead. It keeps the objects whose bounds touch the box, so a pour
+    larger than the box is kept wherever its copper is; objects_in_area
+    tests the real shape.
+
     Give sizes with a unit (6mil, 0.15mm). The engine reads bare numbers in
     its own unit, which is not always the board's display unit, and a unit
     written inside the query is a syntax error; so each value with a unit is
@@ -3226,43 +3237,55 @@ async def query_objects(ctx: Context, expression: str, limit: int = 200, board_p
 
     Args:
         expression (str): The query.
+        area (list): Only objects touching [x1, y1, x2, y2], from the board
+            origin in unit. Default the whole board.
+        unit (str): "mil" (default) or "mm", for area.
         limit (int): How many objects to list in full; matched counts all.
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
 
     Returns:
         str: JSON with matched, by_kind counts, and the objects: kind, name
-             (designator, pad, polygon, rule), net, layer and bounds in mils
-             from the board origin. expression_run is what the engine ran.
+             (designator, pad, polygon, rule), net, layer, layer_name and
+             bounds in mils from the board origin. expression_run is what the
+             engine ran. copper_polygons_without_net counts matched pours
+             with no net, which InNet() cannot find.
     """
     import pcb_query
 
     error = pcb_query.check(expression)
-    if error:
-        return json.dumps({"success": False, "error": error})
+    box, area_error = pcb_query.area_text(area, unit)
+    if error or area_error:
+        return json.dumps({"success": False, "error": error or area_error})
     in_mm, in_mil, values = pcb_query.with_units(expression)
     result, error = await _run_query("query_objects", {
-        "expr_mm": in_mm, "expr_mil": in_mil, "limit": max(0, int(limit)), "board_path": long_path(board_path)})
+        "expr_mm": in_mm, "expr_mil": in_mil, "limit": max(0, int(limit)), "area": box,
+        "board_path": long_path(board_path)})
     if result is None:
         return json.dumps({"success": False, "error": error})
     bare = pcb_query.bare_numbers(expression)
     if bare:
         result["warning"] = (f"{', '.join(bare)} has no unit, so the engine read it in "
                              f"{result.get('engine_unit') or 'its own unit'}. Give sizes with a unit.")
+    if result.get("copper_polygons_without_net"):
+        result["polygon_warning"] = (f"{result['copper_polygons_without_net']} copper polygon(s) have no net: "
+                                     "InNet() and net filters cannot find them, and a repour removes their "
+                                     "copper as dead copper if Remove Dead Copper is on.")
     if not result.get("matched"):
         result["note"] = "Nothing matched."
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 @_tool(read_only=True)
 async def which_rule(ctx: Context, object_a: str, object_b: str, rule_kind: str = "clearance",
-                     board_path: str = "") -> str:
+                     area_a: list = None, area_b: list = None, unit: str = "mil", board_path: str = "") -> str:
     """
     Which design rule applies between two PCB objects, and how far apart
     they are: Altium's own FindDominantRuleForObjectPair, the rule DRC uses.
 
     Each object is a query expression (as for query_objects) that must match
-    exactly one object, e.g. "IsPad And (Name = 'U1-3')" or
-    "IsVia And InNet('GND') And (X = 1250mil) And (Y = 800mil)".
+    exactly one object, e.g. "IsPad And (Name = 'U1-3')". The engine has no
+    X or Y, so narrow one down by position with area_a / area_b, e.g.
+    object_a="IsVia And InNet('GND')", area_a=[1245, 795, 1255, 805].
 
     Args:
         object_a, object_b (str): Query expressions, one object each.
@@ -3270,6 +3293,9 @@ async def which_rule(ctx: Context, object_a: str, object_b: str, rule_kind: str 
             polygon_connect, plane_connect, solder_mask_expansion,
             paste_mask_expansion, short_circuit, hole_to_hole, silk_to_silk,
             silk_to_mask, component_clearance.
+        area_a, area_b (list): Only objects touching [x1, y1, x2, y2] from the
+            board origin, in unit, count for object_a / object_b.
+        unit (str): "mil" (default) or "mm", for the areas.
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
 
@@ -3284,10 +3310,14 @@ async def which_rule(ctx: Context, object_a: str, object_b: str, rule_kind: str 
         error = pcb_query.check(expr)
         if error:
             return json.dumps({"success": False, "error": error})
+    box_a, error_a = pcb_query.area_text(area_a, unit)
+    box_b, error_b = pcb_query.area_text(area_b, unit)
+    if error_a or error_b:
+        return json.dumps({"success": False, "error": error_a or error_b})
     a_mm, a_mil, _ = pcb_query.with_units(object_a)
     b_mm, b_mil, _ = pcb_query.with_units(object_b)
     result, error = await _run_query("which_rule", {
-        "a_mm": a_mm, "a_mil": a_mil, "b_mm": b_mm, "b_mil": b_mil,
+        "a_mm": a_mm, "a_mil": a_mil, "b_mm": b_mm, "b_mil": b_mil, "area_a": box_a, "area_b": box_b,
         "rule_kind": rule_kind.strip().lower(), "board_path": long_path(board_path)})
     if result is None:
         return json.dumps({"success": False, "error": error})
