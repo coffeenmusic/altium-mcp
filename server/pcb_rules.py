@@ -33,8 +33,9 @@ CONNECT_STYLES = ("relief", "direct", "none")
 SIGNED = {"expansion"}
 
 
-def encode_values(kind: str, values: dict) -> Tuple[str, str]:
-    """("key=value;..." for Altium, "") or ("", error)."""
+def encode_values(kind: str, values: dict, partial: bool = False) -> Tuple[str, str]:
+    """("key=value;..." for Altium, "") or ("", error). partial: only the
+    values to change (edit_pcb_rule), so none is required."""
     spec = RULE_KINDS.get(kind)
     if spec is None:
         return "", f"unknown rule_type '{kind}'; one of: {', '.join(RULE_KINDS)}"
@@ -43,7 +44,7 @@ def encode_values(kind: str, values: dict) -> Tuple[str, str]:
     if unknown:
         return "", f"{kind} takes {', '.join(spec)}; not {', '.join(unknown)}"
     missing = [k for k, (_, _, req) in spec.items() if req and k not in values]
-    if missing:
+    if missing and not partial:
         return "", f"{kind} needs {', '.join(missing)}"
     out = []
     for name, (key, unit, _) in spec.items():
@@ -76,10 +77,10 @@ def encode_values(kind: str, values: dict) -> Tuple[str, str]:
     # large as the via, without complaint
     for lo, mid, hi in (("min", "preferred", "max"), ("min_diameter", "preferred_diameter", "max_diameter"),
                         ("min_hole", "preferred_hole", "max_hole")):
-        if mid in vals and not vals[lo] <= vals[mid] <= vals[hi]:
+        if mid in vals and lo in vals and hi in vals and not vals[lo] <= vals[mid] <= vals[hi]:
             return "", f"{mid}_mils must be between {lo}_mils and {hi}_mils"
     for size in ("min", "preferred", "max"):
         hole, diameter = f"{size}_hole", f"{size}_diameter"
-        if hole in vals and vals[hole] >= vals[diameter]:
+        if hole in vals and diameter in vals and vals[hole] >= vals[diameter]:
             return "", f"{hole}_mils must be smaller than {diameter}_mils"
     return ";".join(out), ""

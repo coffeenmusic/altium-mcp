@@ -1694,6 +1694,12 @@ begin
             Result := ExecuteSetPCBLayerVisibility(RequestData);   
         'create_pcb_rule':
             Result := ExecuteCreatePCBRule(RequestData);
+        'pcb_rule_info':
+            Result := ExecuteRuleEdit(CommandName, RequestData);
+        'edit_pcb_rule':
+            Result := ExecuteRuleEdit(CommandName, RequestData);
+        'set_rule_priority':
+            Result := ExecuteRuleEdit(CommandName, RequestData);
         'get_pcb_layer_stackup':
             Result := GetPCBLayerStackup(ROOT_DIR);         
         'get_selected_components_coordinates':
