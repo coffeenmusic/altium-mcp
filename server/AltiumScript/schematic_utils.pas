@@ -2891,8 +2891,6 @@ begin
     end;
 end;
 
-// Place a symbol from a .SchLib on Doc. Opening the library makes it the
-// current document, so Doc is held by reference throughout.
 // Sets the parameter Name of Comp to Value (adding it if missing), shown
 // or hidden
 procedure SetSchParameter(Comp: ISch_Component; Name, Value: String; Visible: Boolean);
@@ -2977,6 +2975,8 @@ begin
     end;
 end;
 
+// Place a symbol from a .SchLib on Doc. Opening the library makes it the
+// current document, so Doc is held by reference throughout.
 function PlaceSchComponent(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
     LibDoc   : ISch_Document;
