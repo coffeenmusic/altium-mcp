@@ -1787,6 +1787,30 @@ end;
 // the flattened document as its original, with '@<variant>' on its id; those
 // are skipped.
 
+// dblib_document: Action 'state' tells whether the DbLib at Path is open in
+// Altium, 'close' closes it (a DbLib document has nothing to save), 'open'
+// opens it again
+function DbLibDocument(Path: String; Action: String): String;
+var
+    Doc   : IServerDocument;
+    Props : TStringList;
+begin
+    if (Action = 'close') and Client.IsDocumentOpen(Path) then
+    begin
+        Doc := Client.GetDocumentByPath(Path);
+        if Doc <> nil then Client.CloseDocument(Doc);
+    end
+    else if (Action = 'open') and not Client.IsDocumentOpen(Path) then
+        Client.OpenDocument('DATABASELIB', Path);
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'open', Client.IsDocumentOpen(Path));
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // The project's components with what a variation needs, one string each:
 // physical|logical|unique id|sheet. Also says whether the project file has
 // unsaved changes in Altium (its variants on disk may then be stale).

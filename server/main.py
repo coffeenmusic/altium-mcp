@@ -5253,6 +5253,106 @@ async def edit_variants(ctx: Context, operations: list, project_path: str = "", 
 MUTATING_COMMANDS.add("apply_variant_edits")
 
 
+async def _dblib_document(params: dict):
+    """(reply, error) of the dblib_document bridge command."""
+    response = await altium_bridge.execute_command("dblib_document", params)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, result
+    return result, None
+
+
+@_tool()
+async def add_dblib_rows(ctx: Context, dblib: str, table: str, rows: list, close_in_altium: bool = True) -> str:
+    """
+    Add parts (rows) to a database library's Excel table, safely.
+
+    1. Who holds the workbook is checked (as check_file_lock): Excel with it
+       open is refused (save and close it there). A leftover ~$ owner file
+       from an Excel session that ended does not block.
+    2. If the DbLib is open as a document in Altium and close_in_altium is
+       set, it is closed first and opened again after (its view then shows
+       the new rows).
+    3. The workbook is backed up, the rows appended, and the result read
+       back; it replaces the workbook only when the old rows are unchanged
+       and the new ones are as given.
+
+    The rows go at the end of the table's sheet, each cell styled like the
+    cell above it. Excel's driver, which Altium reads the table with, types
+    each column from its first 8 rows; in a column of numbers a text value
+    reads as empty in Altium, so number-like text there ("10%", "0,5",
+    "25") is written as a number. unreadable_cells lists the cells already
+    in the table that Altium reads as empty for that reason.
+
+    Args:
+        dblib (str): Full path of the .DbLib.
+        table (str): The table (sheet), e.g. "Capacitor" or "Capacitor$".
+        rows (list): Objects of column name: value; each needs the table's
+            key (e.g. PartNr), which must be new. Columns must exist.
+        close_in_altium (bool): Close the DbLib document in Altium for the
+            write and reopen it after (default True).
+
+    Returns:
+        str: JSON with the keys added, their row numbers, the backup's path,
+             and unreadable_cells.
+    """
+    import dblib as dblib_module
+    import dblib_write
+    import file_locks
+
+    path = long_path(dblib)
+    try:
+        lib = dblib_module.read_dblib(path)
+    except dblib_module.DbLibError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    xlsx = lib["database"]
+    report = file_locks.lock_report(xlsx)
+    if not report.get("exists"):
+        return json.dumps({"success": False, "error": f"the DbLib's workbook is not found: {xlsx}"})
+    others = [h for h in report.get("held_by", []) if not any(k in h["name"].lower() for k in ("x2", "altium"))]
+    if others:
+        return json.dumps({"success": False, "error": "the workbook is open in " +
+                           ", ".join(sorted({h['name'] for h in others})) + ": save and close it there first",
+                           "lock": report})
+    reopen = False
+    state, error = await _dblib_document({"path": path, "action": "state"})
+    if state and state.get("open") and close_in_altium:
+        closed, error = await _dblib_document({"path": path, "action": "close"})
+        if closed is None or closed.get("open"):
+            return json.dumps({"success": False, "error": f"could not close the DbLib in Altium: {error}"})
+        reopen = True
+    reply = {}
+    try:
+        report = file_locks.lock_report(xlsx)
+        if not report.get("writable"):
+            return json.dumps({"success": False, "error": "the workbook is still held after closing the DbLib",
+                               "lock": report})
+        try:
+            result = dblib_write.add_rows(path, table, rows, str(EXCHANGE_DIR / "dblib_backups"))
+        except (dblib_write.WriteError, dblib_module.DbLibError, OSError) as e:
+            return json.dumps({"success": False, "error": str(e)})
+        reply = {"success": True, **result}
+        unreadable = dblib_write.text_in_numeric_columns(xlsx, result["sheet"])
+        if unreadable:
+            headers, numbered = dblib_module.read_xlsx_numbered(xlsx, result["sheet"])
+            letters = {dblib_write._col_letters(i): h for i, h in headers.items()}
+            keys = {n: row.get(result["key"], "") for n, row in numbered}
+            reply["unreadable_cells"] = [{"key": keys.get(c["row"], ""), "row": c["row"],
+                                          "column": letters.get(c["column"], c["column"])} for c in unreadable]
+            reply["unreadable_note"] = ("Text in a column of numbers: Altium reads these cells as empty. "
+                                        "Retype them as numbers in Excel.")
+    finally:
+        if reopen:
+            opened, _ = await _dblib_document({"path": path, "action": "open"})
+            reply["reopened_in_altium"] = bool(opened and opened.get("open"))
+    return json.dumps(reply, indent=1)
+
+
 @_tool(read_only=True)
 async def check_file_lock(ctx: Context, path: str) -> str:
     """

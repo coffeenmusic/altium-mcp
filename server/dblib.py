@@ -142,6 +142,17 @@ def _column(ref: str) -> int:
 
 def read_xlsx_sheet(path: str, sheet: str) -> List[Dict[str, str]]:
     """The rows of one sheet as {header: value}, the first row as headers."""
+    return read_xlsx_table(path, sheet)[1]
+
+
+def read_xlsx_table(path: str, sheet: str) -> Tuple[Dict[int, str], List[Dict[str, str]]]:
+    """({column index: header}, rows as {header: value}) of one sheet."""
+    headers, numbered = read_xlsx_numbered(path, sheet)
+    return headers, [row for _, row in numbered]
+
+
+def read_xlsx_numbered(path: str, sheet: str) -> Tuple[Dict[int, str], List[Tuple[int, Dict[str, str]]]]:
+    """Like read_xlsx_table, each row with its row number in the sheet."""
     try:
         z = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile) as e:
@@ -171,11 +182,12 @@ def read_xlsx_sheet(path: str, sheet: str) -> List[Dict[str, str]]:
         cells = {}
         for c in row.findall("m:c", _NS):
             cells[_column(c.get("r"))] = _cell_text(c, strings, percent, sep)
-        rows.append(cells)
+        rows.append((int(row.get("r", len(rows) + 1)), cells))
     if not rows:
-        return []
-    headers = {i: h.strip() for i, h in rows[0].items() if h.strip()}
-    return [{h: r.get(i, "") for i, h in headers.items()} for r in rows[1:] if any(v for v in r.values())]
+        return {}, []
+    headers = {i: h.strip() for i, h in rows[0][1].items() if h.strip()}
+    return headers, [(n, {h: r.get(i, "") for i, h in headers.items()})
+                     for n, r in rows[1:] if any(v for v in r.values())]
 
 
 def key_field(lib: dict, table: str, rows: List[Dict[str, str]]) -> str:

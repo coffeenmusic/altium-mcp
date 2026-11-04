@@ -1365,6 +1365,8 @@ begin
             Result := ExecuteGetProjectComponents(RequestData);
         'get_erc_violations':
             Result := ExecuteGetERCViolations(RequestData);
+        'dblib_document':
+            Result := DbLibDocument(RequestText(RequestData, 'path', ''), RequestText(RequestData, 'action', 'state'));
         'get_variant_targets':
             Result := GetVariantTargets(RequestText(RequestData, 'project_path', ''));
         'apply_variant_edits':
