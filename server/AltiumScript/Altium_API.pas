@@ -1488,6 +1488,9 @@ begin
             Result := ExecuteCreateSymbolsBatch(RequestData);
         'edit_schematic':
             Result := ExecuteEditSchematic(RequestData);
+        'get_schematic_pins':
+            Result := GetSchematicPins(RequestText(RequestData, 'sheet_path', ''),
+                                       RequestText(RequestData, 'designators', ''));
         'build_circuit':
             Result := BuildCircuitFromSpec(ROOT_DIR + 'circuit_spec.txt',
                                           ROOT_DIR + 'param_placement.txt');
