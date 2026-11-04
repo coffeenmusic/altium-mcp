@@ -2192,6 +2192,50 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
                               "wires from these, not from predicted offsets.")
     return json.dumps(result, indent=2)
 
+async def _schematic_pins(sheet_path: str, designators=None):
+    """The sheet's placed pins from Altium (internal units), or (None, error)."""
+    response = await altium_bridge.execute_command("get_schematic_pins", {
+        "sheet_path": sheet_path,
+        "designators": "|" + "|".join(designators) + "|" if designators else ""})
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result, strict=False)
+    return result.get("pins", []), ""
+
+@_tool(read_only=True)
+async def get_schematic_pins(ctx: Context, sheet_path: str, designators: list = None, unit: str = "mil") -> str:
+    """
+    The pins of a schematic sheet's parts, live from Altium: each pin's
+    connection point (the outer end, where a wire must end), number, name,
+    electrical type and whether it is hidden. Only the part and display mode
+    each component shows are listed. Unsaved changes in Altium are seen.
+
+    Args:
+        sheet_path (str): Full path of the .SchDoc; opened if not open.
+        designators (list): Only these components; empty for all.
+        unit (str): "mil" (default) or "mm" for the coordinates.
+
+    Returns:
+        str: JSON with the pins: designator, part, pin, name, x, y,
+             electrical, hidden.
+    """
+    import sch_edit
+
+    sheet_path = long_path(sheet_path)
+    if unit not in sch_edit.COORD_PER:
+        return json.dumps({"success": False, "error": "unit is mil or mm"})
+    if designators and any("|" in str(d) for d in designators):
+        return json.dumps({"success": False, "error": "a designator cannot contain '|'"})
+    pins, error = await _schematic_pins(sheet_path, [str(d).strip().upper() for d in designators or []])
+    if pins is None:
+        return json.dumps({"success": False, "error": error})
+    scale = sch_edit.COORD_PER[unit]
+    for p in pins:
+        p["x"], p["y"] = round(p["x"] / scale, 4), round(p["y"] / scale, 4)
+    return json.dumps({"success": True, "unit": unit, "count": len(pins), "pins": pins}, indent=2)
+
 @_tool()
 async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: str = "mil",
                          save: bool = False) -> str:
@@ -2214,25 +2258,40 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         [mirror true/false]. x, y is the part's origin.
       delete_component  designator, [part]
       place_component   library (.SchLib path), symbol, designator, x, y,
-                        [rotation], [mirror], [comment]
+                        [rotation], [mirror], [comment]. For a part from a
+                        database library, dblib (.DbLib path) and
+                        part_number (its key), [table], in place of library
+                        and symbol: the row gives the symbol, footprints,
+                        description and parameters, and the part is linked
+                        to the DbLib as when Altium places it (Excel tables)
       set_parameter     designator, name, value, [part], [visible]
                         (creates the parameter when missing)
       move_text         designator, name ("Designator", "Comment" or a
                         parameter), [part], [x, y], [justification 0-8:
                         bottom-left, bottom-centre, bottom-right, middle-left,
                         ..., top-right], [orientation 0-3], [visible]
-      add_wire          points [[x, y], ...] (a pin's connection point is
-                        its outer end, as build_schematic's pin_map gives)
+      add_wire          points [[x, y] or "U20.VCC", ...]: a point may name
+                        a pin, by number ("U20.3") or name ("U20.VCC")
       add_net_label     x, y (on a wire), text, [orientation], [justification]
       add_power_port    x, y, text, [style: bar, arrow, circle, wave,
                         power_ground, signal_ground, earth], [orientation
                         0-3, default 1 = up], [show_net_name]
       add_junction      x, y
       add_no_erc        x, y
+      add_port          x, y (its left end, or bottom end when vertical),
+                        name, [io_type: unspecified, output, input,
+                        bidirectional], [style: right (default), left,
+                        left_right, none, top, bottom, top_bottom], [width]:
+                        a width turns auto size off, so the port keeps its
+                        length and stays on its wire when renamed
       delete_at         kind (wire, net_label, power_port, junction, no_erc,
                         port, note), x, y, [text]: removes a wire passing
                         through the point, or the object located there
     "part" picks one part of a multi-part component (1 = A, ...).
+    The add_* operations with x, y also take "at": "U20.VCC" instead, to
+    place a label, port, power port, junction or no-ERC on a pin. Pins are
+    read live from the sheet (see get_schematic_pins) before anything is
+    changed; an unknown pin or a name several pins share is an error.
 
     Args:
         sheet_path (str): Full path of the .SchDoc; opened if not open.
@@ -2245,19 +2304,41 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     Returns:
         str: JSON with how many operations were applied and the errors.
     """
+    import dblib
     import sch_edit
 
+    # A part from a database library: its row gives the symbol and the link
+    expanded = []
+    for i, op in enumerate(operations or []):
+        if isinstance(op, dict) and op.get("op") == "place_component" and (op.get("dblib") or op.get("part_number")):
+            if not (op.get("dblib") and op.get("part_number")) or op.get("library") or op.get("symbol"):
+                return json.dumps({"success": False, "error": f"operation {i + 1}: a DbLib part takes dblib and "
+                                                              f"part_number (and table), not library or symbol"})
+            try:
+                op = dblib.place_operation(dict(op, dblib=long_path(op["dblib"])))
+            except (dblib.DbLibError, OSError, KeyError) as e:
+                return json.dumps({"success": False, "error": f"operation {i + 1}: {e}"})
+        expanded.append(op)
+    operations = expanded
     # Long paths, or Altium opens a second copy of a sheet or library that
     # is already open
     sheet_path = long_path(sheet_path)
     operations = [dict(op, library=long_path(op["library"]))
                   if isinstance(op, dict) and op.get("op") == "place_component" and op.get("library") else op
                   for op in (operations or [])]
+    if not sheet_path.lower().endswith(".schdoc"):
+        return json.dumps({"success": False, "error": "sheet_path must be a .SchDoc"})
+    designators = sch_edit.pin_designators(operations)
+    if designators:
+        pins, error = await _schematic_pins(sheet_path, designators)
+        if pins is None:
+            return json.dumps({"success": False, "error": f"Could not read the pins: {error}"})
+        operations, error = sch_edit.resolve_pins(operations, pins, unit)
+        if error:
+            return json.dumps({"success": False, "error": error})
     lines, error = sch_edit.encode_operations(operations, unit)
     if error:
         return json.dumps({"success": False, "error": error})
-    if not sheet_path.lower().endswith(".schdoc"):
-        return json.dumps({"success": False, "error": "sheet_path must be a .SchDoc"})
     logger.info(f"Editing {sheet_path}: {len(lines)} operations")
     # Part names and parameter values may hold text that is not plain ASCII
     write_altium_text(EXCHANGE_DIR / "sch_edit_spec.txt", "\n".join(lines) + "\n")
@@ -4924,11 +5005,12 @@ async def get_project_info(ctx: Context) -> str:
 @_tool(read_only=True)
 async def get_project_components(ctx: Context, include_parameters: bool = False, designators: list = None,
                                  sheet: str = "", offset: int = 0, limit: int = 0,
-                                 parameter_names: list = None) -> str:
+                                 parameter_names: list = None, project_path: str = "") -> str:
     """
     List the components of the compiled project (schematic side).
 
-    Compiles the focused project in memory first (nothing is saved). Unlike
+    Compiles the project in memory first (nothing is saved): project_path,
+    or the focused project, as for get_erc_violations. Unlike
     the PCB component tools, this returns the schematic Comment of each
     instance, which is where values of generic passives usually live.
 
@@ -4949,6 +5031,7 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
         limit (int): At most this many components; 0 for as many as fit.
         parameter_names (list): Return only these parameters, e.g.
             ["Manufacturer_Part_Number"]. Implies include_parameters.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
         str: JSON with project_path, component_count (the whole project),
@@ -4959,7 +5042,8 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
     import project_components
 
     text = await _simple_command("get_project_components",
-                                 {"include_parameters": include_parameters or bool(parameter_names)},
+                                 {"include_parameters": include_parameters or bool(parameter_names),
+                                  "project_path": long_path(project_path)},
                                  "project components")
     try:
         data = json.loads(text, strict=False)
@@ -4973,22 +5057,336 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
 
 
 @_tool(read_only=True)
-async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
+async def get_erc_violations(ctx: Context, compile: bool = True, project_path: str = "") -> str:
     """
-    Compile the focused project and list its ERC/compiler violations.
+    Compile a project and list its ERC/compiler violations.
 
-    Compiling works in memory and does not save any document (Altium may
+    Give project_path to compile exactly that project (it is opened if
+    needed): without it the focused project is compiled, which is whatever
+    document last had focus, and "Free Documents" is refused. The result
+    names the project it compiled.
+
+    Compiling reads each sheet from disk, except a sheet open in Altium with
+    unsaved changes: that one is compiled from Altium's copy and listed in
+    unsaved_in_altium. Save it (or close it unsaved) for the file to count.
+    Sheets the project lists but that are not on disk are in
+    missing_on_disk. Compiling does not save any document (Altium may
     refresh the derived .PrjPcbStructure file).
 
     Args:
         compile (bool): Compile before reading (default True). False returns
             the violations of the last compilation.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
-        str: JSON with total, fatal, errors, warnings and violations
+        str: JSON with project_path, unsaved_in_altium, missing_on_disk,
+             total, fatal, errors, warnings and violations
              [{level, type, detail}]
     """
-    return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
+    return await _simple_command("get_erc_violations", {"compile": compile, "project_path": long_path(project_path)},
+                                 "ERC violations")
+
+
+async def _variant_context(project_path: str):
+    """(targets reply, variants parsed from the saved .PrjPcb, error)."""
+    import variants
+
+    response = await altium_bridge.execute_command("get_variant_targets",
+                                                   {"project_path": long_path(project_path)})
+    if not response.get("success", False):
+        return None, None, response.get("error", "unknown error")
+    data = response.get("result", {})
+    if isinstance(data, str):
+        try:
+            data = json.loads(data, strict=False)
+        except ValueError:
+            return None, None, data
+    try:
+        text = read_altium_text(Path(data["project_path"]))
+    except OSError as e:
+        return None, None, f"cannot read {data.get('project_path')}: {e}"
+    return data, variants.parse_variants(text), None
+
+
+@_tool(read_only=True)
+async def get_variants(ctx: Context, project_path: str = "", variant: str = "",
+                       designators: list = None) -> str:
+    """
+    List a project's variants with their variations, by logical designator
+    and channel as well as by physical designator.
+
+    Compiles the project in memory (nothing is saved) to tell, for every
+    variation, which logical designator, channel and sheet it belongs to: in
+    a multichannel design the variation of R1 in channel CH2 is stored as
+    R1_CH2 with the path of sheet symbols down to it.
+
+    The variants are read from the saved .PrjPcb. When the project has unsaved
+    changes in Altium, "project_unsaved" is true and unsaved variant edits are
+    not shown.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        variant (str): Only this variant (by name).
+        designators (list): Only variations of these designators, physical or
+            logical; wildcards work, e.g. ["R1", "C1*"].
+
+    Returns:
+        str: JSON with project_path, project_unsaved and variants [{name,
+             variation_count, variations [{designator, logical, channel, sheet,
+             kind ("not_fitted", "alternate" or "none" for parameters only),
+             alternate_part?, params?}]}]
+    """
+    import variants as vmod
+
+    data, parsed, error = await _variant_context(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    targets = vmod.parse_targets(data.get("components", []))
+    reply = {"project_path": data["project_path"], "project_unsaved": data.get("project_unsaved", False),
+             "component_count": len(targets)}
+    try:
+        problems = vmod.layout_problems(Path(data["project_path"]).read_bytes().decode("latin-1"))
+    except OSError:
+        problems = []
+    if problems:
+        reply["file_layout_problems"] = problems
+        reply["file_layout_note"] = ("Altium reads a parameter row as belonging to the variation line above "
+                                     "it and reads rows past the counts, so on the next load these sections "
+                                     "attach parameters to other parts. Any edit_variants call regroups them.")
+    reply["variants"] = vmod.describe(parsed, targets, variant, designators)
+    return json.dumps(reply, indent=1)
+
+
+@_tool()
+async def edit_variants(ctx: Context, operations: list, project_path: str = "", variant: str = "",
+                        dry_run: bool = False) -> str:
+    """
+    Change a project's variants: fit or leave out parts, vary their
+    parameters, add or rename variants. Parts are named by physical
+    designator, or by logical designator and channel.
+
+    The edits go through Altium on the open project, which is then saved, so
+    Altium's copy and the file agree. Refused when the project file already
+    has unsaved changes in Altium (saving would write them too).
+
+    Each operation is a dict with "op":
+    - add_variant {name}
+    - rename_variant {name} (of "variant")
+    - not_fitted {designator, channel?}: leave the part out
+    - fitted {designator, channel?}: fit it as designed (removes its variation,
+      an alternate part included)
+    - set_param {designator, channel?, name, value}: vary a parameter, e.g.
+      Comment; a fitted part gets a parameter-only variation
+    - remove_param {designator, channel?, name}: drop a parameter variation
+      (not on an alternate part)
+    designator is a physical designator ("R1_CH2") or a logical one ("R1")
+    with channel ("CH2", a wildcard such as "CH*", or "*" for every channel).
+    The channel is what the channel naming adds to the logical designator.
+    Each operation may give "variant"; otherwise the variant argument, or
+    the only variant, is used. Alternate parts cannot be set here.
+
+    Args:
+        operations (list): The operations, in order.
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        variant (str): Variant the operations apply to unless they name one.
+        dry_run (bool): Report the plan and change nothing.
+
+    Returns:
+        str: JSON with success, plan (what each operation does to which
+             part), applied, saved and errors
+    """
+    import variants as vmod
+
+    if not isinstance(operations, list) or not operations:
+        return json.dumps({"success": False, "error": "operations must be a non-empty list"})
+    data, parsed, error = await _variant_context(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if data.get("project_unsaved"):
+        return json.dumps({"success": False, "error": "the project has unsaved changes in Altium: save or "
+                                                      "discard them first, since saving the variants would "
+                                                      "write them too"})
+    targets = vmod.parse_targets(data.get("components", []))
+    shared = vmod.shared_designators(parsed)
+    lines, errors, plan = vmod.encode_operations(parsed, targets, operations, variant)
+    touched = {ln.split("|")[1].lower() for ln in lines if ln.split("|")[0] != "NEW"}
+    for name in sorted(n for n in shared if n.lower() in touched):
+        errors.append(f"variant '{name}' has several variations with the same designator "
+                      f"({', '.join(shared[name][:5])}): annotate the project first, or its parameter "
+                      f"rows cannot be kept with their parts")
+    if errors:
+        return json.dumps({"success": False, "errors": errors, "plan": plan,
+                           "note": "Nothing was changed."}, indent=1)
+    if dry_run or not lines:
+        return json.dumps({"success": True, "dry_run": dry_run, "plan": plan, "applied": 0}, indent=1)
+    write_altium_text(EXCHANGE_DIR / "variant_edit_spec.txt", "\n".join(lines) + "\n")
+    response = await altium_bridge.execute_command("apply_variant_edits",
+                                                   {"project_path": data["project_path"]})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": response.get("error", "unknown error"), "plan": plan})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return result
+    result["plan"] = plan
+    if result.get("saved"):
+        # Altium's save updates the variation rows where they stand, but its
+        # loader reads each parameter row as belonging to the variation line
+        # above it: regroup them, or the next load mixes parts up
+        prj = Path(data["project_path"])
+        try:
+            text = prj.read_bytes().decode("latin-1")
+            fixed, report = vmod.normalize(text)
+            if fixed != text:
+                prj.write_bytes(fixed.encode("latin-1"))
+            if report:
+                result["file_layout"] = report
+        except OSError as e:
+            result["warning"] = f"could not regroup the variant rows in the file: {e}"
+    if result.get("errors"):
+        result["success"] = False
+    return json.dumps(result, indent=1)
+
+# Changes the project: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("apply_variant_edits")
+
+
+async def _dblib_document(params: dict):
+    """(reply, error) of the dblib_document bridge command."""
+    response = await altium_bridge.execute_command("dblib_document", params)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, result
+    return result, None
+
+
+@_tool()
+async def add_dblib_rows(ctx: Context, dblib: str, table: str, rows: list, close_in_altium: bool = True) -> str:
+    """
+    Add parts (rows) to a database library's Excel table, safely.
+
+    1. Who holds the workbook is checked (as check_file_lock): Excel with it
+       open is refused (save and close it there). A leftover ~$ owner file
+       from an Excel session that ended does not block.
+    2. If the DbLib is open as a document in Altium and close_in_altium is
+       set, it is closed first and opened again after (its view then shows
+       the new rows).
+    3. The workbook is backed up, the rows appended, and the result read
+       back; it replaces the workbook only when the old rows are unchanged
+       and the new ones are as given.
+
+    The rows go at the end of the table's sheet, each cell styled like the
+    cell above it. Excel's driver, which Altium reads the table with, types
+    each column from its first 8 rows; in a column of numbers a text value
+    reads as empty in Altium, so number-like text there ("10%", "0,5",
+    "25") is written as a number. unreadable_cells lists the cells already
+    in the table that Altium reads as empty for that reason.
+
+    Args:
+        dblib (str): Full path of the .DbLib.
+        table (str): The table (sheet), e.g. "Capacitor" or "Capacitor$".
+        rows (list): Objects of column name: value; each needs the table's
+            key (e.g. PartNr), which must be new. Columns must exist.
+        close_in_altium (bool): Close the DbLib document in Altium for the
+            write and reopen it after (default True).
+
+    Returns:
+        str: JSON with the keys added, their row numbers, the backup's path,
+             and unreadable_cells.
+    """
+    import dblib as dblib_module
+    import dblib_write
+    import file_locks
+
+    path = long_path(dblib)
+    try:
+        lib = dblib_module.read_dblib(path)
+    except dblib_module.DbLibError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    xlsx = lib["database"]
+    report = file_locks.lock_report(xlsx)
+    if not report.get("exists"):
+        return json.dumps({"success": False, "error": f"the DbLib's workbook is not found: {xlsx}"})
+    others = [h for h in report.get("held_by", []) if not any(k in h["name"].lower() for k in ("x2", "altium"))]
+    if others:
+        return json.dumps({"success": False, "error": "the workbook is open in " +
+                           ", ".join(sorted({h['name'] for h in others})) + ": save and close it there first",
+                           "lock": report})
+    reopen = False
+    state, error = await _dblib_document({"path": path, "action": "state"})
+    if state and state.get("open") and close_in_altium:
+        closed, error = await _dblib_document({"path": path, "action": "close"})
+        if closed is None or closed.get("open"):
+            return json.dumps({"success": False, "error": f"could not close the DbLib in Altium: {error}"})
+        reopen = True
+    reply = {}
+    try:
+        report = file_locks.lock_report(xlsx)
+        if not report.get("writable"):
+            return json.dumps({"success": False, "error": "the workbook is still held after closing the DbLib",
+                               "lock": report})
+        try:
+            result = dblib_write.add_rows(path, table, rows, str(EXCHANGE_DIR / "dblib_backups"))
+        except (dblib_write.WriteError, dblib_module.DbLibError, OSError) as e:
+            return json.dumps({"success": False, "error": str(e)})
+        reply = {"success": True, **result}
+        unreadable = dblib_write.text_in_numeric_columns(xlsx, result["sheet"])
+        if unreadable:
+            headers, numbered = dblib_module.read_xlsx_numbered(xlsx, result["sheet"])
+            letters = {dblib_write._col_letters(i): h for i, h in headers.items()}
+            keys = {n: row.get(result["key"], "") for n, row in numbered}
+            reply["unreadable_cells"] = [{"key": keys.get(c["row"], ""), "row": c["row"],
+                                          "column": letters.get(c["column"], c["column"])} for c in unreadable]
+            reply["unreadable_note"] = ("Text in a column of numbers: Altium reads these cells as empty. "
+                                        "Retype them as numbers in Excel.")
+    finally:
+        if reopen:
+            opened, _ = await _dblib_document({"path": path, "action": "open"})
+            reply["reopened_in_altium"] = bool(opened and opened.get("open"))
+    return json.dumps(reply, indent=1)
+
+
+@_tool(read_only=True)
+async def check_file_lock(ctx: Context, path: str) -> str:
+    """
+    Tell whether a file can be written now and which programs hold it.
+
+    For a database library give the .DbLib: its data file (the spreadsheet or
+    Access file in its connection string) is checked. Use it before writing
+    rows into a DbLib's spreadsheet, which fails while Excel has it open or
+    Altium's database driver is reading it.
+
+    Args:
+        path (str): The file, or a .DbLib.
+
+    Returns:
+        str: JSON with path (the data file for a .DbLib), exists, writable,
+             held_by [{pid, name}], office_owner_file? and advice when it is
+             held
+    """
+    import file_locks
+
+    path = long_path(path)
+    report = {}
+    if path.lower().endswith(".dblib"):
+        if not os.path.exists(path):
+            return json.dumps({"success": False, "error": f"not found: {path}"})
+        source = file_locks.dblib_source(path)
+        if not source:
+            return json.dumps({"success": False, "dblib": path,
+                               "error": "the DbLib does not read a file (a database server, or no "
+                                        "Data Source in its connection string)"})
+        report["dblib"] = path
+        path = source
+    report.update(file_locks.lock_report(path))
+    return json.dumps(report, indent=1)
 
 
 @_tool(read_only=True)
