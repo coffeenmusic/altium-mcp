@@ -1368,6 +1368,13 @@ begin
             Result := ExecuteCreatePolygonPour(RequestData);
         'create_cutout':
             Result := ExecuteCreateCutout(RequestData);
+        'release_outjob':
+            Result := ReleaseOutJob(RequestOutJobPath(RequestData));
+        'reopen_outjob':
+            Result := ReopenOutJob(RequestOutJobPath(RequestData));
+        'add_to_project':
+            Result := AddDocumentToProject(RequestText(RequestData, 'project_path', ''),
+                                           RequestOutJobPath(RequestData));
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':

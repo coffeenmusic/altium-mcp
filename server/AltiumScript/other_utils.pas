@@ -172,6 +172,73 @@ begin
 end;
 
 // Error text for an OutJob that ResolveOutJobPath could not resolve
+// Before the server edits an OutJob file: close it in Altium if it is open,
+// so Altium does not keep (and later save) the old one. Refused when it has
+// unsaved changes there, which the edit would lose.
+function ReleaseOutJob(Path: String): String;
+var
+    Doc : IServerDocument;
+begin
+    if not Client.IsDocumentOpen(Path) then
+    begin
+        Result := '{"success": true, "was_open": false}';
+        Exit;
+    end;
+    Doc := Client.GetDocumentByPath(Path);
+    if (Doc <> nil) and Doc.Modified then
+    begin
+        Result := 'ERROR: The OutJob has unsaved changes in Altium; save or close it there first';
+        Exit;
+    end;
+    if Doc <> nil then Client.CloseDocument(Doc);
+    Result := '{"success": true, "was_open": true}';
+end;
+
+// After the edit: open the OutJob again if it was open before
+function ReopenOutJob(Path: String): String;
+var
+    Doc : IServerDocument;
+begin
+    Doc := Client.OpenDocument('OUTPUTJOB', Path);
+    if Doc = nil then
+        Result := 'ERROR: Altium could not open the edited OutJob: ' + Path
+    else
+        Result := '{"success": true}';
+end;
+
+// Add DocPath to the project ProjectPath (opened if needed) and save the
+// project. Refused when the project has unsaved changes in Altium, which the
+// save would write too.
+function AddDocumentToProject(ProjectPath: String; DocPath: String): String;
+var
+    Project : IProject;
+    ProjDoc : IServerDocument;
+    I       : Integer;
+begin
+    Project := GetWorkspace.DM_OpenProject(ProjectPath, True);
+    if Project = nil then
+    begin
+        Result := 'ERROR: Altium could not open the project ' + ProjectPath;
+        Exit;
+    end;
+    for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        if SameText(NormalizePath(Project.DM_LogicalDocuments(I).DM_FullPath), NormalizePath(DocPath)) then
+        begin
+            Result := '{"success": true, "added": false, "project": "' + JSONEscapeString(Project.DM_ProjectFullPath) + '"}';
+            Exit;
+        end;
+    ProjDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
+    if (ProjDoc <> nil) and ProjDoc.Modified then
+    begin
+        Result := 'ERROR: The project has unsaved changes in Altium; save it first, or add the OutJob there';
+        Exit;
+    end;
+    Project.DM_AddSourceDocument(DocPath);
+    ProjDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
+    if ProjDoc <> nil then ProjDoc.DoFileSave('');
+    Result := '{"success": true, "added": true, "project": "' + JSONEscapeString(Project.DM_ProjectFullPath) + '"}';
+end;
+
 function OutJobNotFoundError(RequestedPath: String): String;
 begin
     if RequestedPath = '' then
@@ -446,6 +513,9 @@ begin
 
     // Commands that handle their own document management - skip focusing
     if (CommandName = 'search_library_symbol') or
+       (CommandName = 'release_outjob') or
+       (CommandName = 'reopen_outjob') or
+       (CommandName = 'add_to_project') or
        (CommandName = 'build_circuit') or
        (CommandName = 'edit_schematic') or
        (CommandName = 'get_symbol_primitives') or

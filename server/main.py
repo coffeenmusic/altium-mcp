@@ -4891,6 +4891,141 @@ async def get_outjob_settings(ctx: Context, outjob_path: str, include_raw_settin
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
+def _outjob_summary(job) -> dict:
+    return {"containers": [{"name": c["name"], "type": c["type"]} for c in job.containers()],
+            "outputs": [{"index": o["index"], "type": o["type"], "name": o["name"],
+                         "containers": o["containers"]} for o in job.outputs()]}
+
+# Identifiers of a managed (vault) OutJob: a copy is a new, unmanaged file
+_VAULT_KEYS = ("VaultGUID", "ItemGUID", "ItemHRID", "RevisionGUID", "RevisionId", "VaultHRID",
+               "AutoItemHRID", "NextRevId", "FolderGUID", "LifeCycleDefinitionGUID", "RevisionNamingSchemeGUID")
+
+@_tool()
+async def create_outjob(ctx: Context, outjob_path: str, template_path: str = "", project_path: str = "") -> str:
+    """
+    Create a new .OutJob file, empty or as a copy of another OutJob.
+
+    An output's settings are long and board specific, so the usual way to
+    get outputs is a template: one of your existing OutJobs (CAM, documents,
+    ...). Then shape it with edit_outjob. An OutJob runs only from a
+    project: give project_path to add it to one (the project is opened in
+    Altium and saved; refused when it has unsaved changes there).
+
+    Args:
+        outjob_path (str): Full path of the new .OutJob; must not exist yet.
+        template_path (str): OutJob to copy; empty for an OutJob with only
+            the Print Job container.
+        project_path (str): .PrjPcb to add the new OutJob to.
+
+    Returns:
+        str: JSON with the containers and outputs of the new OutJob, and the
+             project it was added to.
+    """
+    import outjob_edit
+
+    path = Path(long_path(outjob_path))
+    if path.suffix.lower() != ".outjob":
+        return json.dumps({"success": False, "error": "outjob_path must end in .OutJob"})
+    if path.exists():
+        return json.dumps({"success": False, "error": f"{path} already exists; edit it with edit_outjob"})
+    if not path.parent.is_dir():
+        return json.dumps({"success": False, "error": f"folder not found: {path.parent}"})
+    try:
+        job = outjob_edit.read(long_path(template_path)) if template_path else outjob_edit.new(path.name)
+    except (OSError, outjob_edit.OutJobError) as e:
+        return json.dumps({"success": False, "error": f"Could not read the template: {e}"})
+    job.set(outjob_edit.GROUP, "Name", path.name)
+    for key in _VAULT_KEYS:
+        if job.get("OutputJobFile", key) is not None:
+            job.set("OutputJobFile", key, "")
+    outjob_edit.write(path, job)
+    out = {"success": True, "outjob_path": str(path), **_outjob_summary(job)}
+    if project_path:
+        response = await altium_bridge.execute_command(
+            "add_to_project", {"project_path": long_path(project_path), "outjob_path": str(path)})
+        if not response.get("success", False):
+            out["success"] = False
+            out["error"] = (f"The OutJob was written but not added to the project: "
+                            f"{response.get('error', 'unknown error')}")
+        else:
+            result = response.get("result", {})
+            if isinstance(result, str):
+                result = json.loads(result, strict=False)
+            out["project"] = result.get("project")
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+@_tool()
+async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run: bool = False) -> str:
+    """
+    Change an .OutJob: its containers, which outputs it has and where they go.
+
+    Operations run in order; one that fails is reported in "errors" and the
+    rest still run. The file is edited in place, keeping everything not
+    changed as Altium wrote it. If the OutJob is open in Altium it is closed
+    first and opened again after (refused when it has unsaved changes there).
+
+    Operations, each a dict with "op":
+      add_container       name, type ("generated_files" or "pdf"), [folder]
+                          (relative to the project, e.g. "Fab"),
+                          [file_name] (pdf), [open_outputs] (default false:
+                          the files are not opened after each run)
+      set_container       name, [new_name], [folder], [file_name], [open_outputs]
+      remove_container    name
+      copy_output         output (name or number), [from_outjob] (another
+                          .OutJob; this one if left out), [new_name],
+                          [containers] (names to put it in)
+      remove_output       output
+      set_output          output, [new_name], [enabled], [document_path],
+                          [containers] ({container name: true/false})
+      set_output_setting  output, key, value: one setting inside the output's
+                          configuration, e.g. key "GerberUnit" value "Metric".
+                          The key must already be there; get_outjob_settings
+                          with include_raw_settings shows them.
+
+    Run with run_output_jobs; check with get_outjob_settings.
+
+    Args:
+        outjob_path (str): Full path of the .OutJob.
+        operations (list): The operations, as above.
+        dry_run (bool): Report what would change without writing.
+
+    Returns:
+        str: JSON with what was done, errors, and the containers and outputs
+             after the edit.
+    """
+    import outjob_edit
+
+    path = long_path(outjob_path)
+    try:
+        job = outjob_edit.read(path)
+    except FileNotFoundError:
+        return json.dumps({"success": False, "error": f"OutJob not found: {path}"})
+    except (OSError, outjob_edit.OutJobError) as e:
+        return json.dumps({"success": False, "error": f"Could not read the OutJob: {e}"})
+    before = job.text()
+    done, errors = outjob_edit.apply(job, operations, load=lambda p: outjob_edit.read(long_path(p)))
+    out = {"success": not errors, "done": done, "errors": errors, "dry_run": dry_run, **_outjob_summary(job)}
+    if dry_run or job.text() == before:
+        out["written"] = False
+        return json.dumps(out, indent=2, ensure_ascii=False)
+
+    response = await altium_bridge.execute_command("release_outjob", {"outjob_path": path})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": response.get("error", "unknown error"),
+                           "written": False, "done": done, "errors": errors})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result, strict=False)
+    outjob_edit.write(path, job)
+    out["written"] = True
+    if result.get("was_open"):
+        reopened = await altium_bridge.execute_command("reopen_outjob", {"outjob_path": path})
+        out["reopened_in_altium"] = bool(reopened.get("success"))
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+MUTATING_COMMANDS.update({"add_to_project", "release_outjob"})
+
+
 async def _simple_command(command: str, params: dict, what: str) -> str:
     """Run a bridge command and return its result as JSON text."""
     response = await altium_bridge.execute_command(command, params)
