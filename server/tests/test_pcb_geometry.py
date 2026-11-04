@@ -64,8 +64,9 @@ class ParseTest(unittest.TestCase):
 
 class ShapeTest(unittest.TestCase):
     def test_region_contours_and_outline(self):
-        rec = "region|Top Layer|GND||1000000|2000000|1100000|2100000|1|s:1000000,2000000;1100000,2000000;1100000,2100000~h:1010000,2010000;1020000,2010000;1020000,2020000"
+        rec = "region|Top Layer|GND||1000000|2000000|1100000|2100000|1|GND_TOP|s:1000000,2000000;1100000,2000000;1100000,2100000~h:1010000,2010000;1020000,2010000;1020000,2020000"
         r = geo.parse_object(rec, ORIGIN)
+        self.assertEqual(r["polygon"], "GND_TOP")
         self.assertEqual(r["contours"], [{"hole": False, "points": [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]},
                                          {"hole": True, "points": [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0)]}])
         self.assertNotIn("contours", geo.parse_object(RECORDS[8], ORIGIN))
@@ -84,6 +85,10 @@ class SelectTest(unittest.TestCase):
         mid = geo.select(RECORDS, ORIGIN, "mil", layers=["Mid Layer 1"])
         self.assertEqual([o["kind"] for o in mid], ["via", "via", "pad"])
         sig = geo.select(RECORDS, ORIGIN, "mil", nets=["sig"])
+        self.assertEqual(len(geo.select(RECORDS + RECORDS[:2], ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")))
+        texts = [o for o in geo.select(RECORDS, ORIGIN, "mil", include_hidden=False) if o["kind"] == "text"]
+        self.assertEqual([t["text"] for t in texts], ["U1|x"])
+        self.assertEqual(texts[0]["ref"], "text|Top Overlay|1010000|2010000")
         self.assertEqual([o["kind"] for o in sig], ["arc", "via", "pad"])
 
 
@@ -92,7 +97,7 @@ class RefTest(unittest.TestCase):
         self.assertEqual(geo.normalize_ref(" via|1|2 "), "via|1|2")
         self.assertEqual(geo.normalize_ref("U1-3"), "pad|U1|3")
         self.assertEqual(geo.normalize_ref("U_LS-9-A1"), "pad|U_LS-9|A1")
-        for bad in ("", "U1", "text|x|1", "-3"):
+        for bad in ("", "U1", "polygon|x|1", "-3"):
             with self.assertRaises(ValueError):
                 geo.normalize_ref(bad)
 

@@ -4261,7 +4261,8 @@ async def _geometry(params: dict, board_path: str):
 
 @_tool(read_only=True)
 async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: list = None, nets: list = None,
-                          unit: str = "mil", limit: int = 500, board_path: str = "") -> str:
+                          unit: str = "mil", limit: int = 500, include_hidden: bool = False,
+                          board_path: str = "") -> str:
     """
     List the board objects in a box: tracks, arcs, vias, pads, fills,
     regions, polygons, texts and components, with their layer, net, owner and
@@ -4269,6 +4270,10 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
 
     Each object has a "ref" that clearance and drag_copper take to find it
     again (opaque: pass it on as is).
+
+    Regions and tracks are matched by their real shape, so a board-sized
+    pour is listed only where its copper reaches the box. A pour's copper
+    (a region with in_polygon) carries its polygon's name, net and layer.
 
     Args:
         bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
@@ -4281,6 +4286,8 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
         unit (str): "mil" (default) or "mm", for bbox and the reply.
         limit (int): At most this many objects from Altium (default 500);
             total says how many touch the box.
+        include_hidden (bool): Also list component designators and comments
+            that are switched off (hidden: true). Default False.
         board_path (str): Full path of the .PcbDoc; default the focused board.
 
     Returns:
@@ -4305,7 +4312,7 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
     if error:
         return json.dumps({"success": False, "error": error})
     objects = geo.select(result.get("objects", []), (result.get("origin_x", 0), result.get("origin_y", 0)),
-                         unit, layers, nets)
+                         unit, layers, nets, include_hidden)
     return json.dumps({"board_path": result.get("board_path"), "unit": unit, "total": result.get("total"),
                        "returned": len(objects), "objects": objects}, indent=1)
 
@@ -4317,7 +4324,8 @@ async def clearance(ctx: Context, object_a: str, object_b: str, unit: str = "mil
     governs them.
 
     Args:
-        object_a (str): A "ref" from objects_in_area, or a pad as "U1-3".
+        object_a (str): A "ref" from objects_in_area (any kind but polygon
+            and component), or a pad as "U1-3".
         object_b (str): The other object, likewise.
         unit (str): "mil" (default) or "mm".
         board_path (str): Full path of the .PcbDoc; default the focused board.

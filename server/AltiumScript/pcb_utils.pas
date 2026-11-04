@@ -5189,10 +5189,154 @@ end;
 // pad|designator|name (or pad|x|y for a free pad), fill|layer|x1|y1|x2|y2,
 // region|layer|left|bottom|right|top, component|designator.
 
+// The polygon a poured region or track belongs to, or nil
+function GeoParentPolygon(Prim: IPCB_Primitive): IPCB_Polygon;
+begin
+    Result := nil;
+    if Prim.InPolygon then Result := Prim.Polygon;
+end;
+
+// A pour's copper carries no net of its own, and Altium can leave it on the
+// internal Connect Layer: its polygon's net and layer are the real ones
 function GeoNet(Prim: IPCB_Primitive): String;
+var
+    Poly : IPCB_Polygon;
 begin
     Result := '';
-    if Prim.Net <> nil then Result := Prim.Net.Name;
+    if Prim.Net <> nil then Result := Prim.Net.Name
+    else
+    begin
+        Poly := GeoParentPolygon(Prim);
+        if (Poly <> nil) and (Poly.Net <> nil) then Result := Poly.Net.Name;
+    end;
+end;
+
+function GeoLayer(Prim: IPCB_Primitive): Integer;
+var
+    Poly : IPCB_Polygon;
+begin
+    Result := Prim.Layer;
+    Poly := GeoParentPolygon(Prim);
+    if Poly <> nil then Result := Poly.Layer;
+end;
+
+function GeoPolygonName(Prim: IPCB_Primitive): String;
+var
+    Poly : IPCB_Polygon;
+begin
+    Result := '';
+    Poly := GeoParentPolygon(Prim);
+    if Poly <> nil then Result := Poly.Name;
+end;
+
+// Does the segment A-B cross the box X1,Y1-X2,Y2 (Liang-Barsky clipping)?
+function GeoSegmentHitsBox(AX, AY, BX, BY, X1, Y1, X2, Y2: Double): Boolean;
+var
+    T0, T1, DX, DY, P, Q, R : Double;
+    I : Integer;
+begin
+    Result := False;
+    T0 := 0;
+    T1 := 1;
+    DX := BX - AX;
+    DY := BY - AY;
+    for I := 0 to 3 do
+    begin
+        case I of
+            0: begin P := -DX; Q := AX - X1; end;
+            1: begin P := DX;  Q := X2 - AX; end;
+            2: begin P := -DY; Q := AY - Y1; end;
+            3: begin P := DY;  Q := Y2 - AY; end;
+        end;
+        if P = 0 then
+        begin
+            if Q < 0 then Exit;
+        end
+        else
+        begin
+            R := Q / P;
+            if P < 0 then
+            begin
+                if R > T1 then Exit;
+                if R > T0 then T0 := R;
+            end
+            else
+            begin
+                if R < T0 then Exit;
+                if R < T1 then T1 := R;
+            end;
+        end;
+    end;
+    Result := True;
+end;
+
+// One contour against the box: 0 outside it, 1 the box is inside the
+// contour, 2 an edge crosses the box
+function GeoContourVsBox(C: IDispatch; X1, Y1, X2, Y2: Integer): Integer;
+var
+    I, J, N : Integer;
+    CX, CY, AX, AY, BX, BY : Double;
+    Inside : Boolean;
+begin
+    N := C.Count;
+    CX := (X1 + X2) / 2;
+    CY := (Y1 + Y2) / 2;
+    Inside := False;
+    J := N - 1;
+    for I := 0 to N - 1 do
+    begin
+        AX := C.x(J); AY := C.y(J);
+        BX := C.x(I); BY := C.y(I);
+        if GeoSegmentHitsBox(AX, AY, BX, BY, X1, Y1, X2, Y2) then
+        begin
+            Result := 2;
+            Exit;
+        end;
+        if ((BY > CY) <> (AY > CY)) and (CX < (AX - BX) * (CY - BY) / (AY - BY) + BX) then Inside := not Inside;
+        J := I;
+    end;
+    if Inside then Result := 1 else Result := 0;
+end;
+
+// Does a region's copper (its outline less its holes) touch the box? A
+// whole-board pour's bounds touch every box; its shape does not.
+function GeoRegionTouchesBox(Region: IPCB_Region; X1, Y1, X2, Y2: Integer): Boolean;
+var
+    GP : IDispatch;
+    K  : Integer;
+begin
+    Result := False;
+    GP := Region.GeometricPolygon;
+    for K := 0 to GP.Count - 1 do
+        if not GP.IsHole(K) then
+            if GeoContourVsBox(GP.Contour(K), X1, Y1, X2, Y2) > 0 then Result := True;
+    if not Result then Exit;
+    // the box wholly inside a hole touches no copper
+    for K := 0 to GP.Count - 1 do
+        if GP.IsHole(K) then
+            if GeoContourVsBox(GP.Contour(K), X1, Y1, X2, Y2) = 1 then
+            begin
+                Result := False;
+                Exit;
+            end;
+end;
+
+// Does the object's shape touch the box? Regions and tracks are tested by
+// shape, the rest by bounds (the spatial iterator's own test).
+function GeoTouchesBox(Prim: IPCB_Primitive; X1, Y1, X2, Y2: Integer): Boolean;
+var
+    Track : IPCB_Track;
+    H     : Integer;
+begin
+    Result := True;
+    if Prim.ObjectId = eRegionObject then
+        Result := GeoRegionTouchesBox(Prim, X1, Y1, X2, Y2)
+    else if Prim.ObjectId = eTrackObject then
+    begin
+        Track := Prim;
+        H := Track.Width div 2;
+        Result := GeoSegmentHitsBox(Track.x1, Track.y1, Track.x2, Track.y2, X1 - H, Y1 - H, X2 + H, Y2 + H);
+    end;
 end;
 
 function GeoOwner(Prim: IPCB_Primitive): String;
@@ -5222,7 +5366,7 @@ var
     Hidden : Boolean;
 begin
     Result := '';
-    Head := Layer2String(Prim.Layer) + '|' + GeoNet(Prim) + '|' + GeoOwner(Prim) + '|';
+    Head := Layer2String(GeoLayer(Prim)) + '|' + GeoNet(Prim) + '|' + GeoOwner(Prim) + '|';
     R := Prim.BoundingRectangle;
     case Prim.ObjectId of
         eTrackObject:
@@ -5259,7 +5403,7 @@ begin
         end;
         eRegionObject:
             Result := 'region|' + Head + IntToStr(R.Left) + '|' + IntToStr(R.Bottom) + '|' + IntToStr(R.Right) + '|' +
-                      IntToStr(R.Top) + '|' + GeoFlag(Prim.InPolygon);
+                      IntToStr(R.Top) + '|' + GeoFlag(Prim.InPolygon) + '|' + GeoPolygonName(Prim);
         ePolyObject:
             Result := 'polygon|' + Head + IntToStr(R.Left) + '|' + IntToStr(R.Bottom) + '|' + IntToStr(R.Right) + '|' +
                       IntToStr(R.Top);
@@ -5376,7 +5520,7 @@ begin
         Prim := It.FirstPCBObject;
         while Prim <> nil do
         begin
-            Rec := GeoRecord(Prim);
+            if GeoTouchesBox(Prim, X1, Y1, X2, Y2) then Rec := GeoRecord(Prim) else Rec := '';
             // For drawing: the outline of a region, not just its bounds
             if Shapes and (Rec <> '') and (Prim.ObjectId = eRegionObject) then
                 Rec := Rec + '|' + GeoContours(Prim);
@@ -5470,6 +5614,7 @@ begin
     else if Kind = 'pad' then ObjSet := MkSet(ePadObject)
     else if Kind = 'fill' then ObjSet := MkSet(eFillObject)
     else if Kind = 'region' then ObjSet := MkSet(eRegionObject)
+    else if Kind = 'text' then ObjSet := MkSet(eTextObject)
     else Exit;
     M := 10;
     It := Board.SpatialIterator_Create;
@@ -5479,7 +5624,7 @@ begin
     Prim := It.FirstPCBObject;
     while (Prim <> nil) and (Result = nil) do
     begin
-        if (LayerName = '') or SameText(Layer2String(Prim.Layer), LayerName) then
+        if (LayerName = '') or SameText(Layer2String(GeoLayer(Prim)), LayerName) then
         begin
             if Kind = 'track' then
             begin
@@ -5512,6 +5657,10 @@ begin
             begin
                 R := Prim.BoundingRectangle;
                 if (R.Left = A) and (R.Bottom = B) and (R.Right = C) and (R.Top = D) then Result := Prim;
+            end
+            else if Kind = 'text' then
+            begin
+                if (Prim.XLocation = A) and (Prim.YLocation = B) then Result := Prim;
             end;
         end;
         Prim := It.NextPCBObject;
