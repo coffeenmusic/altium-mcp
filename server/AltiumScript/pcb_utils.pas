@@ -4704,6 +4704,255 @@ begin
     end;
 end;
 
+// The kind of a free primitive delete_pcb_objects and modify_pcb_objects act
+// on, or '' for one they leave alone: pads, anything of a component, and the
+// copper a polygon poured (it is the polygon's own and goes with it)
+function EditableKind(Prim: IPCB_Primitive): String;
+begin
+    Result := '';
+    if Prim.InComponent or Prim.InPolygon then Exit;
+    case Prim.ObjectId of
+        eTrackObject:  Result := 'track';
+        eArcObject:    Result := 'arc';
+        eViaObject:    Result := 'via';
+        ePolyObject:   Result := 'polygon';
+        eRegionObject: Result := 'region';
+        eFillObject:   Result := 'fill';
+    end;
+end;
+
+// The primitives matching every filter: Kinds is '|track|via|...|', NetName
+// and LayerName '' for any, Area 'x1|y1|x2|y2' (internal units from the board
+// origin) or '' for anywhere; an object matches the area when it lies inside.
+// A via matches a layer it spans.
+function MatchPCBObjects(Board: IPCB_Board; Kinds: String; NetName: String; Layer: Integer;
+                         Area: String; Found: TInterfaceList): Integer;
+var
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+    Kind     : String;
+    R        : TCoordRect;
+    X1, Y1, X2, Y2 : Integer;
+    Ok       : Boolean;
+begin
+    if Area <> '' then
+    begin
+        X1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 0));
+        Y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 1));
+        X2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 2));
+        Y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 3));
+    end;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Prim := Iterator.FirstPCBObject;
+    while Prim <> nil do
+    begin
+        Kind := EditableKind(Prim);
+        Ok := (Kind <> '') and (Pos('|' + Kind + '|', Kinds) > 0);
+        if Ok and (NetName <> '') then
+            Ok := (Prim.Net <> nil) and (UpperCase(Prim.Net.Name) = UpperCase(NetName));
+        if Ok and (Layer <> eNoLayer) then
+        begin
+            if Prim.ObjectId = eViaObject then
+                Ok := (Prim.LowLayer <= Layer) and (Layer <= Prim.HighLayer)
+            else
+                Ok := Prim.Layer = Layer;
+        end;
+        if Ok and (Area <> '') then
+        begin
+            R := Prim.BoundingRectangle;
+            Ok := (R.Left >= X1) and (R.Right <= X2) and (R.Bottom >= Y1) and (R.Top <= Y2);
+        end;
+        if Ok then Found.Add(Prim);
+        Prim := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+    Result := Found.Count;
+end;
+
+// One matched object for the result: kind, net, layer, position in mils
+function PCBObjectJSON(Board: IPCB_Board; Prim: IPCB_Primitive): String;
+var
+    Item : TStringList;
+    R    : TCoordRect;
+begin
+    Item := TStringList.Create;
+    try
+        AddJSONProperty(Item, 'kind', EditableKind(Prim));
+        if Prim.Net <> nil then AddJSONProperty(Item, 'net', Prim.Net.Name) else AddJSONProperty(Item, 'net', '');
+        if Prim.ObjectId = eViaObject then
+        begin
+            AddJSONProperty(Item, 'layer', Layer2String(Prim.LowLayer) + ' - ' + Layer2String(Prim.HighLayer));
+            AddJSONNumber(Item, 'x', CoordToMils(Prim.x - Board.XOrigin));
+            AddJSONNumber(Item, 'y', CoordToMils(Prim.y - Board.YOrigin));
+            AddJSONNumber(Item, 'diameter_mils', CoordToMils(Prim.Size));
+            AddJSONNumber(Item, 'hole_mils', CoordToMils(Prim.HoleSize));
+        end
+        else
+        begin
+            AddJSONProperty(Item, 'layer', Layer2String(Prim.Layer));
+            if Prim.ObjectId = eTrackObject then
+            begin
+                AddJSONNumber(Item, 'x1', CoordToMils(Prim.x1 - Board.XOrigin));
+                AddJSONNumber(Item, 'y1', CoordToMils(Prim.y1 - Board.YOrigin));
+                AddJSONNumber(Item, 'x2', CoordToMils(Prim.x2 - Board.XOrigin));
+                AddJSONNumber(Item, 'y2', CoordToMils(Prim.y2 - Board.YOrigin));
+                AddJSONNumber(Item, 'width_mils', CoordToMils(Prim.Width));
+            end
+            else
+            begin
+                R := Prim.BoundingRectangle;
+                AddJSONNumber(Item, 'left', CoordToMils(R.Left - Board.XOrigin));
+                AddJSONNumber(Item, 'bottom', CoordToMils(R.Bottom - Board.YOrigin));
+                AddJSONNumber(Item, 'right', CoordToMils(R.Right - Board.XOrigin));
+                AddJSONNumber(Item, 'top', CoordToMils(R.Top - Board.YOrigin));
+                if Prim.ObjectId = eArcObject then AddJSONNumber(Item, 'width_mils', CoordToMils(Prim.LineWidth));
+                if Prim.ObjectId = ePolyObject then AddJSONProperty(Item, 'name', Prim.Name);
+            end;
+        end;
+        Result := BuildJSONObject(Item, 1);
+    finally
+        Item.Free;
+    end;
+end;
+
+// delete_pcb_objects and modify_pcb_objects. Action is 'delete' or 'modify';
+// with DryRun nothing changes and the matches are listed. Modify sets what is
+// given: Width (tracks, arcs), ViaSize and ViaHole (vias), the net when SetNet
+// ('' removes it), NewLayerName (tracks, arcs, fills, regions); -1 or ''
+// leaves a value alone. All of it is one undo step.
+function EditPCBObjects(Action: String; Kinds: String; NetName: String; LayerName: String; Area: String;
+                        DryRun: Boolean; Width: Integer; ViaSize: Integer; ViaHole: Integer;
+                        SetNet: Boolean; NewNetName: String; NewLayerName: String): String;
+var
+    Board    : IPCB_Board;
+    Found, Polys : TInterfaceList;
+    Prim     : IPCB_Primitive;
+    Layer, NewLayer, i, Changed, Skipped : Integer;
+    NewNet   : IPCB_Net;
+    Kind     : String;
+    Items, Props : TStringList;
+    Did      : Boolean;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    if (NetName <> '') and (FindBoardNet(Board, NetName) = nil) then
+    begin
+        Result := 'ERROR: Net not found on the board: ' + NetName;
+        Exit;
+    end;
+    Layer := eNoLayer;
+    if LayerName <> '' then
+    begin
+        Layer := ResolveBoardLayer(Board, LayerName);
+        if Layer = eNoLayer then
+        begin
+            Result := 'ERROR: ' + LayerName + ' is not a copper layer of this board';
+            Exit;
+        end;
+    end;
+    NewNet := nil;
+    if SetNet and (NewNetName <> '') then
+    begin
+        NewNet := FindBoardNet(Board, NewNetName);
+        if NewNet = nil then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NewNetName;
+            Exit;
+        end;
+    end;
+    NewLayer := eNoLayer;
+    if NewLayerName <> '' then
+    begin
+        NewLayer := ResolveBoardLayer(Board, NewLayerName);
+        if NewLayer = eNoLayer then
+        begin
+            Result := 'ERROR: ' + NewLayerName + ' is not a copper layer of this board';
+            Exit;
+        end;
+    end;
+
+    Found := TInterfaceList.Create;
+    Polys := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        MatchPCBObjects(Board, Kinds, NetName, Layer, Area, Found);
+        for i := 0 to Found.Count - 1 do
+            if i < 50 then Items.Add(PCBObjectJSON(Board, Found.Items[i]));
+
+        Changed := 0;
+        Skipped := 0;
+        if (not DryRun) and (Found.Count > 0) then
+        begin
+            // PostProcess must run whatever happens, or Altium's undo stays broken
+            PCBServer.PreProcess;
+            try
+                for i := 0 to Found.Count - 1 do
+                begin
+                    Prim := Found.Items[i];
+                    if Action = 'delete' then
+                    begin
+                        Board.RemovePCBObject(Prim);
+                        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+                        Changed := Changed + 1;
+                    end
+                    else
+                    begin
+                        Kind := EditableKind(Prim);
+                        Did := False;
+                        PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                        if (Width >= 0) and (Kind = 'track') then begin Prim.Width := Width; Did := True; end;
+                        if (Width >= 0) and (Kind = 'arc') then begin Prim.LineWidth := Width; Did := True; end;
+                        if (ViaSize >= 0) and (Kind = 'via') then begin Prim.Size := ViaSize; Did := True; end;
+                        if (ViaHole >= 0) and (Kind = 'via') then begin Prim.HoleSize := ViaHole; Did := True; end;
+                        if SetNet then begin Prim.Net := NewNet; Did := True; end;
+                        if (NewLayer <> eNoLayer) and ((Kind = 'track') or (Kind = 'arc') or (Kind = 'fill') or (Kind = 'region')) then
+                        begin
+                            Prim.Layer := NewLayer;
+                            Did := True;
+                        end;
+                        PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                        if Did then Changed := Changed + 1 else Skipped := Skipped + 1;
+                        if Did and (Kind = 'polygon') then Polys.Add(Prim);
+                    end;
+                end;
+                // a polygon given another net pours again for it
+                for i := 0 to Polys.Count - 1 do
+                    Polys.Items[i].Rebuild;
+            finally
+                PCBServer.PostProcess;
+            end;
+            Board.ViewManager_FullUpdate;
+        end;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'action', Action);
+        AddJSONBoolean(Props, 'dry_run', DryRun);
+        AddJSONInteger(Props, 'matched', Found.Count);
+        if Action = 'delete' then AddJSONInteger(Props, 'deleted', Changed)
+        else
+        begin
+            AddJSONInteger(Props, 'changed', Changed);
+            AddJSONInteger(Props, 'unchanged', Skipped);
+        end;
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'objects')) else Props.Add('"objects": []');
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Found.Free;
+        Polys.Free;
+        Items.Free;
+        Props.Free;
+    end;
+end;
+
 // Add the vias of place_vias to the focused board. Each record is
 // 'x|y|diameter|hole|net|start layer|end layer', x and y in internal units
 // relative to the board origin, sizes in internal units, an empty net for a
