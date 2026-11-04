@@ -39,8 +39,9 @@ class ComponentTest(unittest.TestCase):
     def test_matched_by_unique_id(self):
         d = diff()
         self.assertEqual(d["add_components"], [{"designator": "R5", "footprint": "R0603", "comment": "1k"}])
-        self.assertEqual([c["designator"] for c in d["remove_components"]], ["R9", "LOGO1"])
-        self.assertIn("board only", d["remove_components"][1]["reason"])
+        # a board-only part (no schematic link) is left alone by the ECO
+        self.assertEqual([c["designator"] for c in d["remove_components"]], ["R9"])
+        self.assertEqual(d["board_only_components"], [{"designator": "LOGO1", "footprint": "LOGO"}])
         self.assertEqual(d["change_designators"], [{"from": "U3", "to": "U2"}])
         self.assertEqual(d["change_footprints"], [{"designator": "C1", "from": "C0805", "to": "C0603"}])
         self.assertEqual(d["change_comments"], [])
@@ -52,12 +53,11 @@ class NetTest(unittest.TestCase):
         self.assertEqual(d["rename_nets"], [{"from": "N1", "to": "MID"}])
         # U2-2 joins SENSE, whose other pin (R5) is not on the board yet; the
         # mounting hole pad has no schematic pin and is left alone. LONELY
-        # has one pin, so with single-pin nets off the netlist leaves it out
-        # and the update takes J1-1 off it, as it does on a real board
-        self.assertEqual(d["change_pin_nets"], [{"pin": "J1-1", "from": "LONELY", "to": ""},
-                                                {"pin": "U3-2", "from": "", "to": "SENSE"}])
+        # has one pin, so with single-pin nets off the ECO leaves J1-1 and
+        # its board net as they are (checked against Altium AD25's ECO)
+        self.assertEqual(d["change_pin_nets"], [{"pin": "U3-2", "from": "", "to": "SENSE"}])
         self.assertEqual(d["add_nets"], ["SENSE"])
-        self.assertEqual(d["remove_nets"], ["LONELY", "X"])
+        self.assertEqual(d["remove_nets"], ["X"])
         on = diff(True)
         self.assertEqual(on["change_pin_nets"], [{"pin": "U3-2", "from": "", "to": "SENSE"}])
         self.assertEqual(on["remove_nets"], ["X"])
@@ -101,10 +101,11 @@ class ClassAndRoomTest(unittest.TestCase):
 class OutputTest(unittest.TestCase):
     def test_summary_and_limit(self):
         d = diff()
-        self.assertEqual(eco_preview.summary(d)["remove_components"], 2)
+        self.assertEqual(eco_preview.summary(d)["remove_components"], 1)
+        self.assertNotIn("board_only_components", eco_preview.summary(d))
         shown, cut = eco_preview.limit(d, 1)
         self.assertEqual(len(shown["remove_components"]), 1)
-        self.assertIn("remove_components", cut)
+        self.assertEqual(sorted(cut), sorted(k for k, v in d.items() if len(v) > 1))
         self.assertNotIn("add_rooms", shown)
 
     def test_fields_with_bars(self):
