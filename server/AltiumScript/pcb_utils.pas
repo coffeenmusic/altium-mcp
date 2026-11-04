@@ -4704,6 +4704,474 @@ begin
     end;
 end;
 
+// Via stitching. Altium keeps each stitching group as a union of vias; its
+// settings (grid, stagger, clearances) are stored with the union in the file
+// but are not reachable from a script, so the server reads those from the
+// saved .PcbDoc. Groups are listed by the vias that carry their union index.
+
+// The via unions on the focused board, optionally only those on NetName
+function GetViaStitchingGroups(NetName: String): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Via      : IPCB_Via;
+    Keys, Counts, Items, Item, Props : TStringList;
+    Firsts   : TInterfaceList;
+    i, k     : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Keys := TStringList.Create;
+    Counts := TStringList.Create;
+    Firsts := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Item := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Via := Iterator.FirstPCBObject;
+        while Via <> nil do
+        begin
+            if (Via.UnionIndex <> 0) and (Via.Net <> nil) and
+               ((NetName = '') or (UpperCase(Via.Net.Name) = UpperCase(NetName))) then
+            begin
+                k := Keys.IndexOf(IntToStr(Via.UnionIndex));
+                if k < 0 then
+                begin
+                    Keys.Add(IntToStr(Via.UnionIndex));
+                    Counts.Add('1');
+                    Firsts.Add(Via);
+                end
+                else
+                    Counts[k] := IntToStr(StrToInt(Counts[k]) + 1);
+            end;
+            Via := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        for i := 0 to Keys.Count - 1 do
+        begin
+            Via := Firsts.Items[i];
+            Item.Clear;
+            AddJSONInteger(Item, 'union_index', Via.UnionIndex);
+            AddJSONProperty(Item, 'net', Via.Net.Name);
+            AddJSONInteger(Item, 'vias', StrToInt(Counts[i]));
+            AddJSONNumber(Item, 'diameter_mils', CoordToMils(Via.Size));
+            AddJSONNumber(Item, 'hole_mils', CoordToMils(Via.HoleSize));
+            AddJSONProperty(Item, 'start_layer', Layer2String(Via.LowLayer));
+            AddJSONProperty(Item, 'end_layer', Layer2String(Via.HighLayer));
+            Items.Add(BuildJSONObject(Item, 1));
+        end;
+        AddJSONBoolean(Props, 'success', True);
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'groups')) else Props.Add('"groups": []');
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Keys.Free;
+        Counts.Free;
+        Firsts.Free;
+        Items.Free;
+        Item.Free;
+        Props.Free;
+    end;
+end;
+
+// The first copper primitive on Net, or nil
+function FirstNetPrimitive(Board: IPCB_Board; Net: IPCB_Net): IPCB_Primitive;
+var
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+begin
+    Result := nil;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(ePadObject, eViaObject, eTrackObject, eArcObject, ePolyObject, eRegionObject, eFillObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Prim := Iterator.FirstPCBObject;
+    while (Prim <> nil) and (Result = nil) do
+    begin
+        if Prim.Net = Net then Result := Prim;
+        Prim := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// Run Altium's Add Stitching to Net for NetName. Its dialog takes the net from
+// the selection, so one primitive of the net is selected while it runs; the
+// user's selection is restored afterwards. The server fills in and confirms
+// the dialog from outside while this waits.
+function RunViaStitching(NetName: String): String;
+var
+    Board    : IPCB_Board;
+    Net      : IPCB_Net;
+    Prim     : IPCB_Primitive;
+    Iterator : IPCB_BoardIterator;
+    Via      : IPCB_Via;
+    Before, NewGroups, RowY, RowX, Rows : TStringList;
+    Saved    : TInterfaceList;
+    i, k, Added, X, Y : Integer;
+    Props    : TStringList;
+    First    : IPCB_Via;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Net := FindBoardNet(Board, NetName);
+    if Net = nil then
+    begin
+        Result := 'ERROR: Net not found on the board: ' + NetName;
+        Exit;
+    end;
+    Prim := FirstNetPrimitive(Board, Net);
+    if Prim = nil then
+    begin
+        Result := 'ERROR: Net ' + NetName + ' has no copper on the board to stitch';
+        Exit;
+    end;
+
+    Before := TStringList.Create;
+    NewGroups := TStringList.Create;
+    RowY := TStringList.Create;
+    RowX := TStringList.Create;
+    Rows := TStringList.Create;
+    Saved := TInterfaceList.Create;
+    Props := TStringList.Create;
+    try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Via := Iterator.FirstPCBObject;
+        while Via <> nil do
+        begin
+            if (Via.UnionIndex <> 0) and (Before.IndexOf(IntToStr(Via.UnionIndex)) < 0) then
+                Before.Add(IntToStr(Via.UnionIndex));
+            Via := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        for i := 0 to Board.SelectecObjectCount - 1 do
+            Saved.Add(Board.SelectecObject[i]);
+        Board.SelectedObjects_Clear;
+        Prim.Selected := True;
+        try
+            ResetParameters;
+            AddStringParameter('Mode', 'Flood');
+            RunProcess('PCB:DoViaStitching');
+        finally
+            Board.SelectedObjects_Clear;
+            for i := 0 to Saved.Count - 1 do
+                Saved.Items[i].Selected := True;
+        end;
+
+        Added := 0;
+        First := nil;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Via := Iterator.FirstPCBObject;
+        while Via <> nil do
+        begin
+            if (Via.UnionIndex <> 0) and (Before.IndexOf(IntToStr(Via.UnionIndex)) < 0) then
+            begin
+                Added := Added + 1;
+                if First = nil then First := Via;
+                if NewGroups.IndexOf(IntToStr(Via.UnionIndex)) < 0 then NewGroups.Add(IntToStr(Via.UnionIndex));
+                // each row's first via, so the server can tell a staggered grid
+                X := Via.x - Board.XOrigin;
+                Y := Via.y - Board.YOrigin;
+                k := RowY.IndexOf(IntToStr(Y));
+                if k < 0 then
+                begin
+                    RowY.Add(IntToStr(Y));
+                    RowX.Add(IntToStr(X));
+                end
+                else if X < StrToInt(RowX[k]) then
+                    RowX[k] := IntToStr(X);
+            end;
+            Via := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'net', Net.Name);
+        AddJSONInteger(Props, 'vias_added', Added);
+        if NewGroups.Count > 0 then AddJSONInteger(Props, 'union_index', StrToInt(NewGroups[0]));
+        if First <> nil then
+        begin
+            AddJSONNumber(Props, 'diameter_mils', CoordToMils(First.Size));
+            AddJSONNumber(Props, 'hole_mils', CoordToMils(First.HoleSize));
+            AddJSONProperty(Props, 'start_layer', Layer2String(First.LowLayer));
+            AddJSONProperty(Props, 'end_layer', Layer2String(First.HighLayer));
+        end;
+        for i := 0 to RowY.Count - 1 do
+            Rows.Add('[' + IntToStr(StrToInt(RowY[i])) + ', ' + IntToStr(StrToInt(RowX[i])) + ']');
+        if Rows.Count > 0 then Props.Add(BuildJSONArray(Rows, 'rows')) else Props.Add('"rows": []');
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Before.Free;
+        NewGroups.Free;
+        RowY.Free;
+        RowX.Free;
+        Rows.Free;
+        Saved.Free;
+        Props.Free;
+    end;
+end;
+
+// Run Altium's Add Shielding to Net for NetName. The dialog shields the net
+// of the selection, so all its tracks and arcs are selected while it runs (all
+// of them, so "Selected Objects" in the dialog shields the whole net either
+// way); the user's selection is restored afterwards. Reports what the new
+// shielding group holds: vias, copper (polygons) and cutouts (regions).
+function RunViaShielding(NetName: String): String;
+var
+    Board    : IPCB_Board;
+    Net      : IPCB_Net;
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+    Before, After, NewGroups, Gone : TStringList;
+    Saved    : TInterfaceList;
+    i, Vias, Copper, Cutouts, Picked : Integer;
+    ViaNet   : String;
+    First    : IPCB_Via;
+    Props    : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Net := FindBoardNet(Board, NetName);
+    if Net = nil then
+    begin
+        Result := 'ERROR: Net not found on the board: ' + NetName;
+        Exit;
+    end;
+
+    Before := TStringList.Create;
+    After := TStringList.Create;
+    NewGroups := TStringList.Create;
+    Gone := TStringList.Create;
+    Saved := TInterfaceList.Create;
+    Props := TStringList.Create;
+    try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject, ePolyObject, eRegionObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while Prim <> nil do
+        begin
+            if (Prim.UnionIndex <> 0) and (Before.IndexOf(IntToStr(Prim.UnionIndex)) < 0) then
+                Before.Add(IntToStr(Prim.UnionIndex));
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        for i := 0 to Board.SelectecObjectCount - 1 do
+            Saved.Add(Board.SelectecObject[i]);
+        Board.SelectedObjects_Clear;
+        Picked := 0;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while Prim <> nil do
+        begin
+            if Prim.Net = Net then
+            begin
+                Prim.Selected := True;
+                Picked := Picked + 1;
+            end;
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        if Picked = 0 then
+        begin
+            for i := 0 to Saved.Count - 1 do
+                Saved.Items[i].Selected := True;
+            Result := 'ERROR: Net ' + NetName + ' has no tracks to shield';
+            Exit;
+        end;
+        try
+            ResetParameters;
+            AddStringParameter('Mode', 'AddShielding');
+            RunProcess('PCB:DoViaShielding');
+        finally
+            Board.SelectedObjects_Clear;
+            for i := 0 to Saved.Count - 1 do
+                Saved.Items[i].Selected := True;
+        end;
+
+        Vias := 0;
+        Copper := 0;
+        Cutouts := 0;
+        First := nil;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject, ePolyObject, eRegionObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while Prim <> nil do
+        begin
+            if Prim.UnionIndex <> 0 then
+            begin
+                if After.IndexOf(IntToStr(Prim.UnionIndex)) < 0 then After.Add(IntToStr(Prim.UnionIndex));
+                if Before.IndexOf(IntToStr(Prim.UnionIndex)) < 0 then
+                begin
+                    if NewGroups.IndexOf(IntToStr(Prim.UnionIndex)) < 0 then NewGroups.Add(IntToStr(Prim.UnionIndex));
+                    if Prim.ObjectId = eViaObject then
+                    begin
+                        Vias := Vias + 1;
+                        if First = nil then First := Prim;
+                    end
+                    else if Prim.ObjectId = ePolyObject then
+                        Copper := Copper + 1
+                    else
+                        Cutouts := Cutouts + 1;
+                end;
+            end;
+            Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        for i := 0 to Before.Count - 1 do
+            if After.IndexOf(Before[i]) < 0 then Gone.Add(Before[i]);
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'net', Net.Name);
+        AddJSONInteger(Props, 'tracks_selected', Picked);
+        AddJSONInteger(Props, 'vias_added', Vias);
+        AddJSONInteger(Props, 'copper_polygons', Copper);
+        AddJSONInteger(Props, 'cutout_regions', Cutouts);
+        if NewGroups.Count > 0 then AddJSONInteger(Props, 'union_index', StrToInt(NewGroups[0]));
+        if Gone.Count > 0 then AddJSONInteger(Props, 'replaced_union_index', StrToInt(Gone[0]));
+        if First <> nil then
+        begin
+            if First.Net <> nil then ViaNet := First.Net.Name else ViaNet := '';
+            AddJSONProperty(Props, 'via_net', ViaNet);
+            AddJSONNumber(Props, 'diameter_mils', CoordToMils(First.Size));
+            AddJSONNumber(Props, 'hole_mils', CoordToMils(First.HoleSize));
+            AddJSONProperty(Props, 'start_layer', Layer2String(First.LowLayer));
+            AddJSONProperty(Props, 'end_layer', Layer2String(First.HighLayer));
+        end;
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Before.Free;
+        After.Free;
+        NewGroups.Free;
+        Gone.Free;
+        Saved.Free;
+        Props.Free;
+    end;
+end;
+
+// Delete the stitching group UnionIndex with Altium's own delete (PCB:Clear on
+// its selected vias), which removes the group too. Deleting the vias from a
+// script (RemovePCBObject) leaves an empty group in the saved board.
+function RemoveViaStitchingGroup(UnionIndex: Integer): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Via      : IPCB_Via;
+    Found    : TInterfaceList;
+    Saved    : TInterfaceList;
+    i, Left  : Integer;
+    Props    : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Found := TInterfaceList.Create;
+    Props := TStringList.Create;
+    try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Via := Iterator.FirstPCBObject;
+        while Via <> nil do
+        begin
+            if Via.UnionIndex = UnionIndex then Found.Add(Via);
+            Via := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        if Found.Count = 0 then
+        begin
+            Result := 'ERROR: No vias in group ' + IntToStr(UnionIndex);
+            Exit;
+        end;
+
+        AddJSONBoolean(Props, 'success', True);
+        Via := Found.Items[0];
+        if Via.Net <> nil then AddJSONProperty(Props, 'net', Via.Net.Name) else AddJSONProperty(Props, 'net', '');
+        Saved := TInterfaceList.Create;
+        try
+            for i := 0 to Board.SelectecObjectCount - 1 do
+                Saved.Add(Board.SelectecObject[i]);
+            Board.SelectedObjects_Clear;
+            for i := 0 to Found.Count - 1 do
+                Found.Items[i].Selected := True;
+            try
+                ResetParameters;
+                RunProcess('PCB:Clear');
+            finally
+                Board.SelectedObjects_Clear;
+                for i := 0 to Saved.Count - 1 do
+                    Saved.Items[i].Selected := True;
+            end;
+        finally
+            Saved.Free;
+        end;
+        Board.ViewManager_FullUpdate;
+
+        Left := 0;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Via := Iterator.FirstPCBObject;
+        while Via <> nil do
+        begin
+            if Via.UnionIndex = UnionIndex then Left := Left + 1;
+            Via := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        if Left > 0 then
+        begin
+            Result := 'ERROR: Altium deleted only ' + IntToStr(Found.Count - Left) + ' of the group''s ' +
+                      IntToStr(Found.Count) + ' vias';
+            Exit;
+        end;
+        AddJSONInteger(Props, 'vias_removed', Found.Count);
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Found.Free;
+        Props.Free;
+    end;
+end;
+
 // Add the vias of place_vias to the focused board. Each record is
 // 'x|y|diameter|hole|net|start layer|end layer', x and y in internal units
 // relative to the board origin, sizes in internal units, an empty net for a
