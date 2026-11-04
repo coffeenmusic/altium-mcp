@@ -11,7 +11,7 @@ import subprocess
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import sys
 import win32gui
 import win32ui
@@ -3167,6 +3167,135 @@ async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer
 
 # Change the design: a timeout leaves their outcome unknown, so no blind retry
 MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout"})
+
+async def _run_query(command: str, params: dict) -> Tuple[Optional[dict], str]:
+    """Run a query command, answering Altium's parse error dialog if one opens."""
+    import pcb_query
+
+    errors: list = []
+    abort = asyncio.Event()
+    watcher = asyncio.create_task(pcb_query.watch_errors(errors, abort))
+    bridge = asyncio.create_task(altium_bridge.execute_command(command, params))
+    aborted = asyncio.create_task(abort.wait())
+    try:
+        await asyncio.wait({bridge, aborted}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (watcher, aborted):
+            task.cancel()
+    if abort.is_set():
+        # The script was cancelled and will not answer: stop waiting for it
+        bridge.cancel()
+        try:
+            await bridge
+        except (asyncio.CancelledError, Exception):
+            pass
+        await altium_bridge.stop_script_debugger()
+        return None, "Altium could not evaluate the expression: " + errors[0]
+    response = bridge.result()
+    if errors:
+        return None, "Altium could not read the expression: " + "; ".join(errors)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result, strict=False)
+    return result, ""
+
+@_tool(read_only=True)
+async def query_objects(ctx: Context, expression: str, limit: int = 200, board_path: str = "") -> str:
+    """
+    Find PCB objects with Altium's own query language, as the PCB Filter
+    panel and rule scopes use it.
+
+    Examples: "IsVia And InNet('GND')", "IsTrack And OnTopLayer And
+    (Width < 6mil)", "InComponent('U1') And IsPad", "IsPolygon",
+    "InNetClass('Power')". A component is found by Name ("IsComponent And
+    (Name = 'U1')"; there is no Designator property) and a pad by its full
+    name ("IsPad And (Name = 'U1-3')"). Text is quoted with ' and compared
+    as text: Name = 1 fails where Name = '1' works.
+
+    An expression Altium cannot read or evaluate comes back as an error with
+    Altium's message; the dialog it raises is answered, so Altium is not
+    left waiting.
+
+    Give sizes with a unit (6mil, 0.15mm). The engine reads bare numbers in
+    its own unit, which is not always the board's display unit, and a unit
+    written inside the query is a syntax error; so each value with a unit is
+    converted to the unit the engine uses on this board before the query
+    runs. Decimals take a dot. The user's selection is left as it was.
+
+    Args:
+        expression (str): The query.
+        limit (int): How many objects to list in full; matched counts all.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with matched, by_kind counts, and the objects: kind, name
+             (designator, pad, polygon, rule), net, layer and bounds in mils
+             from the board origin. expression_run is what the engine ran.
+    """
+    import pcb_query
+
+    error = pcb_query.check(expression)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    in_mm, in_mil, values = pcb_query.with_units(expression)
+    result, error = await _run_query("query_objects", {
+        "expr_mm": in_mm, "expr_mil": in_mil, "limit": max(0, int(limit)), "board_path": long_path(board_path)})
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    bare = pcb_query.bare_numbers(expression)
+    if bare:
+        result["warning"] = (f"{', '.join(bare)} has no unit, so the engine read it in "
+                             f"{result.get('engine_unit') or 'its own unit'}. Give sizes with a unit.")
+    if not result.get("matched"):
+        result["note"] = "Nothing matched."
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+@_tool(read_only=True)
+async def which_rule(ctx: Context, object_a: str, object_b: str, rule_kind: str = "clearance",
+                     board_path: str = "") -> str:
+    """
+    Which design rule applies between two PCB objects, and how far apart
+    they are: Altium's own FindDominantRuleForObjectPair, the rule DRC uses.
+
+    Each object is a query expression (as for query_objects) that must match
+    exactly one object, e.g. "IsPad And (Name = 'U1-3')" or
+    "IsVia And InNet('GND') And (X = 1250mil) And (Y = 800mil)".
+
+    Args:
+        object_a, object_b (str): Query expressions, one object each.
+        rule_kind (str): clearance (default), width, routing_via, hole_size,
+            polygon_connect, plane_connect, solder_mask_expansion,
+            paste_mask_expansion, short_circuit, hole_to_hole, silk_to_silk,
+            silk_to_mask, component_clearance.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with both objects, distance_mils (edge to edge), and the
+             rule: name, descriptor, priority, scopes, and for clearance
+             gap_mils and whether the distance passes it.
+    """
+    import pcb_query
+
+    for expr in (object_a, object_b):
+        error = pcb_query.check(expr)
+        if error:
+            return json.dumps({"success": False, "error": error})
+    a_mm, a_mil, _ = pcb_query.with_units(object_a)
+    b_mm, b_mil, _ = pcb_query.with_units(object_b)
+    result, error = await _run_query("which_rule", {
+        "a_mm": a_mm, "a_mil": a_mil, "b_mm": b_mm, "b_mil": b_mil,
+        "rule_kind": rule_kind.strip().lower(), "board_path": long_path(board_path)})
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    if "gap_mils" in result and "distance_mils" in result:
+        result["passes"] = result["distance_mils"] >= result["gap_mils"] - 1e-3
+    if not result.get("rule"):
+        result["note"] = f"No {rule_kind} rule applies to this pair."
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
