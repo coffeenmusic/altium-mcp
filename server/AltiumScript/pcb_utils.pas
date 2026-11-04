@@ -5219,6 +5219,7 @@ var
     Comp  : IPCB_Component;
     R     : TCoordRect;
     Head  : String;
+    Hidden : Boolean;
 begin
     Result := '';
     Head := Layer2String(Prim.Layer) + '|' + GeoNet(Prim) + '|' + GeoOwner(Prim) + '|';
@@ -5265,8 +5266,16 @@ begin
         eTextObject:
         begin
             Txt := Prim;
+            // A component's comment or designator switched off is still an
+            // object on the board, just not shown
+            Hidden := False;
+            if Prim.InComponent and (Prim.Component <> nil) then
+            begin
+                if Txt.IsComment and not Prim.Component.CommentOn then Hidden := True;
+                if Txt.IsDesignator and not Prim.Component.NameOn then Hidden := True;
+            end;
             Result := 'text|' + Head + IntToStr(Txt.XLocation) + '|' + IntToStr(Txt.YLocation) + '|' + IntToStr(Txt.Size) +
-                      '|' + IntToStr(Round(Txt.Rotation * 1000)) + '|' + Txt.Text;
+                      '|' + IntToStr(Round(Txt.Rotation * 1000)) + '|' + GeoFlag(Hidden) + '|' + Txt.Text;
         end;
         eComponentObject:
         begin
@@ -5292,9 +5301,63 @@ begin
     if (Kinds = '') or (Pos('|component|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eComponentObject));
 end;
 
+// A region's outline for drawing: its contours joined by '~', each 's:' (solid)
+// or 'h:' (hole) followed by x,y points joined by ';'
+function GeoContours(Region: IPCB_Region): String;
+var
+    GP   : IDispatch;
+    K, I : Integer;
+    Part : String;
+begin
+    Result := '';
+    GP := Region.GeometricPolygon;
+    for K := 0 to GP.Count - 1 do
+    begin
+        if GP.IsHole(K) then Part := 'h:' else Part := 's:';
+        for I := 0 to GP.Contour(K).Count - 1 do
+        begin
+            if I > 0 then Part := Part + ';';
+            Part := Part + IntToStr(GP.Contour(K).x(I)) + ',' + IntToStr(GP.Contour(K).y(I));
+        end;
+        if K > 0 then Result := Result + '~';
+        Result := Result + Part;
+    end;
+end;
+
+// The board outline: vx,vy,kind(0 line, 1 arc),cx,cy,radius,angle1,angle2
+// per segment (angles in thousandths of a degree), joined by ';'
+function GeoOutline(Board: IPCB_Board): String;
+var
+    I   : Integer;
+    Seg : TPolySegment;
+    Props : TStringList;
+    Text : String;
+begin
+    Text := '';
+    for I := 0 to Board.BoardOutline.PointCount - 1 do
+    begin
+        Seg := Board.BoardOutline.Segments[I];
+        if I > 0 then Text := Text + ';';
+        Text := Text + IntToStr(Seg.vx) + ',' + IntToStr(Seg.vy) + ',' + IntToStr(Seg.Kind) + ',' +
+                IntToStr(Seg.cx) + ',' + IntToStr(Seg.cy) + ',' + IntToStr(Seg.Radius) + ',' +
+                IntToStr(Round(Seg.Angle1 * 1000)) + ',' + IntToStr(Round(Seg.Angle2 * 1000));
+    end;
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        AddJSONProperty(Props, 'outline', Text);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Objects touching the box X1,Y1-X2,Y2 (internal units) of the kinds in
 // Kinds ('|track|via|', or '' for all), at most Limit
-function ObjectsInArea(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Kinds: String; Limit: Integer): String;
+function ObjectsInArea(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Kinds: String; Limit: Integer;
+                       Shapes: Boolean): String;
 var
     It    : IPCB_SpatialIterator;
     Prim  : IPCB_Primitive;
@@ -5314,6 +5377,9 @@ begin
         while Prim <> nil do
         begin
             Rec := GeoRecord(Prim);
+            // For drawing: the outline of a region, not just its bounds
+            if Shapes and (Rec <> '') and (Prim.ObjectId = eRegionObject) then
+                Rec := Rec + '|' + GeoContours(Prim);
             if Rec <> '' then
             begin
                 Total := Total + 1;
@@ -5728,7 +5794,10 @@ begin
                                 Board.XOrigin + StrToInt(RequestText(RequestData, 'x2', '0')),
                                 Board.YOrigin + StrToInt(RequestText(RequestData, 'y2', '0')),
                                 RequestText(RequestData, 'kinds', ''),
-                                StrToInt(RequestText(RequestData, 'limit', '500')))
+                                StrToInt(RequestText(RequestData, 'limit', '500')),
+                                RequestText(RequestData, 'shapes', 'false') = 'true')
+    else if Cmd = 'outline' then
+        Result := GeoOutline(Board)
     else if Cmd = 'clearance' then
         Result := GeoClearance(Board, RequestText(RequestData, 'a', ''), RequestText(RequestData, 'b', ''))
     else if Cmd = 'drag' then

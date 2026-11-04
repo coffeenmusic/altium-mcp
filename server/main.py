@@ -4406,6 +4406,115 @@ async def drag_copper(ctx: Context, object_ref: str, dx: float, dy: float, unit:
 MUTATING_COMMANDS.add("geometry")
 
 
+@_tool(read_only=True)
+async def render_pcb(ctx: Context, bbox: list = None, layers: list = None, dpi: float = 300, unit: str = "mil",
+                     board_path: str = ""):
+    """
+    Draw a board area as a picture: copper (tracks, arcs, pads, fills,
+    pours), vias, overlay and the board outline, in Altium's layer colours on
+    black.
+
+    Drawn here from the board's objects, not captured from Altium's window:
+    nothing in Altium moves, zooms or comes to the front.
+
+    Args:
+        bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
+            Default the whole board outline.
+        layers (list): Layers to draw, by Altium's name. Default Top Layer,
+            Bottom Layer, Multi-Layer and Top Overlay; e.g. ["Bottom Layer",
+            "Bottom Overlay"] for the bottom side or ["Mid Layer 1"].
+        dpi (float): Pixels per inch of board (default 300); lowered so the
+            longer side stays within 4000 pixels.
+        unit (str): "mil" (default) or "mm", for bbox.
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        JSON (bbox, dpi, size, what was drawn per layer) and the PNG
+    """
+    import io
+    import pcb_geometry as geo
+    import render
+
+    try:
+        geo.unit_factor(unit)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    outline_reply, error = await _geometry({"geometry": "outline"}, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    origin = (outline_reply.get("origin_x", 0), outline_reply.get("origin_y", 0))
+    outline = geo.parse_outline(outline_reply.get("outline", ""), origin, "mil")
+    k = geo.unit_factor(unit) / geo.unit_factor("mil")
+    if bbox:
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            return json.dumps({"success": False, "error": "bbox must be [x1, y1, x2, y2]"})
+        box = [float(v) * k for v in bbox]
+    elif outline:
+        xs, ys = [s["x"] for s in outline], [s["y"] for s in outline]
+        box = [min(xs), min(ys), max(xs), max(ys)]
+    else:
+        return json.dumps({"success": False, "error": "the board has no outline; give bbox"})
+    x1, y1, x2, y2 = (geo.to_coord(v, "mil") for v in box)
+    reply, error = await _geometry({"geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)),
+                                    "x2": str(max(x1, x2)), "y2": str(max(y1, y2)),
+                                    "kinds": "|track|arc|via|pad|fill|region|text|", "limit": "200000",
+                                    "shapes": "true"}, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    objects = geo.select(reply.get("objects", []), origin, "mil")
+    image, info = render.render_pcb(objects, box, layers, dpi, outline)
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    info.update({"board_path": reply.get("board_path"), "bbox_mil": [round(v, 2) for v in box],
+                 "objects": reply.get("total")})
+    return [json.dumps(info, indent=1), MCPImage(data=buf.getvalue(), format="png")]
+
+
+@_tool(read_only=True)
+async def render_sheet(ctx: Context, sheet_path: str, bbox: list = None, dpi: float = 150, unit: str = "mil"):
+    """
+    Draw a schematic sheet, or part of it, as a picture: wires, buses,
+    junctions, component bodies with pins, net labels, power ports, ports,
+    sheet symbols and visible texts.
+
+    Read from the .SchDoc file, so Altium need not have it open and nothing
+    in Altium changes; changes not yet saved in Altium are not shown.
+
+    Args:
+        sheet_path (str): Full path of the .SchDoc.
+        bbox (list): [x1, y1, x2, y2] in sheet coordinates (Altium's origin
+            at the bottom left), in unit. Default everything drawn.
+        dpi (float): Pixels per inch of sheet (default 150); lowered so the
+            longer side stays within 4000 pixels.
+        unit (str): "mil" (default) or "mm".
+
+    Returns:
+        JSON (bbox in mils, dpi, size) and the PNG
+    """
+    import io
+    import pcb_geometry as geo
+    import render
+    from schdoc_reader import read_schdoc
+
+    path = long_path(sheet_path)
+    if not path.lower().endswith(".schdoc") or not os.path.isfile(path):
+        return json.dumps({"success": False, "error": f"not a .SchDoc file: {sheet_path}"})
+    try:
+        k = geo.unit_factor(unit) / geo.unit_factor("mil")
+        box = None
+        if bbox:
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                raise ValueError("bbox must be [x1, y1, x2, y2]")
+            box = [float(v) * k for v in bbox]
+        image, info = await asyncio.to_thread(lambda: render.render_sheet(read_schdoc(path), box, dpi))
+    except (ValueError, OSError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    info["sheet_path"] = path
+    return [json.dumps(info, indent=1), MCPImage(data=buf.getvalue(), format="png")]
+
+
 @_tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
     """
