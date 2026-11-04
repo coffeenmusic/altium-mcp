@@ -6587,6 +6587,70 @@ async def get_erc_violations(ctx: Context, compile: bool = True, project_path: s
 
 
 @_tool(read_only=True)
+async def compare_netlist(ctx: Context, project_path: str = "", against: str = "last", save_as: str = "last",
+                          max_per_kind: int = 100) -> str:
+    """
+    Compile the project and compare its netlist with a saved one: the
+    safety net for editing sheets in place. Call it before an edit (the
+    first call only saves) and again after: it lists the nets that gained or
+    lost pins, the pins that moved between nets, nets added, removed or
+    renamed, and nets left with a single pin.
+
+    Snapshots are kept per project under a name. By default each call
+    compares with the previous call ("last") and then saves itself as
+    "last". Save a fixed baseline with save_as="before" and compare later
+    calls with against="before".
+
+    An auto-named net (NetR1_1) whose pins stay together under a new name is
+    a rename, not a removal and an addition. Compiling reads the sheets as
+    they are open in Altium, unsaved edits included.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; empty for the focused
+            project.
+        against (str): The snapshot to compare with; "" to only save.
+        save_as (str): Save this netlist under that name; "" to not save.
+        max_per_kind (int): At most this many entries per list.
+
+    Returns:
+        str: JSON with summary (count per kind of change), the changes, the
+             snapshot compared with (and when it was saved), and the
+             unsaved sheets.
+    """
+    import datetime
+    import netlist_diff
+
+    source, error = await _command_json("get_eco_source", {"project_path": long_path(project_path)})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    project = source.get("project_path", project_path)
+    current = netlist_diff.from_source(source)
+    folder = EXCHANGE_DIR / "netlists"
+    reply = {"project_path": project, "pins": len(current),
+             "nets": len({n for n in current.values() if n}),
+             "unsaved_in_altium": source.get("unsaved_in_altium", [])}
+    if against:
+        old = netlist_diff.load(netlist_diff.snapshot_path(folder, project, against))
+        if old is None:
+            reply["note"] = f"No snapshot '{against}' for this project yet; nothing to compare with."
+        else:
+            diff = netlist_diff.compare(old.get("pins", {}), current)
+            reply["compared_with"] = {"name": against, "saved": old.get("saved")}
+            reply["summary"] = netlist_diff.summary(diff)
+            if not reply["summary"]:
+                reply["note"] = "The netlist is the same."
+            cut = netlist_diff.limit(diff, max(1, int(max_per_kind)))
+            if cut:
+                reply["truncated"] = cut
+            reply.update({k: v for k, v in diff.items() if v})
+    if save_as:
+        when = datetime.datetime.now().isoformat(timespec="seconds")
+        netlist_diff.save(netlist_diff.snapshot_path(folder, project, save_as), project, current, when)
+        reply["saved_as"] = save_as
+    return json.dumps(reply, indent=1)
+
+
+@_tool(read_only=True)
 async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", max_per_kind: int = 50) -> str:
     """
     Show what Design > Update PCB would change, without running it: the
