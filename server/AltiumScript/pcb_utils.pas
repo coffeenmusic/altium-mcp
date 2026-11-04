@@ -5319,6 +5319,67 @@ begin
     end;
 end;
 
+// The board's own name of a layer ('GND1' for Mid Layer 1 on a board that
+// renamed it), or '' when it has none of its own
+function QueryBoardLayerName(Board: IPCB_Board; Layer: Integer): String;
+var
+    Obj : IPCB_LayerObject;
+begin
+    Result := '';
+    try
+        Obj := Board.LayerStack.LayerObject(Layer);
+        if Obj <> nil then Result := Obj.Name;
+    except
+        Result := '';
+    end;
+    if SameText(Result, Layer2String(Layer)) then Result := '';
+end;
+
+// The engine knows layers only by the board's names: OnLayer('Mid Layer 3')
+// matches nothing on a board that calls it 'SIG/PWR'. Each quoted generic
+// layer name is replaced by the board's name for it.
+function QueryLayerNames(Board: IPCB_Board; Expr: String): String;
+var
+    L     : Integer;
+    Named : String;
+begin
+    Result := Expr;
+    for L := eTopLayer to eMultiLayer do
+    begin
+        Named := QueryBoardLayerName(Board, L);
+        if Named <> '' then
+            Result := StringReplace(Result, '''' + Layer2String(L) + '''', '''' + Named + '''',
+                                    MkSet(rfReplaceAll, rfIgnoreCase));
+    end;
+end;
+
+// Area is 'x1|y1|x2|y2' in internal units from the board origin, or '' for
+// the whole board; True when the object's bounds touch it
+function QueryInArea(Board: IPCB_Board; Prim: IPCB_Primitive; Area: String): Boolean;
+var
+    R : TCoordRect;
+    X1, Y1, X2, Y2 : Integer;
+begin
+    Result := True;
+    if Area = '' then Exit;
+    X1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 0));
+    Y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 1));
+    X2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 2));
+    Y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 3));
+    R := Prim.BoundingRectangle;
+    Result := (R.Left <= X2) and (R.Right >= X1) and (R.Bottom <= Y2) and (R.Top >= Y1);
+end;
+
+// Keeps the objects of Found inside Area
+procedure QueryKeepInArea(Board: IPCB_Board; Found: TInterfaceList; Area: String);
+var
+    i : Integer;
+begin
+    if Area = '' then Exit;
+    for i := Found.Count - 1 downto 0 do
+        if not QueryInArea(Board, Found.Items[i], Area) then Found.Delete(i);
+end;
+
 function QueryKindName(Prim: IPCB_Primitive): String;
 begin
     case Prim.ObjectId of
@@ -5369,7 +5430,12 @@ begin
             if Prim.ObjectId = eViaObject then
                 AddJSONProperty(Item, 'layer', Layer2String(Prim.LowLayer) + ' - ' + Layer2String(Prim.HighLayer))
             else
+            begin
                 AddJSONProperty(Item, 'layer', Layer2String(Prim.Layer));
+                // the name the board gives it, which is what OnLayer() takes
+                if QueryBoardLayerName(Board, Prim.Layer) <> '' then
+                    AddJSONProperty(Item, 'layer_name', QueryBoardLayerName(Board, Prim.Layer));
+            end;
             R := Prim.BoundingRectangle;
             AddJSONNumber(Item, 'left', CoordToMils(R.Left - Board.XOrigin));
             AddJSONNumber(Item, 'bottom', CoordToMils(R.Bottom - Board.YOrigin));
@@ -5383,15 +5449,16 @@ begin
 end;
 
 // query_objects: ExprMM and ExprMil are the expression with its unit values
-// written in mm and in mil; the one in the engine's unit is run. StoreFile
-// keeps the user's selection while the queries run.
-function QueryObjects(ExprMM: String; ExprMil: String; Limit: Integer; StoreFile: String): String;
+// written in mm and in mil; the one in the engine's unit is run. Area keeps
+// the objects touching it. StoreFile keeps the user's selection while the
+// queries run.
+function QueryObjects(ExprMM: String; ExprMil: String; Limit: Integer; Area: String; StoreFile: String): String;
 var
     Board : IPCB_Board;
     Found, Saved : TInterfaceList;
     Items, Kinds, Counts, Props : TStringList;
     Units, Expr, Kind : String;
-    i, k  : Integer;
+    i, k, NoNet : Integer;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then
@@ -5410,12 +5477,19 @@ begin
         try
             Units := QueryUnit(Board);
             if Units = 'mil' then Expr := ExprMil else Expr := ExprMM;
+            Expr := QueryLayerNames(Board, Expr);
             RunBoardQuery(Board, Expr, Found);
         finally
             QueryEndSelection(Board, StoreFile, Saved);
         end;
+        QueryKeepInArea(Board, Found, Area);
+        NoNet := 0;
         for i := 0 to Found.Count - 1 do
         begin
+            // A copper pour that lost its net: InNet() cannot find it, and a
+            // repour would pour it as dead copper
+            if Found.Items[i].ObjectId = ePolyObject then
+                if (Found.Items[i].Net = nil) and (Found.Items[i].Layer >= eTopLayer) and (Found.Items[i].Layer <= eBottomLayer) then NoNet := NoNet + 1;
             if i < Limit then Items.Add(QueryObjectJSON(Board, Found.Items[i]));
             Kind := QueryKindName(Found.Items[i]);
             k := Kinds.IndexOf(Kind);
@@ -5431,6 +5505,7 @@ begin
         AddJSONProperty(Props, 'expression_run', Expr);
         AddJSONProperty(Props, 'engine_unit', Units);
         AddJSONInteger(Props, 'matched', Found.Count);
+        if NoNet > 0 then AddJSONInteger(Props, 'copper_polygons_without_net', NoNet);
         Item_Counts_JSON(Props, Kinds, Counts);
         if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'objects')) else Props.Add('"objects": []');
         AddJSONProperty(Props, 'board', Board.FileName);
@@ -5500,8 +5575,9 @@ end;
 // which_rule: the rule of RuleName that applies to the one object ExprA
 // matches, or between it and the one ExprB matches with the distance between
 // them, and whether they pass it. ExprB is empty for a one-object kind.
-// StoreFile keeps the user's selection while the queries run.
-function WhichRule(ExprAMM, ExprAMil, ExprBMM, ExprBMil, RuleName, StoreFile: String): String;
+// AreaA and AreaB keep the objects touching them. StoreFile keeps the user's
+// selection while the queries run.
+function WhichRule(ExprAMM, ExprAMil, ExprBMM, ExprBMil, RuleName, AreaA, AreaB, StoreFile: String): String;
 var
     Board     : IPCB_Board;
     A, B      : TInterfaceList;
@@ -5544,14 +5620,18 @@ begin
         QuerySaveSelection(Board, StoreFile, Saved);
         try
             Units := QueryUnit(Board);
-            if Units = 'mil' then RunBoardQuery(Board, ExprAMil, A) else RunBoardQuery(Board, ExprAMM, A);
+            if Units = 'mil' then RunBoardQuery(Board, QueryLayerNames(Board, ExprAMil), A)
+            else RunBoardQuery(Board, QueryLayerNames(Board, ExprAMM), A);
             if not Unary then
             begin
-                if Units = 'mil' then RunBoardQuery(Board, ExprBMil, B) else RunBoardQuery(Board, ExprBMM, B);
+                if Units = 'mil' then RunBoardQuery(Board, QueryLayerNames(Board, ExprBMil), B)
+                else RunBoardQuery(Board, QueryLayerNames(Board, ExprBMM), B);
             end;
         finally
             QueryEndSelection(Board, StoreFile, Saved);
         end;
+        QueryKeepInArea(Board, A, AreaA);
+        QueryKeepInArea(Board, B, AreaB);
         if Unary and (A.Count <> 1) then
         begin
             Result := 'ERROR: The expression must match exactly one object; object_a matched ' + IntToStr(A.Count);

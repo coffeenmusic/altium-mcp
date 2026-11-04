@@ -819,11 +819,13 @@ begin
     StoreFile := ROOT_DIR + 'query_selection.txt';
     if CommandName = 'query_objects' then
         Result := QueryObjects(RequestText(RequestData, 'expr_mm', ''), RequestText(RequestData, 'expr_mil', ''),
-                               StrToInt(RequestText(RequestData, 'limit', '200')), StoreFile)
+                               StrToInt(RequestText(RequestData, 'limit', '200')), RequestText(RequestData, 'area', ''),
+                               StoreFile)
     else if CommandName = 'which_rule' then
         Result := WhichRule(RequestText(RequestData, 'a_mm', ''), RequestText(RequestData, 'a_mil', ''),
                             RequestText(RequestData, 'b_mm', ''), RequestText(RequestData, 'b_mil', ''),
-                            RequestText(RequestData, 'rule_kind', 'clearance'), StoreFile)
+                            RequestText(RequestData, 'rule_kind', 'clearance'),
+                            RequestText(RequestData, 'area_a', ''), RequestText(RequestData, 'area_b', ''), StoreFile)
     else
         Result := QueryRestore(StoreFile);
 end;

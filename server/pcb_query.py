@@ -121,6 +121,11 @@ def check(expression: str) -> str:
     # Commas inside quoted text are part of a name (InNet('D0,1'))
     if re.search(r"\d,\d", _VALUE.sub("", _blank_quotes(expression))):
         return "write decimals with a dot (0.25mm), not a comma"
+    # The engine has no position properties ("Undeclared identifier: X")
+    unquoted = re.sub(r"'[^']*'", "''", expression)
+    if re.search(r"(?<![\w.])[XY]\s*(?:[<>=]|<>)", unquoted, re.I):
+        return ("Altium's query language has no X or Y property; give the box as area=[x1, y1, x2, y2] "
+                "instead (which_rule: area_a, area_b)")
     return ""
 
 
@@ -136,6 +141,27 @@ def check_limit(limit) -> str:
     if not 0 <= limit <= QUERY_LIMIT_MAX:
         return f"limit must be from 0 to {QUERY_LIMIT_MAX:,}"
     return ""
+
+
+_MILS_PER = {"mil": 1.0, "mm": 1 / 0.0254}
+
+
+def area_text(area, unit: str = "mil") -> Tuple[str, str]:
+    """An area [x1, y1, x2, y2] from the board origin as the bridge takes it
+    ('x1|y1|x2|y2' in internal units, 10000 per mil), or ('', error).
+    None or [] is the whole board: ('', '')."""
+    if not area:
+        return "", ""
+    if unit not in _MILS_PER:
+        return "", "unit must be 'mil' or 'mm'"
+    try:
+        if len(area) != 4:
+            raise ValueError
+        x1, y1, x2, y2 = (float(v) * _MILS_PER[unit] for v in area)
+    except (TypeError, ValueError):
+        return "", "area must be [x1, y1, x2, y2]"
+    box = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+    return "|".join(str(int(round(v * 10000))) for v in box), ""
 
 
 _proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
