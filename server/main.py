@@ -2192,6 +2192,50 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
                               "wires from these, not from predicted offsets.")
     return json.dumps(result, indent=2)
 
+async def _schematic_pins(sheet_path: str, designators=None):
+    """The sheet's placed pins from Altium (internal units), or (None, error)."""
+    response = await altium_bridge.execute_command("get_schematic_pins", {
+        "sheet_path": sheet_path,
+        "designators": "|" + "|".join(designators) + "|" if designators else ""})
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result, strict=False)
+    return result.get("pins", []), ""
+
+@_tool(read_only=True)
+async def get_schematic_pins(ctx: Context, sheet_path: str, designators: list = None, unit: str = "mil") -> str:
+    """
+    The pins of a schematic sheet's parts, live from Altium: each pin's
+    connection point (the outer end, where a wire must end), number, name,
+    electrical type and whether it is hidden. Only the part and display mode
+    each component shows are listed. Unsaved changes in Altium are seen.
+
+    Args:
+        sheet_path (str): Full path of the .SchDoc; opened if not open.
+        designators (list): Only these components; empty for all.
+        unit (str): "mil" (default) or "mm" for the coordinates.
+
+    Returns:
+        str: JSON with the pins: designator, part, pin, name, x, y,
+             electrical, hidden.
+    """
+    import sch_edit
+
+    sheet_path = long_path(sheet_path)
+    if unit not in sch_edit.COORD_PER:
+        return json.dumps({"success": False, "error": "unit is mil or mm"})
+    if designators and any("|" in str(d) for d in designators):
+        return json.dumps({"success": False, "error": "a designator cannot contain '|'"})
+    pins, error = await _schematic_pins(sheet_path, [str(d).strip().upper() for d in designators or []])
+    if pins is None:
+        return json.dumps({"success": False, "error": error})
+    scale = sch_edit.COORD_PER[unit]
+    for p in pins:
+        p["x"], p["y"] = round(p["x"] / scale, 4), round(p["y"] / scale, 4)
+    return json.dumps({"success": True, "unit": unit, "count": len(pins), "pins": pins}, indent=2)
+
 @_tool()
 async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: str = "mil",
                          save: bool = False) -> str:
@@ -2214,25 +2258,40 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         [mirror true/false]. x, y is the part's origin.
       delete_component  designator, [part]
       place_component   library (.SchLib path), symbol, designator, x, y,
-                        [rotation], [mirror], [comment]
+                        [rotation], [mirror], [comment]. For a part from a
+                        database library, dblib (.DbLib path) and
+                        part_number (its key), [table], in place of library
+                        and symbol: the row gives the symbol, footprints,
+                        description and parameters, and the part is linked
+                        to the DbLib as when Altium places it (Excel tables)
       set_parameter     designator, name, value, [part], [visible]
                         (creates the parameter when missing)
       move_text         designator, name ("Designator", "Comment" or a
                         parameter), [part], [x, y], [justification 0-8:
                         bottom-left, bottom-centre, bottom-right, middle-left,
                         ..., top-right], [orientation 0-3], [visible]
-      add_wire          points [[x, y], ...] (a pin's connection point is
-                        its outer end, as build_schematic's pin_map gives)
+      add_wire          points [[x, y] or "U20.VCC", ...]: a point may name
+                        a pin, by number ("U20.3") or name ("U20.VCC")
       add_net_label     x, y (on a wire), text, [orientation], [justification]
       add_power_port    x, y, text, [style: bar, arrow, circle, wave,
                         power_ground, signal_ground, earth], [orientation
                         0-3, default 1 = up], [show_net_name]
       add_junction      x, y
       add_no_erc        x, y
+      add_port          x, y (its left end, or bottom end when vertical),
+                        name, [io_type: unspecified, output, input,
+                        bidirectional], [style: right (default), left,
+                        left_right, none, top, bottom, top_bottom], [width]:
+                        a width turns auto size off, so the port keeps its
+                        length and stays on its wire when renamed
       delete_at         kind (wire, net_label, power_port, junction, no_erc,
                         port, note), x, y, [text]: removes a wire passing
                         through the point, or the object located there
     "part" picks one part of a multi-part component (1 = A, ...).
+    The add_* operations with x, y also take "at": "U20.VCC" instead, to
+    place a label, port, power port, junction or no-ERC on a pin. Pins are
+    read live from the sheet (see get_schematic_pins) before anything is
+    changed; an unknown pin or a name several pins share is an error.
 
     Args:
         sheet_path (str): Full path of the .SchDoc; opened if not open.
@@ -2245,19 +2304,41 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     Returns:
         str: JSON with how many operations were applied and the errors.
     """
+    import dblib
     import sch_edit
 
+    # A part from a database library: its row gives the symbol and the link
+    expanded = []
+    for i, op in enumerate(operations or []):
+        if isinstance(op, dict) and op.get("op") == "place_component" and (op.get("dblib") or op.get("part_number")):
+            if not (op.get("dblib") and op.get("part_number")) or op.get("library") or op.get("symbol"):
+                return json.dumps({"success": False, "error": f"operation {i + 1}: a DbLib part takes dblib and "
+                                                              f"part_number (and table), not library or symbol"})
+            try:
+                op = dblib.place_operation(dict(op, dblib=long_path(op["dblib"])))
+            except (dblib.DbLibError, OSError, KeyError) as e:
+                return json.dumps({"success": False, "error": f"operation {i + 1}: {e}"})
+        expanded.append(op)
+    operations = expanded
     # Long paths, or Altium opens a second copy of a sheet or library that
     # is already open
     sheet_path = long_path(sheet_path)
     operations = [dict(op, library=long_path(op["library"]))
                   if isinstance(op, dict) and op.get("op") == "place_component" and op.get("library") else op
                   for op in (operations or [])]
+    if not sheet_path.lower().endswith(".schdoc"):
+        return json.dumps({"success": False, "error": "sheet_path must be a .SchDoc"})
+    designators = sch_edit.pin_designators(operations)
+    if designators:
+        pins, error = await _schematic_pins(sheet_path, designators)
+        if pins is None:
+            return json.dumps({"success": False, "error": f"Could not read the pins: {error}"})
+        operations, error = sch_edit.resolve_pins(operations, pins, unit)
+        if error:
+            return json.dumps({"success": False, "error": error})
     lines, error = sch_edit.encode_operations(operations, unit)
     if error:
         return json.dumps({"success": False, "error": error})
-    if not sheet_path.lower().endswith(".schdoc"):
-        return json.dumps({"success": False, "error": "sheet_path must be a .SchDoc"})
     logger.info(f"Editing {sheet_path}: {len(lines)} operations")
     # Part names and parameter values may hold text that is not plain ASCII
     write_altium_text(EXCHANGE_DIR / "sch_edit_spec.txt", "\n".join(lines) + "\n")

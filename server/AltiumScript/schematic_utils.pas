@@ -2891,6 +2891,90 @@ begin
     end;
 end;
 
+// Sets the parameter Name of Comp to Value (adding it if missing), shown
+// or hidden
+procedure SetSchParameter(Comp: ISch_Component; Name, Value: String; Visible: Boolean);
+var
+    Iter  : ISch_Iterator;
+    Param : ISch_Parameter;
+    Found : ISch_Parameter;
+begin
+    Found := nil;
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eParameter));
+    Param := Iter.FirstSchObject;
+    while Param <> nil do
+    begin
+        if SameText(Param.Name, Name) then Found := Param;
+        Param := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+    if Found = nil then
+    begin
+        Found := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+        Found.Name := Name;
+        Found.Location := Comp.Location;
+        Comp.AddSchObject(Found);
+    end;
+    Found.Text := Value;
+    Found.IsHidden := not Visible;
+end;
+
+// Links a placed component to its DbLib row as Altium's own placement from a
+// DbLib does: Rec continues at field First with
+// DB|library|table|key|description|n|name|visible|value...|m|footprint...
+// The footprints replace the symbol's own, the first one current.
+procedure ApplyDbLink(Comp: ISch_Component; Rec: String; First: Integer);
+var
+    Iter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    Old  : TInterfaceList;
+    F, N, i : Integer;
+begin
+    Comp.SourceLibraryName := GetFieldFromPipeString(Rec, First + 1);
+    Comp.LibraryPath := '*';
+    Comp.DatabaseTableName := GetFieldFromPipeString(Rec, First + 2);
+    Comp.DesignItemId := GetFieldFromPipeString(Rec, First + 3);
+    if GetFieldFromPipeString(Rec, First + 4) <> '' then
+        Comp.ComponentDescription := GetFieldFromPipeString(Rec, First + 4);
+    F := First + 5;
+    N := StrToInt(GetFieldFromPipeString(Rec, F));
+    for i := 0 to N - 1 do
+        SetSchParameter(Comp, GetFieldFromPipeString(Rec, F + 1 + 3 * i),
+                        GetFieldFromPipeString(Rec, F + 3 + 3 * i),
+                        GetFieldFromPipeString(Rec, F + 2 + 3 * i) = '1');
+    F := F + 1 + 3 * N;
+    N := StrToIntDef(GetFieldFromPipeString(Rec, F), 0);
+    if N = 0 then Exit;
+    Old := TInterfaceList.Create;
+    try
+        Iter := Comp.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := Iter.FirstSchObject;
+        while Impl <> nil do
+        begin
+            if SameText(Impl.ModelType, 'PCBLIB') then Old.Add(Impl);
+            Impl := Iter.NextSchObject;
+        end;
+        Comp.SchIterator_Destroy(Iter);
+        for i := 0 to Old.Count - 1 do
+            Comp.RemoveSchImplementation(Old.Items[i]);
+    finally
+        Old.Free;
+    end;
+    for i := 1 to N do
+    begin
+        Impl := Comp.AddSchImplementation;
+        Impl.ModelName := GetFieldFromPipeString(Rec, F + i);
+        Impl.ModelType := 'PCBLIB';
+        Impl.ClearAllDatafileLinks;
+        Impl.AddDataFileLink(GetFieldFromPipeString(Rec, F + i), '', 'PCBLib');
+        Impl.UseComponentLibrary := True;
+        Impl.DatabaseDatalinksLocked := True;
+        Impl.IsCurrent := i = 1;
+    end;
+end;
+
 // Place a symbol from a .SchLib on Doc. Opening the library makes it the
 // current document, so Doc is held by reference throughout.
 function PlaceSchComponent(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
@@ -2941,6 +3025,7 @@ begin
     Replica.MoveByXY(StrToInt(GetFieldFromPipeString(Rec, 4)) - Replica.Location.X,
                      StrToInt(GetFieldFromPipeString(Rec, 5)) - Replica.Location.Y);
     if GetFieldFromPipeString(Rec, 8) <> '' then Replica.Comment.Text := GetFieldFromPipeString(Rec, 8);
+    if GetFieldFromPipeString(Rec, 9) = 'DB' then ApplyDbLink(Replica, Rec, 9);
     Result := True;
 end;
 
@@ -3082,6 +3167,24 @@ begin
         SchRegister(Doc, Obj);
         Result := True;
     end
+    else if Kind = 'PORT' then
+    begin
+        // PORT|x|y|iotype|style|width|name: x, y is the port's left (or
+        // bottom) end; a width other than 0 turns auto size off, so the
+        // port keeps its length and the end a wire meets stays put
+        Obj := SchServer.SchObjectFactory(ePort, eCreate_GlobalCopy);
+        Obj.Location := Point(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)));
+        Obj.IOType := StrToInt(GetFieldFromPipeString(Rec, 3));
+        Obj.Style := StrToInt(GetFieldFromPipeString(Rec, 4));
+        Obj.Name := GetFieldFromPipeString(Rec, 6);
+        if StrToInt(GetFieldFromPipeString(Rec, 5)) > 0 then
+        begin
+            Obj.AutoSize := False;
+            Obj.Width := StrToInt(GetFieldFromPipeString(Rec, 5));
+        end;
+        SchRegister(Doc, Obj);
+        Result := True;
+    end
     else if (Kind = 'JUNCTION') or (Kind = 'NOERC') then
     begin
         if Kind = 'JUNCTION' then
@@ -3106,6 +3209,89 @@ begin
         Result := PlaceSchComponent(Doc, Rec, Msg)
     else
         Msg := 'unknown edit ' + Kind;
+end;
+
+// The placed pins of a sheet's components, live from Altium: designator,
+// part, pin number and name, its connection point (hot end) in internal
+// units, electrical type and whether it is hidden. Designators is
+// '|U1|R3|' or '' for every component. Only the pins of the part and display
+// mode each component shows are on the sheet.
+function GetSchematicPins(SheetPath: String; Designators: String): String;
+var
+    Doc       : ISch_Document;
+    ServerDoc : IServerDocument;
+    Iter, PinIter : ISch_Iterator;
+    Comp      : ISch_Component;
+    Pin       : ISch_Pin;
+    HotX, HotY, Count : Integer;
+    Items, Item, Props : TStringList;
+begin
+    Doc := SchServer.GetSchDocumentByPath(SheetPath);
+    if Doc = nil then
+    begin
+        if not FileExists(SheetPath) then
+        begin
+            Result := 'ERROR: Sheet not found: ' + SheetPath;
+            Exit;
+        end;
+        ServerDoc := Client.OpenDocument('SCH', SheetPath);
+        Doc := SchServer.GetSchDocumentByPath(SheetPath);
+    end;
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Altium could not open the sheet ' + SheetPath;
+        Exit;
+    end;
+    Designators := UpperCase(Designators);
+    Items := TStringList.Create;
+    Item := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Count := 0;
+        Iter := Doc.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := Iter.FirstSchObject;
+        while Comp <> nil do
+        begin
+            if (Designators = '') or (Pos('|' + UpperCase(Comp.Designator.Text) + '|', Designators) > 0) then
+            begin
+                PinIter := Comp.SchIterator_Create;
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                Pin := PinIter.FirstSchObject;
+                while Pin <> nil do
+                begin
+                    if ((Pin.OwnerPartId = 0) or (Pin.OwnerPartId = Comp.CurrentPartID)) and
+                       (Pin.OwnerPartDisplayMode = Comp.DisplayMode) then
+                    begin
+                        GetPinHotEnd(Pin, HotX, HotY);
+                        Item.Clear;
+                        AddJSONProperty(Item, 'designator', Comp.Designator.Text);
+                        AddJSONInteger(Item, 'part', Comp.CurrentPartID);
+                        AddJSONProperty(Item, 'pin', Pin.Designator);
+                        AddJSONProperty(Item, 'name', Pin.Name);
+                        AddJSONInteger(Item, 'x', HotX);
+                        AddJSONInteger(Item, 'y', HotY);
+                        AddJSONInteger(Item, 'electrical', Pin.Electrical);
+                        AddJSONBoolean(Item, 'hidden', Pin.IsHidden);
+                        Items.Add(BuildJSONObject(Item, 1));
+                        Count := Count + 1;
+                    end;
+                    Pin := PinIter.NextSchObject;
+                end;
+                Comp.SchIterator_Destroy(PinIter);
+            end;
+            Comp := Iter.NextSchObject;
+        end;
+        Doc.SchIterator_Destroy(Iter);
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'count', Count);
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'pins')) else Props.Add('"pins": []');
+        Result := BuildJSONObject(Props);
+    finally
+        Items.Free;
+        Item.Free;
+        Props.Free;
+    end;
 end;
 
 function EditSchematic(SheetPath: String; SpecPath: String; Save: Boolean): String;
