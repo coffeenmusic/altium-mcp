@@ -5455,6 +5455,139 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
     return json.dumps(geo.area_reply(result, unit, limit, layers, nets, include_hidden), indent=1)
 
 
+@_tool()
+async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str = "", width: float = 0,
+                     via_size: float = 0, via_hole: float = 0, via_span: str = "through",
+                     diagonal_first: bool = False, corner_chamfer: float = 0, unit: str = "mil",
+                     check: bool = True, undo_on_violation: bool = False, dry_run: bool = False,
+                     board_path: str = "") -> str:
+    """
+    Route a net through waypoints, changing layer with vias, and check the
+    new copper against the board's rules.
+
+    Every segment is exactly 0, 45 or 90 degrees: between two waypoints not
+    in line the route takes a straight leg and a 45 degree diagonal (as
+    route_track). A waypoint with another layer than the current one puts
+    a via at that waypoint and the route goes on in that layer.
+
+    The new tracks and vias are then checked like check_objects_drc (own
+    width and hole rules; clearance, short circuit and hole to hole against
+    everything near), and the violations returned. Hits on pour copper are
+    listed apart (pour_violations): the pour has not been repoured around
+    the new copper yet. With undo_on_violation the route is taken off again
+    when there is a violation other than a pour hit.
+
+    Args:
+        net (str): The net; it must exist on the board.
+        start: Where to begin: a pad as "U1-3", a ref from objects_in_area,
+            or [x, y] (then give layer).
+        waypoints (list): Each [x, y], [x, y, "layer"], {"x", "y", "layer"},
+            or a pad "J1-2" (typically the last); x, y from the board origin.
+        layer (str): The starting layer; default the start pad's layer
+            (Top Layer for a through-hole pad or a point).
+        width (float): Track width in unit; 0 (default) takes the width
+            rule's preferred width for the net on each layer.
+        via_size, via_hole (float): Via diameter and hole; 0 takes the
+            routing via style rule's preferred values.
+        via_span (str): "through" (default: Top to Bottom) or "layers" (only
+            the two layers it joins).
+        diagonal_first (bool): Diagonals at the start of each stretch.
+        corner_chamfer (float): Cut right-angle corners with 45 degree
+            segments of this length (in unit).
+        unit (str): "mil" (default) or "mm".
+        check (bool): Check the new copper (default True).
+        undo_on_violation (bool): Remove the route again when the check
+            finds a violation (pour hits do not count).
+        dry_run (bool): Only plan: the segments and vias, nothing added.
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        str: JSON with the tracks and vias added (with refs for
+             drag_copper and check_objects_drc), the violations, and whether
+             the route was removed again.
+    """
+    import pcb_geometry as geo
+
+    def point(p, what):
+        if isinstance(p, str):
+            return ("ref", geo.normalize_ref(p))
+        if isinstance(p, dict):
+            p = [p.get("x"), p.get("y"), p.get("layer")]
+        if isinstance(p, (list, tuple)) and len(p) in (2, 3):
+            x, y = geo.to_coord(p[0], unit), geo.to_coord(p[1], unit)
+            return ("xy", (x, y, p[2] if len(p) == 3 else None))
+        raise ValueError(f"{what} must be a pad like 'U1-3', [x, y] or [x, y, layer]")
+
+    try:
+        geo.unit_factor(unit)
+        if via_span not in ("through", "layers"):
+            raise ValueError("via_span is 'through' or 'layers'")
+        pts = [point(start, "start")] + [point(w, f"waypoint {i + 1}") for i, w in enumerate(waypoints or [])]
+        if len(pts) < 2:
+            raise ValueError("give at least one waypoint")
+    except (TypeError, ValueError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+    refs = [p[1] for p in pts if p[0] == "ref"]
+    located = {}
+    if refs:
+        result, error = await _bridge_json("geometry", {"geometry": "locate", "refs": "~".join(refs),
+                                                        "board_path": long_path(board_path)})
+        if error:
+            return json.dumps({"success": False, "error": error})
+        for ref, item in zip(refs, result.get("located", [])):
+            parts = item.split("|", 3)
+            if len(parts) < 4:
+                return json.dumps({"success": False, "error": f"not found on the board: {ref}"})
+            located[ref] = (int(parts[0]), int(parts[1]), parts[2], parts[3])
+    warnings = []
+    resolved = []
+    for kind, p in pts:
+        if kind == "ref":
+            x, y, pad_layer, pad_net = located[p]
+            if pad_net and pad_net.lower() != net.lower():
+                warnings.append(f"{p} is on net {pad_net}, not {net}")
+            resolved.append((x, y, None if pad_layer == "Multi-Layer" else pad_layer))
+        else:
+            resolved.append(p)
+    first_layer = layer or resolved[0][2] or "Top Layer"
+    tracks, vias = routing.plan_path((resolved[0][0], resolved[0][1], first_layer), resolved[1:],
+                                     diagonal_first, geo.to_coord(corner_chamfer, unit), via_span)
+    k = geo.unit_factor(unit)
+    plan = {"tracks": [[t[0]] + [round(v / k, 4) for v in t[1:]] for t in tracks],
+            "vias": [[round(v[0] / k, 4), round(v[1] / k, 4), v[2], v[3]] for v in vias]}
+    if not tracks and not vias:
+        return json.dumps({"success": False, "error": "the waypoints are all the same point"})
+    if dry_run:
+        return json.dumps({"success": True, "dry_run": True, "unit": unit, **plan,
+                           **({"warnings": warnings} if warnings else {})}, indent=1)
+    result, error = await _bridge_json("geometry", {
+        "geometry": "route", "net": net,
+        "tracks": "~".join("|".join(str(v) for v in t) for t in tracks),
+        "vias": "~".join("|".join(str(v) for v in via) for via in vias),
+        "width": str(geo.to_coord(width, unit)), "via_size": str(geo.to_coord(via_size, unit)),
+        "via_hole": str(geo.to_coord(via_hole, unit)), "check": "true" if check else "false",
+        "undo_on_violation": "true" if undo_on_violation else "false", "board_path": long_path(board_path)})
+    if error:
+        return json.dumps({"success": False, "error": error, "plan": plan})
+    origin = (result.get("origin_x", 0), result.get("origin_y", 0))
+    created = [geo.parse_object(r, origin, unit) for r in result.get("created", [])]
+    reply = {"success": True, "board_path": result.get("board_path"), "unit": unit,
+             "tracks": [o for o in created if o and o["kind"] == "track"],
+             "vias": [o for o in created if o and o["kind"] == "via"],
+             "pairs_checked": result.get("pairs_checked")}
+    reply["violations"], pour = geo.split_pour_violations(geo.describe_violations(result, unit))
+    if pour:
+        reply["pour_violations"] = pour
+        reply["pour_note"] = ("Against pour copper as last poured; repour_polygons, then "
+                              "check_objects_drc on the new copper.")
+    if result.get("removed_again"):
+        reply["removed_again"] = True
+        reply["note"] = "The route broke a rule and was taken off again (undo_on_violation)."
+    if warnings:
+        reply["warnings"] = warnings
+    return json.dumps(reply, indent=1)
+
+
 @_tool(read_only=True)
 async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, unit: str = "mil",
                             limit: int = 300, margin: float = None, board_path: str = "") -> str:
