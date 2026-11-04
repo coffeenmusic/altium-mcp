@@ -148,5 +148,24 @@ class ViaRecordsTest(unittest.TestCase):
         self.assertEqual(routing.via_records([], 20, 10), (None, "vias is empty"))
 
 
+class PlanPathTest(unittest.TestCase):
+    def test_layer_change_drops_a_via(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"),
+                                         [(1000, 500, None), (1000, 500, "Bottom Layer"), (2000, 500, None)])
+        self.assertEqual(tracks, [("Top Layer", 0, 0, 500, 0), ("Top Layer", 500, 0, 1000, 500),
+                                  ("Bottom Layer", 1000, 500, 2000, 500)])
+        self.assertEqual(vias, [(1000, 500, "Top Layer", "Bottom Layer")])
+
+    def test_via_between_the_two_layers(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(500, 0, "Mid Layer 1"), (500, 800, None)],
+                                         via_span="layers")
+        self.assertEqual(vias, [(500, 0, "Top Layer", "Mid Layer 1")])
+        self.assertEqual(tracks[-1], ("Mid Layer 1", 500, 0, 500, 800))
+
+    def test_same_layer_waypoint_is_no_via(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(300, 0, "Top Layer"), (300, 300, None)])
+        self.assertEqual(vias, [])
+        self.assertEqual(len(tracks), 2)
+
 if __name__ == "__main__":
     unittest.main()

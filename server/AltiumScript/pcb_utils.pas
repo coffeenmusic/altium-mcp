@@ -5179,3 +5179,1209 @@ begin
         Props.Free;
     end;
 end;
+
+// ---------------------------------------------------------------- geometry
+//
+// objects_in_area, clearance and drag_copper. Objects travel as '|' strings
+// of integers (internal units; angles in thousandths of a degree), so no
+// number depends on the Windows decimal separator. A reference names one
+// object again: track|layer|x1|y1|x2|y2, arc|layer|cx|cy|r, via|x|y,
+// pad|designator|name (or pad|x|y for a free pad), fill|layer|x1|y1|x2|y2,
+// region|layer|left|bottom|right|top, component|designator.
+
+// The polygon a poured region or track belongs to, or nil
+function GeoParentPolygon(Prim: IPCB_Primitive): IPCB_Polygon;
+begin
+    Result := nil;
+    if Prim.InPolygon then Result := Prim.Polygon;
+end;
+
+// A pour's copper carries no net of its own, and Altium can leave it on the
+// internal Connect Layer: its polygon's net and layer are the real ones
+function GeoNet(Prim: IPCB_Primitive): String;
+var
+    Poly : IPCB_Polygon;
+begin
+    Result := '';
+    if Prim.Net <> nil then Result := Prim.Net.Name
+    else
+    begin
+        Poly := GeoParentPolygon(Prim);
+        if (Poly <> nil) and (Poly.Net <> nil) then Result := Poly.Net.Name;
+    end;
+end;
+
+function GeoLayer(Prim: IPCB_Primitive): Integer;
+var
+    Poly : IPCB_Polygon;
+begin
+    Result := Prim.Layer;
+    Poly := GeoParentPolygon(Prim);
+    if Poly <> nil then Result := Poly.Layer;
+end;
+
+function GeoPolygonName(Prim: IPCB_Primitive): String;
+var
+    Poly : IPCB_Polygon;
+begin
+    Result := '';
+    Poly := GeoParentPolygon(Prim);
+    if Poly <> nil then Result := Poly.Name;
+end;
+
+// Does the segment A-B cross the box X1,Y1-X2,Y2 (Liang-Barsky clipping)?
+function GeoSegmentHitsBox(AX, AY, BX, BY, X1, Y1, X2, Y2: Double): Boolean;
+var
+    T0, T1, DX, DY, P, Q, R : Double;
+    I : Integer;
+begin
+    Result := False;
+    T0 := 0;
+    T1 := 1;
+    DX := BX - AX;
+    DY := BY - AY;
+    for I := 0 to 3 do
+    begin
+        case I of
+            0: begin P := -DX; Q := AX - X1; end;
+            1: begin P := DX;  Q := X2 - AX; end;
+            2: begin P := -DY; Q := AY - Y1; end;
+            3: begin P := DY;  Q := Y2 - AY; end;
+        end;
+        if P = 0 then
+        begin
+            if Q < 0 then Exit;
+        end
+        else
+        begin
+            R := Q / P;
+            if P < 0 then
+            begin
+                if R > T1 then Exit;
+                if R > T0 then T0 := R;
+            end
+            else
+            begin
+                if R < T0 then Exit;
+                if R < T1 then T1 := R;
+            end;
+        end;
+    end;
+    Result := True;
+end;
+
+// One contour against the box: 0 outside it, 1 the box is inside the
+// contour, 2 an edge crosses the box
+function GeoContourVsBox(C: IDispatch; X1, Y1, X2, Y2: Integer): Integer;
+var
+    I, J, N : Integer;
+    CX, CY, AX, AY, BX, BY : Double;
+    Inside : Boolean;
+begin
+    N := C.Count;
+    CX := (X1 + X2) / 2;
+    CY := (Y1 + Y2) / 2;
+    Inside := False;
+    J := N - 1;
+    for I := 0 to N - 1 do
+    begin
+        AX := C.x(J); AY := C.y(J);
+        BX := C.x(I); BY := C.y(I);
+        if GeoSegmentHitsBox(AX, AY, BX, BY, X1, Y1, X2, Y2) then
+        begin
+            Result := 2;
+            Exit;
+        end;
+        if ((BY > CY) <> (AY > CY)) and (CX < (AX - BX) * (CY - BY) / (AY - BY) + BX) then Inside := not Inside;
+        J := I;
+    end;
+    if Inside then Result := 1 else Result := 0;
+end;
+
+// Does a region's copper (its outline less its holes) touch the box? A
+// whole-board pour's bounds touch every box; its shape does not.
+function GeoRegionTouchesBox(Region: IPCB_Region; X1, Y1, X2, Y2: Integer): Boolean;
+var
+    GP : IDispatch;
+    K  : Integer;
+begin
+    Result := False;
+    GP := Region.GeometricPolygon;
+    for K := 0 to GP.Count - 1 do
+        if not GP.IsHole(K) then
+            if GeoContourVsBox(GP.Contour(K), X1, Y1, X2, Y2) > 0 then Result := True;
+    if not Result then Exit;
+    // the box wholly inside a hole touches no copper
+    for K := 0 to GP.Count - 1 do
+        if GP.IsHole(K) then
+            if GeoContourVsBox(GP.Contour(K), X1, Y1, X2, Y2) = 1 then
+            begin
+                Result := False;
+                Exit;
+            end;
+end;
+
+// Does the object's shape touch the box? Regions and tracks are tested by
+// shape, the rest by bounds (the spatial iterator's own test).
+function GeoTouchesBox(Prim: IPCB_Primitive; X1, Y1, X2, Y2: Integer): Boolean;
+var
+    Track : IPCB_Track;
+    H     : Integer;
+begin
+    Result := True;
+    if Prim.ObjectId = eRegionObject then
+        Result := GeoRegionTouchesBox(Prim, X1, Y1, X2, Y2)
+    else if Prim.ObjectId = eTrackObject then
+    begin
+        Track := Prim;
+        H := Track.Width div 2;
+        Result := GeoSegmentHitsBox(Track.x1, Track.y1, Track.x2, Track.y2, X1 - H, Y1 - H, X2 + H, Y2 + H);
+    end;
+end;
+
+function GeoOwner(Prim: IPCB_Primitive): String;
+begin
+    Result := '';
+    if Prim.InComponent then
+        if Prim.Component <> nil then Result := Prim.Component.Name.Text;
+end;
+
+function GeoFlag(B: Boolean): String;
+begin
+    if B then Result := '1' else Result := '0';
+end;
+
+// One object as kind|layer|net|owner|fields...
+function GeoRecord(Prim: IPCB_Primitive): String;
+var
+    Track : IPCB_Track;
+    Arc   : IPCB_Arc;
+    Via   : IPCB_Via;
+    Pad   : IPCB_Pad;
+    Fill  : IPCB_Fill;
+    Txt   : IPCB_Text;
+    Comp  : IPCB_Component;
+    R     : TCoordRect;
+    Head  : String;
+    Hidden : Boolean;
+begin
+    Result := '';
+    Head := Layer2String(GeoLayer(Prim)) + '|' + GeoNet(Prim) + '|' + GeoOwner(Prim) + '|';
+    R := Prim.BoundingRectangle;
+    case Prim.ObjectId of
+        eTrackObject:
+        begin
+            Track := Prim;
+            Result := 'track|' + Head + IntToStr(Track.x1) + '|' + IntToStr(Track.y1) + '|' + IntToStr(Track.x2) +
+                      '|' + IntToStr(Track.y2) + '|' + IntToStr(Track.Width) + '|' + GeoFlag(Prim.InPolygon);
+        end;
+        eArcObject:
+        begin
+            Arc := Prim;
+            Result := 'arc|' + Head + IntToStr(Arc.XCenter) + '|' + IntToStr(Arc.YCenter) + '|' + IntToStr(Arc.Radius) +
+                      '|' + IntToStr(Round(Arc.StartAngle * 1000)) + '|' + IntToStr(Round(Arc.EndAngle * 1000)) +
+                      '|' + IntToStr(Arc.LineWidth) + '|' + GeoFlag(Prim.InPolygon);
+        end;
+        eViaObject:
+        begin
+            Via := Prim;
+            Result := 'via|' + Layer2String(Via.LowLayer) + ':' + Layer2String(Via.HighLayer) + '|' + GeoNet(Prim) +
+                      '||' + IntToStr(Via.x) + '|' + IntToStr(Via.y) + '|' + IntToStr(Via.Size) + '|' + IntToStr(Via.HoleSize);
+        end;
+        ePadObject:
+        begin
+            Pad := Prim;
+            Result := 'pad|' + Head + IntToStr(Pad.x) + '|' + IntToStr(Pad.y) + '|' + IntToStr(Pad.TopXSize) + '|' +
+                      IntToStr(Pad.TopYSize) + '|' + IntToStr(Pad.TopShape) + '|' + IntToStr(Pad.HoleSize) + '|' +
+                      IntToStr(Round(Pad.Rotation * 1000)) + '|' + Pad.Name;
+        end;
+        eFillObject:
+        begin
+            Fill := Prim;
+            Result := 'fill|' + Head + IntToStr(Fill.X1Location) + '|' + IntToStr(Fill.Y1Location) + '|' +
+                      IntToStr(Fill.X2Location) + '|' + IntToStr(Fill.Y2Location) + '|' + IntToStr(Round(Fill.Rotation * 1000));
+        end;
+        eRegionObject:
+            Result := 'region|' + Head + IntToStr(R.Left) + '|' + IntToStr(R.Bottom) + '|' + IntToStr(R.Right) + '|' +
+                      IntToStr(R.Top) + '|' + GeoFlag(Prim.InPolygon) + '|' + GeoPolygonName(Prim);
+        ePolyObject:
+            Result := 'polygon|' + Head + IntToStr(R.Left) + '|' + IntToStr(R.Bottom) + '|' + IntToStr(R.Right) + '|' +
+                      IntToStr(R.Top);
+        eTextObject:
+        begin
+            Txt := Prim;
+            // A component's comment or designator switched off is still an
+            // object on the board, just not shown
+            Hidden := False;
+            if Prim.InComponent and (Prim.Component <> nil) then
+            begin
+                if Txt.IsComment and not Prim.Component.CommentOn then Hidden := True;
+                if Txt.IsDesignator and not Prim.Component.NameOn then Hidden := True;
+            end;
+            Result := 'text|' + Head + IntToStr(Txt.XLocation) + '|' + IntToStr(Txt.YLocation) + '|' + IntToStr(Txt.Size) +
+                      '|' + IntToStr(Round(Txt.Rotation * 1000)) + '|' + GeoFlag(Hidden) + '|' + Txt.Text;
+        end;
+        eComponentObject:
+        begin
+            Comp := Prim;
+            Result := 'component|' + Layer2String(Comp.Layer) + '||' + Comp.Name.Text + '|' + IntToStr(Comp.x) + '|' +
+                      IntToStr(Comp.y) + '|' + IntToStr(Round(Comp.Rotation * 1000)) + '|' + IntToStr(R.Left) + '|' +
+                      IntToStr(R.Bottom) + '|' + IntToStr(R.Right) + '|' + IntToStr(R.Top) + '|' + Comp.Pattern;
+        end;
+    end;
+end;
+
+function GeoKindSet(Kinds: String): TObjectSet;
+begin
+    Result := MkSet();
+    if (Kinds = '') or (Pos('|track|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eTrackObject));
+    if (Kinds = '') or (Pos('|arc|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eArcObject));
+    if (Kinds = '') or (Pos('|via|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eViaObject));
+    if (Kinds = '') or (Pos('|pad|', Kinds) > 0) then Result := SetUnion(Result, MkSet(ePadObject));
+    if (Kinds = '') or (Pos('|fill|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eFillObject));
+    if (Kinds = '') or (Pos('|region|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eRegionObject));
+    if (Kinds = '') or (Pos('|polygon|', Kinds) > 0) then Result := SetUnion(Result, MkSet(ePolyObject));
+    if (Kinds = '') or (Pos('|text|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eTextObject));
+    if (Kinds = '') or (Pos('|component|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eComponentObject));
+end;
+
+// A region's outline for drawing: its contours joined by '~', each 's:' (solid)
+// or 'h:' (hole) followed by x,y points joined by ';'
+function GeoContours(Region: IPCB_Region): String;
+var
+    GP   : IDispatch;
+    K, I : Integer;
+    Part : String;
+begin
+    Result := '';
+    GP := Region.GeometricPolygon;
+    for K := 0 to GP.Count - 1 do
+    begin
+        if GP.IsHole(K) then Part := 'h:' else Part := 's:';
+        for I := 0 to GP.Contour(K).Count - 1 do
+        begin
+            if I > 0 then Part := Part + ';';
+            Part := Part + IntToStr(GP.Contour(K).x(I)) + ',' + IntToStr(GP.Contour(K).y(I));
+        end;
+        if K > 0 then Result := Result + '~';
+        Result := Result + Part;
+    end;
+end;
+
+// The board outline: vx,vy,kind(0 line, 1 arc),cx,cy,radius,angle1,angle2
+// per segment (angles in thousandths of a degree), joined by ';'
+function GeoOutline(Board: IPCB_Board): String;
+var
+    I   : Integer;
+    Seg : TPolySegment;
+    Props : TStringList;
+    Text : String;
+begin
+    Text := '';
+    for I := 0 to Board.BoardOutline.PointCount - 1 do
+    begin
+        Seg := Board.BoardOutline.Segments[I];
+        if I > 0 then Text := Text + ';';
+        Text := Text + IntToStr(Seg.vx) + ',' + IntToStr(Seg.vy) + ',' + IntToStr(Seg.Kind) + ',' +
+                IntToStr(Seg.cx) + ',' + IntToStr(Seg.cy) + ',' + IntToStr(Seg.Radius) + ',' +
+                IntToStr(Round(Seg.Angle1 * 1000)) + ',' + IntToStr(Round(Seg.Angle2 * 1000));
+    end;
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        AddJSONProperty(Props, 'outline', Text);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+// Objects touching the box X1,Y1-X2,Y2 (internal units) of the kinds in
+// Kinds ('|track|via|', or '' for all), at most Limit
+function ObjectsInArea(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Kinds: String; Limit: Integer;
+                       Shapes: Boolean): String;
+var
+    It    : IPCB_SpatialIterator;
+    Prim  : IPCB_Primitive;
+    Items, Props : TStringList;
+    Rec   : String;
+    Total : Integer;
+begin
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Total := 0;
+        It := Board.SpatialIterator_Create;
+        It.AddFilter_ObjectSet(GeoKindSet(Kinds));
+        It.AddFilter_LayerSet(AllLayers);
+        It.AddFilter_Area(X1, Y1, X2, Y2);
+        Prim := It.FirstPCBObject;
+        while Prim <> nil do
+        begin
+            if GeoTouchesBox(Prim, X1, Y1, X2, Y2) then Rec := GeoRecord(Prim) else Rec := '';
+            // For drawing: the outline of a region, not just its bounds
+            if Shapes and (Rec <> '') and (Prim.ObjectId = eRegionObject) then
+                Rec := Rec + '|' + GeoContours(Prim);
+            if Rec <> '' then
+            begin
+                Total := Total + 1;
+                if Items.Count < Limit then Items.Add('"' + JSONEscapeString(Rec) + '"');
+            end;
+            Prim := It.NextPCBObject;
+        end;
+        Board.SpatialIterator_Destroy(It);
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        AddJSONInteger(Props, 'total', Total);
+        Props.Add(BuildJSONArray(Items, 'objects'));
+        Result := BuildJSONObject(Props);
+    finally
+        Items.Free;
+        Props.Free;
+    end;
+end;
+
+// The pad Name of the component Designator, or nil
+function GeoComponentPad(Board: IPCB_Board; Designator, Name: String): IPCB_Pad;
+var
+    Comp : IPCB_Component;
+    GI   : IPCB_GroupIterator;
+    Pad  : IPCB_Pad;
+begin
+    Result := nil;
+    Comp := Board.GetPcbComponentByRefDes(Designator);
+    if Comp = nil then Exit;
+    GI := Comp.GroupIterator_Create;
+    GI.AddFilter_ObjectSet(MkSet(ePadObject));
+    Pad := GI.FirstPCBObject;
+    while (Pad <> nil) and (Result = nil) do
+    begin
+        if SameText(Pad.Name, Name) then Result := Pad;
+        Pad := GI.NextPCBObject;
+    end;
+    Comp.GroupIterator_Destroy(GI);
+end;
+
+// The object a reference names (see the top of this section), or nil
+function GeoFind(Board: IPCB_Board; Ref: String): IPCB_Primitive;
+var
+    Kind, LayerName : String;
+    It   : IPCB_SpatialIterator;
+    Prim : IPCB_Primitive;
+    Track : IPCB_Track;
+    Arc  : IPCB_Arc;
+    Via  : IPCB_Via;
+    Pad  : IPCB_Pad;
+    Fill : IPCB_Fill;
+    R    : TCoordRect;
+    A, B, C, D, M : Integer;
+    ObjSet : TObjectSet;
+begin
+    Result := nil;
+    Kind := GetFieldFromPipeString(Ref, 0);
+    if Kind = 'component' then
+    begin
+        Result := Board.GetPcbComponentByRefDes(GetFieldFromPipeString(Ref, 1));
+        Exit;
+    end;
+    if (Kind = 'pad') and (StrToIntDef(GetFieldFromPipeString(Ref, 1), -1) = -1) then
+    begin
+        Result := GeoComponentPad(Board, GetFieldFromPipeString(Ref, 1), GetFieldFromPipeString(Ref, 2));
+        Exit;
+    end;
+    if (Kind = 'via') or (Kind = 'pad') then
+    begin
+        A := StrToInt(GetFieldFromPipeString(Ref, 1));
+        B := StrToInt(GetFieldFromPipeString(Ref, 2));
+        C := A;
+        D := B;
+        LayerName := '';
+    end
+    else
+    begin
+        LayerName := GetFieldFromPipeString(Ref, 1);
+        A := StrToInt(GetFieldFromPipeString(Ref, 2));
+        B := StrToInt(GetFieldFromPipeString(Ref, 3));
+        C := StrToIntDef(GetFieldFromPipeString(Ref, 4), A);
+        D := StrToIntDef(GetFieldFromPipeString(Ref, 5), B);
+    end;
+    if Kind = 'track' then ObjSet := MkSet(eTrackObject)
+    else if Kind = 'arc' then ObjSet := MkSet(eArcObject)
+    else if Kind = 'via' then ObjSet := MkSet(eViaObject)
+    else if Kind = 'pad' then ObjSet := MkSet(ePadObject)
+    else if Kind = 'fill' then ObjSet := MkSet(eFillObject)
+    else if Kind = 'region' then ObjSet := MkSet(eRegionObject)
+    else if Kind = 'text' then ObjSet := MkSet(eTextObject)
+    else Exit;
+    M := 10;
+    It := Board.SpatialIterator_Create;
+    It.AddFilter_ObjectSet(ObjSet);
+    It.AddFilter_LayerSet(AllLayers);
+    It.AddFilter_Area(Min(A, C) - M, Min(B, D) - M, Max(A, C) + M, Max(B, D) + M);
+    Prim := It.FirstPCBObject;
+    while (Prim <> nil) and (Result = nil) do
+    begin
+        if (LayerName = '') or SameText(Layer2String(GeoLayer(Prim)), LayerName) then
+        begin
+            if Kind = 'track' then
+            begin
+                Track := Prim;
+                if ((Track.x1 = A) and (Track.y1 = B) and (Track.x2 = C) and (Track.y2 = D)) or
+                   ((Track.x1 = C) and (Track.y1 = D) and (Track.x2 = A) and (Track.y2 = B)) then Result := Prim;
+            end
+            else if Kind = 'arc' then
+            begin
+                Arc := Prim;
+                if (Arc.XCenter = A) and (Arc.YCenter = B) and (Arc.Radius = C) then Result := Prim;
+            end
+            else if Kind = 'via' then
+            begin
+                Via := Prim;
+                if (Via.x = A) and (Via.y = B) then Result := Prim;
+            end
+            else if Kind = 'pad' then
+            begin
+                Pad := Prim;
+                if (Pad.x = A) and (Pad.y = B) then Result := Prim;
+            end
+            else if Kind = 'fill' then
+            begin
+                Fill := Prim;
+                if (Fill.X1Location = A) and (Fill.Y1Location = B) and (Fill.X2Location = C) and
+                   (Fill.Y2Location = D) then Result := Prim;
+            end
+            else if Kind = 'region' then
+            begin
+                R := Prim.BoundingRectangle;
+                if (R.Left = A) and (R.Bottom = B) and (R.Right = C) and (R.Top = D) then Result := Prim;
+            end
+            else if Kind = 'text' then
+            begin
+                if (Prim.XLocation = A) and (Prim.YLocation = B) then Result := Prim;
+            end;
+        end;
+        Prim := It.NextPCBObject;
+    end;
+    Board.SpatialIterator_Destroy(It);
+end;
+
+// Distance between two referenced objects, and the clearance rule between them
+function GeoClearance(Board: IPCB_Board; RefA, RefB: String): String;
+var
+    A, B  : IPCB_Primitive;
+    Rule  : IPCB_Rule;
+    Props : TStringList;
+begin
+    A := GeoFind(Board, RefA);
+    B := GeoFind(Board, RefB);
+    if A = nil then begin Result := 'ERROR: object not found: ' + RefA; Exit; end;
+    if B = nil then begin Result := 'ERROR: object not found: ' + RefB; Exit; end;
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'a', GeoRecord(A));
+        AddJSONProperty(Props, 'b', GeoRecord(B));
+        AddJSONInteger(Props, 'distance', Board.PrimPrimDistance(A, B));
+        Rule := Board.FindDominantRuleForObjectPair(A, B, eRule_Clearance);
+        if Rule <> nil then
+        begin
+            AddJSONProperty(Props, 'rule', Rule.Name);
+            AddJSONInteger(Props, 'rule_gap', Rule.Gap);
+            AddJSONBoolean(Props, 'rule_violated', Rule.ActualCheck(A, B) <> nil);
+        end;
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+// What sits at X,Y (internal units), for a drag: track ends on a layer in
+// Layers ('|id|id|', or '' for every layer) go into Tracks with the end in
+// EndNos ('1' or '2'), vias into Vias; an arc ending there or a pad under it
+// is named in Blocker, since neither can follow. Skip is the dragged object.
+procedure GeoAttached(Board: IPCB_Board; X, Y: Integer; Layers: String; Skip: IPCB_Primitive;
+                      Tracks: TInterfaceList; EndNos: TStringList; Vias: TInterfaceList; var Blocker: String);
+var
+    It    : IPCB_SpatialIterator;
+    Prim  : IPCB_Primitive;
+    Track : IPCB_Track;
+    Arc   : IPCB_Arc;
+    R     : TCoordRect;
+    Tol   : Integer;
+begin
+    Tol := 100;
+    It := Board.SpatialIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject));
+    It.AddFilter_LayerSet(AllLayers);
+    It.AddFilter_Area(X - Tol, Y - Tol, X + Tol, Y + Tol);
+    Prim := It.FirstPCBObject;
+    while Prim <> nil do
+    begin
+        if (Prim.I_ObjectAddress <> Skip.I_ObjectAddress) and not Prim.InPolygon and
+           ((Layers = '') or (Prim.ObjectId = eViaObject) or (Prim.Layer = eMultiLayer) or
+            (Pos('|' + IntToStr(Prim.Layer) + '|', Layers) > 0)) then
+        begin
+            if Prim.ObjectId = eTrackObject then
+            begin
+                Track := Prim;
+                if (Abs(Track.x1 - X) <= Tol) and (Abs(Track.y1 - Y) <= Tol) then
+                begin
+                    Tracks.Add(Track);
+                    EndNos.Add('1');
+                end
+                else if (Abs(Track.x2 - X) <= Tol) and (Abs(Track.y2 - Y) <= Tol) then
+                begin
+                    Tracks.Add(Track);
+                    EndNos.Add('2');
+                end;
+            end
+            else if Prim.ObjectId = eViaObject then
+            begin
+                if (Abs(Prim.x - X) <= Tol) and (Abs(Prim.y - Y) <= Tol) then Vias.Add(Prim);
+            end
+            else if Prim.ObjectId = eArcObject then
+            begin
+                Arc := Prim;
+                if ((Abs(Arc.StartX - X) <= Tol) and (Abs(Arc.StartY - Y) <= Tol)) or
+                   ((Abs(Arc.EndX - X) <= Tol) and (Abs(Arc.EndY - Y) <= Tol)) then
+                    Blocker := 'an arc (' + Layer2String(Prim.Layer) + ') ends at a moved point';
+            end
+            else if Prim.ObjectId = ePadObject then
+            begin
+                R := Prim.BoundingRectangle;
+                if (X >= R.Left) and (X <= R.Right) and (Y >= R.Bottom) and (Y <= R.Top) then
+                    Blocker := 'pad ' + GeoOwner(Prim) + '-' + Prim.Name + ' lies under a moved point';
+            end;
+        end;
+        Prim := It.NextPCBObject;
+    end;
+    Board.SpatialIterator_Destroy(It);
+end;
+
+procedure GeoBeginModify(Prim: IPCB_Primitive);
+begin
+    PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+end;
+
+procedure GeoEndModify(Prim: IPCB_Primitive);
+begin
+    PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    Prim.GraphicallyInvalidate;
+end;
+
+// Drag a via, or a track segment, by DX,DY and keep its copper connected:
+// track ends at a moved point follow, and a via at a moved end of a track
+// moves too, with the tracks on its other layers. Refused when an arc ends
+// at a moved point or a pad lies under one. With DryRun nothing changes.
+function DragCopper(Board: IPCB_Board; Ref: String; DX, DY: Integer; DryRun: Boolean): String;
+var
+    Obj    : IPCB_Primitive;
+    Track  : IPCB_Track;
+    Via    : IPCB_Via;
+    Tracks, Vias, PointVias : TInterfaceList;
+    EndNos, Moved, Stretched, Props : TStringList;
+    Blocker : String;
+    I, J, K, PX, PY : Integer;
+begin
+    Obj := GeoFind(Board, Ref);
+    if Obj = nil then begin Result := 'ERROR: object not found: ' + Ref; Exit; end;
+    if (Obj.ObjectId <> eViaObject) and (Obj.ObjectId <> eTrackObject) then
+    begin
+        Result := 'ERROR: only a via or a track can be dragged';
+        Exit;
+    end;
+    if Obj.InPolygon then begin Result := 'ERROR: that is part of a polygon pour'; Exit; end;
+    Tracks := TInterfaceList.Create;
+    Vias := TInterfaceList.Create;
+    PointVias := TInterfaceList.Create;
+    EndNos := TStringList.Create;
+    Moved := TStringList.Create;
+    Stretched := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Blocker := '';
+        if Obj.ObjectId = eViaObject then
+        begin
+            Vias.Add(Obj);
+            GeoAttached(Board, Obj.x, Obj.y, '', Obj, Tracks, EndNos, PointVias, Blocker);
+        end
+        else
+        begin
+            Track := Obj;
+            for K := 1 to 2 do
+            begin
+                if K = 1 then begin PX := Track.x1; PY := Track.y1; end
+                else begin PX := Track.x2; PY := Track.y2; end;
+                // A via at this end moves along, so its tracks on every layer follow
+                PointVias.Clear;
+                GeoAttached(Board, PX, PY, '|' + IntToStr(Track.Layer) + '|', Obj, Tracks, EndNos, PointVias, Blocker);
+                for I := 0 to PointVias.Count - 1 do
+                begin
+                    Vias.Add(PointVias[I]);
+                    GeoAttached(Board, PX, PY, '', PointVias[I], Tracks, EndNos, Vias, Blocker);
+                end;
+            end;
+        end;
+        // The dragged track, and anything found twice, counts once
+        for I := Tracks.Count - 1 downto 0 do
+        begin
+            if Tracks[I] = Obj then
+            begin
+                Tracks.Delete(I);
+                EndNos.Delete(I);
+                Continue;
+            end;
+            for J := 0 to I - 1 do
+                if (Tracks[I] = Tracks[J]) and (EndNos[I] = EndNos[J]) then
+                begin
+                    Tracks.Delete(I);
+                    EndNos.Delete(I);
+                    Break;
+                end;
+        end;
+        for I := Vias.Count - 1 downto 1 do
+            for J := 0 to I - 1 do
+                if Vias[I] = Vias[J] then
+                begin
+                    Vias.Delete(I);
+                    Break;
+                end;
+        if (Blocker <> '') and not DryRun then
+        begin
+            Result := 'ERROR: not dragged: ' + Blocker + ', which cannot follow';
+            Exit;
+        end;
+        if not DryRun then PCBServer.PreProcess;
+        try
+            if Obj.ObjectId = eTrackObject then
+            begin
+                Track := Obj;
+                if not DryRun then
+                begin
+                    GeoBeginModify(Track);
+                    Track.x1 := Track.x1 + DX;
+                    Track.y1 := Track.y1 + DY;
+                    Track.x2 := Track.x2 + DX;
+                    Track.y2 := Track.y2 + DY;
+                    GeoEndModify(Track);
+                end;
+                Moved.Add('"' + JSONEscapeString(GeoRecord(Track)) + '"');
+            end;
+            for I := 0 to Vias.Count - 1 do
+            begin
+                Via := Vias[I];
+                if not DryRun then
+                begin
+                    GeoBeginModify(Via);
+                    Via.x := Via.x + DX;
+                    Via.y := Via.y + DY;
+                    GeoEndModify(Via);
+                end;
+                Moved.Add('"' + JSONEscapeString(GeoRecord(Via)) + '"');
+            end;
+            for I := 0 to Tracks.Count - 1 do
+            begin
+                Track := Tracks[I];
+                if not DryRun then
+                begin
+                    GeoBeginModify(Track);
+                    if EndNos[I] = '1' then
+                    begin
+                        Track.x1 := Track.x1 + DX;
+                        Track.y1 := Track.y1 + DY;
+                    end
+                    else
+                    begin
+                        Track.x2 := Track.x2 + DX;
+                        Track.y2 := Track.y2 + DY;
+                    end;
+                    GeoEndModify(Track);
+                end;
+                Stretched.Add('"' + JSONEscapeString(EndNos[I] + '|' + GeoRecord(Track)) + '"');
+            end;
+        finally
+            if not DryRun then PCBServer.PostProcess;
+        end;
+        if not DryRun then Board.ViewManager_FullUpdate;
+        AddJSONBoolean(Props, 'dry_run', DryRun);
+        AddJSONProperty(Props, 'blocker', Blocker);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        Props.Add(BuildJSONArray(Moved, 'moved'));
+        Props.Add(BuildJSONArray(Stretched, 'stretched'));
+        Result := BuildJSONObject(Props);
+    finally
+        Tracks.Free;
+        Vias.Free;
+        PointVias.Free;
+        EndNos.Free;
+        Moved.Free;
+        Stretched.Free;
+        Props.Free;
+    end;
+end;
+
+// geometry requests: "geometry" names the command (area, clearance, drag)
+// ---------------------------------------------------------------- object DRC
+// The board's own rules run on chosen objects only: each object's
+// width / hole rule, and the clearance, short-circuit and hole-to-hole
+// rules against every object near it. Rule.ActualCheck is the test the
+// batch DRC uses for one object or pair; it returns nil when they comply.
+
+function GeoRuleKindName(Kind: Integer): String;
+begin
+    case Kind of
+        eRule_Clearance:            Result := 'clearance';
+        eRule_ShortCircuit:         Result := 'short_circuit';
+        eRule_HoleToHoleClearance:  Result := 'hole_to_hole';
+        eRule_MaxMinWidth:          Result := 'width';
+        eRule_MaxMinHoleSize:       Result := 'hole_size';
+    else
+        Result := IntToStr(Kind);
+    end;
+end;
+
+// The largest clearance gap of the board's enabled rules: how far to look
+// for neighbours
+function GeoLargestGap(Board: IPCB_Board): Integer;
+var
+    It   : IPCB_BoardIterator;
+    Rule : IPCB_Rule;
+begin
+    Result := 0;
+    It := Board.BoardIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eRuleObject));
+    It.AddFilter_LayerSet(AllLayers);
+    It.AddFilter_Method(eProcessAll);
+    Rule := It.FirstPCBObject;
+    while Rule <> nil do
+    begin
+        if Rule.Enabled and (Rule.RuleKind = eRule_Clearance) then
+            if Rule.Gap > Result then Result := Rule.Gap;
+        if Rule.Enabled and (Rule.RuleKind = eRule_HoleToHoleClearance) then
+            if Rule.Gap > Result then Result := Rule.Gap;
+        Rule := It.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(It);
+end;
+
+function GeoHasHole(Prim: IPCB_Primitive): Boolean;
+begin
+    Result := False;
+    if Prim.ObjectId = eViaObject then Result := True
+    else if Prim.ObjectId = ePadObject then Result := Prim.HoleSize > 0;
+end;
+
+function GeoIsPourCopper(Prim: IPCB_Primitive): Boolean;
+begin
+    Result := False;
+    if Prim <> nil then Result := (Prim.ObjectId = eRegionObject) and Prim.InPolygon;
+end;
+
+procedure GeoAddViolation(Board: IPCB_Board; Items: TStringList; Rule: IPCB_Rule; A, B: IPCB_Primitive;
+                          var Hard: Integer);
+var
+    Item : TStringList;
+begin
+    // a hit on pour copper goes away with a repour; the rest are hard
+    if not (GeoIsPourCopper(A) or GeoIsPourCopper(B)) then Hard := Hard + 1;
+    Item := TStringList.Create;
+    try
+        AddJSONProperty(Item, 'rule', Rule.Name);
+        AddJSONProperty(Item, 'kind', GeoRuleKindName(Rule.RuleKind));
+        AddJSONProperty(Item, 'a', GeoRecord(A));
+        if B <> nil then
+        begin
+            AddJSONProperty(Item, 'b', GeoRecord(B));
+            AddJSONInteger(Item, 'distance', Board.PrimPrimDistance(A, B));
+        end;
+        if Rule.RuleKind = eRule_Clearance then AddJSONInteger(Item, 'gap', Rule.Gap);
+        AddJSONProperty(Item, 'descriptor', Rule.Descriptor);
+        Items.Add(BuildJSONObject(Item, 1));
+    finally
+        Item.Free;
+    end;
+end;
+
+// Checks Objects; Items gets one JSON object per violation, Hard counts
+// those not against pour copper
+procedure GeoCheckObjects(Board: IPCB_Board; Objects: TInterfaceList; Items: TStringList; var Pairs: Integer;
+                          var Hard: Integer);
+var
+    A, B  : IPCB_Primitive;
+    Rule  : IPCB_Rule;
+    It    : IPCB_SpatialIterator;
+    R     : TCoordRect;
+    i, k, Margin, Kind : Integer;
+    Seen  : TStringList;
+    Key   : String;
+begin
+    Margin := GeoLargestGap(Board) + MilsToCoord(1);
+    Seen := TStringList.Create;
+    try
+        Seen.Sorted := True;
+        for i := 0 to Objects.Count - 1 do
+        begin
+            A := Objects.Items[i];
+            // the object's own rules
+            for k := 0 to 1 do
+            begin
+                Kind := -1;
+                if (k = 0) and ((A.ObjectId = eTrackObject) or (A.ObjectId = eArcObject)) then Kind := eRule_MaxMinWidth;
+                if (k = 1) and GeoHasHole(A) then Kind := eRule_MaxMinHoleSize;
+                if Kind >= 0 then
+                begin
+                    Rule := Board.FindDominantRuleForObject(A, Kind);
+                    if (Rule <> nil) and Rule.Enabled then
+                        if Rule.ActualCheck(A, nil) <> nil then GeoAddViolation(Board, Items, Rule, A, nil, Hard);
+                end;
+            end;
+            // against what is near it
+            R := A.BoundingRectangle;
+            It := Board.SpatialIterator_Create;
+            It.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject, eFillObject, eRegionObject));
+            It.AddFilter_LayerSet(AllLayers);
+            It.AddFilter_Area(R.Left - Margin, R.Bottom - Margin, R.Right + Margin, R.Top + Margin);
+            B := It.FirstPCBObject;
+            while B <> nil do
+            begin
+                if B.I_ObjectAddress <> A.I_ObjectAddress then
+                begin
+                    // each pair once, also when both objects were asked for
+                    if A.I_ObjectAddress < B.I_ObjectAddress then
+                        Key := IntToStr(A.I_ObjectAddress) + '-' + IntToStr(B.I_ObjectAddress)
+                    else
+                        Key := IntToStr(B.I_ObjectAddress) + '-' + IntToStr(A.I_ObjectAddress);
+                    if Seen.IndexOf(Key) < 0 then
+                    begin
+                        Seen.Add(Key);
+                        Pairs := Pairs + 1;
+                        for k := 0 to 2 do
+                        begin
+                            if k = 0 then Kind := eRule_Clearance
+                            else if k = 1 then Kind := eRule_ShortCircuit
+                            else Kind := eRule_HoleToHoleClearance;
+                            if (Kind <> eRule_HoleToHoleClearance) or (GeoHasHole(A) and GeoHasHole(B)) then
+                            begin
+                                Rule := Board.FindDominantRuleForObjectPair(A, B, Kind);
+                                if (Rule <> nil) and Rule.Enabled then
+                                    if Rule.ActualCheck(A, B) <> nil then GeoAddViolation(Board, Items, Rule, A, B, Hard);
+                            end;
+                        end;
+                    end;
+                end;
+                B := It.NextPCBObject;
+            end;
+            Board.SpatialIterator_Destroy(It);
+        end;
+    finally
+        Seen.Free;
+    end;
+end;
+
+// check: Refs ('~'-separated refs) and/or the box X1..Y2 (all copper in it);
+// at most Limit objects
+function GeoCheck(Board: IPCB_Board; Refs: String; HasBox: Boolean; X1, Y1, X2, Y2, Limit: Integer): String;
+var
+    Objects : TInterfaceList;
+    Items, Props, Missing, RefList : TStringList;
+    Prim : IPCB_Primitive;
+    It   : IPCB_SpatialIterator;
+    Ref  : String;
+    i, Pairs, Total, Hard : Integer;
+begin
+    Objects := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    Missing := TStringList.Create;
+    RefList := TStringList.Create;
+    try
+        RefList.Text := StringReplace(Refs, '~', #13#10, REPLACEALL);
+        for i := 0 to RefList.Count - 1 do
+        begin
+            Ref := Trim(RefList[i]);
+            if Ref = '' then Continue;
+            Prim := GeoFind(Board, Ref);
+            if Prim = nil then Missing.Add('"' + JSONEscapeString(Ref) + '"') else Objects.Add(Prim);
+        end;
+        Total := Objects.Count;
+        if HasBox then
+        begin
+            It := Board.SpatialIterator_Create;
+            It.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject, eFillObject));
+            It.AddFilter_LayerSet(AllLayers);
+            It.AddFilter_Area(X1, Y1, X2, Y2);
+            Prim := It.FirstPCBObject;
+            while Prim <> nil do
+            begin
+                if GeoTouchesBox(Prim, X1, Y1, X2, Y2) then
+                begin
+                    Total := Total + 1;
+                    if Objects.Count < Limit then Objects.Add(Prim);
+                end;
+                Prim := It.NextPCBObject;
+            end;
+            Board.SpatialIterator_Destroy(It);
+        end;
+        Pairs := 0;
+        Hard := 0;
+        GeoCheckObjects(Board, Objects, Items, Pairs, Hard);
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        AddJSONInteger(Props, 'objects_checked', Objects.Count);
+        AddJSONInteger(Props, 'objects_found', Total);
+        AddJSONInteger(Props, 'pairs_checked', Pairs);
+        Props.Add(BuildJSONArray(Missing, 'not_found'));
+        Props.Add(BuildJSONArray(Items, 'violations'));
+        Result := BuildJSONObject(Props);
+    finally
+        Objects.Free;
+        Items.Free;
+        Props.Free;
+        Missing.Free;
+        RefList.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- route
+// route_path's Altium side: where pins are, and adding a planned route's
+// tracks and vias in one undo step, sized by the rules when no size is
+// given, then checked with GeoCheckObjects.
+
+// locate: Refs ('~'-separated) as x|y|layer|net each, in order ('' when not found)
+function GeoLocate(Board: IPCB_Board; Refs: String): String;
+var
+    List, Items : TStringList;
+    Prim : IPCB_Primitive;
+    Props : TStringList;
+    i : Integer;
+    Layer : String;
+begin
+    List := TStringList.Create;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        List.Text := StringReplace(Refs, '~', #13#10, REPLACEALL);
+        for i := 0 to List.Count - 1 do
+        begin
+            Prim := GeoFind(Board, Trim(List[i]));
+            if Prim = nil then
+                Items.Add('""')
+            else
+            begin
+                if Prim.ObjectId = eViaObject then Layer := 'Multi-Layer'
+                else Layer := Layer2String(Prim.Layer);
+                Items.Add('"' + JSONEscapeString(IntToStr(Prim.x - Board.XOrigin) + '|' +
+                          IntToStr(Prim.y - Board.YOrigin) + '|' + Layer + '|' + GeoNet(Prim)) + '"');
+            end;
+        end;
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        Props.Add(BuildJSONArray(Items, 'located'));
+        Result := BuildJSONObject(Props);
+    finally
+        List.Free;
+        Items.Free;
+        Props.Free;
+    end;
+end;
+
+function GeoNetByName(Board: IPCB_Board; Name: String): IPCB_Net;
+var
+    It   : IPCB_BoardIterator;
+    Prim : IPCB_Primitive;
+begin
+    Result := nil;
+    It := Board.BoardIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eNetObject));
+    It.AddFilter_LayerSet(AllLayers);
+    It.AddFilter_Method(eProcessAll);
+    Prim := It.FirstPCBObject;
+    while (Prim <> nil) and (Result = nil) do
+    begin
+        if SameText(Prim.Name, Name) then Result := Prim;
+        Prim := It.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(It);
+end;
+
+// route: Tracks 'layer|x1|y1|x2|y2' and Vias 'x|y|low|high' per '~'-separated
+// item (internal units from the origin). Width, ViaSize, ViaHole 0: from
+// the rules. Removes it all again when Check finds violations other than
+// against pour copper and Undo is set.
+function GeoRoute(Board: IPCB_Board; NetName, Tracks, Vias: String; Width, ViaSize, ViaHole: Integer;
+                  Check, Undo: Boolean): String;
+var
+    Net    : IPCB_Net;
+    List   : TStringList;
+    Items, Made, Props : TStringList;
+    Created : TInterfaceList;
+    Track  : IPCB_Track;
+    Via    : IPCB_Via;
+    Rule   : IPCB_Rule;
+    i, Pairs, L, Hard : Integer;
+    Removed : Boolean;
+begin
+    Net := GeoNetByName(Board, NetName);
+    if Net = nil then
+    begin
+        Result := 'ERROR: no net ' + NetName + ' on the board';
+        Exit;
+    end;
+    List := TStringList.Create;
+    Items := TStringList.Create;
+    Made := TStringList.Create;
+    Props := TStringList.Create;
+    Created := TInterfaceList.Create;
+    try
+        PCBServer.PreProcess;
+        try
+            List.Text := StringReplace(Tracks, '~', #13#10, REPLACEALL);
+            for i := 0 to List.Count - 1 do
+            begin
+                if Trim(List[i]) = '' then Continue;
+                L := String2Layer(GetFieldFromPipeString(List[i], 0));
+                if L = eNoLayer then
+                begin
+                    Result := 'ERROR: unknown layer ' + GetFieldFromPipeString(List[i], 0);
+                    Exit;
+                end;
+                Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                Track.x1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(List[i], 1));
+                Track.y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(List[i], 2));
+                Track.x2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(List[i], 3));
+                Track.y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(List[i], 4));
+                Track.Layer := L;
+                Track.Net := Net;
+                Track.Width := Width;
+                if Width <= 0 then Track.Width := MilsToCoord(10);
+                Board.AddPCBObject(Track);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
+                // the width rule for this net and layer, as interactive routing uses it
+                if Width <= 0 then
+                begin
+                    Rule := Board.FindDominantRuleForObject(Track, eRule_MaxMinWidth);
+                    if Rule <> nil then Track.Width := Rule.FavoredWidth(L);
+                end;
+                Created.Add(Track);
+            end;
+            List.Text := StringReplace(Vias, '~', #13#10, REPLACEALL);
+            for i := 0 to List.Count - 1 do
+            begin
+                if Trim(List[i]) = '' then Continue;
+                Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+                Via.x := Board.XOrigin + StrToInt(GetFieldFromPipeString(List[i], 0));
+                Via.y := Board.YOrigin + StrToInt(GetFieldFromPipeString(List[i], 1));
+                Via.LowLayer := String2Layer(GetFieldFromPipeString(List[i], 2));
+                Via.HighLayer := String2Layer(GetFieldFromPipeString(List[i], 3));
+                Via.Net := Net;
+                Via.Size := ViaSize;
+                Via.HoleSize := ViaHole;
+                if ViaSize <= 0 then Via.Size := MilsToCoord(20);
+                if ViaHole <= 0 then Via.HoleSize := MilsToCoord(10);
+                Board.AddPCBObject(Via);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Via.I_ObjectAddress);
+                if (ViaSize <= 0) or (ViaHole <= 0) then
+                begin
+                    Rule := Board.FindDominantRuleForObject(Via, eRule_RoutingViaStyle);
+                    if Rule <> nil then
+                    begin
+                        if ViaSize <= 0 then Via.Size := Rule.PreferedWidth;
+                        if ViaHole <= 0 then Via.HoleSize := Rule.PreferedHoleWidth;
+                    end;
+                end;
+                Created.Add(Via);
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+        Pairs := 0;
+        Hard := 0;
+        if Check then GeoCheckObjects(Board, Created, Items, Pairs, Hard);
+        Removed := False;
+        if Undo and (Hard > 0) then
+        begin
+            PCBServer.PreProcess;
+            try
+                for i := 0 to Created.Count - 1 do
+                begin
+                    Board.RemovePCBObject(Created.Items[i]);
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration,
+                                                  Created.Items[i].I_ObjectAddress);
+                end;
+            finally
+                PCBServer.PostProcess;
+            end;
+            Removed := True;
+        end;
+        for i := 0 to Created.Count - 1 do
+            Made.Add('"' + JSONEscapeString(GeoRecord(Created.Items[i])) + '"');
+        Board.ViewManager_FullUpdate;
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        AddJSONBoolean(Props, 'removed_again', Removed);
+        AddJSONInteger(Props, 'pairs_checked', Pairs);
+        Props.Add(BuildJSONArray(Made, 'created'));
+        Props.Add(BuildJSONArray(Items, 'violations'));
+        Result := BuildJSONObject(Props);
+    finally
+        List.Free;
+        Items.Free;
+        Made.Free;
+        Props.Free;
+        Created.Free;
+    end;
+end;
+
+function ExecuteGeometry(RequestData: TStringList): String;
+var
+    Board : IPCB_Board;
+    Cmd   : String;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if Board = nil then
+    begin
+        Result := 'ERROR: no PCB is focused';
+        Exit;
+    end;
+    Cmd := RequestText(RequestData, 'geometry', '');
+    if Cmd = 'area' then
+        // The box is relative to the board origin, as in the other PCB tools
+        Result := ObjectsInArea(Board, Board.XOrigin + StrToInt(RequestText(RequestData, 'x1', '0')),
+                                Board.YOrigin + StrToInt(RequestText(RequestData, 'y1', '0')),
+                                Board.XOrigin + StrToInt(RequestText(RequestData, 'x2', '0')),
+                                Board.YOrigin + StrToInt(RequestText(RequestData, 'y2', '0')),
+                                RequestText(RequestData, 'kinds', ''),
+                                StrToInt(RequestText(RequestData, 'limit', '500')),
+                                RequestText(RequestData, 'shapes', 'false') = 'true')
+    else if Cmd = 'outline' then
+        Result := GeoOutline(Board)
+    else if Cmd = 'clearance' then
+        Result := GeoClearance(Board, RequestText(RequestData, 'a', ''), RequestText(RequestData, 'b', ''))
+    else if Cmd = 'locate' then
+        Result := GeoLocate(Board, RequestText(RequestData, 'refs', ''))
+    else if Cmd = 'route' then
+        Result := GeoRoute(Board, RequestText(RequestData, 'net', ''), RequestText(RequestData, 'tracks', ''),
+                           RequestText(RequestData, 'vias', ''), StrToInt(RequestText(RequestData, 'width', '0')),
+                           StrToInt(RequestText(RequestData, 'via_size', '0')),
+                           StrToInt(RequestText(RequestData, 'via_hole', '0')),
+                           RequestText(RequestData, 'check', 'true') = 'true',
+                           RequestText(RequestData, 'undo_on_violation', 'false') = 'true')
+    else if Cmd = 'check' then
+        Result := GeoCheck(Board, RequestText(RequestData, 'refs', ''), RequestText(RequestData, 'x1', '') <> '',
+                           Board.XOrigin + StrToIntDef(RequestText(RequestData, 'x1', '0'), 0),
+                           Board.YOrigin + StrToIntDef(RequestText(RequestData, 'y1', '0'), 0),
+                           Board.XOrigin + StrToIntDef(RequestText(RequestData, 'x2', '0'), 0),
+                           Board.YOrigin + StrToIntDef(RequestText(RequestData, 'y2', '0'), 0),
+                           StrToInt(RequestText(RequestData, 'limit', '300')))
+    else if Cmd = 'drag' then
+        Result := DragCopper(Board, RequestText(RequestData, 'ref', ''),
+                             StrToInt(RequestText(RequestData, 'dx', '0')),
+                             StrToInt(RequestText(RequestData, 'dy', '0')),
+                             RequestText(RequestData, 'dry_run', 'false') = 'true')
+    else
+        Result := 'ERROR: unknown geometry command ' + Cmd;
+end;

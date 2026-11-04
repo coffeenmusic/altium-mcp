@@ -173,6 +173,35 @@ def route(points: List[Tuple[int, int]], diagonal_first: bool = False, chamfer: 
     return [(a[0], a[1], b[0], b[1]) for a, b in zip(clean, clean[1:]) if a != b]
 
 
+def plan_path(start: Tuple[int, int, str], waypoints: List[Tuple[int, int, Optional[str]]],
+              diagonal_first: bool = False, chamfer: int = 0, via_span: str = "through"):
+    """A route through waypoints that may change layer: ([(layer, x1, y1, x2,
+    y2)], [(x, y, low layer, high layer)]).
+
+    start is (x, y, layer). A waypoint whose layer differs from the current
+    one ends the stretch there, drops a via at that point and goes on in the
+    new layer. Each stretch is routed with route(): 0, 45 and 90 degree
+    segments only. via_span "through" gives Top Layer to Bottom Layer vias,
+    "layers" vias between the two layers only.
+    """
+    tracks, vias = [], []
+    layer = start[2]
+    stretch = [(start[0], start[1])]
+    for x, y, wl in waypoints:
+        stretch.append((x, y))
+        if wl and wl != layer:
+            tracks += [(layer,) + s for s in route(stretch, diagonal_first, chamfer)]
+            if via_span == "through":
+                low, high = "Top Layer", "Bottom Layer"
+            else:
+                low, high = layer, wl
+            vias.append((x, y, low, high))
+            layer = wl
+            stretch = [(x, y)]
+    tracks += [(layer,) + s for s in route(stretch, diagonal_first, chamfer)]
+    return tracks, vias
+
+
 VIA_KEYS = {"net", "diameter_mils", "hole_mils", "start_layer", "end_layer"}
 
 
