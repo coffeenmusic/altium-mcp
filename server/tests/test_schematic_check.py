@@ -340,6 +340,54 @@ class PinOffGridTest(unittest.TestCase):
         self.assertEqual(self.check(3.15), [])    # a metric symbol on an imperial grid
 
 
+def port_rec(name, x, y, width=500):
+    return {"RECORD": 18, **at(x, y), "WIDTH": width // 10, "HEIGHT": 10, "STYLE": 2, "NAME": name,
+            "FONTID": 1}
+
+
+class ElectricalTest(unittest.TestCase):
+    def issues(self, extra):
+        recs = [
+            {"HEADER": "x"},
+            {"RECORD": 31, "FONTIDCOUNT": 1, "SIZE1": 10, "FONTNAME1": "Times New Roman", "SNAPGRIDSIZE": 10},
+            {"RECORD": 1, "LIBREFERENCE": "RES", **at(1000, 3000), "CURRENTPARTID": 1},
+            {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 1, "PINLENGTH": 10,
+             **at(1000, 3000), "DESIGNATOR": "1"},
+            {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 3, "PINLENGTH": 10,
+             **at(1000, 2800), "DESIGNATOR": "2"},
+            {"RECORD": 34, "OWNERINDEX": 1, **at(1150, 2900), "TEXT": "R1", "NAME": "Designator", "FONTID": 1},
+        ] + extra
+        return sc.Checker(sc.Sheet(parse_records(records_stream(recs)))).run()
+
+    def of(self, issues, kind):
+        return [i for i in issues if i["type"] == kind]
+
+    def test_wire_ending_inside_a_port(self):
+        # the port runs 2000..2500; the wire stops at 2200, inside it
+        issues = self.issues([port_rec("LATCH_EN", 2000, 1000), wire((1500, 1000), (2200, 1000)),
+                              port_rec("IN", 1000, 1000), wire((1500, 1000), (1000, 1000))])
+        hit = self.of(issues, "wire_into_port")
+        self.assertEqual([(i["port"], i["at"]) for i in hit], [("LATCH_EN", [2200, 1000])])
+        self.assertEqual(hit[0]["suggest"]["to"], [2000, 1000])
+
+    def test_port_connected_at_either_end_or_to_nothing(self):
+        issues = self.issues([port_rec("A", 2000, 1000), wire((2500, 1000), (2800, 1000)),
+                              port_rec("B", 4000, 1000)])
+        self.assertEqual([i["port"] for i in self.of(issues, "port_unconnected")], ["B"])
+
+    def test_single_pin_net(self):
+        # R1 pin 1 wired to a corner and back to nothing; pin 2 goes to a power port
+        issues = self.issues([wire((1000, 3100), (1300, 3100), (1300, 3400)),
+                              wire((1000, 2700), (1000, 2600)),
+                              {"RECORD": 17, **at(1000, 2600), "STYLE": 4, "ORIENTATION": 3, "TEXT": "GND"}])
+        self.assertEqual([(i["designator"], i["pin"]) for i in self.of(issues, "single_pin_net")], [("R1", "1")])
+
+    def test_a_net_joined_by_label_name_is_not_one_pin(self):
+        issues = self.issues([wire((1000, 3100), (1300, 3100)), label("N1", 1300, 3100, just=2),
+                              wire((3000, 3100), (3300, 3100)), label("N1", 3000, 3100)])
+        self.assertEqual(self.of(issues, "single_pin_net"), [])
+
+
 class ProjectTest(unittest.TestCase):
     def test_project_sheets(self):
         with tempfile.TemporaryDirectory() as tmp:
