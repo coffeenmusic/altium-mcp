@@ -5005,11 +5005,12 @@ async def get_project_info(ctx: Context) -> str:
 @_tool(read_only=True)
 async def get_project_components(ctx: Context, include_parameters: bool = False, designators: list = None,
                                  sheet: str = "", offset: int = 0, limit: int = 0,
-                                 parameter_names: list = None) -> str:
+                                 parameter_names: list = None, project_path: str = "") -> str:
     """
     List the components of the compiled project (schematic side).
 
-    Compiles the focused project in memory first (nothing is saved). Unlike
+    Compiles the project in memory first (nothing is saved): project_path,
+    or the focused project, as for get_erc_violations. Unlike
     the PCB component tools, this returns the schematic Comment of each
     instance, which is where values of generic passives usually live.
 
@@ -5030,6 +5031,7 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
         limit (int): At most this many components; 0 for as many as fit.
         parameter_names (list): Return only these parameters, e.g.
             ["Manufacturer_Part_Number"]. Implies include_parameters.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
         str: JSON with project_path, component_count (the whole project),
@@ -5040,7 +5042,8 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
     import project_components
 
     text = await _simple_command("get_project_components",
-                                 {"include_parameters": include_parameters or bool(parameter_names)},
+                                 {"include_parameters": include_parameters or bool(parameter_names),
+                                  "project_path": long_path(project_path)},
                                  "project components")
     try:
         data = json.loads(text, strict=False)
@@ -5054,22 +5057,236 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
 
 
 @_tool(read_only=True)
-async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
+async def get_erc_violations(ctx: Context, compile: bool = True, project_path: str = "") -> str:
     """
-    Compile the focused project and list its ERC/compiler violations.
+    Compile a project and list its ERC/compiler violations.
 
-    Compiling works in memory and does not save any document (Altium may
+    Give project_path to compile exactly that project (it is opened if
+    needed): without it the focused project is compiled, which is whatever
+    document last had focus, and "Free Documents" is refused. The result
+    names the project it compiled.
+
+    Compiling reads each sheet from disk, except a sheet open in Altium with
+    unsaved changes: that one is compiled from Altium's copy and listed in
+    unsaved_in_altium. Save it (or close it unsaved) for the file to count.
+    Sheets the project lists but that are not on disk are in
+    missing_on_disk. Compiling does not save any document (Altium may
     refresh the derived .PrjPcbStructure file).
 
     Args:
         compile (bool): Compile before reading (default True). False returns
             the violations of the last compilation.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
-        str: JSON with total, fatal, errors, warnings and violations
+        str: JSON with project_path, unsaved_in_altium, missing_on_disk,
+             total, fatal, errors, warnings and violations
              [{level, type, detail}]
     """
-    return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
+    return await _simple_command("get_erc_violations", {"compile": compile, "project_path": long_path(project_path)},
+                                 "ERC violations")
+
+
+async def _variant_context(project_path: str):
+    """(targets reply, variants parsed from the saved .PrjPcb, error)."""
+    import variants
+
+    response = await altium_bridge.execute_command("get_variant_targets",
+                                                   {"project_path": long_path(project_path)})
+    if not response.get("success", False):
+        return None, None, response.get("error", "unknown error")
+    data = response.get("result", {})
+    if isinstance(data, str):
+        try:
+            data = json.loads(data, strict=False)
+        except ValueError:
+            return None, None, data
+    try:
+        text = read_altium_text(Path(data["project_path"]))
+    except OSError as e:
+        return None, None, f"cannot read {data.get('project_path')}: {e}"
+    return data, variants.parse_variants(text), None
+
+
+@_tool(read_only=True)
+async def get_variants(ctx: Context, project_path: str = "", variant: str = "",
+                       designators: list = None) -> str:
+    """
+    List a project's variants with their variations, by logical designator
+    and channel as well as by physical designator.
+
+    Compiles the project in memory (nothing is saved) to tell, for every
+    variation, which logical designator, channel and sheet it belongs to: in
+    a multichannel design the variation of R1 in channel CH2 is stored as
+    R1_CH2 with the path of sheet symbols down to it.
+
+    The variants are read from the saved .PrjPcb. When the project has unsaved
+    changes in Altium, "project_unsaved" is true and unsaved variant edits are
+    not shown.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        variant (str): Only this variant (by name).
+        designators (list): Only variations of these designators, physical or
+            logical; wildcards work, e.g. ["R1", "C1*"].
+
+    Returns:
+        str: JSON with project_path, project_unsaved and variants [{name,
+             variation_count, variations [{designator, logical, channel, sheet,
+             kind ("not_fitted", "alternate" or "none" for parameters only),
+             alternate_part?, params?}]}]
+    """
+    import variants as vmod
+
+    data, parsed, error = await _variant_context(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    targets = vmod.parse_targets(data.get("components", []))
+    reply = {"project_path": data["project_path"], "project_unsaved": data.get("project_unsaved", False),
+             "component_count": len(targets)}
+    try:
+        problems = vmod.layout_problems(Path(data["project_path"]).read_bytes().decode("latin-1"))
+    except OSError:
+        problems = []
+    if problems:
+        reply["file_layout_problems"] = problems
+        reply["file_layout_note"] = ("Altium reads a parameter row as belonging to the variation line above "
+                                     "it and reads rows past the counts, so on the next load these sections "
+                                     "attach parameters to other parts. Any edit_variants call regroups them.")
+    reply["variants"] = vmod.describe(parsed, targets, variant, designators)
+    return json.dumps(reply, indent=1)
+
+
+@_tool()
+async def edit_variants(ctx: Context, operations: list, project_path: str = "", variant: str = "",
+                        dry_run: bool = False) -> str:
+    """
+    Change a project's variants: fit or leave out parts, vary their
+    parameters, add or rename variants. Parts are named by physical
+    designator, or by logical designator and channel.
+
+    The edits go through Altium on the open project, which is then saved, so
+    Altium's copy and the file agree. Refused when the project file already
+    has unsaved changes in Altium (saving would write them too).
+
+    Each operation is a dict with "op":
+    - add_variant {name}
+    - rename_variant {name} (of "variant")
+    - not_fitted {designator, channel?}: leave the part out
+    - fitted {designator, channel?}: fit it as designed (removes its variation,
+      an alternate part included)
+    - set_param {designator, channel?, name, value}: vary a parameter, e.g.
+      Comment; a fitted part gets a parameter-only variation
+    - remove_param {designator, channel?, name}: drop a parameter variation
+      (not on an alternate part)
+    designator is a physical designator ("R1_CH2") or a logical one ("R1")
+    with channel ("CH2", a wildcard such as "CH*", or "*" for every channel).
+    The channel is what the channel naming adds to the logical designator.
+    Each operation may give "variant"; otherwise the variant argument, or
+    the only variant, is used. Alternate parts cannot be set here.
+
+    Args:
+        operations (list): The operations, in order.
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        variant (str): Variant the operations apply to unless they name one.
+        dry_run (bool): Report the plan and change nothing.
+
+    Returns:
+        str: JSON with success, plan (what each operation does to which
+             part), applied, saved and errors
+    """
+    import variants as vmod
+
+    if not isinstance(operations, list) or not operations:
+        return json.dumps({"success": False, "error": "operations must be a non-empty list"})
+    data, parsed, error = await _variant_context(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if data.get("project_unsaved"):
+        return json.dumps({"success": False, "error": "the project has unsaved changes in Altium: save or "
+                                                      "discard them first, since saving the variants would "
+                                                      "write them too"})
+    targets = vmod.parse_targets(data.get("components", []))
+    shared = vmod.shared_designators(parsed)
+    lines, errors, plan = vmod.encode_operations(parsed, targets, operations, variant)
+    touched = {ln.split("|")[1].lower() for ln in lines if ln.split("|")[0] != "NEW"}
+    for name in sorted(n for n in shared if n.lower() in touched):
+        errors.append(f"variant '{name}' has several variations with the same designator "
+                      f"({', '.join(shared[name][:5])}): annotate the project first, or its parameter "
+                      f"rows cannot be kept with their parts")
+    if errors:
+        return json.dumps({"success": False, "errors": errors, "plan": plan,
+                           "note": "Nothing was changed."}, indent=1)
+    if dry_run or not lines:
+        return json.dumps({"success": True, "dry_run": dry_run, "plan": plan, "applied": 0}, indent=1)
+    write_altium_text(EXCHANGE_DIR / "variant_edit_spec.txt", "\n".join(lines) + "\n")
+    response = await altium_bridge.execute_command("apply_variant_edits",
+                                                   {"project_path": data["project_path"]})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": response.get("error", "unknown error"), "plan": plan})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return result
+    result["plan"] = plan
+    if result.get("saved"):
+        # Altium's save updates the variation rows where they stand, but its
+        # loader reads each parameter row as belonging to the variation line
+        # above it: regroup them, or the next load mixes parts up
+        prj = Path(data["project_path"])
+        try:
+            text = prj.read_bytes().decode("latin-1")
+            fixed, report = vmod.normalize(text)
+            if fixed != text:
+                prj.write_bytes(fixed.encode("latin-1"))
+            if report:
+                result["file_layout"] = report
+        except OSError as e:
+            result["warning"] = f"could not regroup the variant rows in the file: {e}"
+    if result.get("errors"):
+        result["success"] = False
+    return json.dumps(result, indent=1)
+
+# Changes the project: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("apply_variant_edits")
+
+
+@_tool(read_only=True)
+async def check_file_lock(ctx: Context, path: str) -> str:
+    """
+    Tell whether a file can be written now and which programs hold it.
+
+    For a database library give the .DbLib: its data file (the spreadsheet or
+    Access file in its connection string) is checked. Use it before writing
+    rows into a DbLib's spreadsheet, which fails while Excel has it open or
+    Altium's database driver is reading it.
+
+    Args:
+        path (str): The file, or a .DbLib.
+
+    Returns:
+        str: JSON with path (the data file for a .DbLib), exists, writable,
+             held_by [{pid, name}], office_owner_file? and advice when it is
+             held
+    """
+    import file_locks
+
+    path = long_path(path)
+    report = {}
+    if path.lower().endswith(".dblib"):
+        if not os.path.exists(path):
+            return json.dumps({"success": False, "error": f"not found: {path}"})
+        source = file_locks.dblib_source(path)
+        if not source:
+            return json.dumps({"success": False, "dblib": path,
+                               "error": "the DbLib does not read a file (a database server, or no "
+                                        "Data Source in its connection string)"})
+        report["dblib"] = path
+        path = source
+    report.update(file_locks.lock_report(path))
+    return json.dumps(report, indent=1)
 
 
 @_tool(read_only=True)
