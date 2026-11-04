@@ -14,6 +14,11 @@
 // SandboxTick(). A script runs on Altium's UI thread and nothing can stop it
 // from outside, so a loop that never ends would freeze Altium until X2.EXE is
 // killed. Past the deadline (%GUARD_SECONDS% s) every guarded loop exits.
+//
+// Layout of a run file: the script's var block joins the globals below, its
+// functions and procedures follow the template's helpers, and its statements
+// become SbxBody. Run calls SbxBody, so an Exit in the script ends the script
+// and Run still writes the result.
 
 const
     REPLACEALL = 1;
@@ -25,6 +30,7 @@ var
     // Scratch variables: DelphiScript has no inline declarations, so scripts
     // either reuse these or start with their own "var" block (the tool moves
     // that block into Run's declarations).
+    ResultText : String;
     S1, S2, S3, S4, S5, S6, S7, S8, S9 : String;
     I1, I2, I3, I4, I5, I6, I7, I8, I9 : Integer;
     B1, B2, B3 : Integer;
@@ -40,6 +46,10 @@ var
     SbxUndoDocs  : TList;
     SbxUndoNames : TStringList;
     SbxUndoPath  : String;
+    // The script's own var block (filled in by the run_altium_script tool).
+    // Global, so the script's functions and procedures can use it too.
+    // === USER VARS (filled in by the run_altium_script tool) ===
+    // === END USER VARS ===
 
 procedure SandboxLog(Msg: String);
 begin
@@ -184,12 +194,78 @@ begin
     end;
 end;
 
+// Numbers as text with a dot as decimal separator, whatever Windows is set to:
+// FloatToStr, FormatFloat and StrToFloat follow the locale, so with a decimal
+// comma FloatToStr(1.5) is '1,5' and StrToFloat('1.5') fails.
+function FmtNum(V : Double; Decimals : Integer = 4) : String;
+var
+    Pattern : String;
+begin
+    Pattern := '0';
+    if Decimals > 0 then Pattern := '0.' + StringOfChar('#', Decimals);
+    Result := StringReplace(FormatFloat(Pattern, V), DecimalSeparator, '.', REPLACEALL);
+end;
+
+// Internal coordinate units as millimetres, with a dot
+function FmtMM(Coord : Integer; Decimals : Integer = 4) : String;
+begin
+    Result := FmtNum(Coord / 393700.787, Decimals);
+end;
+
+// A number written with a dot or a comma
+function ParseNum(S : String) : Double;
+begin
+    S := Trim(S);
+    S := StringReplace(S, '.', DecimalSeparator, REPLACEALL);
+    S := StringReplace(S, ',', DecimalSeparator, REPLACEALL);
+    Result := StrToFloat(S);
+end;
+
+// A length in millimetres ('1.5', '1,5', '1.5mm') or mils ('15mil') as
+// internal coordinate units
+function ParseMM(S : String) : Integer;
+begin
+    S := LowerCase(Trim(S));
+    if Copy(S, Length(S) - 2, 3) = 'mil' then
+        Result := Round(ParseNum(Copy(S, 1, Length(S) - 3)) * 10000)
+    else
+    begin
+        if Copy(S, Length(S) - 1, 2) = 'mm' then S := Copy(S, 1, Length(S) - 2);
+        Result := MM(ParseNum(S));
+    end;
+end;
+
+// Logs whether a document the tool snapshotted is open in Altium and has
+// unsaved changes before the script runs: a rollback restores the file on
+// disk, so changes that were only in Altium before the run cannot come back.
+procedure SbxNoteDoc(Path : String);
+var
+    D : IServerDocument;
+    State : String;
+begin
+    State := 'closed';
+    if Client.IsDocumentOpen(Path) then
+    begin
+        State := 'open';
+        D := Client.GetDocumentByPath(Path);
+        if (D <> nil) and (BoolToStr(D.Modified, True) = 'True') then State := 'unsaved';
+    end;
+    SandboxLog('DOC STATE: ' + State + '|' + Path);
+end;
+
+// === USER ROUTINES (filled in by the run_altium_script tool) ===
+// === END USER ROUTINES ===
+
+procedure SbxBody;
+begin
+    // === BEGIN EXPERIMENT (filled in by the run_altium_script tool) ===
+    SandboxLog('no script loaded');
+    // === END EXPERIMENT ===
+end;
+
 procedure Run;
 var
-    ResultText : String;
     OutLines   : TStringList;
-    // === USER VARS (filled in by the run_altium_script tool) ===
-    // === END USER VARS ===
 begin
     LogPath := '%LOG_PATH%';
     OutPath := '%OUT_PATH%';
@@ -205,12 +281,12 @@ begin
     List2 := TStringList.Create;
     List3 := TStringList.Create;
     ResultText := '{"sandbox": "no result set"}';
+    // === SNAPSHOT DOCS (filled in by the run_altium_script tool) ===
+    // === END SNAPSHOT DOCS ===
     SandboxLog('sandbox start');
 
     try
-        // === BEGIN EXPERIMENT (filled in by the run_altium_script tool) ===
-        SandboxLog('no script loaded');
-        // === END EXPERIMENT ===
+        SbxBody;
     except
         // Errors inside the body - undeclared identifiers, calls on nil, bad
         // conversions - end up here instead of in a blocking dialog. The tool

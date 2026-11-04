@@ -3,6 +3,7 @@ from mcp.server.fastmcp.utilities.types import Image as MCPImage
 from mcp.types import ToolAnnotations
 import json
 import os
+import shutil
 import time
 import asyncio
 import logging
@@ -11,7 +12,7 @@ import subprocess
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 import sys
 import win32gui
 import win32ui
@@ -1566,7 +1567,7 @@ def _sandbox() -> sandbox.Sandbox:
 
 @_tool()
 async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120,
-                            skip_lint: bool = False) -> str:
+                            skip_lint: bool = False, snapshot: Optional[List[str]] = None) -> str:
     """
     Run a DelphiScript snippet inside an isolated Altium sandbox and report
     what happened, step by step.
@@ -1595,7 +1596,26 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
       (TStringList, created empty by the sandbox - reuse with .Clear, never
       Free them), IntMan, DbDoc. Assigning an undeclared plain name is
       refused before Altium is called. Do not assign to a for-loop variable
-      inside its loop (compile error).
+      inside its loop (compile error). The var block is global: do not
+      declare a sandbox name again (S1, MM, ...).
+    - Functions and procedures: put them after the var block, before the
+      statements. They can use the var block, the scratch variables,
+      ResultText and the helpers:
+          var
+              N : Integer;
+          function Twice(X : Integer) : Integer;
+          begin
+              Result := X * 2;
+          end;
+          N := Twice(21);
+          ResultText := IntToStr(N);
+      Exit in the statements ends the script; the result is still returned.
+    - Refused before Altium is called, because Altium's message does not say
+      what is wrong: a reserved word as a name (Label, Object, Unit, File,
+      Type, Out, Property, ...), and a comparison next to and/or without
+      parentheses: 'if A = 1 and B = 2' is 'A = (1 and B) = 2' ("Then
+      expected"); 'not A = B' is '(not A) = B' and silently gives the wrong
+      answer. Write '(A = 1) and (B = 2)' and 'not (A = B)'.
     - Calls known to crash Altium (GetState_DescriptionString, reading
       .Corner or .BoundingRectangle through an IDispatch variable, ...) and
       a PreProcess without PostProcess are refused before Altium is called:
@@ -1608,6 +1628,17 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
       OpenSchDoc(path) returns the ISch_Document, opening the file if needed
       (GetSchDocumentByPath alone returns nil for a closed file, and a call on
       nil stops the script); SaveDoc(path) marks a document modified and saves it.
+    - Numbers: FloatToStr, FormatFloat and StrToFloat follow the Windows
+      decimal separator, which may be a comma ('1,5'). Use FmtNum(V [,
+      decimals]) and FmtMM(coord [, decimals]) for text with a dot, and
+      ParseNum(s) and ParseMM(s) to read '1.5' or '1,5' ('15mil' and '1.5mm'
+      too for ParseMM, which returns internal units).
+    - Snapshots: before the run, the Altium documents the script names in
+      its strings (full paths to .SchDoc, .PcbDoc, .SchLib, .PcbLib, .OutJob,
+      .PrjPcb) are copied aside; pass snapshot=[paths] to choose them, or []
+      for none. The result's "snapshot" gives the run_id for
+      rollback_altium_script, which closes them in Altium without saving and
+      restores the copies.
     - Errors inside the script (undeclared identifiers, calls on nil, bad
       conversions) are caught by the sandbox and come back as "script error"
       with Altium's message and the last step; no try/except is needed.
@@ -1641,10 +1672,13 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     Args:
         script (str): DelphiScript statements to execute (body only, optionally
-            preceded by a var block).
+            preceded by a var block and functions or procedures).
         timeout_seconds (int): How long to wait for completion (default 120).
         skip_lint (bool): Run even though the known-crash check refused the
             script. Only for a false positive.
+        snapshot (list): Documents to copy before the run, for
+            rollback_altium_script. Default: those named in the script's
+            strings. [] takes none.
 
     Returns:
         str: JSON with success, the step log and the script's ResultText; on
@@ -1661,13 +1695,17 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         return json.dumps({"success": False, "error": problem})
 
     split = sandbox.split_var_block(script)
-    problems = sandbox.check_script(split.body, sandbox.declared_names(split.decls), split.body_offset)
+    script_names = sandbox.declared_names(split.decls) + [r.name for r in sandbox.routines(split)]
+    problems = (sandbox.check_declarations(split) + sandbox.check_routines(split)
+                + sandbox.check_script(split.body, script_names, split.body_offset))
     if problems:
         return json.dumps({"success": False,
                            "error": "refused before execution: the script would not compile",
                            "problems": problems, "executor_wedged": False}, indent=2)
     if not skip_lint:
-        problems = sandbox.lint_script(split.body, split.body_offset, split.decls)
+        # The routines come straight before the statements, so one pass keeps
+        # the line numbers and counts PreProcess/PostProcess across both
+        problems = sandbox.lint_script(split.routines + split.body, split.routines_offset, split.decls)
         if problems:
             return json.dumps({"success": False,
                                "error": "refused before execution: the script uses a call known to "
@@ -1701,9 +1739,18 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     # The loops stop early enough for the script to finish and its result to
     # arrive before this tool gives up on it
     guard_seconds = max(5, timeout_seconds - 10)
+    snap_paths = sandbox.doc_paths(script) if snapshot is None else [str(p) for p in snapshot]
+    missing = [p for p in snap_paths if not os.path.isfile(p)]
+    if missing:
+        return json.dumps({"success": False, "error": "not run: snapshot paths not found",
+                           "missing": missing, "executor_wedged": False}, indent=2)
     try:
         files = sb.new_run_files()
-        built = sb.write(files, script, guard_seconds)
+        if snap_paths:
+            entries = sandbox.take_snapshot(files.snapshot, snap_paths)
+            report["snapshot"] = {"run_id": files.script.stem, "files": [e["path"] for e in entries],
+                                  "rollback": f"rollback_altium_script(run_id='{files.script.stem}')"}
+        built = sb.write(files, script, guard_seconds, snap_paths)
     except Exception as e:
         return json.dumps({"success": False, "error": f"could not write the run file: {e}"})
     sb.launch(files)
@@ -1748,6 +1795,14 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     report["dialog_snapshots"] = [p for p in snapshots.values() if p]
     steps = (sandbox.read_when_ready(files.log, read_altium_text).splitlines()
              if files.log.exists() else [])
+    if "snapshot" in report:
+        unsaved = [p for p in report["snapshot"]["files"]
+                   if sandbox.doc_states(steps).get(p.lower()) == "unsaved"]
+        if unsaved:
+            report["snapshot"]["unsaved_before_run"] = unsaved
+            report["snapshot"]["note"] = ("These had unsaved changes in Altium before the run. The "
+                                          "snapshot holds the file on disk, without those changes.")
+    steps = [s for s in steps if not s.startswith(sandbox.DOC_STATE_PREFIX)]
 
     if files.result.exists():
         _clear_script_stuck()  # our script ran to the end: Altium is free
@@ -1869,6 +1924,81 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         "diagnosis": "Altium may be busy, showing a dialog, or running or debugging a script of "
                      "the user's own. Nothing was stopped.",
         "steps": steps, **report}, indent=2)
+
+
+@_tool()
+async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: bool = False) -> str:
+    """
+    Undo a run_altium_script run by restoring the documents it snapshotted.
+
+    Each document is closed in Altium without saving (dropping whatever the
+    script changed there), its copy from before the run is put back on disk,
+    and the documents that were open are opened again.
+
+    A document that already had unsaved changes in Altium before the run is
+    refused: those changes were never on disk, so closing it would lose
+    them. Pass discard_unsaved=True to restore it anyway.
+
+    Args:
+        run_id (str): The "snapshot" run_id from run_altium_script's result.
+        discard_unsaved (bool): Also restore documents that had unsaved
+            changes before the run, losing those changes.
+
+    Returns:
+        str: JSON with the restored documents and which were reopened.
+    """
+    sb = _sandbox()
+    files = sb.run_files(run_id)
+    manifest = files.snapshot / "manifest.json" if files else None
+    if manifest is None or not manifest.exists():
+        return json.dumps({"success": False, "error": f"no snapshot for run '{run_id}' (only the "
+                                                      f"{sb.keep_runs} newest runs are kept)"})
+    entries = json.loads(manifest.read_text(encoding="utf-8"))
+    log = (sandbox.read_when_ready(files.log, read_altium_text).splitlines()
+           if files.log.exists() else [])
+    states = sandbox.doc_states(log)
+    unsaved = [e["path"] for e in entries if states.get(e["path"].lower()) == "unsaved"]
+    if unsaved and not discard_unsaved:
+        return json.dumps({
+            "success": False,
+            "error": "not rolled back: these documents had unsaved changes in Altium before the run, "
+                     "which the snapshot does not hold; closing them would lose those changes",
+            "unsaved_before_run": unsaved,
+            "note": "Pass discard_unsaved=True to restore the files on disk anyway."}, indent=2)
+
+    problem = altium_limit_problem() or await altium_bridge.ensure_paths(need_script=False)
+    if problem:
+        return json.dumps({"success": False, "error": problem})
+    if await asyncio.to_thread(sandbox.altium_hung):
+        return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR})
+    if any(d.is_script_error for d in sandbox.altium_dialogs()):
+        return json.dumps({"success": False, "error": "not run: Altium is showing a script error "
+                                                      "dialog. Answer or close it, then retry."})
+
+    paths = [e["path"] for e in entries]
+    closed = await asyncio.to_thread(sb.run_quick, sandbox.close_script(paths))
+    if closed is None:
+        return json.dumps({"success": False, "error": "Altium did not close the documents; nothing "
+                                                      "was restored"})
+    was_open = [ln.split("|", 1)[1] for ln in closed.splitlines() if ln.startswith("open|")]
+    restored, failed = [], []
+    for e in entries:
+        try:
+            shutil.copy2(files.snapshot / e["copy"], e["path"])
+            restored.append(e["path"])
+        except OSError as err:
+            failed.append({"path": e["path"], "error": str(err)})
+    # Projects first: a sheet opened before its project lands in Free Documents
+    reopen = sorted([p for p in was_open if p in restored],
+                    key=lambda p: not p.lower().endswith(".prjpcb"))
+    reopened = None
+    if reopen:
+        reopened = await asyncio.to_thread(sb.run_quick, sandbox.reopen_script(reopen)) is not None
+    sb.prune()
+    return json.dumps({"success": not failed, "restored": restored, "failed": failed,
+                       "reopened": reopen if reopened else [],
+                       **({"reopen_error": "Altium did not reopen them; open them by hand"}
+                          if reopen and not reopened else {})}, indent=2)
 
 
 @_tool()
