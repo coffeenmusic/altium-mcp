@@ -59,5 +59,14 @@ class EncodeTest(unittest.TestCase):
             self.assertTrue(spec, kind)
 
 
+class PartialTest(unittest.TestCase):
+    def test_partial_values(self):
+        self.assertEqual(encode_values("clearance", {}, partial=True), ("", ""))
+        self.assertEqual(encode_values("routing_via", {"min_hole_mils": 8}, partial=True), ("min_hole=80000", ""))
+        self.assertIn("needs", encode_values("routing_via", {"min_hole_mils": 8})[1])
+        self.assertIn("not", encode_values("clearance", {"width": 1}, partial=True)[1])
+        self.assertIn("larger", encode_values("hole_size", {"min_mils": 9, "max_mils": 8}, partial=True)[1])
+
+
 if __name__ == "__main__":
     unittest.main()
