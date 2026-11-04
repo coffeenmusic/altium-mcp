@@ -102,12 +102,15 @@ def parse_object(record: str, origin=(0, 0), unit: str = "mil") -> Optional[dict
         if kind == "region":
             if rest[4:5] == ["1"]:
                 obj["in_polygon"] = True
-            obj["ref"] = f"region|{layer}|{left}|{bottom}|{right}|{top}"
             if len(rest) > 5 and rest[5]:
-                obj["contours"] = parse_contours(rest[5], x, y)
+                obj["polygon"] = rest[5]
+            obj["ref"] = f"region|{layer}|{left}|{bottom}|{right}|{top}"
+            if len(rest) > 6 and rest[6]:
+                obj["contours"] = parse_contours(rest[6], x, y)
     elif kind == "text":
         tx, ty, size, rot = _ints(rest, 4)
-        obj.update({"x": x(tx), "y": y(ty), "height": d(size), "rotation": rot / 1000, "text": "|".join(rest[5:])})
+        obj.update({"x": x(tx), "y": y(ty), "height": d(size), "rotation": rot / 1000, "text": "|".join(rest[5:]),
+                    "ref": f"text|{layer}|{tx}|{ty}"})
         if rest[4:5] == ["1"]:
             obj["hidden"] = True
     elif kind == "component":
@@ -209,13 +212,22 @@ def _layer_match(obj: dict, layers: List[str], stack: Optional[List[str]] = None
 
 
 def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = None,
-           nets: Optional[List[str]] = None, stack: Optional[List[str]] = None) -> List[dict]:
+           nets: Optional[List[str]] = None, stack: Optional[List[str]] = None,
+           include_hidden: bool = True) -> List[dict]:
+    """The records as objects, filtered; a record Altium sends twice is kept
+    once."""
     out = []
+    seen = set()
     want_nets = {n.lower() for n in nets} if nets else None
     for rec in records:
         obj = parse_object(rec, origin, unit)
         if obj is None:
             continue
+        if not include_hidden and obj.get("hidden"):
+            continue
+        if rec in seen:
+            continue
+        seen.add(rec)
         if layers and not _layer_match(obj, layers, stack):
             continue
         if want_nets is not None and (obj.get("net") or "").lower() not in want_nets:
@@ -236,14 +248,14 @@ def scan_limit(limit: int, layers=None, nets=None) -> int:
     return max(limit, SCAN_CAP) if (layers or nets) else limit
 
 
-def area_reply(result: dict, unit: str, limit: int, layers=None, nets=None) -> dict:
+def area_reply(result: dict, unit: str, limit: int, layers=None, nets=None, include_hidden: bool = True) -> dict:
     """objects_in_area's reply from the 'area' command's result: filtered by
     layer and net first, then cut to limit. total counts the objects that
     pass the filters; None when Altium stopped at its cap before the filters
     ran, so the count is not known."""
     records = result.get("objects", [])
     origin = (result.get("origin_x", 0), result.get("origin_y", 0))
-    matched = select(records, origin, unit, layers, nets, result.get("copper_layers"))
+    matched = select(records, origin, unit, layers, nets, result.get("copper_layers"), include_hidden)
     altium_total = result.get("total", len(records))
     if not (layers or nets):
         total = altium_total
@@ -269,7 +281,7 @@ def normalize_ref(ref: str) -> str:
         raise ValueError("empty object reference")
     if "|" in ref:
         kind = ref.split("|", 1)[0]
-        if kind not in ("track", "arc", "via", "pad", "fill", "region", "component"):
+        if kind not in ("track", "arc", "via", "pad", "fill", "region", "text", "component"):
             raise ValueError(f"cannot find a '{kind}' by reference; use a ref from objects_in_area")
         return ref
     if "-" in ref:
