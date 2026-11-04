@@ -185,7 +185,9 @@ begin
         Exit;
     end;
     Doc := Client.GetDocumentByPath(Path);
-    if (Doc <> nil) and Doc.Modified then
+    // Read through BoolToStr: in the bridge, Modified read directly in a
+    // condition is always False, passed as an argument it is right
+    if (Doc <> nil) and (BoolToStr(Doc.Modified, True) = 'True') then
     begin
         Result := 'ERROR: The OutJob has unsaved changes in Altium; save or close it there first';
         Exit;
