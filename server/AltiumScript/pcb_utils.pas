@@ -5561,3 +5561,333 @@ begin
         Props.Free;
     end;
 end;
+
+// ---------------------------------------------------------------- rule edits
+// IPCB_Rule.Priority cannot be set from a script (the setter raises and
+// changes nothing), but a rule removed and added again becomes priority 1
+// of its kind while the others keep their order; MoveRuleTo builds any
+// order from that. A rule changed between PCBM_BeginModify and
+// PCBM_EndModify (needed for undo) also jumps to priority 1, so an edit
+// moves it back where it was.
+
+// create_pcb_rule's name for a rule's kind, or '' for kinds it cannot edit
+function RuleKindWord(Rule: IPCB_Rule): String;
+begin
+    case Rule.RuleKind of
+        eRule_Clearance:            Result := 'clearance';
+        eRule_MaxMinWidth:          Result := 'width';
+        eRule_MaxMinHoleSize:       Result := 'hole_size';
+        eRule_RoutingViaStyle:      Result := 'routing_via';
+        eRule_SolderMaskExpansion:  Result := 'solder_mask_expansion';
+        eRule_PasteMaskExpansion:   Result := 'paste_mask_expansion';
+        eRule_PolygonConnectStyle:  Result := 'polygon_connect';
+    else
+        Result := '';
+    end;
+end;
+
+// The rules of Kind, highest priority (1) first
+procedure RulesOfKindByPriority(Board: IPCB_Board; Kind: Integer; Rules: TInterfaceList);
+var
+    Iterator : IPCB_BoardIterator;
+    Rule     : IPCB_Rule;
+    i, j     : Integer;
+begin
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Rule := Iterator.FirstPCBObject;
+    while Rule <> nil do
+    begin
+        if Rule.RuleKind = Kind then
+        begin
+            j := Rules.Count;
+            for i := Rules.Count - 1 downto 0 do
+                if Rules.Items[i].Priority > Rule.Priority then j := i;
+            Rules.Insert(j, Rule);
+        end;
+        Rule := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// "rules_of_kind": [{"name": ..., "priority": ...}, ...]
+function RuleOrderJSON(Board: IPCB_Board; Kind: Integer): String;
+var
+    Rules : TInterfaceList;
+    Items, Item : TStringList;
+    i     : Integer;
+begin
+    Rules := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Item := TStringList.Create;
+    try
+        RulesOfKindByPriority(Board, Kind, Rules);
+        for i := 0 to Rules.Count - 1 do
+        begin
+            Item.Clear;
+            AddJSONProperty(Item, 'name', Rules.Items[i].Name);
+            AddJSONInteger(Item, 'priority', Rules.Items[i].Priority);
+            Items.Add(BuildJSONObject(Item, 1));
+        end;
+        Result := BuildJSONArray(Items, 'rules_of_kind');
+    finally
+        Rules.Free;
+        Items.Free;
+        Item.Free;
+    end;
+end;
+
+procedure RuleStateJSON(Board: IPCB_Board; Rule: IPCB_Rule; Props: TStringList);
+begin
+    AddJSONProperty(Props, 'name', Rule.Name);
+    AddJSONProperty(Props, 'kind', RuleKindWord(Rule));
+    AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
+    AddJSONProperty(Props, 'scope1', Rule.Scope1Expression);
+    AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
+    AddJSONProperty(Props, 'comment', Rule.Comment);
+    AddJSONBoolean(Props, 'enabled', Rule.Enabled);
+    AddJSONInteger(Props, 'priority', Rule.Priority);
+    Props.Add(RuleOrderJSON(Board, Rule.RuleKind));
+    AddJSONProperty(Props, 'board', Board.FileName);
+end;
+
+// Sets the values given in Values (create_pcb_rule's keys) on Rule; values
+// not given keep what the rule has
+procedure ApplyRuleValues(Rule: IPCB_Rule; Values: TStringList);
+var
+    Clear    : IPCB_ClearanceConstraint;
+    Width    : IPCB_MaxMinWidthConstraint;
+    Hole     : IPCB_MaxMinHoleSizeConstraint;
+    Via      : IPCB_RoutingViaStyleRule;
+    SMask    : IPCB_SolderMaskExpansionRule;
+    PMask    : IPCB_PasteMaskExpansionRule;
+    Connect  : IPCB_PolygonConnectStyleRule;
+    L        : Integer;
+    Style    : String;
+begin
+    case Rule.RuleKind of
+        eRule_Clearance:
+            begin
+                Clear := Rule;
+                if RuleHasValue(Values, 'gap') then Clear.Gap := RuleValue(Values, 'gap', 0);
+            end;
+        eRule_MaxMinWidth:
+            begin
+                Width := Rule;
+                for L := eTopLayer to eBottomLayer do
+                begin
+                    if RuleHasValue(Values, 'min') then Width.MinWidth(L) := RuleValue(Values, 'min', 0);
+                    if RuleHasValue(Values, 'max') then Width.MaxWidth(L) := RuleValue(Values, 'max', 0);
+                    if RuleHasValue(Values, 'preferred') then Width.FavoredWidth(L) := RuleValue(Values, 'preferred', 0);
+                end;
+            end;
+        eRule_MaxMinHoleSize:
+            begin
+                Hole := Rule;
+                if RuleHasValue(Values, 'min') then Hole.MinLimit := RuleValue(Values, 'min', 0);
+                if RuleHasValue(Values, 'max') then Hole.MaxLimit := RuleValue(Values, 'max', 0);
+            end;
+        eRule_RoutingViaStyle:
+            begin
+                Via := Rule;
+                if RuleHasValue(Values, 'min_diameter') then Via.MinWidth := RuleValue(Values, 'min_diameter', 0);
+                if RuleHasValue(Values, 'max_diameter') then Via.MaxWidth := RuleValue(Values, 'max_diameter', 0);
+                if RuleHasValue(Values, 'preferred_diameter') then Via.PreferedWidth := RuleValue(Values, 'preferred_diameter', 0);
+                if RuleHasValue(Values, 'min_hole') then Via.MinHoleWidth := RuleValue(Values, 'min_hole', 0);
+                if RuleHasValue(Values, 'max_hole') then Via.MaxHoleWidth := RuleValue(Values, 'max_hole', 0);
+                if RuleHasValue(Values, 'preferred_hole') then Via.PreferedHoleWidth := RuleValue(Values, 'preferred_hole', 0);
+            end;
+        eRule_SolderMaskExpansion:
+            begin
+                SMask := Rule;
+                if RuleHasValue(Values, 'expansion') then SMask.Expansion := RuleValue(Values, 'expansion', 0);
+            end;
+        eRule_PasteMaskExpansion:
+            begin
+                PMask := Rule;
+                if RuleHasValue(Values, 'expansion') then PMask.Expansion := RuleValue(Values, 'expansion', 0);
+            end;
+        eRule_PolygonConnectStyle:
+            begin
+                Connect := Rule;
+                if RuleHasValue(Values, 'connect_style') then
+                begin
+                    Style := Values.Values['connect_style'];
+                    if Style = 'direct' then Connect.ConnectStyle := eDirectConnectToPlane
+                    else if Style = 'none' then Connect.ConnectStyle := eNoConnect
+                    else Connect.ConnectStyle := eReliefConnectToPlane;
+                end;
+                if RuleHasValue(Values, 'conductor_width') then
+                    Connect.ReliefConductorWidth := RuleValue(Values, 'conductor_width', 0);
+                if RuleHasValue(Values, 'air_gap') then
+                    Connect.ReliefAirGap := RuleValue(Values, 'air_gap', 0);
+                if RuleHasValue(Values, 'entries') then
+                    Connect.ReliefEntries := RuleValue(Values, 'entries', 4);
+            end;
+    end;
+end;
+
+// pcb_rule_info: a rule's kind, scopes, priority and the order of its kind
+function PcbRuleInfo(Name: String): String;
+var
+    Board : IPCB_Board;
+    Rule  : IPCB_Rule;
+    Props : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
+    Rule := FindRuleByName(Board, Name);
+    if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        RuleStateJSON(Board, Rule, Props);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+// Takes Rule off the board and adds it again: it becomes priority 1 of its
+// kind, the others keep their order
+procedure RuleToTop(Board: IPCB_Board; Rule: IPCB_Rule);
+begin
+    Board.RemovePCBObject(Rule);
+    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Rule.I_ObjectAddress);
+    Board.AddPCBObject(Rule);
+    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Rule.I_ObjectAddress);
+end;
+
+// Moves Rule to priority Wanted of its kind (clamped to the rules there
+// are); returns how many rules were added again. The rules that should
+// stay above it are added again after it, lowest first, so they end up
+// above it in their old order; the rules below are not touched. Call
+// between PreProcess and PostProcess.
+function MoveRuleTo(Board: IPCB_Board; Rule: IPCB_Rule; Wanted: Integer): Integer;
+var
+    Rules : TInterfaceList;
+    i     : Integer;
+begin
+    Result := 0;
+    Rules := TInterfaceList.Create;
+    try
+        RulesOfKindByPriority(Board, Rule.RuleKind, Rules);
+        for i := Rules.Count - 1 downto 0 do
+            if Rules.Items[i].I_ObjectAddress = Rule.I_ObjectAddress then Rules.Delete(i);
+        if Wanted < 1 then Wanted := 1;
+        if Wanted > Rules.Count + 1 then Wanted := Rules.Count + 1;
+        if Wanted = Rule.Priority then Exit;
+        RuleToTop(Board, Rule);
+        for i := Wanted - 2 downto 0 do
+            RuleToTop(Board, Rules.Items[i]);
+        Result := Wanted;
+    finally
+        Rules.Free;
+    end;
+end;
+
+// edit_pcb_rule: changes what is given and keeps the rule where it is in
+// its kind's priority order. Fields is '|scope1|scope2|comment|enabled|name|'
+// for the fields to change.
+function EditPCBRule(Name, NewName, Scope1, Scope2, Comment, Enabled, Fields: String; Values: TStringList): String;
+var
+    Board : IPCB_Board;
+    Rule, Clash : IPCB_Rule;
+    Props : TStringList;
+    Before : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
+    Rule := FindRuleByName(Board, Name);
+    if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
+    if Pos('|name|', Fields) > 0 then
+    begin
+        Clash := FindRuleByName(Board, NewName);
+        if (Clash <> nil) and (Clash.I_ObjectAddress <> Rule.I_ObjectAddress) then
+        begin
+            Result := 'ERROR: A rule named ' + NewName + ' already exists';
+            Exit;
+        end;
+    end;
+    Before := Rule.Priority;
+    PCBServer.PreProcess;
+    try
+        PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        if Pos('|scope1|', Fields) > 0 then Rule.Scope1Expression := Scope1;
+        if Pos('|scope2|', Fields) > 0 then Rule.Scope2Expression := Scope2;
+        if Pos('|comment|', Fields) > 0 then Rule.Comment := Comment;
+        if Pos('|enabled|', Fields) > 0 then Rule.Enabled := Enabled = 'true';
+        if Pos('|name|', Fields) > 0 then Rule.Name := NewName;
+        ApplyRuleValues(Rule, Values);
+        PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        MoveRuleTo(Board, Rule, Before);
+    finally
+        PCBServer.PostProcess;
+    end;
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'priority_before', Before);
+        RuleStateJSON(Board, Rule, Props);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+// set_rule_priority: Name to priority Wanted (1 is highest) of its kind
+function SetRulePriority(Name: String; Wanted: Integer): String;
+var
+    Board : IPCB_Board;
+    Rule  : IPCB_Rule;
+    Props : TStringList;
+    Before, Moved : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
+    Rule := FindRuleByName(Board, Name);
+    if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
+    Before := Rule.Priority;
+    PCBServer.PreProcess;
+    try
+        Moved := MoveRuleTo(Board, Rule, Wanted);
+    finally
+        PCBServer.PostProcess;
+    end;
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'priority_before', Before);
+        AddJSONInteger(Props, 'rules_moved', Moved);
+        RuleStateJSON(Board, Rule, Props);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+function ExecuteRuleEdit(CommandName: String; RequestData: TStringList): String;
+var
+    Values : TStringList;
+begin
+    if CommandName = 'pcb_rule_info' then
+        Result := PcbRuleInfo(RequestText(RequestData, 'rule_name', ''))
+    else if CommandName = 'set_rule_priority' then
+        Result := SetRulePriority(RequestText(RequestData, 'rule_name', ''),
+                                  StrToInt(RequestText(RequestData, 'priority', '1')))
+    else
+    begin
+        Values := TStringList.Create;
+        try
+            Values.Text := StringReplace(RequestText(RequestData, 'values', ''), ';', #13#10, REPLACEALL);
+            Result := EditPCBRule(RequestText(RequestData, 'rule_name', ''), RequestText(RequestData, 'new_name', ''),
+                                  RequestText(RequestData, 'scope1', ''), RequestText(RequestData, 'scope2', ''),
+                                  RequestText(RequestData, 'comment', ''), RequestText(RequestData, 'enabled', ''),
+                                  RequestText(RequestData, 'set', ''), Values);
+        finally
+            Values.Free;
+        end;
+    end;
+end;

@@ -487,6 +487,9 @@ begin
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'get_pcb_layer_stackup')               or
        (CommandName = 'create_pcb_rule')                     or
+       (CommandName = 'pcb_rule_info')                       or
+       (CommandName = 'edit_pcb_rule')                       or
+       (CommandName = 'set_rule_priority')                   or
        (CommandName = 'get_board_summary')                   or
        (CommandName = 'create_polygon_pour')                 or
        (CommandName = 'create_cutout')                       or
