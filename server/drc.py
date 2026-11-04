@@ -121,6 +121,61 @@ _WAIVED_RE = re.compile(r"^Waived Violations :\s*(\d+)")
 _ERROR_RE = re.compile(r"^ERROR\s*:\s*(.*)$")
 
 
+# What a violation's descriptor says about by how much, as Altium writes it:
+#   "Clearance Constraint: (0.659mm < 1.27mm) Between Via ... And Via ..."
+#   "Width Constraint: Track ... Actual Width = 0.15mm, Target Width = 0.254mm"
+_NUM = r"(-?\d+(?:\.\d+)?)\s*(mm|mil|um)"
+_PAIR = re.compile(r"\(\s*" + _NUM + r"\s*([<>]=?)\s*" + _NUM + r"\s*\)")
+_ACTUAL = re.compile(r"Actual [\w ]*?=\s*" + _NUM + r",\s*Target [\w ]*?=\s*" + _NUM)
+_TO_MILS = {"mm": 1 / 0.0254, "mil": 1.0, "um": 0.001 / 0.0254}
+
+
+def measurement(descriptor: str) -> dict:
+    """The measured and allowed values in a violation's descriptor, in mils:
+    {"kind", "actual_mils", "limit_mils", "comparison"}; only "kind" when the
+    descriptor gives no numbers."""
+    out = {"kind": descriptor.split(":", 1)[0].strip()} if ":" in descriptor else {}
+    m = _PAIR.search(descriptor)
+    if m:
+        out.update(actual_mils=round(float(m.group(1)) * _TO_MILS[m.group(2)], 3),
+                   limit_mils=round(float(m.group(4)) * _TO_MILS[m.group(5)], 3),
+                   comparison=m.group(3))
+        return out
+    m = _ACTUAL.search(descriptor)
+    if m:
+        actual = round(float(m.group(1)) * _TO_MILS[m.group(2)], 3)
+        limit = round(float(m.group(3)) * _TO_MILS[m.group(4)], 3)
+        out.update(actual_mils=actual, limit_mils=limit, comparison="<" if actual < limit else ">")
+    return out
+
+
+def _points(v: dict):
+    yield v.get("x_mils"), v.get("y_mils")
+    for key in ("primitive1", "primitive2"):
+        p = v.get(key) or {}
+        yield p.get("x_mils"), p.get("y_mils")
+
+
+def matches(v: dict, rules=(), nets=(), area=None) -> bool:
+    """Whether a violation passes the filters: a rule name or kind containing
+    one of rules, a primitive on one of nets, its location inside area
+    ([x1, y1, x2, y2] in mils from the board origin)."""
+    if rules:
+        hay = (v.get("rule", "") + " " + v.get("kind", "")).lower()
+        if not any(r.lower() in hay for r in rules):
+            return False
+    if nets:
+        on = {(v.get(k) or {}).get("net", "").lower() for k in ("primitive1", "primitive2")}
+        if not on & {n.lower() for n in nets}:
+            return False
+    if area is not None:
+        x1, x2 = sorted((area[0], area[2]))
+        y1, y2 = sorted((area[1], area[3]))
+        if not any(x is not None and x1 <= x <= x2 and y1 <= y <= y2 for x, y in _points(v)):
+            return False
+    return True
+
+
 def parse_report(text: str) -> dict:
     """Per-rule violation counts and totals from a .drc report, its errors,
     and whether Altium stopped the check at its violation limit."""
