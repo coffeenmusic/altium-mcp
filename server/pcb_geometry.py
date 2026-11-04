@@ -209,6 +209,16 @@ def describe_violations(result: dict, unit: str) -> List[dict]:
     return out
 
 
+def split_pour_violations(violations: List[dict]) -> tuple:
+    """(violations, those against pour copper): pour copper is as last
+    poured, so the second kind goes away with a repour (unless the pour
+    cannot pull back from the new copper)."""
+    def pour(o):
+        return bool(o) and o.get("kind") == "region" and o.get("in_polygon")
+    keep = [v for v in violations if not (pour(v.get("a")) or pour(v.get("b")))]
+    return keep, [v for v in violations if v not in keep]
+
+
 def describe_clearance(result: dict, unit: str) -> dict:
     k = unit_factor(unit)
     out = {"distance": round(result["distance"] / k, 4), "unit": unit}

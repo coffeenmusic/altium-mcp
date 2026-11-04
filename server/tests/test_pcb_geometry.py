@@ -87,6 +87,15 @@ class ViolationTest(unittest.TestCase):
         self.assertNotIn("b", out[1])
 
 
+class PourSplitTest(unittest.TestCase):
+    def test_pour_hits_apart(self):
+        pour = {"kind": "region", "in_polygon": True}
+        hard = {"rule": "c", "a": {"kind": "track"}, "b": {"kind": "pad"}}
+        soft = {"rule": "c", "a": {"kind": "track"}, "b": pour}
+        own = {"rule": "w", "a": {"kind": "track"}}
+        self.assertEqual(geo.split_pour_violations([hard, soft, own]), ([hard, own], [soft]))
+
+
 class SelectTest(unittest.TestCase):
     def test_layers_and_nets(self):
         top = geo.select(RECORDS, ORIGIN, "mil", layers=["top layer"])
