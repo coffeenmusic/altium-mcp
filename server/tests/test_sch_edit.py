@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from sch_edit import encode_operations  # noqa: E402
+from sch_edit import OpError, encode_operations, find_pin, pin_designators, resolve_pins  # noqa: E402
 
 
 def one(op, unit="mil"):
@@ -75,6 +75,46 @@ class EncodeTest(unittest.TestCase):
             self.assertIn(expected, err, op)
         self.assertEqual(encode_operations([], "mil"), ([], "operations is empty"))
         self.assertIn("unit", encode_operations([{"op": "add_junction", "x": 0, "y": 0}], "inch")[1])
+
+
+PINS = [
+    {"designator": "U20", "pin": "1", "name": "VCC", "x": 1000000, "y": 2000000},
+    {"designator": "U20", "pin": "2", "name": "GND", "x": 1000000, "y": 1900000},
+    {"designator": "U20", "pin": "3", "name": "GND", "x": 1000000, "y": 1800000},
+]
+
+
+class PinRefTest(unittest.TestCase):
+    def test_designators_named(self):
+        ops = [{"op": "add_wire", "points": ["u20.VCC", [0, 0]]}, {"op": "add_junction", "at": "R1.2"},
+               {"op": "add_net_label", "x": 1, "y": 2, "text": "A.B"}]
+        self.assertEqual(pin_designators(ops), ["R1", "U20"])
+
+    def test_found_by_number_then_name(self):
+        self.assertEqual(find_pin("U20.1", PINS)["name"], "VCC")
+        self.assertEqual(find_pin("u20.vcc", PINS)["pin"], "1")
+        with self.assertRaisesRegex(OpError, "give the pin number"):
+            find_pin("U20.GND", PINS)
+        with self.assertRaisesRegex(OpError, "no pin"):
+            find_pin("U20.FOO", PINS)
+        with self.assertRaisesRegex(OpError, "no component"):
+            find_pin("U9.1", PINS)
+
+    def test_resolved_into_points(self):
+        ops, err = resolve_pins([{"op": "add_wire", "points": ["U20.VCC", [50, 200]]},
+                                 {"op": "add_net_label", "at": "U20.3", "text": "N"}], PINS, "mil")
+        self.assertEqual(err, "")
+        self.assertEqual(ops[0]["points"], [[100.0, 200.0], [50, 200]])
+        self.assertEqual((ops[1]["x"], ops[1]["y"]), (100.0, 180.0))
+        self.assertNotIn("at", ops[1])
+        self.assertIn("not both", resolve_pins([{"op": "add_junction", "at": "U20.1", "x": 1, "y": 1}], PINS)[1])
+
+    def test_port(self):
+        lines, err = encode_operations([{"op": "add_port", "x": 10, "y": 20, "name": "LATCH_EN",
+                                         "io_type": "input", "style": "right", "width": 600}])
+        self.assertEqual((lines, err), (["PORT|100000|200000|2|2|6000000|LATCH_EN"], ""))
+        self.assertIn("io_type", encode_operations([{"op": "add_port", "x": 0, "y": 0, "name": "P",
+                                                     "io_type": "sideways"}])[1])
 
 
 if __name__ == "__main__":
