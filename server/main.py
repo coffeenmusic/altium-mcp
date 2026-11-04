@@ -4924,11 +4924,12 @@ async def get_project_info(ctx: Context) -> str:
 @_tool(read_only=True)
 async def get_project_components(ctx: Context, include_parameters: bool = False, designators: list = None,
                                  sheet: str = "", offset: int = 0, limit: int = 0,
-                                 parameter_names: list = None) -> str:
+                                 parameter_names: list = None, project_path: str = "") -> str:
     """
     List the components of the compiled project (schematic side).
 
-    Compiles the focused project in memory first (nothing is saved). Unlike
+    Compiles the project in memory first (nothing is saved): project_path,
+    or the focused project, as for get_erc_violations. Unlike
     the PCB component tools, this returns the schematic Comment of each
     instance, which is where values of generic passives usually live.
 
@@ -4949,6 +4950,7 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
         limit (int): At most this many components; 0 for as many as fit.
         parameter_names (list): Return only these parameters, e.g.
             ["Manufacturer_Part_Number"]. Implies include_parameters.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
         str: JSON with project_path, component_count (the whole project),
@@ -4959,7 +4961,8 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
     import project_components
 
     text = await _simple_command("get_project_components",
-                                 {"include_parameters": include_parameters or bool(parameter_names)},
+                                 {"include_parameters": include_parameters or bool(parameter_names),
+                                  "project_path": long_path(project_path)},
                                  "project components")
     try:
         data = json.loads(text, strict=False)
@@ -4973,22 +4976,160 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
 
 
 @_tool(read_only=True)
-async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
+async def get_erc_violations(ctx: Context, compile: bool = True, project_path: str = "") -> str:
     """
-    Compile the focused project and list its ERC/compiler violations.
+    Compile a project and list its ERC/compiler violations.
 
-    Compiling works in memory and does not save any document (Altium may
+    Give project_path to compile exactly that project (it is opened if
+    needed): without it the focused project is compiled, which is whatever
+    document last had focus, and "Free Documents" is refused. The result
+    names the project it compiled.
+
+    Compiling reads each sheet from disk, except a sheet open in Altium with
+    unsaved changes: that one is compiled from Altium's copy and listed in
+    unsaved_in_altium. Save it (or close it unsaved) for the file to count.
+    Sheets the project lists but that are not on disk are in
+    missing_on_disk. Compiling does not save any document (Altium may
     refresh the derived .PrjPcbStructure file).
 
     Args:
         compile (bool): Compile before reading (default True). False returns
             the violations of the last compilation.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
-        str: JSON with total, fatal, errors, warnings and violations
+        str: JSON with project_path, unsaved_in_altium, missing_on_disk,
+             total, fatal, errors, warnings and violations
              [{level, type, detail}]
     """
-    return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
+    return await _simple_command("get_erc_violations", {"compile": compile, "project_path": long_path(project_path)},
+                                 "ERC violations")
+
+
+async def _bridge_json(command: str, params: dict):
+    """(parsed result, error) of a bridge command that returns JSON."""
+    response = await altium_bridge.execute_command(command, params)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, result
+    return result, None
+
+
+async def _project_file(project_path: str):
+    """(path of the .PrjPcb, error): project_path, or the focused project's."""
+    if project_path:
+        path = long_path(project_path)
+    else:
+        info, error = await _bridge_json("get_project_info", {})
+        if error:
+            return None, error
+        path = info.get("project_path", "")
+    if not path.lower().endswith(".prjpcb") or not os.path.isfile(path):
+        return None, f"not a .PrjPcb file: {path or '(no project focused)'}"
+    return path, None
+
+
+@_tool(read_only=True)
+async def get_project_options(ctx: Context, project_path: str = "") -> str:
+    """
+    Read a project's options from its .PrjPcb, by readable name.
+
+    Groups: cross_references (auto cross references and their styles),
+    netlist (net naming, single-pin nets, hierarchy mode), multichannel
+    (room naming, designator format), class_generation (classes and rooms
+    from directives, net classes for buses and components), sheets (per
+    sheet: component_class, room, net_classes, class_cluster: what the
+    sheet generates for the PCB) and comparison (the comparator's matching
+    options). Numeric styles are given as stored: their meaning is the order
+    of the choices in Project Options.
+
+    Reads the file: options changed in Altium and not yet saved are not seen.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+
+    Returns:
+        str: JSON with project_path and the groups above
+    """
+    import project_options
+
+    path, error = await _project_file(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    return json.dumps({"project_path": path, **project_options.read_options(Path(path).read_bytes())}, indent=1)
+
+
+@_tool()
+async def set_project_options(ctx: Context, changes: dict, project_path: str = "", dry_run: bool = False) -> str:
+    """
+    Change a project's options in its .PrjPcb, e.g. turn off cross
+    references, or stop a sheet from generating a room.
+
+    changes uses get_project_options' names:
+        {"cross_references": {"auto_cross_references": false},
+         "netlist": {"single_pin_nets": true},
+         "sheets": {"Power.SchDoc": {"room": false}, "SCH_Heater\\*": {"component_class": true}},
+         "raw": [{"section": "Design", "key": "SomeKey", "value": "1"}]}
+    Sheets are matched by file name or path; wildcards work. "raw" sets any
+    key of any section, for options without a readable name.
+
+    Altium keeps an open project's options in memory and would write them
+    back, so when the project is open it is closed (with its open documents),
+    the file is written, and the project and those documents are opened
+    again. Refused when any of them has unsaved changes. Run preview_eco
+    after changing class or room generation, before the next Update PCB.
+
+    Args:
+        changes (dict): The changes, as above.
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        dry_run (bool): Report what would change and touch nothing.
+
+    Returns:
+        str: JSON with success, applied [{option, from, to}], and when the
+             project was open, closed_and_reopened and reopened documents
+    """
+    import project_options
+
+    path, error = await _project_file(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    data = Path(path).read_bytes()
+    new, applied, errors = project_options.change_options(data, changes)
+    if errors:
+        return json.dumps({"success": False, "errors": errors, "note": "Nothing was changed."}, indent=1)
+    if not applied or dry_run:
+        return json.dumps({"success": True, "dry_run": dry_run, "applied": applied,
+                           **({} if applied else {"note": "The options already have these values."})}, indent=1)
+
+    closed, error = await _bridge_json("close_project_for_edit", {"project_path": path})
+    if error:
+        return json.dumps({"success": False, "error": error, "note": "Nothing was changed."})
+    reply = {"success": True, "project_path": path, "applied": applied}
+    try:
+        Path(path).write_bytes(new)
+    except OSError as e:
+        reply = {"success": False, "error": f"could not write the project file: {e}"}
+    if closed.get("was_open"):
+        docs = closed.get("open_documents", [])
+        write_altium_text(EXCHANGE_DIR / "reopen_documents.txt", "\n".join(docs) + "\n")
+        reopened, error = await _bridge_json("reopen_project", {"project_path": path})
+        reply["closed_and_reopened"] = True
+        if error:
+            reply["reopen_error"] = f"{error}; open the project again by hand"
+        else:
+            reply["reopened"] = reopened.get("reopened", [])
+            missing = [d for d in docs if d not in reply["reopened"]]
+            if missing:
+                reply["not_reopened"] = missing
+    return json.dumps(reply, indent=1)
+
+# Closes and reopens the project: a timeout leaves the state unknown
+MUTATING_COMMANDS.update({"close_project_for_edit", "reopen_project"})
 
 
 @_tool(read_only=True)

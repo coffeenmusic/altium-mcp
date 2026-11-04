@@ -1108,7 +1108,7 @@ begin
             DoCompile := LowerCase(TrimJSON(ParamValue)) <> 'false';
         end;
     end;
-    Result := GetERCViolations(ROOT_DIR, DoCompile);
+    Result := GetERCViolations(ROOT_DIR, DoCompile, RequestText(RequestData, 'project_path', ''));
 end;
 
 // get_component_primitives: "designators" array parameter
@@ -1154,7 +1154,7 @@ begin
             IncludeParams := LowerCase(TrimJSON(ParamValue)) = 'true';
         end;
     end;
-    Result := GetProjectComponents(ROOT_DIR, IncludeParams);
+    Result := GetProjectComponents(ROOT_DIR, IncludeParams, RequestText(RequestData, 'project_path', ''));
 end;
 
 // create_vias: one string of 'x|y|diameter|hole|net|start|end' records
@@ -1362,6 +1362,11 @@ begin
             Result := ExecuteGetProjectComponents(RequestData);
         'get_erc_violations':
             Result := ExecuteGetERCViolations(RequestData);
+        'close_project_for_edit':
+            Result := CloseProjectForEdit(RequestText(RequestData, 'project_path', ''));
+        'reopen_project':
+            Result := ReopenProject(RequestText(RequestData, 'project_path', ''),
+                                    ROOT_DIR + 'reopen_documents.txt');
         'get_board_summary':
             Result := GetBoardSummary(ROOT_DIR);
         'create_polygon_pour':

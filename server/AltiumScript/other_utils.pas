@@ -455,7 +455,9 @@ begin
        (CommandName = 'create_pcb_footprint') or
        (CommandName = 'get_project_info') or
        (CommandName = 'get_project_components') or
-       (CommandName = 'get_erc_violations') then
+       (CommandName = 'get_erc_violations') or
+       (CommandName = 'close_project_for_edit') or
+       (CommandName = 'reopen_project') then
     begin
         Result := True;
         Exit;
@@ -1385,6 +1387,17 @@ begin
     end;
 end;
 
+// Whether an open document has unsaved changes. Read through BoolToStr:
+// in the bridge, IServerDocument.Modified read directly in a condition or an
+// assignment is always False, while passed as an argument it is right (a
+// sheet with a real unsaved edit read False one way and True the other).
+function DocumentModified(Doc: IServerDocument): Boolean;
+begin
+    Result := False;
+    if Doc = nil then Exit;
+    Result := BoolToStr(Doc.Modified, True) = 'True';
+end;
+
 // Mark an open document as changed, so its tab shows it unsaved and Altium
 // asks before closing it. Objects a script adds to a library through
 // PreProcess/PostProcess do not reliably set the flag (a PCB library never
@@ -1483,7 +1496,7 @@ begin
             ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
             if ServerDoc = Nil then
                 OpenState := 'closed'
-            else if ServerDoc.Modified then
+            else if DocumentModified(ServerDoc) then
             begin
                 OpenState := 'modified';
                 Inc(ModifiedCount);
@@ -1546,7 +1559,86 @@ end;
 // Compile the focused project (in memory, nothing is saved) and list the
 // compiler/ERC violations. Violations live on the project object; the
 // per-document DM_ViolationCount does not exist in recent Altium versions.
-function GetERCViolations(ROOT_DIR: String; DoCompile: Boolean): String;
+// The project a compile command works on: ProjectPath when given (found
+// among the open projects, else opened), otherwise the focused project.
+// 'Free Documents' is not a project: compiling it gave results for nothing
+// the caller meant, so it is refused and the caller asked for a path.
+function TargetProject(ProjectPath: String; var Err: String): IProject;
+var
+    P : Integer;
+    Project : IProject;
+begin
+    Result := nil;
+    Err := '';
+    if ProjectPath <> '' then
+    begin
+        for P := 0 to GetWorkspace.DM_ProjectCount - 1 do
+        begin
+            Project := GetWorkspace.DM_Projects(P);
+            if (Project <> nil) and SameText(NormalizePath(Project.DM_ProjectFullPath), NormalizePath(ProjectPath)) then
+            begin
+                Result := Project;
+                Exit;
+            end;
+        end;
+        if not FileExists(ProjectPath) then
+        begin
+            Err := 'Project not found: ' + ProjectPath;
+            Exit;
+        end;
+        Result := GetWorkspace.DM_OpenProject(ProjectPath, True);
+        if Result = nil then Err := 'Altium could not open the project ' + ProjectPath;
+        Exit;
+    end;
+    Result := GetWorkspace.DM_FocusedProject;
+    if (Result = nil) or (Pos('Free Documents', Result.DM_ProjectFullPath) > 0) then
+    begin
+        Result := nil;
+        Err := 'No project is focused (Free Documents has focus); give project_path';
+    end;
+end;
+
+// What a compile of Project reads: a sheet with unsaved changes in Altium is
+// compiled from Altium's copy, not the file; one listed but missing on disk
+// is left out. Both are added to Props, so a result says what it rests on.
+procedure AddProjectSheetStatus(Project: IProject; Props: TStringList);
+var
+    I : Integer;
+    Doc : IDocument;
+    SheetPath : String;
+    SheetDoc : IServerDocument;
+    Unsaved, Missing : TStringList;
+begin
+    Unsaved := TStringList.Create;
+    Missing := TStringList.Create;
+    try
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Doc := Project.DM_LogicalDocuments(I);
+            if Doc.DM_DocumentKind = 'SCH' then
+            begin
+                SheetPath := Doc.DM_FullPath;
+                if not FileExists(SheetPath) then
+                    Missing.Add('"' + JSONEscapeString(SheetPath) + '"')
+                else
+                begin
+                    SheetDoc := Client.GetDocumentByPath(SheetPath);
+                    if DocumentModified(SheetDoc) then
+                        Unsaved.Add('"' + JSONEscapeString(SheetPath) + '"');
+                end;
+            end;
+        end;
+        if Unsaved.Count > 0 then Props.Add(BuildJSONArray(Unsaved, 'unsaved_in_altium'))
+        else Props.Add('"unsaved_in_altium": []');
+        if Missing.Count > 0 then Props.Add(BuildJSONArray(Missing, 'missing_on_disk'))
+        else Props.Add('"missing_on_disk": []');
+    finally
+        Unsaved.Free;
+        Missing.Free;
+    end;
+end;
+
+function GetERCViolations(ROOT_DIR: String; DoCompile: Boolean; ProjectPath: String): String;
 var
     Project     : IProject;
     Violation   : IViolation;
@@ -1556,11 +1648,12 @@ var
     ViolArray   : TStringList;
     ItemProps   : TStringList;
     OutputLines : TStringList;
+    Err         : String;
 begin
-    Project := GetWorkspace.DM_FocusedProject;
+    Project := TargetProject(ProjectPath, Err);
     if Project = Nil then
     begin
-        Result := 'ERROR: No focused project';
+        Result := 'ERROR: ' + Err;
         Exit;
     end;
 
@@ -1592,6 +1685,7 @@ begin
 
         AddJSONProperty(ResultProps, 'project_path', Project.DM_ProjectFullPath);
         AddJSONBoolean(ResultProps, 'compiled', DoCompile);
+        AddProjectSheetStatus(Project, ResultProps);
         AddJSONInteger(ResultProps, 'total', ViolArray.Count);
         AddJSONInteger(ResultProps, 'fatal', NFatal);
         AddJSONInteger(ResultProps, 'errors', NError);
@@ -1613,7 +1707,7 @@ end;
 
 // Every component of the compiled (flattened) project with its comment,
 // footprint, library reference, sheet and parameters. Compiles first.
-function GetProjectComponents(ROOT_DIR: String; IncludeParameters: Boolean): String;
+function GetProjectComponents(ROOT_DIR: String; IncludeParameters: Boolean; ProjectPath: String): String;
 var
     Project     : IProject;
     Flat        : IDocument;
@@ -1624,11 +1718,12 @@ var
     ParamArray  : TStringList;
     ResultProps : TStringList;
     OutputLines : TStringList;
+    Err         : String;
 begin
-    Project := GetWorkspace.DM_FocusedProject;
+    Project := TargetProject(ProjectPath, Err);
     if Project = Nil then
     begin
-        Result := 'ERROR: No focused project';
+        Result := 'ERROR: ' + Err;
         Exit;
     end;
     Project.DM_Compile;
@@ -1679,5 +1774,126 @@ begin
     finally
         CompArray.Free;
         ResultProps.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- project file edits
+//
+// Altium keeps an open project's options in memory and writes them back on
+// save, so a change made to the .PrjPcb while the project is open is lost or
+// fights a reload. A tool that edits the file closes the project first
+// (CloseProjectForEdit), writes, and opens it again (ReopenProject).
+
+// The open project whose file is ProjectPath, or nil (never opens it)
+function OpenProjectByPath(ProjectPath: String): IProject;
+var
+    I : Integer;
+begin
+    Result := nil;
+    for I := 0 to GetWorkspace.DM_ProjectCount - 1 do
+        if SameText(NormalizePath(GetWorkspace.DM_Projects(I).DM_ProjectFullPath), NormalizePath(ProjectPath)) then
+        begin
+            Result := GetWorkspace.DM_Projects(I);
+            Exit;
+        end;
+end;
+
+// Close the project and its open documents, without saving: refused when
+// any of them has unsaved changes. Reports whether the project was open and
+// which of its documents were, so they can be opened again.
+function CloseProjectForEdit(ProjectPath: String): String;
+var
+    Project : IProject;
+    I       : Integer;
+    Path    : String;
+    OpenDocs, Unsaved, Props : TStringList;
+begin
+    Project := OpenProjectByPath(ProjectPath);
+    Props := TStringList.Create;
+    OpenDocs := TStringList.Create;
+    Unsaved := TStringList.Create;
+    try
+        if Project = nil then
+        begin
+            AddJSONBoolean(Props, 'was_open', False);
+            Props.Add(BuildJSONArray(OpenDocs, 'open_documents'));
+            Result := BuildJSONObject(Props);
+            Exit;
+        end;
+        if DocumentModified(Client.GetDocumentByPath(Project.DM_ProjectFullPath)) then
+            Unsaved.Add(Project.DM_ProjectFullPath);
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            if not Client.IsDocumentOpen(Path) then Continue;
+            OpenDocs.Add('"' + JSONEscapeString(Path) + '"');
+            if DocumentModified(Client.GetDocumentByPath(Path)) then
+                Unsaved.Add(Path);
+        end;
+        if Unsaved.Count > 0 then
+        begin
+            Result := 'ERROR: these have unsaved changes in Altium; save or discard them first: ' +
+                      StringReplace(Trim(Unsaved.Text), #13#10, '; ', REPLACEALL);
+            Exit;
+        end;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            if Client.IsDocumentOpen(Path) then
+                Client.CloseDocument(Client.GetDocumentByPath(Path));
+        end;
+        Client.CloseDocument(Client.GetDocumentByPath(ProjectPath));
+        AddJSONBoolean(Props, 'was_open', True);
+        AddJSONBoolean(Props, 'closed', OpenProjectByPath(ProjectPath) = nil);
+        Props.Add(BuildJSONArray(OpenDocs, 'open_documents'));
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+        OpenDocs.Free;
+        Unsaved.Free;
+    end;
+end;
+
+// Open the project again, then the documents listed in DocsPath (one path
+// per line) that were open before
+function ReopenProject(ProjectPath, DocsPath: String): String;
+var
+    Docs, Props, Reopened : TStringList;
+    I    : Integer;
+    Kind, Ext : String;
+    Doc  : IServerDocument;
+begin
+    Docs := TStringList.Create;
+    Props := TStringList.Create;
+    Reopened := TStringList.Create;
+    try
+        GetWorkspace.DM_OpenProject(ProjectPath, True);
+        if FileExists(DocsPath) then Docs.LoadFromFile(DocsPath);
+        for I := 0 to Docs.Count - 1 do
+        begin
+            if Trim(Docs[I]) = '' then Continue;
+            Ext := UpperCase(ExtractFileExt(Docs[I]));
+            Kind := '';
+            if Ext = '.SCHDOC' then Kind := 'SCH'
+            else if Ext = '.PCBDOC' then Kind := 'PCB'
+            else if Ext = '.OUTJOB' then Kind := 'OUTPUTJOB'
+            else if Ext = '.SCHLIB' then Kind := 'SCHLIB'
+            else if Ext = '.PCBLIB' then Kind := 'PCBLIB'
+            else if Ext = '.DBLIB' then Kind := 'DATABASELIB';
+            if Kind = '' then Continue;
+            Doc := Client.OpenDocument(Kind, Docs[I]);
+            if Doc <> nil then
+            begin
+                Client.ShowDocument(Doc);
+                Reopened.Add('"' + JSONEscapeString(Docs[I]) + '"');
+            end;
+        end;
+        AddJSONBoolean(Props, 'project_open', OpenProjectByPath(ProjectPath) <> nil);
+        Props.Add(BuildJSONArray(Reopened, 'reopened'));
+        Result := BuildJSONObject(Props);
+    finally
+        Docs.Free;
+        Props.Free;
+        Reopened.Free;
     end;
 end;
