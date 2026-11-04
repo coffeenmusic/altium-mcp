@@ -73,6 +73,21 @@ def polygon_names(names) -> Tuple[List[str], str, str]:
     return out, ("|" + "|".join(out) + "|") if out else "", ""
 
 
+def area_box(area) -> Tuple[str, str]:
+    """An [x1, y1, x2, y2] area in mils as 'x1|y1|x2|y2' in internal units
+    (corners in either order), '' for none; and an error message."""
+    if area is None:
+        return "", ""
+    if (not isinstance(area, (list, tuple)) or len(area) != 4
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in area)):
+        return "", "area is [x1, y1, x2, y2] in mils from the board origin"
+    x1, x2 = sorted((area[0], area[2]))
+    y1, y2 = sorted((area[1], area[3]))
+    if x1 == x2 or y1 == y2:
+        return "", "area has no size"
+    return "|".join(str(int(round(v * COORD_PER_MIL))) for v in (x1, y1, x2, y2)), ""
+
+
 def unmatched_names(names, result) -> List[str]:
     """Names that picked no polygon, repoured or shelved, in a repour result."""
     found = {p.get("name", "").upper() for p in result.get("polygons", [])}

@@ -571,7 +571,16 @@ end;
 function ExecuteRepourPolygons(RequestData: TStringList): String;
 begin
     Result := RepourPolygons(RequestText(RequestData, 'names', ''), RequestText(RequestData, 'net', ''),
-        RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'include_shelved', 'false') = 'true');
+        RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'area', ''),
+        RequestText(RequestData, 'include_shelved', 'false') = 'true');
+end;
+
+// Function to execute the pour report
+function ExecutePourReport(RequestData: TStringList): String;
+begin
+    Result := PourReport(RequestText(RequestData, 'names', ''), RequestText(RequestData, 'net', ''),
+        RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'area', ''),
+        StrToInt(RequestText(RequestData, 'sliver_sq_mils', '100')));
 end;
 
 // Extract the create symbols batch logic
@@ -1377,6 +1386,8 @@ begin
             Result := ExecuteCreateCutout(RequestData);
         'repour_polygons':
             Result := ExecuteRepourPolygons(RequestData);
+        'pour_report':
+            Result := ExecutePourReport(RequestData);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':
