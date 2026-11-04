@@ -4243,7 +4243,350 @@ def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
         win32gui.ReleaseDC(hwnd, hwnd_dc)
 
 
+async def _geometry(params: dict, board_path: str):
+    """(parsed reply, error) of the 'geometry' bridge command."""
+    if board_path:
+        params = dict(params, board_path=long_path(board_path))
+    response = await altium_bridge.execute_command("geometry", params)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, result
+    return result, None
+
+
 @_tool(read_only=True)
+async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: list = None, nets: list = None,
+                          unit: str = "mil", limit: int = 500, include_hidden: bool = False,
+                          board_path: str = "") -> str:
+    """
+    List the board objects in a box: tracks, arcs, vias, pads, fills,
+    regions, polygons, texts and components, with their layer, net, owner and
+    geometry.
+
+    Each object has a "ref" that clearance and drag_copper take to find it
+    again (opaque: pass it on as is).
+
+    Regions and tracks are matched by their real shape, so a board-sized
+    pour is listed only where its copper reaches the box. A pour's copper
+    (a region with in_polygon) carries its polygon's name, net and layer.
+
+    Args:
+        bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
+        layers (list): Only these layers, by Altium's name ("Top Layer",
+            "Mid Layer 1", "Mechanical 1"); through vias and multi-layer pads
+            are on every copper layer. Default all.
+        kinds (list): Only these: track, arc, via, pad, fill, region, polygon,
+            text, component. Default all.
+        nets (list): Only objects on these nets.
+        unit (str): "mil" (default) or "mm", for bbox and the reply.
+        limit (int): At most this many objects from Altium (default 500);
+            total says how many touch the box.
+        include_hidden (bool): Also list component designators and comments
+            that are switched off (hidden: true). Default False.
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        str: JSON with total, returned and objects [{kind, layer, net,
+             component, coordinates..., ref}]
+    """
+    import pcb_geometry as geo
+
+    try:
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            raise ValueError("bbox must be [x1, y1, x2, y2]")
+        x1, y1, x2, y2 = (geo.to_coord(v, unit) for v in bbox)
+        bad = [k for k in (kinds or []) if k not in geo.KINDS]
+        if bad:
+            raise ValueError(f"unknown kinds {bad}; use {', '.join(geo.KINDS)}")
+    except (TypeError, ValueError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+    kind_filter = "|" + "|".join(kinds) + "|" if kinds else ""
+    result, error = await _geometry({"geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)),
+                                     "x2": str(max(x1, x2)), "y2": str(max(y1, y2)), "kinds": kind_filter,
+                                     "limit": str(max(1, int(limit)))}, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    objects = geo.select(result.get("objects", []), (result.get("origin_x", 0), result.get("origin_y", 0)),
+                         unit, layers, nets, include_hidden)
+    return json.dumps({"board_path": result.get("board_path"), "unit": unit, "total": result.get("total"),
+                       "returned": len(objects), "objects": objects}, indent=1)
+
+
+@_tool(read_only=True)
+async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, unit: str = "mil",
+                            limit: int = 300, board_path: str = "") -> str:
+    """
+    Run the board's design rules on chosen objects only, without a batch
+    DRC: the vias just moved, the tracks just added.
+
+    Each object is checked against its own width or hole-size rule, and
+    against every copper object near it (tracks, arcs, vias, pads, fills,
+    pour copper) for the clearance, short-circuit and hole-to-hole rules.
+    The rule is the one Altium's DRC would pick for that object or pair,
+    and Rule.ActualCheck, the DRC's own test, decides the violation.
+
+    Pour copper is checked as it was last poured: a via moved into a pour
+    shows a violation against it until the pour is repoured
+    (repour_polygons).
+
+    Args:
+        refs (list): Objects as "ref"s from objects_in_area (or pads as
+            "U1-3").
+        bbox (list): And/or [x1, y1, x2, y2] from the board origin: every
+            track, arc, via, pad and fill touching it.
+        unit (str): "mil" (default) or "mm".
+        limit (int): At most this many objects from the box (default 300).
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        str: JSON with objects_checked, pairs_checked and the violations:
+             rule, kind, both objects, their distance and the rule's gap.
+    """
+    import pcb_geometry as geo
+
+    if not refs and not bbox:
+        return json.dumps({"success": False, "error": "give refs, bbox or both"})
+    params = {"geometry": "check", "limit": str(max(1, int(limit)))}
+    try:
+        params["refs"] = "~".join(geo.normalize_ref(r) for r in (refs or []))
+        if bbox:
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                raise ValueError("bbox must be [x1, y1, x2, y2]")
+            x1, y1, x2, y2 = (geo.to_coord(v, unit) for v in bbox)
+            params.update({"x1": str(min(x1, x2)), "y1": str(min(y1, y2)),
+                           "x2": str(max(x1, x2)), "y2": str(max(y1, y2))})
+    except (TypeError, ValueError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+    if "~" in "".join(refs or []):
+        return json.dumps({"success": False, "error": "a ref cannot contain '~'"})
+    result, error = await _geometry(params, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    violations = geo.describe_violations(result, unit)
+    reply = {"board_path": result.get("board_path"), "unit": unit,
+             "objects_checked": result.get("objects_checked"), "pairs_checked": result.get("pairs_checked"),
+             "violations": violations}
+    if result.get("objects_found", 0) > result.get("objects_checked", 0):
+        reply["truncated"] = f"{result['objects_found']} objects in the box; checked {result['objects_checked']}"
+    if result.get("not_found"):
+        reply["not_found"] = result["not_found"]
+    if not violations:
+        reply["note"] = "No violations."
+    return json.dumps(reply, indent=1)
+
+
+@_tool(read_only=True)
+async def clearance(ctx: Context, object_a: str, object_b: str, unit: str = "mil", board_path: str = "") -> str:
+    """
+    Measure the gap between two board objects, and the clearance rule that
+    governs them.
+
+    Args:
+        object_a (str): A "ref" from objects_in_area (any kind but polygon
+            and component), or a pad as "U1-3".
+        object_b (str): The other object, likewise.
+        unit (str): "mil" (default) or "mm".
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        str: JSON with distance (edge to edge, 0 when they touch), rule,
+             rule_gap and violates_rule (Altium's own check of that rule
+             for this pair), and both objects
+    """
+    import pcb_geometry as geo
+
+    try:
+        a, b = geo.normalize_ref(object_a), geo.normalize_ref(object_b)
+        geo.unit_factor(unit)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    result, error = await _geometry({"geometry": "clearance", "a": a, "b": b}, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    reply = geo.describe_clearance(result, unit)
+    reply["a"] = geo.parse_object(result.get("a", ""), unit=unit)
+    reply["b"] = geo.parse_object(result.get("b", ""), unit=unit)
+    for side in ("a", "b"):
+        if reply[side]:
+            reply[side] = {k: v for k, v in reply[side].items() if k in ("kind", "layer", "low_layer", "high_layer",
+                                                                           "net", "component", "name", "designator")}
+    return json.dumps(reply, indent=1)
+
+
+@_tool()
+async def drag_copper(ctx: Context, object_ref: str, dx: float, dy: float, unit: str = "mil",
+                      dry_run: bool = False, board_path: str = "") -> str:
+    """
+    Move a via or a track segment and keep it connected: track ends that
+    meet it follow (they stretch), and a via at an end of a moved track
+    moves with it, its tracks on the other layers following too.
+
+    Refused when an arc ends at a moved point or a pad lies under one,
+    since those cannot follow; dry_run shows what would move first. Polygon
+    pours are not repoured: run repour_polygons afterwards if copper changed
+    near one, and check_routing to confirm the connections.
+
+    Args:
+        object_ref (str): A via or track "ref" from objects_in_area.
+        dx (float): Move along x, in unit.
+        dy (float): Move along y, in unit.
+        unit (str): "mil" (default) or "mm".
+        dry_run (bool): Report what would move and stretch; change nothing.
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        str: JSON with moved (the object, and vias moved with it), stretched
+             (track ends that followed), blocker (why it cannot be dragged)
+    """
+    import pcb_geometry as geo
+
+    try:
+        ref = geo.normalize_ref(object_ref)
+        if ref.split("|")[0] not in ("via", "track"):
+            raise ValueError("only a via or a track can be dragged")
+        mx, my = geo.to_coord(dx, unit), geo.to_coord(dy, unit)
+    except (TypeError, ValueError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+    result, error = await _geometry({"geometry": "drag", "ref": ref, "dx": str(mx), "dy": str(my),
+                                     "dry_run": "true" if dry_run else "false"}, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    origin = (result.get("origin_x", 0), result.get("origin_y", 0))
+    moved = [geo.parse_object(r, origin, unit) for r in result.get("moved", [])]
+    stretched = []
+    for item in result.get("stretched", []):
+        end, _, rec = item.partition("|")
+        obj = geo.parse_object(rec, origin, unit)
+        if obj:
+            obj["end"] = int(end)
+            stretched.append(obj)
+    reply = {"success": not result.get("blocker") or dry_run, "dry_run": dry_run,
+             "moved": moved, "stretched": stretched}
+    if result.get("blocker"):
+        reply["blocker"] = result["blocker"]
+    if dry_run:
+        reply["note"] = "Coordinates are before the move. Nothing was changed."
+    return json.dumps(reply, indent=1)
+
+# Moves copper: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("geometry")
+
+
+@_tool(read_only=True)
+async def render_pcb(ctx: Context, bbox: list = None, layers: list = None, dpi: float = 300, unit: str = "mil",
+                     board_path: str = ""):
+    """
+    Draw a board area as a picture: copper (tracks, arcs, pads, fills,
+    pours), vias, overlay and the board outline, in Altium's layer colours on
+    black.
+
+    Drawn here from the board's objects, not captured from Altium's window:
+    nothing in Altium moves, zooms or comes to the front.
+
+    Args:
+        bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
+            Default the whole board outline.
+        layers (list): Layers to draw, by Altium's name. Default Top Layer,
+            Bottom Layer, Multi-Layer and Top Overlay; e.g. ["Bottom Layer",
+            "Bottom Overlay"] for the bottom side or ["Mid Layer 1"].
+        dpi (float): Pixels per inch of board (default 300); lowered so the
+            longer side stays within 4000 pixels.
+        unit (str): "mil" (default) or "mm", for bbox.
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        JSON (bbox, dpi, size, what was drawn per layer) and the PNG
+    """
+    import io
+    import pcb_geometry as geo
+    import render
+
+    try:
+        geo.unit_factor(unit)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    outline_reply, error = await _geometry({"geometry": "outline"}, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    origin = (outline_reply.get("origin_x", 0), outline_reply.get("origin_y", 0))
+    outline = geo.parse_outline(outline_reply.get("outline", ""), origin, "mil")
+    k = geo.unit_factor(unit) / geo.unit_factor("mil")
+    if bbox:
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            return json.dumps({"success": False, "error": "bbox must be [x1, y1, x2, y2]"})
+        box = [float(v) * k for v in bbox]
+    elif outline:
+        xs, ys = [s["x"] for s in outline], [s["y"] for s in outline]
+        box = [min(xs), min(ys), max(xs), max(ys)]
+    else:
+        return json.dumps({"success": False, "error": "the board has no outline; give bbox"})
+    x1, y1, x2, y2 = (geo.to_coord(v, "mil") for v in box)
+    reply, error = await _geometry({"geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)),
+                                    "x2": str(max(x1, x2)), "y2": str(max(y1, y2)),
+                                    "kinds": "|track|arc|via|pad|fill|region|text|", "limit": "200000",
+                                    "shapes": "true"}, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    objects = geo.select(reply.get("objects", []), origin, "mil")
+    image, info = render.render_pcb(objects, box, layers, dpi, outline)
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    info.update({"board_path": reply.get("board_path"), "bbox_mil": [round(v, 2) for v in box],
+                 "objects": reply.get("total")})
+    return [json.dumps(info, indent=1), MCPImage(data=buf.getvalue(), format="png")]
+
+
+@_tool(read_only=True)
+async def render_sheet(ctx: Context, sheet_path: str, bbox: list = None, dpi: float = 150, unit: str = "mil"):
+    """
+    Draw a schematic sheet, or part of it, as a picture: wires, buses,
+    junctions, component bodies with pins, net labels, power ports, ports,
+    sheet symbols and visible texts.
+
+    Read from the .SchDoc file, so Altium need not have it open and nothing
+    in Altium changes; changes not yet saved in Altium are not shown.
+
+    Args:
+        sheet_path (str): Full path of the .SchDoc.
+        bbox (list): [x1, y1, x2, y2] in sheet coordinates (Altium's origin
+            at the bottom left), in unit. Default everything drawn.
+        dpi (float): Pixels per inch of sheet (default 150); lowered so the
+            longer side stays within 4000 pixels.
+        unit (str): "mil" (default) or "mm".
+
+    Returns:
+        JSON (bbox in mils, dpi, size) and the PNG
+    """
+    import io
+    import pcb_geometry as geo
+    import render
+    from schdoc_reader import read_schdoc
+
+    path = long_path(sheet_path)
+    if not path.lower().endswith(".schdoc") or not os.path.isfile(path):
+        return json.dumps({"success": False, "error": f"not a .SchDoc file: {sheet_path}"})
+    try:
+        k = geo.unit_factor(unit) / geo.unit_factor("mil")
+        box = None
+        if bbox:
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                raise ValueError("bbox must be [x1, y1, x2, y2]")
+            box = [float(v) * k for v in bbox]
+        image, info = await asyncio.to_thread(lambda: render.render_sheet(read_schdoc(path), box, dpi))
+    except (ValueError, OSError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    info["sheet_path"] = path
+    return [json.dumps(info, indent=1), MCPImage(data=buf.getvalue(), format="png")]
+
+
+@_tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = None):
     """
     Take a screenshot of the Altium window, returned as viewable image content.
