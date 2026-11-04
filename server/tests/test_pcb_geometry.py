@@ -76,6 +76,18 @@ class ShapeTest(unittest.TestCase):
                                 "start_angle": 270.0, "end_angle": 90.0}])
 
 
+class ViolationTest(unittest.TestCase):
+    def test_violations_in_unit(self):
+        result = {"origin_x": 1000000, "origin_y": 2000000, "violations": [
+            {"rule": "Clearance", "kind": "clearance", "a": RECORDS[3], "b": RECORDS[0], "distance": 20000,
+             "gap": 50000, "descriptor": "d"},
+            {"rule": "Width", "kind": "width", "a": RECORDS[0], "descriptor": "w"}]}
+        out = geo.describe_violations(result, "mil")
+        self.assertEqual((out[0]["a"]["kind"], out[0]["b"]["kind"]), ("via", "track"))
+        self.assertEqual((out[0]["distance"], out[0]["rule_gap"]), (2.0, 5.0))
+        self.assertNotIn("b", out[1])
+
+
 class SelectTest(unittest.TestCase):
     def test_layers_and_nets(self):
         top = geo.select(RECORDS, ORIGIN, "mil", layers=["top layer"])

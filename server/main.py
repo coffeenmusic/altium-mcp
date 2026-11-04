@@ -5456,6 +5456,69 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
 
 
 @_tool(read_only=True)
+async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, unit: str = "mil",
+                            limit: int = 300, board_path: str = "") -> str:
+    """
+    Run the board's design rules on chosen objects only, without a batch
+    DRC: the vias just moved, the tracks just added.
+
+    Each object is checked against its own width or hole-size rule, and
+    against every copper object near it (tracks, arcs, vias, pads, fills,
+    pour copper) for the clearance, short-circuit and hole-to-hole rules.
+    The rule is the one Altium's DRC would pick for that object or pair,
+    and Rule.ActualCheck, the DRC's own test, decides the violation.
+
+    Pour copper is checked as it was last poured: a via moved into a pour
+    shows a violation against it until the pour is repoured
+    (repour_polygons).
+
+    Args:
+        refs (list): Objects as "ref"s from objects_in_area (or pads as
+            "U1-3").
+        bbox (list): And/or [x1, y1, x2, y2] from the board origin: every
+            track, arc, via, pad and fill touching it.
+        unit (str): "mil" (default) or "mm".
+        limit (int): At most this many objects from the box (default 300).
+        board_path (str): Full path of the .PcbDoc; default the focused board.
+
+    Returns:
+        str: JSON with objects_checked, pairs_checked and the violations:
+             rule, kind, both objects, their distance and the rule's gap.
+    """
+    import pcb_geometry as geo
+
+    if not refs and not bbox:
+        return json.dumps({"success": False, "error": "give refs, bbox or both"})
+    params = {"geometry": "check", "limit": str(max(1, int(limit)))}
+    try:
+        params["refs"] = "~".join(geo.normalize_ref(r) for r in (refs or []))
+        if bbox:
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                raise ValueError("bbox must be [x1, y1, x2, y2]")
+            x1, y1, x2, y2 = (geo.to_coord(v, unit) for v in bbox)
+            params.update({"x1": str(min(x1, x2)), "y1": str(min(y1, y2)),
+                           "x2": str(max(x1, x2)), "y2": str(max(y1, y2))})
+    except (TypeError, ValueError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+    if "~" in "".join(refs or []):
+        return json.dumps({"success": False, "error": "a ref cannot contain '~'"})
+    result, error = await _geometry(params, board_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    violations = geo.describe_violations(result, unit)
+    reply = {"board_path": result.get("board_path"), "unit": unit,
+             "objects_checked": result.get("objects_checked"), "pairs_checked": result.get("pairs_checked"),
+             "violations": violations}
+    if result.get("objects_found", 0) > result.get("objects_checked", 0):
+        reply["truncated"] = f"{result['objects_found']} objects in the box; checked {result['objects_checked']}"
+    if result.get("not_found"):
+        reply["not_found"] = result["not_found"]
+    if not violations:
+        reply["note"] = "No violations."
+    return json.dumps(reply, indent=1)
+
+
+@_tool(read_only=True)
 async def clearance(ctx: Context, object_a: str, object_b: str, unit: str = "mil", board_path: str = "") -> str:
     """
     Measure the gap between two board objects, and the clearance rule that
