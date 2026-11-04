@@ -35,7 +35,10 @@ OPS = {
     "add_port": (("x", "y", "name"), ("io_type", "style", "width")),
     "add_no_erc": (("x", "y"), ()),
     "delete_at": (("kind", "x", "y"), ("text",)),
-    "place_component": (("library", "symbol", "designator", "x", "y"), ("rotation", "mirror", "comment")),
+    "place_component": (("library", "symbol", "designator", "x", "y"),
+                        ("rotation", "mirror", "comment",
+                         # filled in from a DbLib row by dblib.place_operation
+                         "db_library", "db_table", "db_key", "db_description", "db_parameters", "db_footprints")),
 }
 
 
@@ -229,10 +232,22 @@ def encode_operations(operations: list, unit: str = "mil") -> Tuple[List[str], s
                 lib = _text(op["library"], "library")
                 if not lib.lower().endswith(".schlib"):
                     raise OpError("library must be the full path of a .SchLib file")
-                lines.append("|".join(["PLACE", _text(op["designator"], "designator"), lib,
-                                       _text(op["symbol"], "symbol"), c(op["x"]), c(op["y"]),
-                                       _rotation(op.get("rotation", 0)), "1" if op.get("mirror") else "0",
-                                       _text(op.get("comment", ""), "comment")]))
+                fields = ["PLACE", _text(op["designator"], "designator"), lib,
+                          _text(op["symbol"], "symbol"), c(op["x"]), c(op["y"]),
+                          _rotation(op.get("rotation", 0)), "1" if op.get("mirror") else "0",
+                          _text(op.get("comment", ""), "comment")]
+                if op.get("db_library"):
+                    # DB|library|table|key|description|n|name|visible|value...|m|footprint...
+                    params = op.get("db_parameters") or []
+                    fields += ["DB", _text(op["db_library"], "db_library"), _text(op["db_table"], "db_table"),
+                               _text(op["db_key"], "db_key"), _text(op.get("db_description", ""), "description"),
+                               str(len(params))]
+                    for name, value, visible in params:
+                        fields += [_text(name, "parameter name"), "1" if visible else "0",
+                                   _text(value, f"value of {name}")]
+                    footprints = op.get("db_footprints") or []
+                    fields += [str(len(footprints))] + [_text(f, "footprint") for f in footprints]
+                lines.append("|".join(fields))
         except OpError as e:
             return [], f"operation {i + 1}: {e}"
     if not lines:
