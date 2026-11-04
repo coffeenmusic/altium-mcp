@@ -22,7 +22,8 @@ RECORDS = [
     "fill|Top Layer|GND||1000000|2000000|1100000|2100000|45000",
     "region|Bottom Layer|GND||1000000|2000000|1500000|2500000|1",
     "polygon|Top Layer|GND||1000000|2000000|1500000|2500000",
-    "text|Top Overlay||U1|1010000|2010000|600000|90000|U1|x",
+    "text|Top Overlay||U1|1010000|2010000|600000|90000|0|U1|x",
+    "text|Top Overlay||U1|1010000|2010000|600000|0|1|Comment",
     "component|Top Layer||U1|1100000|2100000|180000|1000000|2000000|1200000|2200000|SOIC8",
     "bogus|record",
 ]
@@ -53,10 +54,24 @@ class ParseTest(unittest.TestCase):
         self.assertEqual((r["bounds"], r["in_polygon"]), ([0.0, 0.0, 50.0, 50.0], True))
         self.assertNotIn("ref", geo.parse_object(RECORDS[9], ORIGIN))
         self.assertEqual(geo.parse_object(RECORDS[10], ORIGIN)["text"], "U1|x")
-        c = geo.parse_object(RECORDS[11], ORIGIN)
+        self.assertNotIn("hidden", geo.parse_object(RECORDS[10], ORIGIN))
+        self.assertTrue(geo.parse_object(RECORDS[11], ORIGIN)["hidden"])
+        c = geo.parse_object(RECORDS[12], ORIGIN)
         self.assertEqual((c["designator"], c["rotation"], c["footprint"], c["ref"]),
                          ("U1", 180.0, "SOIC8", "component|U1"))
-        self.assertIsNone(geo.parse_object(RECORDS[12]))
+        self.assertIsNone(geo.parse_object(RECORDS[13]))
+
+
+class ShapeTest(unittest.TestCase):
+    def test_region_contours_and_outline(self):
+        rec = "region|Top Layer|GND||1000000|2000000|1100000|2100000|1|s:1000000,2000000;1100000,2000000;1100000,2100000~h:1010000,2010000;1020000,2010000;1020000,2020000"
+        r = geo.parse_object(rec, ORIGIN)
+        self.assertEqual(r["contours"], [{"hole": False, "points": [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]},
+                                         {"hole": True, "points": [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0)]}])
+        self.assertNotIn("contours", geo.parse_object(RECORDS[8], ORIGIN))
+        out = geo.parse_outline("1000000,2000000,0,0,0,0,0,0;1100000,2000000,1,1100000,2050000,50000,270000,90000;x", ORIGIN)
+        self.assertEqual(out, [{"x": 0.0, "y": 0.0, "kind": 0, "cx": -100.0, "cy": -200.0, "radius": 0.0},
+                               {"x": 10.0, "y": 0.0, "kind": 1, "cx": 10.0, "cy": 5.0, "radius": 5.0}])
 
 
 class SelectTest(unittest.TestCase):
