@@ -455,7 +455,9 @@ begin
        (CommandName = 'create_pcb_footprint') or
        (CommandName = 'get_project_info') or
        (CommandName = 'get_project_components') or
-       (CommandName = 'get_erc_violations') then
+       (CommandName = 'get_erc_violations') or
+       (CommandName = 'get_eco_source') or
+       (CommandName = 'get_eco_target') then
     begin
         Result := True;
         Exit;
@@ -1772,5 +1774,247 @@ begin
     finally
         CompArray.Free;
         ResultProps.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- ECO preview
+//
+// What Design > Update PCB would compare, read without running it: the
+// compiled project on one side, the board on the other. Each item is one
+// '|'-separated string; the server compares them (eco_preview.py).
+
+function EcoQuote(S: String): String;
+begin
+    Result := '"' + JSONEscapeString(S) + '"';
+end;
+
+// Schematic side: components (unique id|designator|footprint|comment), their
+// pins (designator|pin|net), component classes (name|sheet|members joined by
+// ','), rooms (name|descriptor) and net classes (name|nets).
+function GetEcoSource(ProjectPath: String): String;
+var
+    Project : IProject;
+    Flat    : IDocument;
+    Comp    : IComponent;
+    I, J    : Integer;
+    Id, Err, Members : String;
+    Comps, Pins, Classes, Rooms, NetClasses, Props : TStringList;
+begin
+    Project := TargetProject(ProjectPath, Err);
+    if Project = nil then
+    begin
+        Result := 'ERROR: ' + Err;
+        Exit;
+    end;
+    Project.DM_Compile;
+    Flat := Project.DM_DocumentFlattened;
+    if Flat = nil then
+    begin
+        Result := 'ERROR: the project did not compile';
+        Exit;
+    end;
+    Comps := TStringList.Create;
+    Pins := TStringList.Create;
+    Classes := TStringList.Create;
+    Rooms := TStringList.Create;
+    NetClasses := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        for I := 0 to Flat.DM_ComponentCount - 1 do
+        begin
+            Comp := Flat.DM_Components(I);
+            Id := Comp.DM_UniqueId;
+            // An alternate part also lists its original, as <id>@<variant>
+            if Pos('@', Id) > 0 then Continue;
+            Comps.Add(EcoQuote(Id + '|' + Comp.DM_PhysicalDesignator + '|' + Comp.DM_Footprint + '|' +
+                               Comp.DM_Comment));
+            for J := 0 to Comp.DM_PinCount - 1 do
+                Pins.Add(EcoQuote(Comp.DM_PhysicalDesignator + '|' + Comp.DM_Pins(J).DM_PinNumber + '|' +
+                                  Comp.DM_Pins(J).DM_FlattenedNetName));
+        end;
+        for I := 0 to Flat.DM_ComponentClassCount - 1 do
+        begin
+            Members := '';
+            for J := 0 to Flat.DM_ComponentClasses(I).DM_MemberCount - 1 do
+            begin
+                if J > 0 then Members := Members + ',';
+                Members := Members + Flat.DM_ComponentClasses(I).DM_Members(J);
+            end;
+            Classes.Add(EcoQuote(Flat.DM_ComponentClasses(I).DM_Name + '|' +
+                                 Flat.DM_ComponentClasses(I).DM_OwnerDocumentName + '|' + Members));
+        end;
+        for I := 0 to Flat.DM_RoomCount - 1 do
+            Rooms.Add(EcoQuote(Flat.DM_Rooms(I).DM_RoomName + '|' + Flat.DM_Rooms(I).DM_LongDescriptorString));
+        for I := 0 to Flat.DM_NetClassCount - 1 do
+        begin
+            Members := '';
+            for J := 0 to Flat.DM_NetClasses(I).DM_MemberCount - 1 do
+            begin
+                if J > 0 then Members := Members + ',';
+                Members := Members + Flat.DM_NetClasses(I).DM_Members(J);
+            end;
+            NetClasses.Add(EcoQuote(Flat.DM_NetClasses(I).DM_Name + '|' + Members));
+        end;
+        AddJSONProperty(Props, 'project_path', Project.DM_ProjectFullPath);
+        if Project.DM_PrimaryImplementationDocument <> nil then
+            AddJSONProperty(Props, 'pcb_path', Project.DM_PrimaryImplementationDocument.DM_FullPath)
+        else
+            AddJSONProperty(Props, 'pcb_path', '');
+        AddProjectSheetStatus(Project, Props);
+        Props.Add(BuildJSONArray(Comps, 'components'));
+        Props.Add(BuildJSONArray(Pins, 'pins'));
+        Props.Add(BuildJSONArray(Classes, 'component_classes'));
+        Props.Add(BuildJSONArray(Rooms, 'rooms'));
+        Props.Add(BuildJSONArray(NetClasses, 'net_classes'));
+        Result := BuildJSONObject(Props);
+    finally
+        Comps.Free;
+        Pins.Free;
+        Classes.Free;
+        Rooms.Free;
+        NetClasses.Free;
+        Props.Free;
+    end;
+end;
+
+// Board side, read without bringing the board to the front: components
+// (source unique id|designator|footprint|comment), pads (designator|pad|net),
+// component and net classes (name|members joined by ','; the built-in
+// classes such as All Components are left out) and rooms (name|scope).
+function GetEcoTarget(BoardPath: String): String;
+var
+    Board   : IPCB_Board;
+    It      : IPCB_BoardIterator;
+    Obj     : IPCB_Primitive;
+    Comp    : IPCB_Component;
+    Pad     : IPCB_Pad;
+    Cls     : IPCB_ObjectClass;
+    Rule    : IPCB_Rule;
+    I       : Integer;
+    NetName, Members : String;
+    Opened  : Boolean;
+    AllComps, AllNets : TInterfaceList;
+    Comps, Pads, CompClasses, NetClasses, Rooms, Props : TStringList;
+begin
+    // A board this opened is closed again at the end, so a preview leaves
+    // the workspace as it found it
+    Opened := False;
+    Board := PCBServer.GetPCBBoardByPath(BoardPath);
+    if Board = nil then
+    begin
+        if not FileExists(BoardPath) then
+        begin
+            Result := 'ERROR: Board not found: ' + BoardPath;
+            Exit;
+        end;
+        Client.OpenDocument('PCB', BoardPath);
+        Opened := True;
+        Board := PCBServer.GetPCBBoardByPath(BoardPath);
+    end;
+    if Board = nil then
+    begin
+        Result := 'ERROR: Could not open the board ' + BoardPath;
+        Exit;
+    end;
+    AllComps := TInterfaceList.Create;
+    AllNets := TInterfaceList.Create;
+    Comps := TStringList.Create;
+    Pads := TStringList.Create;
+    CompClasses := TStringList.Create;
+    NetClasses := TStringList.Create;
+    Rooms := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        It := Board.BoardIterator_Create;
+        It.AddFilter_ObjectSet(MkSet(eComponentObject, ePadObject, eNetObject, eClassObject, eRuleObject));
+        It.AddFilter_LayerSet(AllLayers);
+        It.AddFilter_Method(eProcessAll);
+        Obj := It.FirstPCBObject;
+        while Obj <> nil do
+        begin
+            if Obj.ObjectId = eComponentObject then
+            begin
+                Comp := Obj;
+                AllComps.Add(Comp);
+                Comps.Add(EcoQuote(Comp.SourceUniqueId + '|' + Comp.Name.Text + '|' + Comp.Pattern + '|' +
+                                   Comp.Comment.Text));
+            end
+            else if Obj.ObjectId = eNetObject then
+                AllNets.Add(Obj)
+            else if Obj.ObjectId = ePadObject then
+            begin
+                Pad := Obj;
+                if Pad.Component <> nil then
+                begin
+                    NetName := '';
+                    if Pad.Net <> nil then NetName := Pad.Net.Name;
+                    Pads.Add(EcoQuote(Pad.Component.Name.Text + '|' + Pad.Name + '|' + NetName));
+                end;
+            end
+            else if Obj.ObjectId = eRuleObject then
+            begin
+                Rule := Obj;
+                if Rule.RuleKind = eRule_ConfinementConstraint then
+                    Rooms.Add(EcoQuote(Rule.Name + '|' + Rule.Scope1Expression));
+            end;
+            Obj := It.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(It);
+
+        It := Board.BoardIterator_Create;
+        It.AddFilter_ObjectSet(MkSet(eClassObject));
+        It.AddFilter_LayerSet(AllLayers);
+        It.AddFilter_Method(eProcessAll);
+        Cls := It.FirstPCBObject;
+        while Cls <> nil do
+        begin
+            if not Cls.SuperClass then
+            begin
+                Members := '';
+                if Cls.MemberKind = eClassMemberKind_Component then
+                begin
+                    for I := 0 to AllComps.Count - 1 do
+                        if Cls.IsMember(AllComps[I]) then
+                        begin
+                            if Members <> '' then Members := Members + ',';
+                            Comp := AllComps[I];
+                            Members := Members + Comp.Name.Text;
+                        end;
+                    CompClasses.Add(EcoQuote(Cls.Name + '|' + Members));
+                end
+                else if Cls.MemberKind = eClassMemberKind_Net then
+                begin
+                    for I := 0 to AllNets.Count - 1 do
+                        if Cls.IsMember(AllNets[I]) then
+                        begin
+                            if Members <> '' then Members := Members + ',';
+                            Obj := AllNets[I];
+                            Members := Members + Obj.Name;
+                        end;
+                    NetClasses.Add(EcoQuote(Cls.Name + '|' + Members));
+                end;
+            end;
+            Cls := It.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(It);
+
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        Props.Add(BuildJSONArray(Comps, 'components'));
+        Props.Add(BuildJSONArray(Pads, 'pads'));
+        Props.Add(BuildJSONArray(CompClasses, 'component_classes'));
+        Props.Add(BuildJSONArray(NetClasses, 'net_classes'));
+        Props.Add(BuildJSONArray(Rooms, 'rooms'));
+        Result := BuildJSONObject(Props);
+    finally
+        if Opened and (Client.GetDocumentByPath(BoardPath) <> nil) then
+            Client.CloseDocument(Client.GetDocumentByPath(BoardPath));
+        AllComps.Free;
+        AllNets.Free;
+        Comps.Free;
+        Pads.Free;
+        CompClasses.Free;
+        NetClasses.Free;
+        Rooms.Free;
+        Props.Free;
     end;
 end;

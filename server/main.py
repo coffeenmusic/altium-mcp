@@ -5006,6 +5006,83 @@ async def get_erc_violations(ctx: Context, compile: bool = True, project_path: s
                                  "ERC violations")
 
 
+async def _command_json(command: str, params: dict):
+    """(parsed result, error) of a bridge command that returns JSON."""
+    response = await altium_bridge.execute_command(command, params)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, result
+    return result, None
+
+
+@_tool(read_only=True)
+async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", max_per_kind: int = 50) -> str:
+    """
+    Show what Design > Update PCB would change, without running it: the
+    differences between the compiled schematics and the board, as data.
+
+    Run it before an Update PCB, in particular to catch rooms and classes the
+    ECO would remove (a room drawn for a class the schematics no longer make
+    disappears with the update), footprint changes and net renames.
+
+    Compiles the project in memory (nothing is saved) and reads the board
+    without bringing it to the front. Components match by unique id, nets by
+    their pins (a net whose pins stay together under a new name is a
+    rename), rooms and classes by name. The comparator's ignore settings are
+    not applied: every difference is listed, including kinds the ECO is set
+    to skip. Duplicate component class names (Altium's "Class already
+    exists" warning, usually from a sheet symbol that lists several files)
+    are explained in duplicate_component_classes.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        pcb_path (str): The board to compare; default the project's PCB.
+        max_per_kind (int): At most this many entries per kind (default 50);
+            "summary" always has the full counts.
+
+    Returns:
+        str: JSON with project_path, pcb_path, unsaved_in_altium (sheets
+             compiled from unsaved edits), summary {kind: count}, and per kind:
+             add_components, remove_components, change_designators,
+             change_footprints, change_comments, add_nets, remove_nets,
+             rename_nets, change_pin_nets, add/remove_component_classes,
+             change_component_class_members, add/remove_net_classes,
+             add_rooms, remove_rooms, duplicate_component_classes
+    """
+    import eco_preview
+
+    source, error = await _command_json("get_eco_source", {"project_path": long_path(project_path)})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    board = long_path(pcb_path) if pcb_path else source.get("pcb_path", "")
+    if not board:
+        return json.dumps({"success": False, "error": "the project has no PCB; give pcb_path"})
+    target, error = await _command_json("get_eco_target", {"pcb_path": board})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    try:
+        prj_text = read_altium_text(Path(source["project_path"]))
+    except (OSError, KeyError):
+        prj_text = ""
+    single_pin = re.search(r"^NetlistSinglePinNets=1\s*$", prj_text, re.MULTILINE) is not None
+    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target), single_pin)
+    shown, cut = eco_preview.limit(diff, max(1, int(max_per_kind)))
+    reply = {"project_path": source.get("project_path"), "pcb_path": target.get("board_path", board),
+             "unsaved_in_altium": source.get("unsaved_in_altium", []),
+             "summary": eco_preview.summary(diff)}
+    if not reply["summary"]:
+        reply["note"] = "No differences: an Update PCB would change nothing."
+    if cut:
+        reply["truncated"] = cut
+    reply.update(shown)
+    return json.dumps(reply, indent=1)
+
+
 @_tool(read_only=True)
 async def get_board_summary(ctx: Context) -> str:
     """
