@@ -1735,6 +1735,8 @@ begin
             Result := ExecuteGetProjectComponents(RequestData);
         'get_erc_violations':
             Result := ExecuteGetERCViolations(RequestData);
+        'run_update_pcb':
+            Result := RunUpdatePCB(RequestText(RequestData, 'project_path', ''), RequestText(RequestData, 'pcb_path', ''));
         'get_eco_source':
             Result := GetEcoSource(RequestText(RequestData, 'project_path', ''));
         'get_eco_target':
