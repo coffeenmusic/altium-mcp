@@ -5924,6 +5924,216 @@ begin
 end;
 
 // geometry requests: "geometry" names the command (area, clearance, drag)
+// ---------------------------------------------------------------- object DRC
+// The board's own rules run on chosen objects only: each object's
+// width / hole rule, and the clearance, short-circuit and hole-to-hole
+// rules against every object near it. Rule.ActualCheck is the test the
+// batch DRC uses for one object or pair; it returns nil when they comply.
+
+function GeoRuleKindName(Kind: Integer): String;
+begin
+    case Kind of
+        eRule_Clearance:            Result := 'clearance';
+        eRule_ShortCircuit:         Result := 'short_circuit';
+        eRule_HoleToHoleClearance:  Result := 'hole_to_hole';
+        eRule_MaxMinWidth:          Result := 'width';
+        eRule_MaxMinHoleSize:       Result := 'hole_size';
+    else
+        Result := IntToStr(Kind);
+    end;
+end;
+
+// The largest clearance gap of the board's enabled rules: how far to look
+// for neighbours
+function GeoLargestGap(Board: IPCB_Board): Integer;
+var
+    It   : IPCB_BoardIterator;
+    Rule : IPCB_Rule;
+begin
+    Result := 0;
+    It := Board.BoardIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eRuleObject));
+    It.AddFilter_LayerSet(AllLayers);
+    It.AddFilter_Method(eProcessAll);
+    Rule := It.FirstPCBObject;
+    while Rule <> nil do
+    begin
+        if Rule.Enabled and (Rule.RuleKind = eRule_Clearance) then
+            if Rule.Gap > Result then Result := Rule.Gap;
+        if Rule.Enabled and (Rule.RuleKind = eRule_HoleToHoleClearance) then
+            if Rule.Gap > Result then Result := Rule.Gap;
+        Rule := It.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(It);
+end;
+
+function GeoHasHole(Prim: IPCB_Primitive): Boolean;
+begin
+    Result := False;
+    if Prim.ObjectId = eViaObject then Result := True
+    else if Prim.ObjectId = ePadObject then Result := Prim.HoleSize > 0;
+end;
+
+procedure GeoAddViolation(Board: IPCB_Board; Items: TStringList; Rule: IPCB_Rule; A, B: IPCB_Primitive);
+var
+    Item : TStringList;
+begin
+    Item := TStringList.Create;
+    try
+        AddJSONProperty(Item, 'rule', Rule.Name);
+        AddJSONProperty(Item, 'kind', GeoRuleKindName(Rule.RuleKind));
+        AddJSONProperty(Item, 'a', GeoRecord(A));
+        if B <> nil then
+        begin
+            AddJSONProperty(Item, 'b', GeoRecord(B));
+            AddJSONInteger(Item, 'distance', Board.PrimPrimDistance(A, B));
+        end;
+        if Rule.RuleKind = eRule_Clearance then AddJSONInteger(Item, 'gap', Rule.Gap);
+        AddJSONProperty(Item, 'descriptor', Rule.Descriptor);
+        Items.Add(BuildJSONObject(Item, 1));
+    finally
+        Item.Free;
+    end;
+end;
+
+// Checks Objects; Items gets one JSON object per violation
+procedure GeoCheckObjects(Board: IPCB_Board; Objects: TInterfaceList; Items: TStringList; var Pairs: Integer);
+var
+    A, B  : IPCB_Primitive;
+    Rule  : IPCB_Rule;
+    It    : IPCB_SpatialIterator;
+    R     : TCoordRect;
+    i, k, Margin, Kind : Integer;
+    Seen  : TStringList;
+    Key   : String;
+begin
+    Margin := GeoLargestGap(Board) + MilsToCoord(1);
+    Seen := TStringList.Create;
+    try
+        Seen.Sorted := True;
+        for i := 0 to Objects.Count - 1 do
+        begin
+            A := Objects.Items[i];
+            // the object's own rules
+            for k := 0 to 1 do
+            begin
+                Kind := -1;
+                if (k = 0) and ((A.ObjectId = eTrackObject) or (A.ObjectId = eArcObject)) then Kind := eRule_MaxMinWidth;
+                if (k = 1) and GeoHasHole(A) then Kind := eRule_MaxMinHoleSize;
+                if Kind >= 0 then
+                begin
+                    Rule := Board.FindDominantRuleForObject(A, Kind);
+                    if (Rule <> nil) and Rule.Enabled then
+                        if Rule.ActualCheck(A, nil) <> nil then GeoAddViolation(Board, Items, Rule, A, nil);
+                end;
+            end;
+            // against what is near it
+            R := A.BoundingRectangle;
+            It := Board.SpatialIterator_Create;
+            It.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject, eFillObject, eRegionObject));
+            It.AddFilter_LayerSet(AllLayers);
+            It.AddFilter_Area(R.Left - Margin, R.Bottom - Margin, R.Right + Margin, R.Top + Margin);
+            B := It.FirstPCBObject;
+            while B <> nil do
+            begin
+                if B.I_ObjectAddress <> A.I_ObjectAddress then
+                begin
+                    // each pair once, also when both objects were asked for
+                    if A.I_ObjectAddress < B.I_ObjectAddress then
+                        Key := IntToStr(A.I_ObjectAddress) + '-' + IntToStr(B.I_ObjectAddress)
+                    else
+                        Key := IntToStr(B.I_ObjectAddress) + '-' + IntToStr(A.I_ObjectAddress);
+                    if Seen.IndexOf(Key) < 0 then
+                    begin
+                        Seen.Add(Key);
+                        Pairs := Pairs + 1;
+                        for k := 0 to 2 do
+                        begin
+                            if k = 0 then Kind := eRule_Clearance
+                            else if k = 1 then Kind := eRule_ShortCircuit
+                            else Kind := eRule_HoleToHoleClearance;
+                            if (Kind <> eRule_HoleToHoleClearance) or (GeoHasHole(A) and GeoHasHole(B)) then
+                            begin
+                                Rule := Board.FindDominantRuleForObjectPair(A, B, Kind);
+                                if (Rule <> nil) and Rule.Enabled then
+                                    if Rule.ActualCheck(A, B) <> nil then GeoAddViolation(Board, Items, Rule, A, B);
+                            end;
+                        end;
+                    end;
+                end;
+                B := It.NextPCBObject;
+            end;
+            Board.SpatialIterator_Destroy(It);
+        end;
+    finally
+        Seen.Free;
+    end;
+end;
+
+// check: Refs ('~'-separated refs) and/or the box X1..Y2 (all copper in it);
+// at most Limit objects
+function GeoCheck(Board: IPCB_Board; Refs: String; HasBox: Boolean; X1, Y1, X2, Y2, Limit: Integer): String;
+var
+    Objects : TInterfaceList;
+    Items, Props, Missing, RefList : TStringList;
+    Prim : IPCB_Primitive;
+    It   : IPCB_SpatialIterator;
+    Ref  : String;
+    i, Pairs, Total : Integer;
+begin
+    Objects := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    Missing := TStringList.Create;
+    RefList := TStringList.Create;
+    try
+        RefList.Text := StringReplace(Refs, '~', #13#10, REPLACEALL);
+        for i := 0 to RefList.Count - 1 do
+        begin
+            Ref := Trim(RefList[i]);
+            if Ref = '' then Continue;
+            Prim := GeoFind(Board, Ref);
+            if Prim = nil then Missing.Add('"' + JSONEscapeString(Ref) + '"') else Objects.Add(Prim);
+        end;
+        Total := Objects.Count;
+        if HasBox then
+        begin
+            It := Board.SpatialIterator_Create;
+            It.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject, eFillObject));
+            It.AddFilter_LayerSet(AllLayers);
+            It.AddFilter_Area(X1, Y1, X2, Y2);
+            Prim := It.FirstPCBObject;
+            while Prim <> nil do
+            begin
+                if GeoTouchesBox(Prim, X1, Y1, X2, Y2) then
+                begin
+                    Total := Total + 1;
+                    if Objects.Count < Limit then Objects.Add(Prim);
+                end;
+                Prim := It.NextPCBObject;
+            end;
+            Board.SpatialIterator_Destroy(It);
+        end;
+        Pairs := 0;
+        GeoCheckObjects(Board, Objects, Items, Pairs);
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        AddJSONInteger(Props, 'objects_checked', Objects.Count);
+        AddJSONInteger(Props, 'objects_found', Total);
+        AddJSONInteger(Props, 'pairs_checked', Pairs);
+        Props.Add(BuildJSONArray(Missing, 'not_found'));
+        Props.Add(BuildJSONArray(Items, 'violations'));
+        Result := BuildJSONObject(Props);
+    finally
+        Objects.Free;
+        Items.Free;
+        Props.Free;
+        Missing.Free;
+        RefList.Free;
+    end;
+end;
+
 function ExecuteGeometry(RequestData: TStringList): String;
 var
     Board : IPCB_Board;
@@ -5949,6 +6159,13 @@ begin
         Result := GeoOutline(Board)
     else if Cmd = 'clearance' then
         Result := GeoClearance(Board, RequestText(RequestData, 'a', ''), RequestText(RequestData, 'b', ''))
+    else if Cmd = 'check' then
+        Result := GeoCheck(Board, RequestText(RequestData, 'refs', ''), RequestText(RequestData, 'x1', '') <> '',
+                           Board.XOrigin + StrToIntDef(RequestText(RequestData, 'x1', '0'), 0),
+                           Board.YOrigin + StrToIntDef(RequestText(RequestData, 'y1', '0'), 0),
+                           Board.XOrigin + StrToIntDef(RequestText(RequestData, 'x2', '0'), 0),
+                           Board.YOrigin + StrToIntDef(RequestText(RequestData, 'y2', '0'), 0),
+                           StrToInt(RequestText(RequestData, 'limit', '300')))
     else if Cmd = 'drag' then
         Result := DragCopper(Board, RequestText(RequestData, 'ref', ''),
                              StrToInt(RequestText(RequestData, 'dx', '0')),

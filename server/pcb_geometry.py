@@ -192,6 +192,23 @@ def normalize_ref(ref: str) -> str:
     raise ValueError(f"'{ref}' is not a ref from objects_in_area or a pad like 'U1-3'")
 
 
+def describe_violations(result: dict, unit: str) -> List[dict]:
+    """check's violations with the objects parsed and distances in unit."""
+    k = unit_factor(unit)
+    origin = (result.get("origin_x", 0), result.get("origin_y", 0))
+    out = []
+    for v in result.get("violations", []):
+        item = {"rule": v.get("rule"), "kind": v.get("kind"), "a": parse_object(v.get("a", ""), origin, unit)}
+        if v.get("b"):
+            item["b"] = parse_object(v["b"], origin, unit)
+            item["distance"] = round(v.get("distance", 0) / k, 4)
+        if "gap" in v:
+            item["rule_gap"] = round(v["gap"] / k, 4)
+        item["descriptor"] = v.get("descriptor")
+        out.append(item)
+    return out
+
+
 def describe_clearance(result: dict, unit: str) -> dict:
     k = unit_factor(unit)
     out = {"distance": round(result["distance"] / k, 4), "unit": unit}
