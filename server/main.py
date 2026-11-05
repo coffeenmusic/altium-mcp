@@ -6586,20 +6586,6 @@ async def get_erc_violations(ctx: Context, compile: bool = True, project_path: s
                                  "ERC violations")
 
 
-async def _command_json(command: str, params: dict):
-    """(parsed result, error) of a bridge command that returns JSON."""
-    response = await altium_bridge.execute_command(command, params)
-    if not response.get("success", False):
-        return None, response.get("error", "unknown error")
-    result = response.get("result", {})
-    if isinstance(result, str):
-        try:
-            result = json.loads(result, strict=False)
-        except ValueError:
-            return None, result
-    return result, None
-
-
 @_tool(read_only=True)
 async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", max_per_kind: int = 50) -> str:
     """
@@ -6617,7 +6603,16 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
     not applied: every difference is listed, including kinds the ECO is set
     to skip. Duplicate component class names (Altium's "Class already
     exists" warning, usually from a sheet symbol that lists several files)
-    are explained in duplicate_component_classes.
+    are explained in duplicate_component_classes. As Altium's ECO does, a pin
+    alone on its net (with "Netlist single pin nets" off) is left as it is,
+    and board parts with no schematic link are left alone; those are listed
+    in board_only_components, outside the summary.
+
+    Not compared, so an empty summary means "no differences of the kinds
+    compared", not that an Update PCB would change nothing: net class
+    members (net classes match by name only), component parameters,
+    differential pairs, rules from parameter sets, and room scope and
+    members (rooms match by name only).
 
     Args:
         project_path (str): Full path of the .PrjPcb; default the focused project.
@@ -6632,17 +6627,21 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
              change_footprints, change_comments, add_nets, remove_nets,
              rename_nets, change_pin_nets, add/remove_component_classes,
              change_component_class_members, add/remove_net_classes,
-             add_rooms, remove_rooms, duplicate_component_classes
+             add_rooms, remove_rooms, duplicate_component_classes,
+             board_only_components
     """
     import eco_preview
 
-    source, error = await _command_json("get_eco_source", {"project_path": long_path(project_path)})
+    project, error = _project_path(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    source, error = await _bridge_json("get_eco_source", {"project_path": project})
     if error:
         return json.dumps({"success": False, "error": error})
     board = long_path(pcb_path) if pcb_path else source.get("pcb_path", "")
     if not board:
         return json.dumps({"success": False, "error": "the project has no PCB; give pcb_path"})
-    target, error = await _command_json("get_eco_target", {"pcb_path": board})
+    target, error = await _bridge_json("get_eco_target", {"pcb_path": board})
     if error:
         return json.dumps({"success": False, "error": error})
     try:
@@ -6656,7 +6655,7 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
              "unsaved_in_altium": source.get("unsaved_in_altium", []),
              "summary": eco_preview.summary(diff)}
     if not reply["summary"]:
-        reply["note"] = "No differences: an Update PCB would change nothing."
+        reply["note"] = eco_preview.no_differences_note()
     if cut:
         reply["truncated"] = cut
     reply.update(shown)

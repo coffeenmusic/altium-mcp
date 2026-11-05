@@ -2,9 +2,12 @@
 
 Run from server/:  python -m unittest tests.test_eco_preview -v
 """
+import asyncio
+import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -39,11 +42,29 @@ class ComponentTest(unittest.TestCase):
     def test_matched_by_unique_id(self):
         d = diff()
         self.assertEqual(d["add_components"], [{"designator": "R5", "footprint": "R0603", "comment": "1k"}])
-        self.assertEqual([c["designator"] for c in d["remove_components"]], ["R9", "LOGO1"])
-        self.assertIn("board only", d["remove_components"][1]["reason"])
+        # a board-only part (no schematic link) is left alone by the ECO
+        self.assertEqual([c["designator"] for c in d["remove_components"]], ["R9"])
+        self.assertEqual(d["board_only_components"], [{"designator": "LOGO1", "footprint": "LOGO"}])
         self.assertEqual(d["change_designators"], [{"from": "U3", "to": "U2"}])
         self.assertEqual(d["change_footprints"], [{"designator": "C1", "from": "C0805", "to": "C0603"}])
         self.assertEqual(d["change_comments"], [])
+
+    def test_multi_part_component(self):
+        # U1A and U1B are one board component, matched by either part's id;
+        # a new two-part U4 is one addition
+        source = dict(SOURCE, components=SOURCE["components"] + [
+            r"\S1\P1|U1|SOIC14|LM324", r"\S1\P2|U1|SOIC14|LM324",
+            r"\S1\Q1|U4|SOIC8|LM358", r"\S1\Q2|U4|SOIC8|LM358"])
+        target = dict(TARGET, components=TARGET["components"] + [r"\S1\P2|U1|SOIC14|LM324"])
+        d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target))
+        self.assertEqual([c["designator"] for c in d["add_components"]], ["R5", "U4"])
+        self.assertNotIn("U1", [c["designator"] for c in d["remove_components"]])
+
+    def test_unannotated_parts_each_added(self):
+        source = dict(SOURCE, components=SOURCE["components"] + [r"\S1\X1|R?|R0603|1k",
+                                                                 r"\S1\X2|R?|R0603|2k"])
+        d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET))
+        self.assertEqual([c["designator"] for c in d["add_components"]], ["R5", "R?", "R?"])
 
 
 class NetTest(unittest.TestCase):
@@ -52,12 +73,11 @@ class NetTest(unittest.TestCase):
         self.assertEqual(d["rename_nets"], [{"from": "N1", "to": "MID"}])
         # U2-2 joins SENSE, whose other pin (R5) is not on the board yet; the
         # mounting hole pad has no schematic pin and is left alone. LONELY
-        # has one pin, so with single-pin nets off the netlist leaves it out
-        # and the update takes J1-1 off it, as it does on a real board
-        self.assertEqual(d["change_pin_nets"], [{"pin": "J1-1", "from": "LONELY", "to": ""},
-                                                {"pin": "U3-2", "from": "", "to": "SENSE"}])
+        # has one pin, so with single-pin nets off the ECO leaves J1-1 and
+        # its board net as they are (checked against Altium AD25's ECO)
+        self.assertEqual(d["change_pin_nets"], [{"pin": "U3-2", "from": "", "to": "SENSE"}])
         self.assertEqual(d["add_nets"], ["SENSE"])
-        self.assertEqual(d["remove_nets"], ["LONELY", "X"])
+        self.assertEqual(d["remove_nets"], ["X"])
         on = diff(True)
         self.assertEqual(on["change_pin_nets"], [{"pin": "U3-2", "from": "", "to": "SENSE"}])
         self.assertEqual(on["remove_nets"], ["X"])
@@ -101,15 +121,51 @@ class ClassAndRoomTest(unittest.TestCase):
 class OutputTest(unittest.TestCase):
     def test_summary_and_limit(self):
         d = diff()
-        self.assertEqual(eco_preview.summary(d)["remove_components"], 2)
+        self.assertEqual(eco_preview.summary(d)["remove_components"], 1)
+        self.assertNotIn("board_only_components", eco_preview.summary(d))
         shown, cut = eco_preview.limit(d, 1)
         self.assertEqual(len(shown["remove_components"]), 1)
-        self.assertIn("remove_components", cut)
+        self.assertEqual(sorted(cut), sorted(k for k, v in d.items() if len(v) > 1))
         self.assertNotIn("add_rooms", shown)
+
+    def test_no_differences_note_names_what_is_not_compared(self):
+        note = eco_preview.no_differences_note()
+        self.assertIn("of the kinds compared", note)
+        for kind in ("net class members", "component parameters", "differential pairs",
+                     "rules from parameter sets", "room scope"):
+            self.assertIn(kind, note)
 
     def test_fields_with_bars(self):
         src = eco_preview.parse_source({"components": [r"\A|R1|R0603|a|b"]})
         self.assertEqual(src["components"]["\\a"]["comment"], "a|b")
+
+
+class ToolTest(unittest.TestCase):
+    """preview_eco in main.py, with the bridge faked."""
+
+    def run_tool(self, replies, **kwargs):
+        import main
+        calls = []
+
+        async def fake(command, params, timeout=None):
+            calls.append(command)
+            return {"success": True, "result": json.dumps(replies[command])}
+        with mock.patch.object(main.altium_bridge, "execute_command", fake):
+            return json.loads(asyncio.run(main.preview_eco(None, **kwargs))), calls
+
+    def test_same_sides_note_only_what_is_compared(self):
+        side = {"components": [r"\S1\A|R1|R0603|10k"], "pins": ["R1|1|A", "R1|2|B"]}
+        replies = {"get_eco_source": dict(side, project_path="", pcb_path="board.PcbDoc"),
+                   "get_eco_target": {"components": side["components"], "pads": ["R1|1|A", "R1|2|B"]}}
+        reply, calls = self.run_tool(replies)
+        self.assertEqual(calls, ["get_eco_source", "get_eco_target"])
+        self.assertEqual(reply["summary"], {})
+        self.assertIn("of the kinds compared", reply["note"])
+
+    def test_bad_project_path_refused_before_altium(self):
+        reply, calls = self.run_tool({}, project_path="C:/nowhere/x.txt")
+        self.assertFalse(reply["success"])
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

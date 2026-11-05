@@ -1896,28 +1896,43 @@ var
     Rule    : IPCB_Rule;
     I       : Integer;
     NetName, Members : String;
-    Opened  : Boolean;
+    Opened  : IServerDocument;
+    BoardDoc : IServerDocument;
     AllComps, AllNets : TInterfaceList;
     Comps, Pads, CompClasses, NetClasses, Rooms, Props : TStringList;
 begin
     // A board this opened is closed again at the end, so a preview leaves
-    // the workspace as it found it
-    Opened := False;
-    Board := PCBServer.GetPCBBoardByPath(BoardPath);
-    if Board = nil then
+    // the workspace as it found it. An open board is found by its path
+    // compared normalised (case, separators, '..'), as FindOpenDocument
+    // does, and is never closed: an exact lookup could miss a board whose
+    // path is written differently, and the user's board would be closed
+    Opened := nil;
+    Board := nil;
+    BoardDoc := FindOpenDocument(NormalizePath(BoardPath));
+    if BoardDoc = nil then
     begin
         if not FileExists(BoardPath) then
         begin
             Result := 'ERROR: Board not found: ' + BoardPath;
             Exit;
         end;
-        Client.OpenDocument('PCB', BoardPath);
-        Opened := True;
-        Board := PCBServer.GetPCBBoardByPath(BoardPath);
+        Opened := Client.OpenDocument('PCB', NormalizePath(BoardPath));
+        BoardDoc := Opened;
     end;
+    // PCBServer is nil until a board has been opened this session
+    if (BoardDoc <> nil) and (PCBServer <> nil) then
+        Board := PCBServer.GetPCBBoardByPath(BoardDoc.FileName);
     if Board = nil then
     begin
-        Result := 'ERROR: Could not open the board ' + BoardPath;
+        if Opened <> nil then
+        begin
+            Client.CloseDocument(Opened);
+            Result := 'ERROR: Could not open the board ' + BoardPath;
+        end
+        else if BoardDoc <> nil then
+            Result := 'ERROR: The board ' + BoardPath + ' is open but could not be read; bring it to the front once'
+        else
+            Result := 'ERROR: Could not open the board ' + BoardPath;
         Exit;
     end;
     AllComps := TInterfaceList.Create;
@@ -2010,8 +2025,9 @@ begin
         Props.Add(BuildJSONArray(Rooms, 'rooms'));
         Result := BuildJSONObject(Props);
     finally
-        if Opened and (Client.GetDocumentByPath(BoardPath) <> nil) then
-            Client.CloseDocument(Client.GetDocumentByPath(BoardPath));
+        // Only the document this call opened; a board that was open stays
+        if Opened <> nil then
+            Client.CloseDocument(Opened);
         AllComps.Free;
         AllNets.Free;
         Comps.Free;

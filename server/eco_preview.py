@@ -14,6 +14,12 @@ match by name.
 Not modelled: the comparator's ignore settings (Project Options > Comparator)
 and its partial net matching (MinPercent/MinMatch). Every difference is
 reported; an ignored kind is not applied by the ECO.
+
+Not compared at all (NOT_COMPARED): net class members (net classes match by
+name only), component parameters, differential pairs, rules from parameter
+sets, and room scope and members (rooms match by name only). No differences
+here means none of the kinds compared, not that an Update PCB would change
+nothing.
 """
 
 from collections import defaultdict
@@ -85,20 +91,36 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False) -> dict:
 
     single_pin_nets is the project's "Netlist single pin nets" option: off
     (the default), a net with one pin in the whole design is left out of the
-    netlist, so the ECO neither adds it nor connects its pin.
+    netlist, so the ECO leaves that pin as it is on the board: it neither
+    connects nor disconnects it, and keeps a board net made of such pins.
+    Board components with no schematic link (logos, title blocks) are left
+    alone too; they are listed as board_only_components. Both checked against
+    Altium AD25's own Engineering Change Order.
     """
     sc, tc = source["components"], target["components"]
     out = {k: [] for k in ("add_components", "remove_components", "change_designators", "change_footprints",
                            "change_comments", "add_nets", "remove_nets", "rename_nets", "change_pin_nets",
                            "add_component_classes", "remove_component_classes", "change_component_class_members",
                            "add_net_classes", "remove_net_classes", "add_rooms", "remove_rooms",
-                           "duplicate_component_classes")}
+                           "duplicate_component_classes", "board_only_components")}
 
-    # Components, matched by unique id
+    # Components, matched by unique id. The parts of a multi-part component
+    # (U1A, U1B) are one board component: a part whose sibling (same
+    # designator) is matched is not an addition, and a new multi-part
+    # component is added once
+    matched = {s["designator"].lower() for uid, s in sc.items() if uid in tc}
+    added = set()
     sch_to_pcb = {}                                   # schematic designator -> board designator
     for uid, s in sc.items():
         t = tc.get(uid)
         if t is None:
+            des = s["designator"].lower()
+            if des in matched:
+                continue
+            if "?" not in des:                        # unannotated parts are each their own
+                if des in added:
+                    continue
+                added.add(des)
             out["add_components"].append({"designator": s["designator"], "footprint": s["footprint"],
                                           "comment": s["comment"]})
             continue
@@ -116,19 +138,23 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False) -> dict:
             out["remove_components"].append({"designator": t["designator"], "footprint": t["footprint"],
                                              "reason": "not in the schematic"})
     for t in target["unlinked"]:
-        out["remove_components"].append({"designator": t["designator"], "footprint": t["footprint"],
-                                         "reason": "placed on the board only (no schematic link)"})
+        out["board_only_components"].append({"designator": t["designator"], "footprint": t["footprint"]})
 
     # Nets, over the pins of matched components, keyed by board designator
     linked = {d.lower() for d in sch_to_pcb.values()}
     all_pins = source["pins"]
+    untouched = set()                                 # board pins the ECO leaves as they are
     if not single_pin_nets:
         sizes = defaultdict(int)
         for n in all_pins.values():
             sizes[n] += 1
+        untouched = {(sch_to_pcb[d].lower(), p) for (d, p), n in all_pins.items()
+                     if d in sch_to_pcb and n and sizes[n] == 1}
+        # nor does it add such a net for a new part
         all_pins = {k: (n if sizes[n] > 1 else "") for k, n in all_pins.items()}
-    sch_pins = {(sch_to_pcb[d].lower(), p): n for (d, p), n in all_pins.items() if d in sch_to_pcb}
-    pcb_pins = {k: n for k, n in target["pads"].items() if k[0] in linked}
+    sch_pins = {(sch_to_pcb[d].lower(), p): n for (d, p), n in all_pins.items()
+                if d in sch_to_pcb and (sch_to_pcb[d].lower(), p) not in untouched}
+    pcb_pins = {k: n for k, n in target["pads"].items() if k[0] in linked and k not in untouched}
     sn, pn = _nets(sch_pins), _nets(pcb_pins)
     by_members = {frozenset(m): name for name, m in pn.items()}
     renamed = {}                                      # board name -> schematic name
@@ -153,7 +179,8 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False) -> dict:
     sch_names = {n for n in all_pins.values() if n}
     pcb_names = {n for n in target["pads"].values() if n}
     out["add_nets"] = sorted(n for n in sch_names if n not in pcb_names and n not in new_names)
-    out["remove_nets"] = sorted(n for n in pcb_names if n not in sch_names and n not in renamed)
+    kept = {n for k, n in target["pads"].items() if k in untouched and n}
+    out["remove_nets"] = sorted(n for n in pcb_names if n not in sch_names and n not in renamed and n not in kept)
 
     # Component classes and rooms, by name
     seen = defaultdict(list)
@@ -208,8 +235,23 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False) -> dict:
     return out
 
 
+# Listed for information: the ECO does not touch them
+INFO_KINDS = ("board_only_components",)
+
+# What an Update PCB can change that compare() does not look at
+NOT_COMPARED = ("net class members", "component parameters", "differential pairs",
+                "rules from parameter sets", "room scope and members")
+
+
+def no_differences_note() -> str:
+    """The note for an empty summary: it covers only what was compared."""
+    return ("No differences of the kinds compared. Not compared: " + ", ".join(NOT_COMPARED) +
+            "; an Update PCB may still change those.")
+
+
 def summary(diff: dict) -> Dict[str, int]:
-    return {k: len(v) for k, v in diff.items() if v}
+    """Count per kind of change; information-only kinds left out."""
+    return {k: len(v) for k, v in diff.items() if v and k not in INFO_KINDS}
 
 
 def limit(diff: dict, n: int) -> Tuple[dict, List[str]]:
