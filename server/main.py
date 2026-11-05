@@ -2369,6 +2369,80 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
     return json.dumps({"success": True, "sheets": len(sheets), "issue_counts": totals,
                        "results": results}, indent=1)
 
+@_tool(read_only=True)
+async def check_hierarchy(ctx: Context, project: str, min_severity: str = "warning",
+                          max_issues: int = 300) -> str:
+    """
+    Check that a project's sheets are connected: every sheet entry against the
+    ports of its child sheet, harness types, and harness definitions.
+
+    Design >> Synchronize Sheet Entries and Ports does this for one sheet
+    symbol, by exact name. This covers the whole project at once, pairs that
+    probably belong together under different names, and the harness errors
+    the ERC reports without a location. It reads the SAVED files and does not
+    need Altium, so save first.
+
+    Issue types, by severity:
+      error
+      * probable_pair - an entry and a port that do not connect but belong
+        together (same harness type, same name apart from case/separators, or
+        a similar name). suggest renames the port to the entry's name, or the
+        entry when the child sheet is used by several sheet symbols;
+        alternative gives the other way round.
+      * harness_type_mismatch - entry and port of the same name with
+        different harness types.
+      * harness_conflict - one harness type defined with different entries on
+        two sheets (the ERC's fatal "Conflicting harness definition");
+        variants lists which entries only one side has.
+      * harness_type_undefined - an entry or port uses a harness type no
+        harness connector defines.
+      * signal_harness_untyped - a signal harness that reaches no harness
+        connector and no typed port or entry, with its location (the ERC's
+        fatal "Missing harness type on harness", which gives none).
+      * signal_harness_type_conflict - a signal harness joining two types.
+      * child_sheet_missing, sheet_symbol_without_file.
+      warning
+      * entry_without_port, port_without_entry - unmatched on one side.
+        linked_on_other_instance marks a port another sheet symbol using the
+        same child does link (the ERC is silent about this instance).
+      * io_mismatch, io_unspecified - I/O types of entry and port differ
+        (not for harness entries and ports, which have none in Altium).
+      * name_case, duplicate_entry, child_not_in_project.
+      * entry_unwired - nothing attached to the entry on the parent sheet.
+      * harness_file_stale, harness_file_missing - a <sheet>.Harness file
+        that disagrees with the sheet's harness connectors.
+      info
+      * entry_matches_power_port - no port for the entry, but a power port
+        of that name on the child sheet (power ports connect globally).
+      * harness_order, top_sheet_ports, sheet_not_in_hierarchy,
+        harness_file_not_in_project.
+
+    Locations are in mils, Altium's origin at the bottom left. Sheet symbols
+    are given by designator and location (symbol_at), since several symbols
+    may share a designator.
+
+    Args:
+        project: the .PrjPcb.
+        min_severity: "error", "warning" (default) or "info": the least severe
+            issues listed. Counts always cover every severity.
+        max_issues: cap on issues listed.
+
+    Returns:
+        JSON: settings, top sheets, issue counts by severity, and the issues.
+    """
+    import hierarchy_check
+
+    p = Path(project)
+    if p.suffix.lower() != ".prjpcb" or not p.is_file():
+        return json.dumps({"success": False, "error": f"not a .PrjPcb: {project}"})
+    if min_severity not in hierarchy_check.SEVERITY_ORDER:
+        return json.dumps({"success": False, "error": "min_severity must be error, warning or info"})
+    try:
+        result = hierarchy_check.check_hierarchy(p, max_issues=max_issues, min_severity=min_severity)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"})
+    return json.dumps({"success": True, **result}, indent=1, ensure_ascii=False)
+
 @_tool()
 async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     """
