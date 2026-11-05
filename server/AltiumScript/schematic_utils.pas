@@ -3361,7 +3361,9 @@ begin
             Result := 'ERROR: Sheet not found: ' + SheetPath;
             Exit;
         end;
+        // Opened and shown the way EditSchematic opens a closed sheet
         ServerDoc := Client.OpenDocument('SCH', SheetPath);
+        if ServerDoc <> nil then Client.ShowDocument(ServerDoc);
         Doc := SchServer.GetSchDocumentByPath(SheetPath);
     end;
     if Doc = nil then

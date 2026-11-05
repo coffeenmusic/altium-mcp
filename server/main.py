@@ -2197,14 +2197,11 @@ async def build_schematic(ctx: Context, parts: list, wires: list = None,
 
 async def _schematic_pins(sheet_path: str, designators=None):
     """The sheet's placed pins from Altium (internal units), or (None, error)."""
-    response = await altium_bridge.execute_command("get_schematic_pins", {
+    result, error = await _bridge_json("get_schematic_pins", {
         "sheet_path": sheet_path,
         "designators": "|" + "|".join(designators) + "|" if designators else ""})
-    if not response.get("success", False):
-        return None, response.get("error", "unknown error")
-    result = response.get("result", {})
-    if isinstance(result, str):
-        result = json.loads(result, strict=False)
+    if result is None:
+        return None, error
     return result.get("pins", []), ""
 
 @_tool(read_only=True)
@@ -2279,7 +2276,8 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
       add_port          x, y (its left end, or bottom end when vertical),
                         name, [io_type: unspecified, output, input,
                         bidirectional], [style: right (default), left,
-                        left_right, none, top, bottom, top_bottom], [width]:
+                        left_right, none, and vertical: top, bottom,
+                        top_bottom, none_vertical], [width]:
                         a width turns auto size off, so the port keeps its
                         length and stays on its wire when renamed
       delete_at         kind (wire, net_label, power_port, junction, no_erc,
@@ -2289,7 +2287,11 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     The add_* operations with x, y also take "at": "U20.VCC" instead, to
     place a label, port, power port, junction or no-ERC on a pin. Pins are
     read live from the sheet (see get_schematic_pins) before anything is
-    changed; an unknown pin or a name several pins share is an error.
+    changed; an unknown pin or a name several pins share is an error. So a
+    reference to a part that an earlier operation in the same call moves,
+    places or deletes is refused: refer to it in a second call. On a
+    multi-part part, "U1A.3" names pin 3 of part A; a pin common to every
+    part (often the power pins) needs the part letter.
 
     Args:
         sheet_path (str): Full path of the .SchDoc; opened if not open.
