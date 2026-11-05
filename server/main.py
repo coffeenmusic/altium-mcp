@@ -4753,7 +4753,8 @@ async def get_pcb_rules(ctx: Context) -> str:
     return json.dumps(rules_data, indent=2)
 
 @_tool()
-async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200) -> str:
+async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200, rules: list = None,
+                  nets: list = None, area: list = None) -> str:
     """
     Run the design rule check (DRC) on a PCB and list the violations.
 
@@ -4772,6 +4773,13 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
         board_path (str): Full path of the .PcbDoc to check. It is opened if
             needed and brought to the front. Empty: the focused board, or
             the one the PCB tools last used.
+        rules (list): Only violations of these rules: each matches a rule
+            name or kind (e.g. "Clearance", "Width", or a rule's own name)
+            by substring, any case. The whole check still runs: Altium
+            checks every enabled rule.
+        nets (list): Only violations with an object on one of these nets.
+        area (list): Only violations located in [x1, y1, x2, y2] (mils from
+            the board origin), by their own or an object's position.
         max_violations (int): How many violations to list in full.
             violation_count counts every violation the check found, but
             Altium stops the check at its own violation limit (500 unless
@@ -4793,7 +4801,9 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
     driver = asyncio.create_task(drc.drive_dialog(outcome, PROGRESS_FILE))
     try:
         response = await altium_bridge.execute_command(
-            "run_drc", {"board_path": board_path, "max_violations": int(max_violations)})
+            "run_drc", {"board_path": board_path,
+                        # filtered: every violation Altium kept, then filter
+                        "max_violations": 1000000 if (rules or nets or area) else int(max_violations)})
     finally:
         driver.cancel()
         try:
@@ -4821,6 +4831,19 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
         if outcome.notes:
             out["notes"] = outcome.notes
     out.update({k: v for k, v in result.items() if k != "success"})
+    # By how much each violation fails, as numbers; then the filters
+    for v in out.get("violations", []):
+        v.update(drc.measurement(v.get("description", "")))
+    if rules or nets or area:
+        if area is not None and (not isinstance(area, (list, tuple)) or len(area) != 4):
+            return json.dumps({"success": False, "error": "area is [x1, y1, x2, y2] in mils"})
+        picked = [v for v in out.get("violations", []) if drc.matches(v, rules or (), nets or (), area)]
+        out["matching_count"] = len(picked)
+        out["violations"] = picked[:max(0, int(max_violations))]
+    by_rule = {}
+    for v in out.get("violations", []):
+        by_rule[v.get("rule", "")] = by_rule.get(v.get("rule", ""), 0) + 1
+    out["listed_by_rule"] = by_rule
     report = drc.find_report(result.get("board", board_path), started)
     if report is not None:
         try:

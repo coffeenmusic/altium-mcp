@@ -121,5 +121,28 @@ class DriveDialogTest(unittest.TestCase):
         self.assertEqual(posted.count(drc.WM_LBUTTONDOWN), 3)
 
 
+class ViolationTest(unittest.TestCase):
+    def test_measurement_from_the_descriptor(self):
+        self.assertEqual(drc.measurement("Clearance Constraint: (0.659mm < 1.27mm) Between Via (91.6mm,65.4mm)"),
+                         {"kind": "Clearance Constraint", "actual_mils": 25.945, "limit_mils": 50.0,
+                          "comparison": "<"})
+        w = drc.measurement("Width Constraint: Track (9mm,44.2mm)(12.475mm,47.675mm) on SIG Actual Width = "
+                            "0.125mm, Target Width = 0.254mm")
+        self.assertEqual((w["actual_mils"], w["limit_mils"], w["comparison"]), (4.921, 10.0, "<"))
+        self.assertEqual(drc.measurement("Un-Routed Net Constraint: Net GND Between Pad"),
+                         {"kind": "Un-Routed Net Constraint"})
+
+    def test_filters(self):
+        v = {"rule": "Clearance_GND", "kind": "Clearance Constraint", "x_mils": 100, "y_mils": 100,
+             "primitive1": {"net": "GND", "x_mils": 95, "y_mils": 100},
+             "primitive2": {"net": "CLK", "x_mils": 300, "y_mils": 300}}
+        self.assertTrue(drc.matches(v, rules=["clearance"]))
+        self.assertFalse(drc.matches(v, rules=["width"]))
+        self.assertTrue(drc.matches(v, nets=["clk"]))
+        self.assertFalse(drc.matches(v, nets=["5V"]))
+        self.assertTrue(drc.matches(v, area=[250, 250, 350, 350]))    # by an object's position
+        self.assertFalse(drc.matches(v, area=[500, 500, 600, 600]))
+
+
 if __name__ == "__main__":
     unittest.main()
