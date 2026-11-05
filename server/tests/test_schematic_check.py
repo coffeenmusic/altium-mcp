@@ -296,6 +296,34 @@ class SlantedWireTest(unittest.TestCase):
         self.assertEqual(issues[0]["suggest"], {"move_end": [1000, 1000], "to": [1000, hot_y]})
 
 
+class PinOffGridTest(unittest.TestCase):
+    def check(self, shift):
+        # a two-pin part on the grid whose drawing is shifted by shift mils
+        recs = [
+            {"HEADER": "x"},
+            {"RECORD": 31, "FONTIDCOUNT": 1, "SIZE1": 10, "FONTNAME1": "Times New Roman", "SNAPGRIDSIZE": 10},
+            {"RECORD": 1, "LIBREFERENCE": "CONN", **at(2000, 1000), "CURRENTPARTID": 1},
+            {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 2, "PINLENGTH": 20,
+             **at(2000 + shift, 1000 + shift), "DESIGNATOR": "1"},
+            {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 2, "PINLENGTH": 20,
+             **at(2000 + shift, 900 + shift), "DESIGNATOR": "2"},
+            {"RECORD": 34, "OWNERINDEX": 1, **at(2100, 1300), "TEXT": "J1", "NAME": "Designator", "FONTID": 1},
+        ]
+        return [i for i in sc.Checker(sc.Sheet(parse_records(records_stream(recs)))).run()
+                if i["type"] == "pin_off_grid"]
+
+    def test_a_few_microns_off_is_reported(self):
+        issues = self.check(-0.4094)
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["designator"], "J1")
+        self.assertIn("shifted from its origin", issues[0]["message"])
+        self.assertEqual(issues[0]["suggest"], {"shift_contents_by": [0.4094, 0.4094]})
+
+    def test_on_grid_and_another_grid_are_not(self):
+        self.assertEqual(self.check(0), [])
+        self.assertEqual(self.check(3.15), [])    # a metric symbol on an imperial grid
+
+
 class ProjectTest(unittest.TestCase):
     def test_project_sheets(self):
         with tempfile.TemporaryDirectory() as tmp:

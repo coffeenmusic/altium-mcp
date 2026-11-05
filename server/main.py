@@ -2304,6 +2304,10 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
         above it. Both go above: file name on the top edge, designator a line
         (100 mil) above it, both bottom-left justified at the left edge.
       * label_orientation, label_off_wire, dangling_wire, wire_through_body.
+      * pin_off_grid - a part whose pins sit a few microns (up to 1 mil) off
+        the grid. Every wire drawn to them comes out slanted. When the part
+        itself is on the grid its drawing was shifted from its origin;
+        suggest.shift_contents_by gives the shift that puts the pins back.
       * slanted_wire - a wire segment a little (1 um to half a grid) out of
         level or plumb. It looks straight, but dragging a part on it turns it
         diagonal. Usually a symbol whose pins are off the grid (then the
