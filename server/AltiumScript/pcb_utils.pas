@@ -5963,18 +5963,25 @@ begin
 end;
 
 // Objects touching the box X1,Y1-X2,Y2 (internal units) of the kinds in
-// Kinds ('|track|via|', or '' for all), at most Limit
+// Kinds ('|track|via|', or '' for all), at most Limit. copper_layers names
+// the board's copper layers top to bottom, so the server knows which layers
+// a blind via spans.
 function ObjectsInArea(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Kinds: String; Limit: Integer): String;
 var
     It    : IPCB_SpatialIterator;
     Prim  : IPCB_Primitive;
-    Items, Props : TStringList;
+    LayerIt : IPCB_LayerObjectIterator;
+    Items, Props, Stack : TStringList;
     Rec   : String;
     Total : Integer;
 begin
     Items := TStringList.Create;
     Props := TStringList.Create;
+    Stack := TStringList.Create;
     try
+        LayerIt := Board.ElectricalLayerIterator;
+        while LayerIt.Next do
+            Stack.Add('"' + JSONEscapeString(Layer2String(LayerIt.LayerObject.LayerID)) + '"');
         Total := 0;
         It := Board.SpatialIterator_Create;
         It.AddFilter_ObjectSet(GeoKindSet(Kinds));
@@ -5996,11 +6003,13 @@ begin
         AddJSONInteger(Props, 'origin_x', Board.XOrigin);
         AddJSONInteger(Props, 'origin_y', Board.YOrigin);
         AddJSONInteger(Props, 'total', Total);
+        Props.Add(BuildJSONArray(Stack, 'copper_layers'));
         Props.Add(BuildJSONArray(Items, 'objects'));
         Result := BuildJSONObject(Props);
     finally
         Items.Free;
         Props.Free;
+        Stack.Free;
     end;
 end;
 
@@ -6201,18 +6210,30 @@ begin
                 Arc := Prim;
                 if ((Abs(Arc.StartX - X) <= Tol) and (Abs(Arc.StartY - Y) <= Tol)) or
                    ((Abs(Arc.EndX - X) <= Tol) and (Abs(Arc.EndY - Y) <= Tol)) then
-                    Blocker := 'an arc (' + Layer2String(Prim.Layer) + ') ends at a moved point';
+                    Blocker := 'an arc (' + Layer2String(Prim.Layer) + ') ends at a moved point and cannot follow';
             end
             else if Prim.ObjectId = ePadObject then
             begin
                 R := Prim.BoundingRectangle;
                 if (X >= R.Left) and (X <= R.Right) and (Y >= R.Bottom) and (Y <= R.Top) then
-                    Blocker := 'pad ' + GeoOwner(Prim) + '-' + Prim.Name + ' lies under a moved point';
+                    Blocker := 'pad ' + GeoOwner(Prim) + '-' + Prim.Name + ' lies under a moved point and cannot follow';
             end;
         end;
         Prim := It.NextPCBObject;
     end;
     Board.SpatialIterator_Destroy(It);
+end;
+
+// Blocker names Prim when it is locked: a drag would move it anyway
+procedure GeoCheckLocked(Prim: IPCB_Primitive; var Blocker: String);
+begin
+    if not Prim.Moveable then
+    begin
+        if Prim.ObjectId = eViaObject then
+            Blocker := 'a locked via (' + GeoNet(Prim) + ') would move'
+        else
+            Blocker := 'a locked track (' + Layer2String(Prim.Layer) + ', ' + GeoNet(Prim) + ') would move';
+    end;
 end;
 
 procedure GeoBeginModify(Prim: IPCB_Primitive);
@@ -6229,12 +6250,13 @@ end;
 // Drag a via, or a track segment, by DX,DY and keep its copper connected:
 // track ends at a moved point follow, and a via at a moved end of a track
 // moves too, with the tracks on its other layers. Refused when an arc ends
-// at a moved point or a pad lies under one. With DryRun nothing changes.
+// at a moved point, a pad lies under one or any of that copper is locked.
+// With DryRun nothing changes.
 function DragCopper(Board: IPCB_Board; Ref: String; DX, DY: Integer; DryRun: Boolean): String;
 var
     Obj    : IPCB_Primitive;
-    Track  : IPCB_Track;
-    Via    : IPCB_Via;
+    Track, OtherTrack : IPCB_Track;
+    Via, OtherVia : IPCB_Via;
     Tracks, Vias, PointVias : TInterfaceList;
     EndNos, Moved, Stretched, Props : TStringList;
     Blocker : String;
@@ -6261,6 +6283,9 @@ begin
         begin
             Vias.Add(Obj);
             GeoAttached(Board, Obj.x, Obj.y, '', Obj, Tracks, EndNos, PointVias, Blocker);
+            // A via stacked at the same point moves along
+            for I := 0 to PointVias.Count - 1 do
+                Vias.Add(PointVias[I]);
         end
         else
         begin
@@ -6279,33 +6304,50 @@ begin
                 end;
             end;
         end;
-        // The dragged track, and anything found twice, counts once
+        // The dragged track, and anything found twice, counts once. By
+        // I_ObjectAddress: a track counted twice would move twice as far.
         for I := Tracks.Count - 1 downto 0 do
         begin
-            if Tracks[I] = Obj then
+            Track := Tracks[I];
+            if Track.I_ObjectAddress = Obj.I_ObjectAddress then
             begin
                 Tracks.Delete(I);
                 EndNos.Delete(I);
                 Continue;
             end;
             for J := 0 to I - 1 do
-                if (Tracks[I] = Tracks[J]) and (EndNos[I] = EndNos[J]) then
+            begin
+                OtherTrack := Tracks[J];
+                if (Track.I_ObjectAddress = OtherTrack.I_ObjectAddress) and (EndNos[I] = EndNos[J]) then
                 begin
                     Tracks.Delete(I);
                     EndNos.Delete(I);
                     Break;
                 end;
+            end;
         end;
         for I := Vias.Count - 1 downto 1 do
+        begin
+            Via := Vias[I];
             for J := 0 to I - 1 do
-                if Vias[I] = Vias[J] then
+            begin
+                OtherVia := Vias[J];
+                if Via.I_ObjectAddress = OtherVia.I_ObjectAddress then
                 begin
                     Vias.Delete(I);
                     Break;
                 end;
+            end;
+        end;
+        // Locked copper stays put: refuse rather than move it
+        GeoCheckLocked(Obj, Blocker);
+        for I := 0 to Vias.Count - 1 do
+            GeoCheckLocked(Vias[I], Blocker);
+        for I := 0 to Tracks.Count - 1 do
+            GeoCheckLocked(Tracks[I], Blocker);
         if (Blocker <> '') and not DryRun then
         begin
-            Result := 'ERROR: not dragged: ' + Blocker + ', which cannot follow';
+            Result := 'ERROR: not dragged: ' + Blocker;
             Exit;
         end;
         if not DryRun then PCBServer.PreProcess;

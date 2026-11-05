@@ -5378,22 +5378,6 @@ def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
         win32gui.ReleaseDC(hwnd, hwnd_dc)
 
 
-async def _geometry(params: dict, board_path: str):
-    """(parsed reply, error) of the 'geometry' bridge command."""
-    if board_path:
-        params = dict(params, board_path=long_path(board_path))
-    response = await altium_bridge.execute_command("geometry", params)
-    if not response.get("success", False):
-        return None, response.get("error", "unknown error")
-    result = response.get("result", {})
-    if isinstance(result, str):
-        try:
-            result = json.loads(result, strict=False)
-        except ValueError:
-            return None, result
-    return result, None
-
-
 @_tool(read_only=True)
 async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: list = None, nets: list = None,
                           unit: str = "mil", limit: int = 500, board_path: str = "") -> str:
@@ -5414,13 +5398,14 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
             text, component. Default all.
         nets (list): Only objects on these nets.
         unit (str): "mil" (default) or "mm", for bbox and the reply.
-        limit (int): At most this many objects from Altium (default 500);
-            total says how many touch the box.
+        limit (int): At most this many objects (default 500), counted after
+            the layer and net filters; total says how many match, and
+            truncated whether the list was cut.
         board_path (str): Full path of the .PcbDoc; default the focused board.
 
     Returns:
-        str: JSON with total, returned and objects [{kind, layer, net,
-             component, coordinates..., ref}]
+        str: JSON with total, returned, truncated and objects [{kind, layer,
+             net, component, coordinates..., ref}]
     """
     import pcb_geometry as geo
 
@@ -5431,18 +5416,16 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
         bad = [k for k in (kinds or []) if k not in geo.KINDS]
         if bad:
             raise ValueError(f"unknown kinds {bad}; use {', '.join(geo.KINDS)}")
+        scan = geo.scan_limit(limit, layers, nets)
     except (TypeError, ValueError) as e:
         return json.dumps({"success": False, "error": str(e)})
     kind_filter = "|" + "|".join(kinds) + "|" if kinds else ""
-    result, error = await _geometry({"geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)),
-                                     "x2": str(max(x1, x2)), "y2": str(max(y1, y2)), "kinds": kind_filter,
-                                     "limit": str(max(1, int(limit)))}, board_path)
+    result, error = await _bridge_json("geometry", {
+        "geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)), "x2": str(max(x1, x2)),
+        "y2": str(max(y1, y2)), "kinds": kind_filter, "limit": str(scan), "board_path": long_path(board_path)})
     if error:
         return json.dumps({"success": False, "error": error})
-    objects = geo.select(result.get("objects", []), (result.get("origin_x", 0), result.get("origin_y", 0)),
-                         unit, layers, nets)
-    return json.dumps({"board_path": result.get("board_path"), "unit": unit, "total": result.get("total"),
-                       "returned": len(objects), "objects": objects}, indent=1)
+    return json.dumps(geo.area_reply(result, unit, limit, layers, nets), indent=1)
 
 
 @_tool(read_only=True)
@@ -5469,7 +5452,8 @@ async def clearance(ctx: Context, object_a: str, object_b: str, unit: str = "mil
         geo.unit_factor(unit)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
-    result, error = await _geometry({"geometry": "clearance", "a": a, "b": b}, board_path)
+    result, error = await _bridge_json("geometry", {"geometry": "clearance", "a": a, "b": b,
+                                                    "board_path": long_path(board_path)})
     if error:
         return json.dumps({"success": False, "error": error})
     reply = geo.describe_clearance(result, unit)
@@ -5491,7 +5475,8 @@ async def drag_copper(ctx: Context, object_ref: str, dx: float, dy: float, unit:
     moves with it, its tracks on the other layers following too.
 
     Refused when an arc ends at a moved point or a pad lies under one,
-    since those cannot follow; dry_run shows what would move first. Polygon
+    since those cannot follow, and when any of the copper to move or stretch
+    is locked; dry_run shows what would move first. Polygon
     pours are not repoured: run repour_polygons afterwards if copper changed
     near one, and check_routing to confirm the connections.
 
@@ -5516,8 +5501,9 @@ async def drag_copper(ctx: Context, object_ref: str, dx: float, dy: float, unit:
         mx, my = geo.to_coord(dx, unit), geo.to_coord(dy, unit)
     except (TypeError, ValueError) as e:
         return json.dumps({"success": False, "error": str(e)})
-    result, error = await _geometry({"geometry": "drag", "ref": ref, "dx": str(mx), "dy": str(my),
-                                     "dry_run": "true" if dry_run else "false"}, board_path)
+    result, error = await _bridge_json("geometry", {"geometry": "drag", "ref": ref, "dx": str(mx), "dy": str(my),
+                                                    "dry_run": "true" if dry_run else "false",
+                                                    "board_path": long_path(board_path)})
     if error:
         return json.dumps({"success": False, "error": error})
     origin = (result.get("origin_x", 0), result.get("origin_y", 0))

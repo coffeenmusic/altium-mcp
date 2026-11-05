@@ -71,6 +71,50 @@ class SelectTest(unittest.TestCase):
         sig = geo.select(RECORDS, ORIGIN, "mil", nets=["sig"])
         self.assertEqual([o["kind"] for o in sig], ["arc", "via", "pad"])
 
+    def test_blind_via_on_its_middle_layers(self):
+        stack = ["Top Layer", "Mid Layer 1", "Mid Layer 2", "Bottom Layer"]
+        blind = "via|Top Layer:Mid Layer 2|SIG||1060000|2060000|236220|98425"
+        buried = "via|Bottom Layer:Mid Layer 1|SIG||1060000|2060000|236220|98425"
+        self.assertEqual(len(geo.select([blind], ORIGIN, "mil", layers=["mid layer 1"], stack=stack)), 1)
+        self.assertEqual(len(geo.select([blind], ORIGIN, "mil", layers=["Bottom Layer"], stack=stack)), 0)
+        # low and high in either order
+        self.assertEqual(len(geo.select([buried], ORIGIN, "mil", layers=["Mid Layer 2"], stack=stack)), 1)
+        self.assertEqual(len(geo.select([buried], ORIGIN, "mil", layers=["Top Layer"], stack=stack)), 0)
+        # without the stack only its end layers are known
+        self.assertEqual(len(geo.select([blind], ORIGIN, "mil", layers=["Mid Layer 1"])), 0)
+        self.assertEqual(geo.via_layers("Top Layer", "Mid Layer 1", ["Top Layer", "Mid Layer 1", "Bottom Layer"]),
+                         ["top layer", "mid layer 1"])
+
+
+class AreaReplyTest(unittest.TestCase):
+    TRACK = "track|{}|GND||1010000|2020000|1030000|2020000|80000|0"
+
+    def result(self, n_top, n_bottom, total=None):
+        recs = [self.TRACK.format("Bottom Layer")] * n_bottom + [self.TRACK.format("Top Layer")] * n_top
+        return {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "objects": recs,
+                "total": len(recs) if total is None else total}
+
+    def test_limit_applies_after_the_filters(self):
+        self.assertEqual(geo.scan_limit(500), 500)
+        self.assertEqual(geo.scan_limit(500, layers=["Top Layer"]), geo.SCAN_CAP)
+        self.assertEqual(geo.scan_limit(50000, nets=["GND"]), 50000)
+        # many bottom-layer objects come first, yet the top-layer ones are found
+        out = geo.area_reply(self.result(3, 600), "mil", 2, layers=["Top Layer"])
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 2, True))
+        self.assertIn("first 2 of 3", out["note"])
+        out = geo.area_reply(self.result(3, 600), "mil", 10, layers=["Top Layer"])
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 3, False))
+        self.assertNotIn("note", out)
+
+    def test_cut_by_altium_is_said(self):
+        out = geo.area_reply(self.result(1, 4, total=9000), "mil", 10, layers=["Top Layer"])
+        self.assertIsNone(out["total"])
+        self.assertTrue(out["truncated"])
+        self.assertIn("9000", out["note"])
+        # unfiltered, Altium's own count is the total
+        out = geo.area_reply(self.result(2, 3, total=40), "mil", 5)
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (40, 5, True))
+
 
 class RefTest(unittest.TestCase):
     def test_refs_and_pad_shorthand(self):

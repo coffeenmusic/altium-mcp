@@ -232,6 +232,18 @@
       "description": "Report what each polygon pour poured: pieces, islands, slivers, and pours with no net or no copper"
     },
     {
+      "name": "objects_in_area",
+      "description": "List the PCB objects in a box with their layer, net, owner, geometry and a ref for the other geometry tools"
+    },
+    {
+      "name": "clearance",
+      "description": "Measure the edge-to-edge gap between two PCB objects and check the clearance rule that applies"
+    },
+    {
+      "name": "drag_copper",
+      "description": "Move a via or a track segment and keep it connected: attached track ends stretch and vias move along"
+    },
+    {
       "name": "layout_duplicator",
       "description": "First step of layout duplication. Selects source components and returns data to match with destination components"
     },
