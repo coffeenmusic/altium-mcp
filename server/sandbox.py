@@ -31,15 +31,35 @@ messages that thread no longer reads. A loop that never ends therefore
 freezes Altium until X2.EXE is killed (issue #37). build_script makes every
 while and repeat loop also call the template's SandboxTick, which ends all
 loops once a deadline has passed, so the script finishes on its own.
+
+Functions and procedures
+------------------------
+DelphiScript has no nested routines, and a script's statements run inside the
+template. So a script is split into its var block, the functions and
+procedures that follow it, and its statements. The var block becomes global,
+the routines go after the template's helpers, and the statements become the
+template's SbxBody, which Run calls: an Exit in the script then ends SbxBody,
+and Run still writes the result (an Exit straight in Run skipped that, and
+the tool waited until its timeout).
+
+Snapshots
+---------
+Before a run the tool copies the Altium documents the script names in its
+strings (or the paths it is given) next to the run file. rollback() puts
+them back. The template logs whether each one had unsaved changes in Altium
+before the script ran: those changes were never on disk, so a rollback that
+closes the document would lose them, and it refuses unless told to.
 """
 
 import ctypes
 import itertools
+import json
 import os
 import re
+import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -47,6 +67,11 @@ BODY_BEGIN = "// === BEGIN EXPERIMENT"
 BODY_END = "// === END EXPERIMENT"
 VARS_BEGIN = "// === USER VARS"
 VARS_END = "// === END USER VARS"
+ROUTINES_BEGIN = "// === USER ROUTINES"
+ROUTINES_END = "// === END USER ROUTINES"
+DOCS_BEGIN = "// === SNAPSHOT DOCS"
+DOCS_END = "// === END SNAPSHOT DOCS"
+DOC_STATE_PREFIX = "DOC STATE: "    # logged by SbxNoteDoc
 EXCEPTION_PREFIX = "EXCEPTION: "   # logged by the template's except block
 GUARD_PREFIX = "LOOP GUARD: "       # logged by SandboxTick when it ends the loops
 UNDO_PREFIX = "UNDO GROUP LEFT OPEN: "  # logged by SbxCloseUndo
@@ -67,6 +92,29 @@ TEMPLATE_NAMES = (
     + ["IntMan", "DbDoc", "ResultText", "LogLines", "LogPath", "OutPath", "OutLines"]
 )
 
+# Every other global name of the template: a script's var block is global
+# too, so declaring one of these again is a "Duplicate identifier". Kept in
+# sync with SandboxScript/Sandbox.pas by test_template_globals_listed.
+TEMPLATE_GLOBALS = [
+    "REPLACEALL", "SbxGuardUntil", "SbxGuardTripped", "SbxUndoDocs", "SbxUndoNames", "SbxUndoPath",
+    "SandboxLog", "SandboxTick", "SbxSaveUndo", "SbxPreProcess", "SbxPostProcess", "SbxPcbPreProcess",
+    "SbxPcbPostProcess", "SbxCloseUndo", "MM", "OpenSchDoc", "SaveDoc", "FmtNum", "FmtMM", "ParseNum",
+    "ParseMM", "SbxNoteDoc", "SbxBody", "Run",
+]
+
+# Pascal's reserved words. Used as a name they fail with messages such as
+# "Error in declaration block" or "Label name expected" (checked in AD25 for
+# Label, Object, Unit, File, Out and Property).
+RESERVED_WORDS = {
+    "and", "array", "as", "asm", "begin", "case", "class", "const", "constructor", "destructor", "div",
+    "do", "downto", "else", "end", "except", "exports", "file", "finalization", "finally", "for",
+    "function", "goto", "if", "implementation", "in", "inherited", "initialization", "inline",
+    "interface", "is", "label", "library", "mod", "nil", "not", "object", "of", "or", "out", "packed",
+    "procedure", "program", "property", "raise", "record", "repeat", "resourcestring", "set", "shl",
+    "shr", "string", "then", "threadvar", "to", "try", "type", "unit", "until", "uses", "var", "while",
+    "with", "xor",
+}
+
 _DECL_RE = re.compile(r"^\s*[A-Za-z_]\w*(\s*,\s*[A-Za-z_]\w*)*\s*:\s*[A-Za-z_][\w.]*\s*;\s*(//.*)?$")
 _ASSIGN_RE = re.compile(r"(?<![\w.\]\)])([A-Za-z_]\w*)\s*:=")
 _LINE_RE = re.compile(r"at Line:\s*(\d+),\s*Char:\s*(\d+)", re.IGNORECASE)
@@ -78,21 +126,64 @@ class SplitScript:
     decl_src: List[int]           # 1-based line of each declaration in the submitted script
     body: List[str]
     body_offset: int              # submitted-script line number = body index (1-based) + offset
+    routines: List[str] = field(default_factory=list)   # function/procedure lines after the var block
+    routines_offset: int = 0      # submitted-script line number = routines index (1-based) + offset
+
+
+_ROUTINE_RE = re.compile(r"^\s*(function|procedure)\b", re.IGNORECASE)
+_BLOCK_RE = re.compile(r"\b(begin|case|try|asm|record|end)\b", re.IGNORECASE)
+
+
+def _split_routines(lines: List[str], start: int) -> int:
+    """Index of the first line after the functions and procedures that start
+    at lines[start] (blank lines first allowed); `start` when there are none.
+
+    A routine ends at the `end` that closes its first `begin`; `case`, `try`
+    and `record` blocks inside it are counted along. A routine that never
+    ends takes the rest of the script, and the compiler reports it.
+    """
+    blank = _blank_strings_and_comments("\n".join(lines)).split("\n")
+    i = start
+    end = start
+    while True:
+        while i < len(blank) and not blank[i].strip():
+            i += 1
+        if i == len(blank) or not _ROUTINE_RE.match(blank[i]):
+            return end
+        depth, opened, j = 0, False, i
+        while j < len(blank):
+            closed = False
+            for m in _BLOCK_RE.finditer(blank[j]):
+                if m.group(1).lower() == "end":
+                    depth -= 1
+                    if opened and depth == 0:
+                        closed = True
+                        break
+                else:
+                    depth += 1
+                    opened = opened or m.group(1).lower() == "begin"
+            j += 1
+            if closed:
+                break
+        i = end = j
 
 
 def split_var_block(script: str) -> SplitScript:
-    """Split an optional leading `var` block off a script.
+    """Split an optional leading `var` block, and the functions and procedures
+    after it, off a script.
 
     The block is the word `var` on a line of its own (or followed by the first
     declaration), then declaration lines of the form `Name1, Name2 : Type;`.
-    It ends at the first line that is not a declaration.
+    It ends at the first line that is not a declaration. Routines follow it
+    (or start the script) and end where their outer begin..end closes.
     """
     lines = script.split("\n")
     i = 0
     while i < len(lines) and not lines[i].strip():
         i += 1
     if i == len(lines) or not re.match(r"^\s*var\b", lines[i], re.IGNORECASE):
-        return SplitScript([], [], lines, 0)
+        end = _split_routines(lines, 0)
+        return SplitScript([], [], lines[end:], end, lines[:end], 0)
     decls, src = [], []
     first = re.sub(r"^\s*var\b", "", lines[i], flags=re.IGNORECASE).strip()
     if first:
@@ -104,7 +195,8 @@ def split_var_block(script: str) -> SplitScript:
             decls.append(lines[i].strip())
             src.append(i + 1)
         i += 1
-    return SplitScript(decls, src, lines[i:], i)
+    end = _split_routines(lines, i)
+    return SplitScript(decls, src, lines[end:], end, lines[i:end], i)
 
 
 def declared_names(decls: List[str]) -> List[str]:
@@ -266,6 +358,68 @@ def track_undo(code: str) -> str:
     return code
 
 
+_PARAM_RE = re.compile(r"([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:(?!=)")
+
+
+@dataclass
+class Routine:
+    name: str
+    lines: List[str]
+    first_line: int               # 1-based line of its header in the submitted script
+    names: List[str]              # its parameters and local variables
+
+
+def routines(split: SplitScript) -> List[Routine]:
+    """The script's functions and procedures with their own names."""
+    found = []
+    blank = _blank_strings_and_comments("\n".join(split.routines)).split("\n")
+    starts = [k for k, ln in enumerate(blank) if _ROUTINE_RE.match(ln)]
+    for n, k in enumerate(starts):
+        stop = starts[n + 1] if n + 1 < len(starts) else len(blank)
+        text = "\n".join(blank[k:stop])
+        m = re.match(r"\s*(?:function|procedure)\s+([A-Za-z_]\w*)", text, re.IGNORECASE)
+        head = text[m.end() if m else 0:]
+        b = re.search(r"\bbegin\b", head, re.IGNORECASE)
+        head = head[:b.start()] if b else head
+        names = [x.strip() for g in _PARAM_RE.findall(head) for x in g.split(",")]
+        found.append(Routine(m.group(1) if m else "", split.routines[k:stop],
+                             split.routines_offset + k + 1, names))
+    return found
+
+
+def check_declarations(split: SplitScript) -> List[str]:
+    """Names the script declares that cannot compile: reserved words, and
+    var-block names the template already declares."""
+    problems = []
+    taken = {n.lower(): n for n in TEMPLATE_NAMES + TEMPLATE_GLOBALS}
+    for decl, src in zip(split.decls, split.decl_src):
+        for name in declared_names([decl]):
+            if name.lower() in RESERVED_WORDS:
+                problems.append(f"line {src}: '{name}' is a reserved word and cannot name a variable; "
+                                f"rename it (e.g. {name}_)")
+            elif name.lower() in taken:
+                problems.append(f"line {src}: '{name}' is already declared by the sandbox; use it without "
+                                f"declaring it, or pick another name")
+    for r in routines(split):
+        for name in [r.name] + r.names:
+            if name.lower() in RESERVED_WORDS:
+                problems.append(f"line {r.first_line}: '{name}' is a reserved word and cannot be used as "
+                                f"a name in {r.name or 'a routine'}; rename it")
+        if r.name.lower() in taken:
+            problems.append(f"line {r.first_line}: '{r.name}' is already a sandbox name; rename the routine")
+    return problems
+
+
+def check_routines(split: SplitScript) -> List[str]:
+    """check_script for each routine, with its parameters, local variables,
+    its own name and Result as known names."""
+    problems = []
+    script_names = declared_names(split.decls) + [r.name for r in routines(split)]
+    for r in routines(split):
+        problems += check_script(r.lines, script_names + r.names + ["Result"], r.first_line - 1)
+    return problems
+
+
 def check_script(body_lines: List[str], extra_names: List[str], line_offset: int = 0) -> List[str]:
     """Problems that would stop the script from compiling, found before Altium sees it.
 
@@ -307,6 +461,61 @@ KNOWN_CRASHES = [
 ]
 
 
+_PREC_TOKEN_RE = re.compile(
+    r":=|<>|<=|>=|[=<>()\[\];]|\b(?:and|or|xor|then|do|of|else|begin|end|until|if|while|repeat|case)\b",
+    re.IGNORECASE)
+_NOT_CMP_RE = re.compile(r"\bnot\s+(?!\()[A-Za-z_][\w.]*(?:\([^()]*\)|\[[^\]]*\])*\s*(?:<>|<=|>=|=|<|>)",
+                         re.IGNORECASE)
+
+
+def precedence_problems(code: str, line_offset: int = 0) -> List[str]:
+    """Comparisons that Pascal's precedence splits in the wrong place.
+
+    `and`, `or` and `not` bind tighter than `=`, `<`, ...: `A = 1 and B = 2`
+    is `A = (1 and B) = 2`, which AD25 rejects with "Then expected", and
+    `not A = B` is `(not A) = B`, which runs and gives the wrong answer.
+    `code` has its strings and comments stripped.
+    """
+    problems = []
+    frames = [[False, None]]          # per parenthesis level: has comparison, line of and/or
+    line = 1
+
+    def check(frame):
+        if frame[0] and frame[1] is not None:
+            problems.append(f"line {frame[1] + line_offset}: a comparison next to and/or without "
+                            f"parentheses: 'A = 1 and B = 2' reads as 'A = (1 and B) = 2'. Write "
+                            f"'(A = 1) and (B = 2)'")
+
+    pos = 0
+    for m in _PREC_TOKEN_RE.finditer(code):
+        line += code.count("\n", pos, m.start())
+        pos = m.start()
+        tok = m.group(0).lower()
+        if tok in "([":
+            frames.append([False, None])
+        elif tok in ")]":
+            if len(frames) > 1:
+                check(frames.pop())
+        elif tok in ("<>", "<=", ">=", "=", "<", ">"):
+            frames[-1][0] = True
+        elif tok in ("and", "or", "xor"):
+            if frames[-1][1] is None:
+                frames[-1][1] = line
+        else:                         # a statement or clause boundary
+            for f in frames:
+                check(f)
+            frames = [[False, None]]
+    for f in frames:
+        check(f)
+    for lineno, text in enumerate(code.splitlines(), 1):
+        m = _NOT_CMP_RE.search(text)
+        if m:
+            problems.append(f"line {lineno + line_offset}: '{' '.join(m.group(0).split())} ...' reads as "
+                            f"'(not ...) = ...', which runs and gives the wrong answer. Write "
+                            f"'not (A = B)' or 'A <> B'")
+    return problems
+
+
 def lint_script(body_lines: List[str], line_offset: int = 0, decls: List[str] = ()) -> List[str]:
     """Calls known to crash Altium, and document edits that are never closed.
 
@@ -334,6 +543,7 @@ def lint_script(body_lines: List[str], line_offset: int = 0, decls: List[str] = 
                             f"variable ({m.group(1)}) crashes; declare it with its interface type, "
                             f"e.g. ISch_GraphicalObject or IPCB_Component. Writing "
                             f"'.Corner := Point(..)' works")
+    problems += precedence_problems(code, line_offset)
     # PCBServer.PreProcess is usually written without parentheses
     pre = len(re.findall(r"\.PreProcess\b", code, re.IGNORECASE))
     post = len(re.findall(r"\.PostProcess\b", code, re.IGNORECASE))
@@ -349,20 +559,30 @@ class BuiltScript:
     split: SplitScript
     body_first_line: int          # 1-based line in `text` of the script body's first line
     vars_first_line: int          # 1-based line in `text` of the first user declaration
+    routines_first_line: int = 0  # 1-based line in `text` of the first routine line
+
+
+def _pascal_string(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
 
 
 def build_script(template: str, script: str, log_path: str, out_path: str,
-                 guard_seconds: int = 60, undo_path: str = "") -> BuiltScript:
-    """Fill the template: user declarations, script body with its loops
-    guarded and its undo groups tracked, the log/result/undo paths and the
-    loop guard's deadline."""
+                 guard_seconds: int = 60, undo_path: str = "",
+                 snapshot_docs: List[str] = ()) -> BuiltScript:
+    """Fill the template: user declarations, routines and script body with
+    their loops guarded and their undo groups tracked, the log/result/undo
+    paths, the loop guard's deadline, and the snapshotted documents whose
+    state is logged before the script runs."""
     split = split_var_block(script)
     decls = split.decls
     body = track_undo(guard_loops("\n".join(split.body), split.body_offset + 1)).split("\n")
-    if template.count(BODY_BEGIN) != 1 or template.count(BODY_END) != 1:
-        raise ValueError("template must contain the experiment markers exactly once")
-    if template.count(VARS_BEGIN) != 1 or template.count(VARS_END) != 1:
-        raise ValueError("template must contain the user-vars markers exactly once")
+    routine_lines = (track_undo(guard_loops("\n".join(split.routines), split.routines_offset + 1)).split("\n")
+                     if split.routines else [])
+    for begin, end, what in ((BODY_BEGIN, BODY_END, "experiment"), (VARS_BEGIN, VARS_END, "user-vars"),
+                             (ROUTINES_BEGIN, ROUTINES_END, "user-routines"),
+                             (DOCS_BEGIN, DOCS_END, "snapshot-docs")):
+        if template.count(begin) != 1 or template.count(end) != 1:
+            raise ValueError(f"template must contain the {what} markers exactly once")
     text = (template.replace(LOG_TOKEN, log_path).replace(OUT_TOKEN, out_path)
             .replace(GUARD_TOKEN, str(int(guard_seconds))).replace(UNDO_TOKEN, undo_path))
 
@@ -376,8 +596,12 @@ def build_script(template: str, script: str, log_path: str, out_path: str,
         return pre + begin + marker + "\n" + block + post_indent + end + post, first
 
     text, vars_first = fill(text, VARS_BEGIN, VARS_END, decls, VARS_INDENT)
+    # Routines keep their own indentation, so columns map back unchanged
+    text, routines_first = fill(text, ROUTINES_BEGIN, ROUTINES_END, routine_lines, "")
+    text, _ = fill(text, DOCS_BEGIN, DOCS_END, [f"SbxNoteDoc({_pascal_string(p)});" for p in snapshot_docs],
+                   VARS_INDENT)
     text, body_first = fill(text, BODY_BEGIN, BODY_END, body, BODY_INDENT)
-    return BuiltScript(text, split, body_first, vars_first)
+    return BuiltScript(text, split, body_first, vars_first, routines_first)
 
 
 def map_error_line(built: BuiltScript, message: str) -> Optional[dict]:
@@ -396,10 +620,87 @@ def map_error_line(built: BuiltScript, message: str) -> Optional[dict]:
     k = line - built.vars_first_line
     if sp.decls and 0 <= k < len(sp.decls):
         return {"where": "var block", "line": sp.decl_src[k], "char": max(1, char - len(VARS_INDENT))}
+    k = line - built.routines_first_line
+    if sp.routines and 0 <= k < len(sp.routines):
+        return {"where": "script", "line": k + 1 + sp.routines_offset, "char": char}
     k = line - built.body_first_line
     if 0 <= k < len(sp.body):
         return {"where": "script", "line": k + 1 + sp.body_offset, "char": max(1, char - len(BODY_INDENT))}
     return {"where": "sandbox template", "line": line, "char": char}
+
+
+# --------------------------------------------------------------------------- snapshots
+
+# Documents a script may change, and the kind Client.OpenDocument takes for
+# each when a rollback opens it again (a project is opened as a project)
+DOC_KINDS = {".schdoc": "SCH", ".pcbdoc": "PCB", ".schlib": "SCHLIB", ".pcblib": "PCBLIB",
+             ".outjob": "OUTPUTJOB", ".prjpcb": "PROJECT"}
+_DOC_PATH_RE = re.compile(r"'((?:[^']|'')+\.(?:" + "|".join(e[1:] for e in DOC_KINDS) + r"))'", re.IGNORECASE)
+
+
+def doc_paths(script: str) -> List[str]:
+    """Absolute paths of existing Altium documents named in the script's
+    string literals, in order, without repeats."""
+    found, seen = [], set()
+    for m in _DOC_PATH_RE.finditer(script):
+        path = m.group(1).replace("''", "'")
+        if os.path.isabs(path) and os.path.isfile(path) and path.lower() not in seen:
+            seen.add(path.lower())
+            found.append(path)
+    return found
+
+
+def take_snapshot(directory: Path, paths: List[str]) -> List[dict]:
+    """Copy `paths` into `directory` and write its manifest; returns the entries."""
+    directory.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for n, path in enumerate(paths):
+        copy = directory / f"{n}_{os.path.basename(path)}"
+        shutil.copy2(path, copy)
+        entries.append({"path": path, "copy": copy.name, "bytes": copy.stat().st_size})
+    (directory / "manifest.json").write_text(json.dumps(entries, indent=1), encoding="utf-8")
+    return entries
+
+
+def doc_states(log_lines: List[str]) -> dict:
+    """Document path (lower case) -> 'closed', 'open' or 'unsaved', from SbxNoteDoc's log lines."""
+    states = {}
+    for ln in log_lines:
+        if ln.startswith(DOC_STATE_PREFIX):
+            state, _, path = ln[len(DOC_STATE_PREFIX):].partition("|")
+            states[path.strip().lower()] = state.strip()
+    return states
+
+
+def close_script(paths: List[str]) -> str:
+    """A sandbox script that closes `paths` in Altium without saving and
+    reports, one line each, 'open|path' or 'closed|path' for how it found them."""
+    lines = []
+    for p in paths:
+        q = _pascal_string(p)
+        lines += [f"if Client.IsDocumentOpen({q}) then",
+                  "begin",
+                  f"    Client.CloseDocument(Client.GetDocumentByPath({q}));",
+                  f"    S1 := S1 + 'open|' + {q} + #13#10;",
+                  "end",
+                  f"else S1 := S1 + 'closed|' + {q} + #13#10;"]
+    lines.append("ResultText := S1;")
+    return "\n".join(lines)
+
+
+def reopen_script(paths: List[str]) -> str:
+    """A sandbox script that opens `paths` in Altium again."""
+    lines = []
+    for p in paths:
+        q = _pascal_string(p)
+        kind = DOC_KINDS.get(os.path.splitext(p)[1].lower(), "")
+        if kind == "PROJECT":
+            lines.append(f"GetWorkspace.DM_OpenProject({q}, True);")
+        else:
+            lines += [f"Obj1 := Client.OpenDocument('{kind}', {q});",
+                      "if Obj1 <> nil then Client.ShowDocument(Obj1);"]
+    lines.append("ResultText := 'reopened';")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- Windows side
@@ -627,6 +928,11 @@ class RunFiles:
         template while it runs."""
         return self.script.with_name(self.script.stem + "_undo.txt")
 
+    @property
+    def snapshot(self) -> Path:
+        """Copies of the documents taken before the run, with manifest.json."""
+        return self.script.with_name(self.script.stem + "_snapshot")
+
 
 @dataclass
 class Sandbox:
@@ -642,11 +948,28 @@ class Sandbox:
         return RunFiles(self.runs_dir / f"{stem}.pas", self.runs_dir / f"{stem}_log.txt",
                         self.runs_dir / f"{stem}_result.txt")
 
-    def write(self, files: RunFiles, script: str, guard_seconds: int = 60) -> BuiltScript:
+    def write(self, files: RunFiles, script: str, guard_seconds: int = 60,
+              snapshot_docs: List[str] = ()) -> BuiltScript:
         built = build_script(self.template.read_text(encoding="utf-8"), script, str(files.log),
-                             str(files.result), guard_seconds, str(files.undo))
+                             str(files.result), guard_seconds, str(files.undo), snapshot_docs)
         files.script.write_text(built.text, encoding="utf-8")
         return built
+
+    def run_files(self, run_id: str) -> Optional[RunFiles]:
+        """The files of an earlier run by its id (the run file's name without .pas)."""
+        if not re.fullmatch(r"[\w-]+", run_id or ""):
+            return None
+        script = self.runs_dir / f"{run_id}.pas"
+        if not script.exists():
+            return None
+        return RunFiles(script, script.with_name(f"{run_id}_log.txt"), script.with_name(f"{run_id}_result.txt"))
+
+    def run_quick(self, script: str, timeout: float = 30.0) -> Optional[str]:
+        """Run a small helper script; its ResultText, or None when it did not finish."""
+        files = self.new_run_files("Helper")
+        if not self._run_until_done(files, script, timeout):
+            return None
+        return read_when_ready(files.result, lambda p: p.read_text(encoding="utf-8", errors="replace"))
 
     def launch(self, files: RunFiles) -> None:
         cmd = (f'"{self.altium_exe}" -RScriptingSystem:RunScriptFile('
@@ -731,5 +1054,6 @@ class Sandbox:
                         p.unlink()
                     except OSError:
                         pass
+                shutil.rmtree(old.with_name(old.stem + "_snapshot"), ignore_errors=True)
         except OSError:
             pass

@@ -157,13 +157,200 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(lines[b.body_first_line - 1], "        ResultText := 'ok';")
         self.assertIn("// === END EXPERIMENT", lines[b.body_first_line])
 
-    def test_user_vars_inserted_in_run(self):
+    def test_user_vars_are_globals(self):
+        # Global, so the script's own functions and procedures can use them
         b = build("var\n  Doc : IDispatch;\nDoc := nil;")
         lines = b.text.splitlines()
         self.assertEqual(lines[b.vars_first_line - 1], "    Doc : IDispatch;")
+        self.assertLess(b.text.index("    Doc : IDispatch;"), b.text.index("procedure SandboxLog"))
+
+    def test_body_is_its_own_procedure(self):
+        # An Exit in the script ends SbxBody; Run still writes the result
+        b = build("Exit;")
+        body = b.text.index("procedure SbxBody;")
         run = b.text.index("procedure Run;")
-        self.assertGreater(b.text.index("    Doc : IDispatch;"), run)
-        self.assertLess(b.text.index("    Doc : IDispatch;"), b.text.index("begin", run))
+        self.assertLess(body, b.text.index("        Exit;"))
+        self.assertLess(b.text.index("        Exit;"), run)
+        tail = b.text[run:]
+        self.assertLess(tail.index("SbxBody;"), tail.index("OutLines.SaveToFile(OutPath);"))
+
+class RoutineTest(unittest.TestCase):
+    SCRIPT = ("var\n    N : Integer;\n"
+              "function Twice(X : Integer) : Integer;\nvar\n    Y : Integer;\nbegin\n"
+              "    Y := X * 2;\n    if Y > 0 then\n    begin\n        Result := Y;\n    end;\nend;\n"
+              "\n"
+              "procedure Note(S : String);\nbegin\n    try\n        SandboxLog(S);\n    finally\n"
+              "        N := N + 1;\n    end;\nend;\n"
+              "N := Twice(2);\nNote('x');\nResultText := IntToStr(N);")
+
+    def test_split(self):
+        sp = sandbox.split_var_block(self.SCRIPT)
+        self.assertEqual(sp.decls, ["N : Integer;"])
+        self.assertEqual(sp.routines[0], "function Twice(X : Integer) : Integer;")
+        self.assertEqual(sp.routines[-1], "end;")
+        self.assertEqual(sp.routines_offset, 2)
+        self.assertEqual(sp.body[0], "N := Twice(2);")
+        self.assertEqual(sp.body_offset, 21)
+        rs = sandbox.routines(sp)
+        self.assertEqual([r.name for r in rs], ["Twice", "Note"])
+        self.assertEqual(rs[0].names, ["X", "Y"])
+        self.assertEqual([r.first_line for r in rs], [3, 14])
+
+    def test_routines_without_var_block_and_none_at_all(self):
+        sp = sandbox.split_var_block("procedure P;\nbegin\n    S1 := 'end';\nend;\nP;")
+        self.assertEqual(len(sp.routines), 4)
+        self.assertEqual(sp.body, ["P;"])
+        sp = sandbox.split_var_block("var\n  X : Integer;\n\nX := 1;")
+        self.assertEqual(sp.routines, [])
+        self.assertEqual(sp.body, ["X := 1;"])
+        self.assertEqual(sp.body_offset, 3)
+
+    def test_checks_know_params_locals_and_result(self):
+        sp = sandbox.split_var_block(self.SCRIPT)
+        self.assertEqual(sandbox.check_routines(sp), [])
+        self.assertEqual(sandbox.check_declarations(sp), [])
+        sp = sandbox.split_var_block("function F(A : Integer) : Integer;\nbegin\n    Z := A;\nend;\nI1 := F(1);")
+        problems = sandbox.check_routines(sp)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("line 3", problems[0])
+        self.assertIn("'Z'", problems[0])
+
+    def test_built_in_order_with_lines_mapped(self):
+        b = build(self.SCRIPT)
+        t = b.text
+        self.assertLess(t.index("    N : Integer;"), t.index("procedure SandboxLog"))
+        self.assertLess(t.index("procedure SaveDoc"), t.index("function Twice"))
+        self.assertLess(t.index("function Twice"), t.index("procedure SbxBody"))
+        self.assertLess(t.index("procedure SbxBody"), t.index("N := Twice(2);"))
+        self.assertLess(t.index("N := Twice(2);"), t.index("procedure Run;"))
+        lines = t.splitlines()
+        self.assertEqual(lines[b.routines_first_line - 1], "function Twice(X : Integer) : Integer;")
+        msg = f"Undeclared identifier at Line:{b.routines_first_line + 4}, Char:5"
+        self.assertEqual(sandbox.map_error_line(b, msg), {"where": "script", "line": 7, "char": 5})
+        msg = f"x at Line:{b.body_first_line + 1}, Char:9"
+        self.assertEqual(sandbox.map_error_line(b, msg), {"where": "script", "line": 23, "char": 1})
+
+    def test_loops_in_routines_guarded(self):
+        b = build("procedure P;\nbegin\n    while I1 < 3 do I1 := I1 + 1;\nend;\nP;")
+        self.assertIn("while SandboxTick(3) and (I1 < 3) do", b.text)
+
+
+class DeclarationTest(unittest.TestCase):
+    def test_reserved_words(self):
+        sp = sandbox.split_var_block("var\n    Label, X : Integer;\n    Object : IDispatch;\nX := 1;")
+        problems = sandbox.check_declarations(sp)
+        self.assertEqual(len(problems), 2)
+        self.assertIn("line 2", problems[0])
+        self.assertIn("'Label' is a reserved word", problems[0])
+        self.assertIn("line 3", problems[1])
+        sp = sandbox.split_var_block("procedure P(Unit : Integer);\nbegin\nend;\nP(1);")
+        self.assertIn("'Unit' is a reserved word", sandbox.check_declarations(sp)[0])
+
+    def test_names_the_template_declares(self):
+        sp = sandbox.split_var_block("var\n    S1 : Integer;\nfunction MM(V : Double) : Integer;\nbegin\nend;\nI1 := 1;")
+        problems = sandbox.check_declarations(sp)
+        self.assertEqual(len(problems), 2)
+        self.assertIn("'S1' is already declared", problems[0])
+        self.assertIn("'MM' is already a sandbox name", problems[1])
+
+    def test_template_globals_listed(self):
+        code = sandbox.strip_strings_and_comments(TEMPLATE)
+        routines = re.findall(r"^\s*(?:procedure|function)\s+([A-Za-z_]\w*)", code, re.M | re.I)
+        self.assertEqual([n for n in routines if n not in sandbox.TEMPLATE_GLOBALS], [])
+        consts = re.findall(r"^\s*([A-Za-z_]\w*)\s*=", code, re.M)
+        self.assertEqual([n for n in consts if n not in sandbox.TEMPLATE_GLOBALS], [])
+        globals_block = code[:code.index("procedure SandboxLog")]
+        for m in re.finditer(r"^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:\s*[A-Za-z_]\w*\s*;", globals_block, re.M):
+            for n in m.group(1).split(","):
+                self.assertIn(n.strip(), sandbox.TEMPLATE_NAMES + sandbox.TEMPLATE_GLOBALS)
+
+
+class PrecedenceTest(unittest.TestCase):
+    def problems(self, code):
+        return sandbox.precedence_problems(sandbox.strip_strings_and_comments(code))
+
+    def test_comparison_next_to_and_or(self):
+        p = self.problems("I1 := 1;\nif I1 = 1 and I2 = 2 then S1 := 'a';")
+        self.assertEqual(len(p), 1)
+        self.assertIn("line 2", p[0])
+        self.assertEqual(len(self.problems("while (I1 < 3) and\n  I2 > 0 do I1 := I1 + 1;")), 1)
+        self.assertEqual(len(self.problems("B1 := X = 1 or Y;")), 1)
+        self.assertEqual(len(self.problems("if F(A = 1 or B) then ;")), 1)
+
+    def test_parenthesized_and_plain_pass(self):
+        for ok in ("if (I1 = 1) and (I2 = 2) then S1 := 'a';",
+                   "if A and B then S1 := 'x' else if C = 2 then S1 := 'y';",
+                   "S1 := 'a = 1 and b';\nI1 := I2 and 3;\nif I1 = 1 then I2 := 3 and I1;",
+                   "repeat I1 := I1 + 1 until (I1 = 3) or (I2 > 4);",
+                   "Ok := Pos('x', S1) > 0;\nX := A[I1 = 1];",
+                   "function F(A : Integer = 4; B : Boolean = False) : Integer;"):
+            self.assertEqual(self.problems(ok), [], ok)
+
+    def test_not_before_comparison(self):
+        p = self.problems("if not I1 = 1 then S1 := 'a';")
+        self.assertEqual(len(p), 1)
+        self.assertIn("not I1 =", p[0])
+        self.assertEqual(len(self.problems("if not Obj1.Selection(1) <> 0 then ;")), 1)
+        self.assertEqual(self.problems("if not (I1 = 1) then ;\nif not B1 then ;\nif I1 <> 1 then ;"), [])
+
+    def test_reported_by_lint(self):
+        sp = sandbox.split_var_block("var\n  X : Integer;\nif X = 1 and X = 2 then X := 3;")
+        p = sandbox.lint_script(sp.body, sp.body_offset, sp.decls)
+        self.assertEqual(len(p), 1)
+        self.assertIn("line 3", p[0])
+
+
+class SnapshotTest(unittest.TestCase):
+    def test_doc_paths_from_string_literals(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = Path(d) / "A.SchDoc"
+            b = Path(d) / "it's.PcbDoc"
+            a.write_text("x")
+            b.write_text("y")
+            q = str(b).replace("'", "''")
+            script = (f"Obj1 := OpenSchDoc('{a}');\nSaveDoc('{str(a).upper()}');\n"
+                      f"S1 := '{q}';\nS2 := '{d}\\missing.SchDoc';\nS3 := 'Rel.SchDoc';")
+            self.assertEqual(sandbox.doc_paths(script), [str(a), str(b)])
+
+    def test_take_snapshot_and_doc_states(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = Path(d) / "A.SchDoc"
+            a.write_bytes(b"abc")
+            entries = sandbox.take_snapshot(Path(d) / "snap", [str(a)])
+            self.assertEqual(entries, [{"path": str(a), "copy": "0_A.SchDoc", "bytes": 3}])
+            self.assertEqual((Path(d) / "snap" / "0_A.SchDoc").read_bytes(), b"abc")
+            self.assertEqual(json.loads((Path(d) / "snap" / "manifest.json").read_text()), entries)
+        states = sandbox.doc_states(["sandbox start", "DOC STATE: unsaved|C:\\X\\A.SchDoc",
+                                     "DOC STATE: closed|C:\\X\\B.PcbDoc"])
+        self.assertEqual(states, {"c:\\x\\a.schdoc": "unsaved", "c:\\x\\b.pcbdoc": "closed"})
+
+    def test_doc_states_logged_before_the_script(self):
+        b = sandbox.build_script(TEMPLATE, "S1 := 'x';", "l", "o", snapshot_docs=["C:\\it's\\A.SchDoc"])
+        run = b.text[b.text.index("procedure Run;"):]
+        self.assertIn("SbxNoteDoc('C:\\it''s\\A.SchDoc');", run)
+        self.assertLess(run.index("SbxNoteDoc("), run.index("SbxBody;"))
+
+    def test_close_and_reopen_scripts(self):
+        paths = ["C:\\p\\A.SchDoc", "C:\\p\\P.PrjPcb", "C:\\p\\B.PcbDoc"]
+        close = sandbox.close_script(paths)
+        self.assertEqual(close.count("Client.CloseDocument("), 3)
+        self.assertEqual(sandbox.check_script(close.split("\n"), []), [])
+        reopen = sandbox.reopen_script(paths)
+        self.assertIn("Client.OpenDocument('SCH', 'C:\\p\\A.SchDoc');", reopen)
+        self.assertIn("GetWorkspace.DM_OpenProject('C:\\p\\P.PrjPcb', True);", reopen)
+        self.assertIn("Client.OpenDocument('PCB', 'C:\\p\\B.PcbDoc');", reopen)
+
+    def test_run_files_by_id(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sb = sandbox.Sandbox("x", Path(d) / "t.pas", Path(d))
+            (Path(d) / "Sbx_1.pas").write_text("x")
+            self.assertEqual(sb.run_files("Sbx_1").snapshot, Path(d) / "Sbx_1_snapshot")
+            self.assertIsNone(sb.run_files("Sbx_2"))
+            self.assertIsNone(sb.run_files("..\\Sbx_1"))
 
 
 class LoopGuardTest(unittest.TestCase):
