@@ -297,16 +297,18 @@ class SlantedWireTest(unittest.TestCase):
 
 
 class PinOffGridTest(unittest.TestCase):
-    def check(self, shift):
-        # a two-pin part on the grid whose drawing is shifted by shift mils
+    def check(self, shift, shift2=None, part_shift=0):
+        # a two-pin part whose drawing is shifted by shift mils (pin 2 by
+        # shift2, when given); the part itself by part_shift
+        shift2 = shift if shift2 is None else shift2
         recs = [
             {"HEADER": "x"},
             {"RECORD": 31, "FONTIDCOUNT": 1, "SIZE1": 10, "FONTNAME1": "Times New Roman", "SNAPGRIDSIZE": 10},
-            {"RECORD": 1, "LIBREFERENCE": "CONN", **at(2000, 1000), "CURRENTPARTID": 1},
+            {"RECORD": 1, "LIBREFERENCE": "CONN", **at(2000 + part_shift, 1000 + part_shift), "CURRENTPARTID": 1},
             {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 2, "PINLENGTH": 20,
              **at(2000 + shift, 1000 + shift), "DESIGNATOR": "1"},
             {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 2, "PINLENGTH": 20,
-             **at(2000 + shift, 900 + shift), "DESIGNATOR": "2"},
+             **at(2000 + shift2, 900 + shift2), "DESIGNATOR": "2"},
             {"RECORD": 34, "OWNERINDEX": 1, **at(2100, 1300), "TEXT": "J1", "NAME": "Designator", "FONTID": 1},
         ]
         return [i for i in sc.Checker(sc.Sheet(parse_records(records_stream(recs)))).run()
@@ -318,6 +320,20 @@ class PinOffGridTest(unittest.TestCase):
         self.assertEqual(issues[0]["designator"], "J1")
         self.assertIn("shifted from its origin", issues[0]["message"])
         self.assertEqual(issues[0]["suggest"], {"shift_contents_by": [0.4094, 0.4094]})
+
+    def test_pins_off_by_different_amounts_get_no_shift(self):
+        # one pin on the grid, one off: no single shift of the drawing fixes both
+        issues = self.check(0, -0.4094)
+        self.assertEqual(len(issues), 1)
+        self.assertNotIn("suggest", issues[0])
+        self.assertIn("different amounts", issues[0]["message"])
+
+    def test_a_part_placed_off_the_grid_is_moved_back(self):
+        # the whole part, pins with it, 1 um off: move it, do not shift its drawing
+        issues = self.check(-0.0395, part_shift=-0.0395)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("whole part", issues[0]["message"])
+        self.assertEqual(issues[0]["suggest"], {"move_component_to": [2000, 1000]})
 
     def test_on_grid_and_another_grid_are_not(self):
         self.assertEqual(self.check(0), [])

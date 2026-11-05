@@ -143,6 +143,26 @@ class ViolationTest(unittest.TestCase):
         self.assertTrue(drc.matches(v, area=[250, 250, 350, 350]))    # by an object's position
         self.assertFalse(drc.matches(v, area=[500, 500, 600, 600]))
 
+    def test_rules_match_whole_names_and_kinds(self):
+        def viol(rule, description):
+            return {"rule": rule, "description": description, **drc.measurement(description)}
+
+        gnd = viol("Clearance_GND", "Clearance Constraint: (0.1mm < 0.152mm) Between Via (1mm,1mm) And Via")
+        holes = viol("HoleToHoleClearance", "Hole To Hole Clearance (Gap=0.1mm): (0.05mm < 0.1mm) Between Pad")
+        edge = viol("BoardOutlineClearance", "Board Outline Clearance(Outline Edge): (Collision < 25mil) Between")
+        net = viol("UnRoutedNet", "Un-Routed Net Constraint: Net GND Between Pad U1-1 And Pad U1-2")
+        self.assertEqual(edge["kind"], "Board Outline Clearance")
+        # a kind picks every rule of that kind, a name only its rule
+        self.assertTrue(drc.matches(gnd, rules=["Clearance"]))
+        self.assertTrue(drc.matches(gnd, rules=["clearance_gnd"]))
+        self.assertFalse(drc.matches(holes, rules=["Clearance"]))
+        self.assertFalse(drc.matches(edge, rules=["Clearance"]))
+        self.assertTrue(drc.matches(holes, rules=["Hole To Hole Clearance"]))
+        self.assertTrue(drc.matches(edge, rules=["BoardOutlineClearance"]))
+        self.assertTrue(drc.matches(net, rules=["Un-Routed Net"]))
+        self.assertTrue(drc.matches(net, rules=["unroutednet constraint"]))
+        self.assertFalse(drc.matches(net, rules=["Net"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1589,7 +1589,9 @@ begin
         Exit;
     end;
     Result := GetWorkspace.DM_FocusedProject;
-    if (Result = nil) or (Pos('Free Documents', Result.DM_ProjectFullPath) > 0) then
+    // Free Documents' full path is just 'Free Documents': a project in a
+    // folder of that name is still a project
+    if (Result = nil) or SameText(Result.DM_ProjectFullPath, 'Free Documents') then
     begin
         Result := nil;
         Err := 'No project is focused (Free Documents has focus); give project_path';

@@ -2306,8 +2306,12 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
       * label_orientation, label_off_wire, dangling_wire, wire_through_body.
       * pin_off_grid - a part whose pins sit a few microns (up to 1 mil) off
         the grid. Every wire drawn to them comes out slanted. When the part
-        itself is on the grid its drawing was shifted from its origin;
-        suggest.shift_contents_by gives the shift that puts the pins back.
+        itself is on the grid its drawing was shifted from its origin. When
+        every pin is off by the same amount, suggest gives the fix:
+        move_component_to (an on-grid position for edit_schematic's
+        move_component) when the whole part is that far off the grid, else
+        shift_contents_by. Pins off by different amounts get no suggestion:
+        the symbol needs fixing in its library.
       * slanted_wire - a wire segment a little (1 um to half a grid) out of
         level or plumb. It looks straight, but dragging a part on it turns it
         diagonal. Usually a symbol whose pins are off the grid (then the
@@ -3280,11 +3284,13 @@ async def get_pour_report(ctx: Context, names: list = None, net: str = "", layer
     box, error = pcb_shapes.area_box(area)
     if error:
         return json.dumps({"success": False, "error": error})
-    if not isinstance(sliver_sq_mils, (int, float)) or sliver_sq_mils < 0:
+    if (not isinstance(sliver_sq_mils, (int, float)) or isinstance(sliver_sq_mils, bool)
+            or not sliver_sq_mils >= 0 or sliver_sq_mils == float("inf")):
         return json.dumps({"success": False, "error": "sliver_sq_mils must be a number of at least 0"})
     response = await altium_bridge.execute_command("pour_report", {
         "names": encoded, "net": net, "layer": layer, "area": box,
-        "sliver_sq_mils": int(round(sliver_sq_mils)), "board_path": long_path(board_path)})
+        # Altium reads it as a 32-bit integer; no piece of copper is near this
+        "sliver_sq_mils": int(round(min(sliver_sq_mils, 2e9))), "board_path": long_path(board_path)})
     if not response.get("success", False):
         return json.dumps({"success": False, "error": response.get("error", "unknown error")})
     result = response.get("result", {})
@@ -4773,13 +4779,17 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
         board_path (str): Full path of the .PcbDoc to check. It is opened if
             needed and brought to the front. Empty: the focused board, or
             the one the PCB tools last used.
-        rules (list): Only violations of these rules: each matches a rule
-            name or kind (e.g. "Clearance", "Width", or a rule's own name)
-            by substring, any case. The whole check still runs: Altium
-            checks every enabled rule.
+        rules (list): Only violations of these rules: each is a rule's own
+            name or a rule kind ("Clearance", "Width", "Short-Circuit",
+            "Un-Routed Net", "Hole To Hole Clearance", ...), whole, in any
+            case and with or without spaces. "Clearance" is the electrical
+            clearance rules only, not hole-to-hole or silk clearances. The
+            whole check still runs: Altium checks every enabled rule.
         nets (list): Only violations with an object on one of these nets.
         area (list): Only violations located in [x1, y1, x2, y2] (mils from
             the board origin), by their own or an object's position.
+            With any filter, matching_count counts the matching violations;
+            listed_by_rule always counts the ones listed.
         max_violations (int): How many violations to list in full.
             violation_count counts every violation the check found, but
             Altium stops the check at its own violation limit (500 unless
@@ -4794,6 +4804,21 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     """
     import drc
 
+    # The filters are checked before the check runs, which takes a while.
+    # A lone name counts as a list of one, not as letters.
+    rules = [rules] if isinstance(rules, str) else rules
+    nets = [nets] if isinstance(nets, str) else nets
+    for label, names in (("rules", rules), ("nets", nets)):
+        if names is not None and (not isinstance(names, (list, tuple))
+                                  or not all(isinstance(n, str) for n in names)):
+            return json.dumps({"success": False, "error": f"{label} is a list of names"})
+    rules = [r for r in rules or () if r.strip()]
+    nets = [n for n in nets or () if n.strip()]
+    if area is not None and (not isinstance(area, (list, tuple)) or len(area) != 4 or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in area)):
+        return json.dumps({"success": False, "error": "area is [x1, y1, x2, y2] in mils from the board origin"})
+    filtered = bool(rules or nets or area is not None)
+
     board_path = long_path(board_path)
     logger.info(f"Running DRC on {board_path or 'the focused board'}")
     started = time.time()
@@ -4802,8 +4827,9 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     try:
         response = await altium_bridge.execute_command(
             "run_drc", {"board_path": board_path,
-                        # filtered: every violation Altium kept, then filter
-                        "max_violations": 1000000 if (rules or nets or area) else int(max_violations)})
+                        # filtered: the violations Altium kept (500 unless its
+                        # limit was raised), up to a cap, then filter
+                        "max_violations": drc.FILTER_FETCH if filtered else int(max_violations)})
     finally:
         driver.cancel()
         try:
@@ -4834,12 +4860,14 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     # By how much each violation fails, as numbers; then the filters
     for v in out.get("violations", []):
         v.update(drc.measurement(v.get("description", "")))
-    if rules or nets or area:
-        if area is not None and (not isinstance(area, (list, tuple)) or len(area) != 4):
-            return json.dumps({"success": False, "error": "area is [x1, y1, x2, y2] in mils"})
-        picked = [v for v in out.get("violations", []) if drc.matches(v, rules or (), nets or (), area)]
+    if filtered:
+        fetched = out.get("violations", [])
+        picked = [v for v in fetched if drc.matches(v, rules, nets, area)]
         out["matching_count"] = len(picked)
         out["violations"] = picked[:max(0, int(max_violations))]
+        if out.get("violation_count", 0) > len(fetched):
+            out["filter_note"] = (f"The filters looked at the first {len(fetched)} of "
+                                  f"{out['violation_count']} violations; matching_count may be low.")
     by_rule = {}
     for v in out.get("violations", []):
         by_rule[v.get("rule", "")] = by_rule.get(v.get("rule", ""), 0) + 1
@@ -5071,6 +5099,20 @@ async def get_project_info(ctx: Context) -> str:
     return await _simple_command("get_project_info", {}, "project info")
 
 
+def _project_path(project_path: str):
+    """A compile tool's project_path in its long form, and an error ('' when
+    fine): empty for the focused project, else an existing .PrjPcb. Altium
+    would open any project file it is given, a script project too."""
+    if not project_path:
+        return "", ""
+    path = long_path(project_path)
+    if not path.lower().endswith(".prjpcb"):
+        return path, f"project_path must be a .PrjPcb file: {project_path}"
+    if not os.path.isfile(path):
+        return path, f"project_path not found: {project_path}"
+    return path, ""
+
+
 @_tool(read_only=True)
 async def get_project_components(ctx: Context, include_parameters: bool = False, designators: list = None,
                                  sheet: str = "", offset: int = 0, limit: int = 0,
@@ -5110,9 +5152,12 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
     """
     import project_components
 
+    project_path, error = _project_path(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
     text = await _simple_command("get_project_components",
                                  {"include_parameters": include_parameters or bool(parameter_names),
-                                  "project_path": long_path(project_path)},
+                                  "project_path": project_path},
                                  "project components")
     try:
         data = json.loads(text, strict=False)
@@ -5152,7 +5197,10 @@ async def get_erc_violations(ctx: Context, compile: bool = True, project_path: s
              total, fatal, errors, warnings and violations
              [{level, type, detail}]
     """
-    return await _simple_command("get_erc_violations", {"compile": compile, "project_path": long_path(project_path)},
+    project_path, error = _project_path(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    return await _simple_command("get_erc_violations", {"compile": compile, "project_path": project_path},
                                  "ERC violations")
 
 

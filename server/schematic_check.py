@@ -669,12 +669,24 @@ class Checker:
             size = f"{worst * 25.4:.1f} um" if self.s.metric else f"{worst:.3f} mil"
             # the same shift for every pin, give or take rounding of the stored fractions
             same = all(abs(ox - dx) < 0.01 and abs(oy - dy) < 0.01 for ox, oy, _ in offsets)
-            msg = f"{c['designator']}'s pins are up to {size} off the grid; wires to them come out slanted"
-            if same and self.off_grid(c["location"]) < 1e-3:
-                msg += (" (the part sits on the grid but its drawing is shifted from its origin: "
-                        "move the drawing back, or update the part from its library and redraw its wires)")
-            self.add("pin_off_grid", pin["hot"], msg, designator=c["designator"], pin=pin["name"],
-                     suggest={"shift_contents_by": self.exact((-dx, -dy))})
+            msg = f"{c['designator']}'s pins are up to {size} off the grid; wires drawn to them can come out slanted"
+            loc = c["location"]
+            lx, ly = loc[0] - round(loc[0] / g) * g, loc[1] - round(loc[1] / g) * g
+            extra = {}
+            if not same:
+                # no one shift puts them all back: the symbol itself is drawn off the grid
+                msg += " (by different amounts, so the symbol's pins need fixing in its library)"
+            elif self.off_grid(loc) >= 1e-3 and abs(lx - dx) < 0.01 and abs(ly - dy) < 0.01:
+                # the whole part sits that far off the grid: moving it (edit_schematic
+                # move_component) puts the pins back
+                msg += " (the whole part is that far off the grid: move it onto the grid, with the wire ends on its pins)"
+                extra["suggest"] = {"move_component_to": self.exact((loc[0] - dx, loc[1] - dy))}
+            else:
+                extra["suggest"] = {"shift_contents_by": self.exact((-dx, -dy))}
+                if self.off_grid(loc) < 1e-3:
+                    msg += (" (the part sits on the grid but its drawing is shifted from its origin: "
+                            "move the drawing back, or update the part from its library and redraw its wires)")
+            self.add("pin_off_grid", pin["hot"], msg, designator=c["designator"], pin=pin["name"], **extra)
 
     def check_pin_taps(self):
         segs = list(self.s.segments())

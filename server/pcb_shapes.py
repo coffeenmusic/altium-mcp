@@ -5,9 +5,15 @@ An outline is a list of [x, y] corners in mils relative to the board origin,
 joined by straight edges and closed back to the first corner. It goes to
 Altium as 'x|y' records in internal units (10000 per mil).
 """
+import math
 from typing import List, Optional, Tuple
 
 COORD_PER_MIL = 10000
+# Altium's design space is 0 to kMaxCoord (99,999 mil). Area corners are
+# clamped to this far from the board origin: that changes nothing they
+# overlap, and keeps the numbers within Altium's 32-bit coordinates (a larger
+# one is a runtime error that stops the bridge script).
+AREA_LIMIT_MILS = 100000
 
 
 def _cross(o, a, b):
@@ -79,13 +85,15 @@ def area_box(area) -> Tuple[str, str]:
     if area is None:
         return "", ""
     if (not isinstance(area, (list, tuple)) or len(area) != 4
-            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in area)):
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                       for v in area)):
         return "", "area is [x1, y1, x2, y2] in mils from the board origin"
     x1, x2 = sorted((area[0], area[2]))
     y1, y2 = sorted((area[1], area[3]))
     if x1 == x2 or y1 == y2:
         return "", "area has no size"
-    return "|".join(str(int(round(v * COORD_PER_MIL))) for v in (x1, y1, x2, y2)), ""
+    return "|".join(str(int(round(max(-AREA_LIMIT_MILS, min(AREA_LIMIT_MILS, v)) * COORD_PER_MIL)))
+                    for v in (x1, y1, x2, y2)), ""
 
 
 def unmatched_names(names, result) -> List[str]:

@@ -41,6 +41,11 @@ class AreaTest(unittest.TestCase):
         self.assertEqual(area_box([100, 50, 0, 0]), ("0|0|1000000|500000", ""))
         self.assertIn("no size", area_box([0, 0, 0, 10])[1])
         self.assertIn("[x1, y1, x2, y2]", area_box([0, 0, 10])[1])
+        self.assertIn("[x1, y1, x2, y2]", area_box([0, 0, float("inf"), 10])[1])
+
+    def test_area_beyond_the_design_space_is_clamped(self):
+        # unclamped, -1e7 mils is -1e11 internal units: past 32 bits in Altium
+        self.assertEqual(area_box([-1e7, 0, 1e7, 10]), ("-1000000000|0|1000000000|100000", ""))
 
 
 class PolygonNamesTest(unittest.TestCase):

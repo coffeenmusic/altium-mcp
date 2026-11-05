@@ -128,13 +128,29 @@ _NUM = r"(-?\d+(?:\.\d+)?)\s*(mm|mil|um)"
 _PAIR = re.compile(r"\(\s*" + _NUM + r"\s*([<>]=?)\s*" + _NUM + r"\s*\)")
 _ACTUAL = re.compile(r"Actual [\w ]*?=\s*" + _NUM + r",\s*Target [\w ]*?=\s*" + _NUM)
 _TO_MILS = {"mm": 1 / 0.0254, "mil": 1.0, "um": 0.001 / 0.0254}
+# How many violations a filtered run_drc fetches from Altium before filtering
+FILTER_FETCH = 5000
+
+
+def _kind(descriptor: str) -> str:
+    # the rule kind leads the descriptor, up to its values or its colon:
+    # "Board Outline Clearance(Outline Edge): (Collision < 25mil) ..."
+    return re.split(r"[(:]", descriptor, 1)[0].strip()
+
+
+def rule_key(text: str) -> str:
+    """A rule name or kind as compared by the rules filter: any case, without
+    spaces, punctuation or a trailing "Constraint", so "Un-Routed Net",
+    "UnRoutedNet" and "Un-Routed Net Constraint" are the same."""
+    key = re.sub(r"[^0-9a-z]", "", text.lower())
+    return key[:-len("constraint")] if key.endswith("constraint") else key
 
 
 def measurement(descriptor: str) -> dict:
     """The measured and allowed values in a violation's descriptor, in mils:
     {"kind", "actual_mils", "limit_mils", "comparison"}; only "kind" when the
     descriptor gives no numbers."""
-    out = {"kind": descriptor.split(":", 1)[0].strip()} if ":" in descriptor else {}
+    out = {"kind": _kind(descriptor)} if ":" in descriptor else {}
     m = _PAIR.search(descriptor)
     if m:
         out.update(actual_mils=round(float(m.group(1)) * _TO_MILS[m.group(2)], 3),
@@ -157,12 +173,15 @@ def _points(v: dict):
 
 
 def matches(v: dict, rules=(), nets=(), area=None) -> bool:
-    """Whether a violation passes the filters: a rule name or kind containing
-    one of rules, a primitive on one of nets, its location inside area
-    ([x1, y1, x2, y2] in mils from the board origin)."""
+    """Whether a violation passes the filters: its rule's name or kind is one
+    of rules (as rule_key compares them), a primitive is on one of nets, its
+    location is inside area ([x1, y1, x2, y2] in mils from the board origin).
+    Whole names, not substrings: "Clearance" is the electrical clearance
+    rules, not Hole To Hole Clearance or Silk to Silk (Clearance=0mm)."""
     if rules:
-        hay = (v.get("rule", "") + " " + v.get("kind", "")).lower()
-        if not any(r.lower() in hay for r in rules):
+        kind = v.get("kind") or _kind(v.get("description", ""))
+        have = {rule_key(v.get("rule", "")), rule_key(kind)} - {""}
+        if not have & {rule_key(r) for r in rules}:
             return False
     if nets:
         on = {(v.get(k) or {}).get("net", "").lower() for k in ("primitive1", "primitive2")}
