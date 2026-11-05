@@ -6596,14 +6596,18 @@ async def compare_netlist(ctx: Context, project_path: str = "", against: str = "
     lost pins, the pins that moved between nets, nets added, removed or
     renamed, and nets left with a single pin.
 
-    Snapshots are kept per project under a name. By default each call
-    compares with the previous call ("last") and then saves itself as
+    Snapshots are kept per project (by its full path, so a copy of a
+    project in another folder keeps its own) under a name. By default each
+    call compares with the previous call ("last") and then saves itself as
     "last". Save a fixed baseline with save_as="before" and compare later
     calls with against="before".
 
     An auto-named net (NetR1_1) whose pins stay together under a new name is
-    a rename, not a removal and an addition. Compiling reads the sheets as
-    they are open in Altium, unsaved edits included.
+    a rename, not a removal and an addition. That matching is greedy: each
+    vanished net takes the new net it shares most pins with, in turn, so
+    when two vanished nets overlap the same new net only the first is a
+    rename. Compiling reads the sheets as they are open in Altium, unsaved
+    edits included.
 
     Args:
         project_path (str): Full path of the .PrjPcb; empty for the focused
@@ -6620,17 +6624,25 @@ async def compare_netlist(ctx: Context, project_path: str = "", against: str = "
     import datetime
     import netlist_diff
 
-    source, error = await _command_json("get_eco_source", {"project_path": long_path(project_path)})
+    path, error = _project_path(project_path)
     if error:
         return json.dumps({"success": False, "error": error})
-    project = source.get("project_path", project_path)
+    source, error = await _bridge_json("get_eco_source", {"project_path": path})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    project = source.get("project_path") or path
+    if not project:
+        return json.dumps({"success": False, "error": "the compiled project has no path; give project_path"})
     current = netlist_diff.from_source(source)
     folder = EXCHANGE_DIR / "netlists"
     reply = {"project_path": project, "pins": len(current),
              "nets": len({n for n in current.values() if n}),
              "unsaved_in_altium": source.get("unsaved_in_altium", [])}
     if against:
-        old = netlist_diff.load(netlist_diff.snapshot_path(folder, project, against))
+        try:
+            old = netlist_diff.load(netlist_diff.snapshot_path(folder, project, against), project)
+        except ValueError as e:
+            return json.dumps({"success": False, "error": str(e)})
         if old is None:
             reply["note"] = f"No snapshot '{against}' for this project yet; nothing to compare with."
         else:

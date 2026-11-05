@@ -13,7 +13,9 @@ addition. A pin "moved" when its net (after that matching) is a different
 one.
 """
 
+import hashlib
 import json
+import ntpath
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -43,7 +45,14 @@ def _nets(netlist: Netlist) -> Dict[str, Set[str]]:
 
 def match_nets(before: Dict[str, Set[str]], after: Dict[str, Set[str]]) -> Dict[str, str]:
     """{old net: new net}: by name, then a vanished net to the new net
-    (not matched by name) it shares most pins with."""
+    (not matched by name) it shares most pins with.
+
+    Greedy: vanished nets are taken one at a time, in the order they come,
+    and each takes the free new net it shares most pins with (the first one
+    on a tie), which is then no longer free. It is not an optimal
+    assignment: when two vanished nets share pins with the same new net, the
+    first one gets it and the second may be reported as removed, or matched
+    to a net it shares fewer pins with."""
     pairs = {n: n for n in before if n in after}
     free = {n: pins for n, pins in after.items() if n not in pairs.values()}
     for old in (n for n in before if n not in pairs):
@@ -104,10 +113,25 @@ def summary(diff: dict) -> Dict[str, int]:
     return {k: len(v) for k, v in diff.items() if v}
 
 
+def same_project(a: str, b: str) -> bool:
+    """Whether two paths name the same project file: compared as Windows
+    paths, case, separators and '..' ignored."""
+    return _normalised(a) == _normalised(b)
+
+
+def _normalised(path: str) -> str:
+    return ntpath.normcase(ntpath.normpath(str(path or "")))
+
+
 def snapshot_path(folder: Path, project_path: str, name: str) -> Path:
-    stem = Path(project_path).stem or "project"
+    """Where a project's snapshot of a name is kept. The file name holds a
+    hash of the normalised full project path, so projects of the same name
+    in different folders (a project and a copy of it) keep their own."""
+    stem = ntpath.splitext(ntpath.basename(ntpath.normpath(str(project_path or ""))))[0] or "project"
+    stem = "".join(c if c.isalnum() or c in "-_ " else "_" for c in stem)
+    key = hashlib.sha1(_normalised(project_path).encode("utf-8")).hexdigest()[:12]
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name) or "last"
-    return folder / f"{stem}__{safe}.json"
+    return folder / f"{stem}_{key}__{safe}.json"
 
 
 def save(path: Path, project_path: str, netlist: Netlist, when: str) -> None:
@@ -116,11 +140,20 @@ def save(path: Path, project_path: str, netlist: Netlist, when: str) -> None:
                     encoding="utf-8")
 
 
-def load(path: Path) -> Optional[dict]:
+def load(path: Path, project_path: str = None) -> Optional[dict]:
+    """A saved snapshot, or None when there is none. With project_path, a
+    snapshot saved for another project raises ValueError instead of being
+    compared with."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict):
+        return None
+    if project_path is not None and not same_project(data.get("project_path", ""), project_path):
+        raise ValueError(f"the snapshot {path.name} was saved for {data.get('project_path') or 'another project'}, "
+                         f"not {project_path}")
+    return data
 
 
 def limit(diff: dict, n: int) -> List[str]:
