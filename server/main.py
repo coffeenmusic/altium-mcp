@@ -3178,8 +3178,118 @@ async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer
     result = response.get("result", {})
     return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
+@_tool()
+async def repour_polygons(ctx: Context, names: list = None, net: str = "", layer: str = "",
+                          area: list = None, include_shelved: bool = False, board_path: str = "") -> str:
+    """
+    Repour polygon pours on a PCB: all of them, or the ones the filters pick.
+
+    Repour after moving parts, tracks or vias through a pour, or after
+    changing clearance or polygon connect rules; Altium does not repour by
+    itself. The whole repour is one undo step.
+
+    Filters combine; with none, every polygon on the board is repoured.
+
+    Args:
+        names (list): Polygon names, any case. Names need not be unique (a
+            "GND" pour on each layer is common), so add layer to pick one.
+        net (str): Only polygons on this net.
+        layer (str): Only polygons on this signal layer, by stack name or
+            Altium's name ("Top Layer").
+        area (list): [x1, y1, x2, y2] in mils from the board origin: only
+            polygons overlapping it, e.g. around an edit. Overlapping, so a
+            whole-board pour counts for any area on it.
+        include_shelved (bool): Also repour shelved polygons, which
+            unshelves them. By default they are left shelved and listed.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with how many polygons were repoured and, for each, its
+             name, layer, net and poured_regions (separate pieces of
+             copper) and hatch_tracks. shelved_skipped lists the shelved
+             polygons that matched and were left alone.
+    """
+    import pcb_shapes
+
+    board_path = long_path(board_path)
+    names, encoded, error = pcb_shapes.polygon_names(names)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    box, error = pcb_shapes.area_box(area)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    logger.info(f"Repouring polygons (names={names or 'any'}, net={net or 'any'}, layer={layer or 'any'})")
+    response = await altium_bridge.execute_command("repour_polygons", {
+        "names": encoded, "net": net, "layer": layer, "area": box,
+        "include_shelved": "true" if include_shelved else "false", "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to repour: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    missing = pcb_shapes.unmatched_names(names, result)
+    if missing:
+        result["names_not_matched"] = missing
+    if not result.get("repoured") and not result.get("shelved_skipped"):
+        result["warning"] = "No polygon matched the filters."
+    return json.dumps(result, indent=2)
+
 # Change the design: a timeout leaves their outcome unknown, so no blind retry
-MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout"})
+MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout", "repour_polygons"})
+
+@_tool(read_only=True)
+async def get_pour_report(ctx: Context, names: list = None, net: str = "", layer: str = "",
+                          area: list = None, sliver_sq_mils: float = 100, board_path: str = "") -> str:
+    """
+    Check what polygon pours poured: islands, slivers, and pours with no net
+    or no copper. Read only; repour first (repour_polygons) to check the
+    copper as the rules now make it.
+
+    Each polygon is listed with its pieces of solid copper and their sizes,
+    and flags:
+      * islands - poured into more than one separate piece;
+      * slivers - a piece smaller than sliver_sq_mils;
+      * no_net - the polygon has no net (dead copper);
+      * no_copper - poured nothing (no room, or all removed as dead copper);
+      * shelved - shelved, so it has no copper now.
+    A piece's area is its outline, holes not subtracted: an upper bound.
+
+    Args:
+        names, net, layer, area: Filters, as for repour_polygons; with none,
+            every polygon on the board.
+        sliver_sq_mils (float): A piece below this area is a sliver
+            (default 100 sq mil).
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with each polygon (name, layer, net, pieces, smallest
+             piece, copper area, slivers, flags) and the flagged ones first.
+    """
+    import pcb_shapes
+
+    names, encoded, error = pcb_shapes.polygon_names(names)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    box, error = pcb_shapes.area_box(area)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if not isinstance(sliver_sq_mils, (int, float)) or sliver_sq_mils < 0:
+        return json.dumps({"success": False, "error": "sliver_sq_mils must be a number of at least 0"})
+    response = await altium_bridge.execute_command("pour_report", {
+        "names": encoded, "net": net, "layer": layer, "area": box,
+        "sliver_sq_mils": int(round(sliver_sq_mils)), "board_path": long_path(board_path)})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": response.get("error", "unknown error")})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    polys = result.get("polygons", [])
+    polys.sort(key=lambda p: (not p.get("flags"), p.get("layer", ""), p.get("name", "")))
+    result["flagged"] = sum(1 for p in polys if p.get("flags"))
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
