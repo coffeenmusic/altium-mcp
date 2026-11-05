@@ -11,7 +11,7 @@ import subprocess
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import sys
 import win32gui
 import win32ui
@@ -5078,6 +5078,27 @@ async def _simple_command(command: str, params: dict, what: str) -> str:
         return json.dumps({"error": f"Failed to get {what}: {error_msg}"})
     result = response.get("result", {})
     return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
+
+
+async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None) -> Tuple[Optional[dict], str]:
+    """(result, "") of a bridge command that returns JSON, or (None, error).
+    One helper for the tools that work with the reply instead of passing it
+    on; strict=False because Altium text can hold control characters."""
+    if timeout is None:
+        response = await altium_bridge.execute_command(command, params)
+    else:
+        response = await altium_bridge.execute_command(command, params, timeout=timeout)
+    if not response.get("success", False):
+        return None, response.get("error", "unknown error")
+    result = response.get("result", {})
+    if isinstance(result, str):
+        try:
+            result = json.loads(result, strict=False)
+        except ValueError:
+            return None, result if result.startswith("ERROR") else f"unexpected reply: {result[:300]}"
+    if not isinstance(result, dict):
+        return None, f"unexpected reply: {str(result)[:300]}"
+    return result, ""
 
 
 @_tool(read_only=True)
