@@ -37,7 +37,7 @@
     },
     {
       "name": "get_erc_violations",
-      "description": "Compile the focused project in memory and list ERC/compiler violations by level"
+      "description": "Compile a project (the focused one, or one by path) in memory and list ERC/compiler violations by level"
     },
     {
       "name": "get_board_summary",
@@ -89,7 +89,7 @@
     },
     {
       "name": "check_schematic",
-      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires"
+      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires, pins off the grid"
     },
     {
       "name": "edit_schematic",
@@ -137,7 +137,7 @@
     },
     {
       "name": "run_drc",
-      "description": "Run the design rule check on a PCB and list the violations"
+      "description": "Run the design rule check on a PCB and list the violations with measured values, optionally filtered by rule, net or area"
     },
     {
       "name": "get_selected_components_coordinates",
@@ -186,6 +186,14 @@
     {
       "name": "place_cutout",
       "description": "Add a polygon pour cutout or a board cutout to a PCB and repour the polygons it overlaps"
+    },
+    {
+      "name": "repour_polygons",
+      "description": "Repour all polygon pours on a PCB, or those picked by name, net, layer or area, as one undo step"
+    },
+    {
+      "name": "get_pour_report",
+      "description": "Report what each polygon pour poured: pieces, islands, slivers, and pours with no net or no copper"
     },
     {
       "name": "layout_duplicator",

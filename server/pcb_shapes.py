@@ -1,12 +1,19 @@
-"""Checking and encoding the outlines of place_polygon_pour and place_cutout.
+"""Checking and encoding the outlines of place_polygon_pour and place_cutout,
+and the polygon names repour_polygons picks.
 
 An outline is a list of [x, y] corners in mils relative to the board origin,
 joined by straight edges and closed back to the first corner. It goes to
 Altium as 'x|y' records in internal units (10000 per mil).
 """
+import math
 from typing import List, Optional, Tuple
 
 COORD_PER_MIL = 10000
+# Altium's design space is 0 to kMaxCoord (99,999 mil). Area corners are
+# clamped to this far from the board origin: that changes nothing they
+# overlap, and keeps the numbers within Altium's 32-bit coordinates (a larger
+# one is a runtime error that stops the bridge script).
+AREA_LIMIT_MILS = 100000
 
 
 def _cross(o, a, b):
@@ -61,3 +68,37 @@ def outline_points(outline) -> Tuple[Optional[List[Tuple[int, int]]], str]:
 
 def encode(points) -> str:
     return ";".join(f"{x}|{y}" for x, y in points)
+
+
+def polygon_names(names) -> Tuple[List[str], str, str]:
+    """The names to repour, how they go to Altium ('|A|B|', '' for any) and
+    an error message ('' when fine)."""
+    out = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if any("|" in n for n in out):
+        return out, "", "a polygon name cannot contain '|'"
+    return out, ("|" + "|".join(out) + "|") if out else "", ""
+
+
+def area_box(area) -> Tuple[str, str]:
+    """An [x1, y1, x2, y2] area in mils as 'x1|y1|x2|y2' in internal units
+    (corners in either order), '' for none; and an error message."""
+    if area is None:
+        return "", ""
+    if (not isinstance(area, (list, tuple)) or len(area) != 4
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                       for v in area)):
+        return "", "area is [x1, y1, x2, y2] in mils from the board origin"
+    x1, x2 = sorted((area[0], area[2]))
+    y1, y2 = sorted((area[1], area[3]))
+    if x1 == x2 or y1 == y2:
+        return "", "area has no size"
+    return "|".join(str(int(round(max(-AREA_LIMIT_MILS, min(AREA_LIMIT_MILS, v)) * COORD_PER_MIL)))
+                    for v in (x1, y1, x2, y2)), ""
+
+
+def unmatched_names(names, result) -> List[str]:
+    """Names that picked no polygon, repoured or shelved, in a repour result."""
+    found = {p.get("name", "").upper() for p in result.get("polygons", [])}
+    # shelved polygons are listed as 'NAME (Layer)'
+    found |= {s.rsplit(" (", 1)[0].upper() for s in result.get("shelved_skipped", [])}
+    return [n for n in names if n.upper() not in found]

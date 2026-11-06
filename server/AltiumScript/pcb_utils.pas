@@ -5179,3 +5179,245 @@ begin
         Props.Free;
     end;
 end;
+
+// Whether Poly overlaps Area ('x1|y1|x2|y2' in internal units from the board
+// origin; '' for anywhere). Overlap, not inside: a whole-board pour must be
+// repoured after an edit anywhere on it.
+function PolygonInArea(Board: IPCB_Board; Poly: IPCB_Polygon; Area: String): Boolean;
+var
+    R : TCoordRect;
+    X1, Y1, X2, Y2 : Integer;
+begin
+    Result := True;
+    if Area = '' then Exit;
+    X1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 0));
+    Y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 1));
+    X2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 2));
+    Y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 3));
+    R := Poly.BoundingRectangle;
+    Result := (R.Left < X2) and (X1 < R.Right) and (R.Bottom < Y2) and (Y1 < R.Top);
+end;
+
+// Repour the polygons of the focused board, all of them or those matching
+// the filters: Names is '|NAME1|NAME2|' (any case; names need not be unique),
+// NetName and LayerName a net and a signal layer, each '' for any, Area as
+// for PolygonInArea. A shelved
+// polygon (Poured false) is skipped unless IncludeShelved: repouring it
+// unshelves it. Rebuild is what repours; PCB:PolygonActions RepourAll does
+// nothing when run from a script.
+function RepourPolygons(Names: String; NetName: String; LayerName: String; Area: String;
+                        IncludeShelved: Boolean): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Poly     : IPCB_Polygon;
+    Net      : IPCB_Net;
+    Layer, Repoured : Integer;
+    Done, Shelved, Item, Props : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Net := nil;
+    if NetName <> '' then
+    begin
+        Net := FindBoardNet(Board, NetName);
+        if Net = nil then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NetName;
+            Exit;
+        end;
+    end;
+    Layer := eNoLayer;
+    if LayerName <> '' then
+    begin
+        Layer := ResolveBoardLayer(Board, LayerName);
+        if (Layer = eNoLayer) or (Layer > eBottomLayer) then
+        begin
+            Result := 'ERROR: ' + LayerName + ' is not a signal layer of this board';
+            Exit;
+        end;
+    end;
+    Names := UpperCase(Names);
+
+    Done := TStringList.Create;
+    Shelved := TStringList.Create;
+    Item := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Repoured := 0;
+        // PostProcess must run whatever happens, or Altium's undo stays broken
+        PCBServer.PreProcess;
+        try
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Poly := Iterator.FirstPCBObject;
+            while Poly <> nil do
+            begin
+                if ((Names = '') or (Pos('|' + UpperCase(Poly.Name) + '|', Names) > 0)) and
+                   ((Net = nil) or (Poly.Net = Net)) and
+                   ((Layer = eNoLayer) or (Poly.Layer = Layer)) and
+                   PolygonInArea(Board, Poly, Area) then
+                begin
+                    if (not Poly.Poured) and (not IncludeShelved) then
+                        Shelved.Add('"' + JSONEscapeString(Poly.Name + ' (' + Layer2String(Poly.Layer) + ')') + '"')
+                    else
+                    begin
+                        Poly.Rebuild;
+                        Repoured := Repoured + 1;
+                        Item.Clear;
+                        AddJSONProperty(Item, 'name', Poly.Name);
+                        AddJSONProperty(Item, 'layer', Layer2String(Poly.Layer));
+                        if Poly.Net <> nil then AddJSONProperty(Item, 'net', Poly.Net.Name) else AddJSONProperty(Item, 'net', '');
+                        AddJSONInteger(Item, 'poured_regions', PolygonPourCount(Poly, True));
+                        AddJSONInteger(Item, 'hatch_tracks', PolygonPourCount(Poly, False));
+                        Done.Add(BuildJSONObject(Item, 1));
+                    end;
+                end;
+                Poly := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        finally
+            PCBServer.PostProcess;
+        end;
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'repoured', Repoured);
+        if Done.Count > 0 then Props.Add(BuildJSONArray(Done, 'polygons')) else Props.Add('"polygons": []');
+        if Shelved.Count > 0 then Props.Add(BuildJSONArray(Shelved, 'shelved_skipped')) else Props.Add('"shelved_skipped": []');
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Done.Free;
+        Shelved.Free;
+        Item.Free;
+        Props.Free;
+    end;
+end;
+
+// What each matching polygon poured, for get_pour_report: its pieces of solid
+// copper (regions) and their sizes, so islands, slivers and pours with no net
+// or no copper stand out. A region's Area is its outline only, holes not
+// counted, so piece areas are upper bounds.
+function PourReport(Names: String; NetName: String; LayerName: String; Area: String; SliverArea: Double): String;
+var
+    Board    : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    GroupIt  : IPCB_GroupIterator;
+    Poly     : IPCB_Polygon;
+    Region   : IPCB_Region;
+    Net      : IPCB_Net;
+    Layer, Pieces, Slivers, Count : Integer;
+    A, Smallest, Total : Double;
+    Flags    : String;
+    Items, Item, Props : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Net := nil;
+    if NetName <> '' then
+    begin
+        Net := FindBoardNet(Board, NetName);
+        if Net = nil then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NetName;
+            Exit;
+        end;
+    end;
+    Layer := eNoLayer;
+    if LayerName <> '' then
+    begin
+        Layer := ResolveBoardLayer(Board, LayerName);
+        if (Layer = eNoLayer) or (Layer > eBottomLayer) then
+        begin
+            Result := 'ERROR: ' + LayerName + ' is not a signal layer of this board';
+            Exit;
+        end;
+    end;
+    Names := UpperCase(Names);
+    Items := TStringList.Create;
+    Item := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Count := 0;
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Poly := Iterator.FirstPCBObject;
+        while Poly <> nil do
+        begin
+            if ((Names = '') or (Pos('|' + UpperCase(Poly.Name) + '|', Names) > 0)) and
+               ((Net = nil) or (Poly.Net = Net)) and
+               ((Layer = eNoLayer) or (Poly.Layer = Layer)) and
+               PolygonInArea(Board, Poly, Area) then
+            begin
+                Count := Count + 1;
+                Pieces := 0;
+                Slivers := 0;
+                Smallest := -1;
+                Total := 0;
+                GroupIt := Poly.GroupIterator_Create;
+                GroupIt.AddFilter_ObjectSet(MkSet(eRegionObject));
+                Region := GroupIt.FirstPCBObject;
+                while Region <> nil do
+                begin
+                    Pieces := Pieces + 1;
+                    A := Region.Area / 100000000.0;     // internal units squared -> sq mil
+                    Total := Total + A;
+                    if (Smallest < 0) or (A < Smallest) then Smallest := A;
+                    if A < SliverArea then Slivers := Slivers + 1;
+                    Region := GroupIt.NextPCBObject;
+                end;
+                Poly.GroupIterator_Destroy(GroupIt);
+
+                Flags := '';
+                if not Poly.Poured then Flags := Flags + '"shelved", '
+                else if (Pieces = 0) and (PolygonPourCount(Poly, False) = 0) then Flags := Flags + '"no_copper", ';
+                // only on copper: a pour on a mask layer has no net by nature
+                if (Poly.Net = nil) and (Poly.Layer <= eBottomLayer) then Flags := Flags + '"no_net", ';
+                if Pieces > 1 then Flags := Flags + '"islands", ';
+                if Slivers > 0 then Flags := Flags + '"slivers", ';
+                if Flags <> '' then Flags := Copy(Flags, 1, Length(Flags) - 2);
+
+                Item.Clear;
+                AddJSONProperty(Item, 'name', Poly.Name);
+                AddJSONProperty(Item, 'layer', Layer2String(Poly.Layer));
+                if Poly.Net <> nil then AddJSONProperty(Item, 'net', Poly.Net.Name) else AddJSONProperty(Item, 'net', '');
+                AddJSONBoolean(Item, 'shelved', not Poly.Poured);
+                AddJSONInteger(Item, 'pieces', Pieces);
+                AddJSONInteger(Item, 'hatch_tracks', PolygonPourCount(Poly, False));
+                if Pieces > 0 then
+                begin
+                    AddJSONNumber(Item, 'smallest_piece_sq_mils', Smallest);
+                    AddJSONNumber(Item, 'copper_sq_mils', Total);
+                end;
+                AddJSONInteger(Item, 'slivers', Slivers);
+                Item.Add('"flags": [' + Flags + ']');
+                Items.Add(BuildJSONObject(Item, 1));
+            end;
+            Poly := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'polygons_checked', Count);
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'polygons')) else Props.Add('"polygons": []');
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Items.Free;
+        Item.Free;
+        Props.Free;
+    end;
+end;

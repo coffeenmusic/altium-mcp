@@ -2305,6 +2305,14 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
         above it. Both go above: file name on the top edge, designator a line
         (100 mil) above it, both bottom-left justified at the left edge.
       * label_orientation, label_off_wire, dangling_wire, wire_through_body.
+      * pin_off_grid - a part whose pins sit a few microns (up to 1 mil) off
+        the grid. Every wire drawn to them comes out slanted. When the part
+        itself is on the grid its drawing was shifted from its origin. When
+        every pin is off by the same amount, suggest gives the fix:
+        move_component_to (an on-grid position for edit_schematic's
+        move_component) when the whole part is that far off the grid, else
+        shift_contents_by. Pins off by different amounts get no suggestion:
+        the symbol needs fixing in its library.
       * slanted_wire - a wire segment a little (1 um to half a grid) out of
         level or plumb. It looks straight, but dragging a part on it turns it
         diagonal. Usually a symbol whose pins are off the grid (then the
@@ -2419,6 +2427,18 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
                                 altium-script skill, SCH_API_Reference.md,
                                 TIeeeSymbol). An unknown edge or symbol is
                                 reported under problems.
+            PINFUNC|<pin number>|<F1>/<F2>/...   optional: replace the
+                                Functions list (Properties panel > Pin >
+                                Functions) of every pin with that number,
+                                in the order given, e.g.
+                                PINFUNC|23|ETH1_MDIO/USART2_TX/TIM2_CH3.
+                                Use it only when the user asks for pin
+                                functions; nothing sets them otherwise, not
+                                even from a pin name with '/' in it. Names
+                                cannot contain '/' or '|'. A script cannot
+                                clear the list, so an empty one is reported
+                                under problems; Altium merges repeated names,
+                                and a stored list that differs is reported.
             These records work after SYMBOL and EDITSYMBOL alike.
             Each SYMBOL or EDITSYMBOL line starts a new symbol; the other
             records belong to the most recent one.
@@ -2477,8 +2497,9 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
              parameter now. Pins also carry
              description, symbol_inside, symbol_inside_edge,
              symbol_outside_edge and symbol_outside (IEEE symbol names as
-             PINSYMBOL takes them), and their parameters [{name, value}]
-             when they have any
+             PINSYMBOL takes them), their parameters [{name, value}]
+             when they have any, and functions ["ETH1_MDIO", ...] (the
+             Functions list, as PINFUNC sets it) when they have any
     """
     logger.info(f"Getting symbol primitives (library={library_path}, symbol={symbol_name})")
 
@@ -3166,8 +3187,120 @@ async def place_cutout(ctx: Context, outline: list, kind: str = "polygon", layer
     result = response.get("result", {})
     return json.dumps(result, indent=2) if not isinstance(result, str) else result
 
+@_tool()
+async def repour_polygons(ctx: Context, names: list = None, net: str = "", layer: str = "",
+                          area: list = None, include_shelved: bool = False, board_path: str = "") -> str:
+    """
+    Repour polygon pours on a PCB: all of them, or the ones the filters pick.
+
+    Repour after moving parts, tracks or vias through a pour, or after
+    changing clearance or polygon connect rules; Altium does not repour by
+    itself. The whole repour is one undo step.
+
+    Filters combine; with none, every polygon on the board is repoured.
+
+    Args:
+        names (list): Polygon names, any case. Names need not be unique (a
+            "GND" pour on each layer is common), so add layer to pick one.
+        net (str): Only polygons on this net.
+        layer (str): Only polygons on this signal layer, by stack name or
+            Altium's name ("Top Layer").
+        area (list): [x1, y1, x2, y2] in mils from the board origin: only
+            polygons overlapping it, e.g. around an edit. Overlapping, so a
+            whole-board pour counts for any area on it.
+        include_shelved (bool): Also repour shelved polygons, which
+            unshelves them. By default they are left shelved and listed.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with how many polygons were repoured and, for each, its
+             name, layer, net and poured_regions (separate pieces of
+             copper) and hatch_tracks. shelved_skipped lists the shelved
+             polygons that matched and were left alone.
+    """
+    import pcb_shapes
+
+    board_path = long_path(board_path)
+    names, encoded, error = pcb_shapes.polygon_names(names)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    box, error = pcb_shapes.area_box(area)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    logger.info(f"Repouring polygons (names={names or 'any'}, net={net or 'any'}, layer={layer or 'any'})")
+    response = await altium_bridge.execute_command("repour_polygons", {
+        "names": encoded, "net": net, "layer": layer, "area": box,
+        "include_shelved": "true" if include_shelved else "false", "board_path": board_path})
+    if not response.get("success", False):
+        return json.dumps({"success": False,
+                           "error": f"Failed to repour: {response.get('error', 'unknown error')}"})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    missing = pcb_shapes.unmatched_names(names, result)
+    if missing:
+        result["names_not_matched"] = missing
+    if not result.get("repoured") and not result.get("shelved_skipped"):
+        result["warning"] = "No polygon matched the filters."
+    return json.dumps(result, indent=2)
+
 # Change the design: a timeout leaves their outcome unknown, so no blind retry
-MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout"})
+MUTATING_COMMANDS.update({"create_polygon_pour", "create_cutout", "repour_polygons"})
+
+@_tool(read_only=True)
+async def get_pour_report(ctx: Context, names: list = None, net: str = "", layer: str = "",
+                          area: list = None, sliver_sq_mils: float = 100, board_path: str = "") -> str:
+    """
+    Check what polygon pours poured: islands, slivers, and pours with no net
+    or no copper. Read only; repour first (repour_polygons) to check the
+    copper as the rules now make it.
+
+    Each polygon is listed with its pieces of solid copper and their sizes,
+    and flags:
+      * islands - poured into more than one separate piece;
+      * slivers - a piece smaller than sliver_sq_mils;
+      * no_net - the polygon has no net (dead copper);
+      * no_copper - poured nothing (no room, or all removed as dead copper);
+      * shelved - shelved, so it has no copper now.
+    A piece's area is its outline, holes not subtracted: an upper bound.
+
+    Args:
+        names, net, layer, area: Filters, as for repour_polygons; with none,
+            every polygon on the board.
+        sliver_sq_mils (float): A piece below this area is a sliver
+            (default 100 sq mil).
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with each polygon (name, layer, net, pieces, smallest
+             piece, copper area, slivers, flags) and the flagged ones first.
+    """
+    import pcb_shapes
+
+    names, encoded, error = pcb_shapes.polygon_names(names)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    box, error = pcb_shapes.area_box(area)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    if (not isinstance(sliver_sq_mils, (int, float)) or isinstance(sliver_sq_mils, bool)
+            or not sliver_sq_mils >= 0 or sliver_sq_mils == float("inf")):
+        return json.dumps({"success": False, "error": "sliver_sq_mils must be a number of at least 0"})
+    response = await altium_bridge.execute_command("pour_report", {
+        "names": encoded, "net": net, "layer": layer, "area": box,
+        # Altium reads it as a 32-bit integer; no piece of copper is near this
+        "sliver_sq_mils": int(round(min(sliver_sq_mils, 2e9))), "board_path": long_path(board_path)})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": response.get("error", "unknown error")})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        return result
+    polys = result.get("polygons", [])
+    polys.sort(key=lambda p: (not p.get("flags"), p.get("layer", ""), p.get("name", "")))
+    result["flagged"] = sum(1 for p in polys if p.get("flags"))
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
@@ -4902,7 +5035,8 @@ async def get_pcb_rules(ctx: Context) -> str:
     return json.dumps(rules_data, indent=2)
 
 @_tool()
-async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200) -> str:
+async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200, rules: list = None,
+                  nets: list = None, area: list = None) -> str:
     """
     Run the design rule check (DRC) on a PCB and list the violations.
 
@@ -4921,6 +5055,17 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
         board_path (str): Full path of the .PcbDoc to check. It is opened if
             needed and brought to the front. Empty: the focused board, or
             the one the PCB tools last used.
+        rules (list): Only violations of these rules: each is a rule's own
+            name or a rule kind ("Clearance", "Width", "Short-Circuit",
+            "Un-Routed Net", "Hole To Hole Clearance", ...), whole, in any
+            case and with or without spaces. "Clearance" is the electrical
+            clearance rules only, not hole-to-hole or silk clearances. The
+            whole check still runs: Altium checks every enabled rule.
+        nets (list): Only violations with an object on one of these nets.
+        area (list): Only violations located in [x1, y1, x2, y2] (mils from
+            the board origin), by their own or an object's position.
+            With any filter, matching_count counts the matching violations;
+            listed_by_rule always counts the ones listed.
         max_violations (int): How many violations to list in full.
             violation_count counts every violation the check found, but
             Altium stops the check at its own violation limit (500 unless
@@ -4935,6 +5080,21 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
     """
     import drc
 
+    # The filters are checked before the check runs, which takes a while.
+    # A lone name counts as a list of one, not as letters.
+    rules = [rules] if isinstance(rules, str) else rules
+    nets = [nets] if isinstance(nets, str) else nets
+    for label, names in (("rules", rules), ("nets", nets)):
+        if names is not None and (not isinstance(names, (list, tuple))
+                                  or not all(isinstance(n, str) for n in names)):
+            return json.dumps({"success": False, "error": f"{label} is a list of names"})
+    rules = [r for r in rules or () if r.strip()]
+    nets = [n for n in nets or () if n.strip()]
+    if area is not None and (not isinstance(area, (list, tuple)) or len(area) != 4 or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in area)):
+        return json.dumps({"success": False, "error": "area is [x1, y1, x2, y2] in mils from the board origin"})
+    filtered = bool(rules or nets or area is not None)
+
     board_path = long_path(board_path)
     logger.info(f"Running DRC on {board_path or 'the focused board'}")
     started = time.time()
@@ -4942,7 +5102,10 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
     driver = asyncio.create_task(drc.drive_dialog(outcome, PROGRESS_FILE))
     try:
         response = await altium_bridge.execute_command(
-            "run_drc", {"board_path": board_path, "max_violations": int(max_violations)})
+            "run_drc", {"board_path": board_path,
+                        # filtered: the violations Altium kept (500 unless its
+                        # limit was raised), up to a cap, then filter
+                        "max_violations": drc.FILTER_FETCH if filtered else int(max_violations)})
     finally:
         driver.cancel()
         try:
@@ -4970,6 +5133,21 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200)
         if outcome.notes:
             out["notes"] = outcome.notes
     out.update({k: v for k, v in result.items() if k != "success"})
+    # By how much each violation fails, as numbers; then the filters
+    for v in out.get("violations", []):
+        v.update(drc.measurement(v.get("description", "")))
+    if filtered:
+        fetched = out.get("violations", [])
+        picked = [v for v in fetched if drc.matches(v, rules, nets, area)]
+        out["matching_count"] = len(picked)
+        out["violations"] = picked[:max(0, int(max_violations))]
+        if out.get("violation_count", 0) > len(fetched):
+            out["filter_note"] = (f"The filters looked at the first {len(fetched)} of "
+                                  f"{out['violation_count']} violations; matching_count may be low.")
+    by_rule = {}
+    for v in out.get("violations", []):
+        by_rule[v.get("rule", "")] = by_rule.get(v.get("rule", ""), 0) + 1
+    out["listed_by_rule"] = by_rule
     report = drc.find_report(result.get("board", board_path), started)
     if report is not None:
         try:
@@ -5197,14 +5375,29 @@ async def get_project_info(ctx: Context) -> str:
     return await _simple_command("get_project_info", {}, "project info")
 
 
+def _project_path(project_path: str):
+    """A compile tool's project_path in its long form, and an error ('' when
+    fine): empty for the focused project, else an existing .PrjPcb. Altium
+    would open any project file it is given, a script project too."""
+    if not project_path:
+        return "", ""
+    path = long_path(project_path)
+    if not path.lower().endswith(".prjpcb"):
+        return path, f"project_path must be a .PrjPcb file: {project_path}"
+    if not os.path.isfile(path):
+        return path, f"project_path not found: {project_path}"
+    return path, ""
+
+
 @_tool(read_only=True)
 async def get_project_components(ctx: Context, include_parameters: bool = False, designators: list = None,
                                  sheet: str = "", offset: int = 0, limit: int = 0,
-                                 parameter_names: list = None) -> str:
+                                 parameter_names: list = None, project_path: str = "") -> str:
     """
     List the components of the compiled project (schematic side).
 
-    Compiles the focused project in memory first (nothing is saved). Unlike
+    Compiles the project in memory first (nothing is saved): project_path,
+    or the focused project, as for get_erc_violations. Unlike
     the PCB component tools, this returns the schematic Comment of each
     instance, which is where values of generic passives usually live.
 
@@ -5225,6 +5418,7 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
         limit (int): At most this many components; 0 for as many as fit.
         parameter_names (list): Return only these parameters, e.g.
             ["Manufacturer_Part_Number"]. Implies include_parameters.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
         str: JSON with project_path, component_count (the whole project),
@@ -5234,8 +5428,12 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
     """
     import project_components
 
+    project_path, error = _project_path(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
     text = await _simple_command("get_project_components",
-                                 {"include_parameters": include_parameters or bool(parameter_names)},
+                                 {"include_parameters": include_parameters or bool(parameter_names),
+                                  "project_path": project_path},
                                  "project components")
     try:
         data = json.loads(text, strict=False)
@@ -5249,22 +5447,37 @@ async def get_project_components(ctx: Context, include_parameters: bool = False,
 
 
 @_tool(read_only=True)
-async def get_erc_violations(ctx: Context, compile: bool = True) -> str:
+async def get_erc_violations(ctx: Context, compile: bool = True, project_path: str = "") -> str:
     """
-    Compile the focused project and list its ERC/compiler violations.
+    Compile a project and list its ERC/compiler violations.
 
-    Compiling works in memory and does not save any document (Altium may
+    Give project_path to compile exactly that project (it is opened if
+    needed): without it the focused project is compiled, which is whatever
+    document last had focus, and "Free Documents" is refused. The result
+    names the project it compiled.
+
+    Compiling reads each sheet from disk, except a sheet open in Altium with
+    unsaved changes: that one is compiled from Altium's copy and listed in
+    unsaved_in_altium. Save it (or close it unsaved) for the file to count.
+    Sheets the project lists but that are not on disk are in
+    missing_on_disk. Compiling does not save any document (Altium may
     refresh the derived .PrjPcbStructure file).
 
     Args:
         compile (bool): Compile before reading (default True). False returns
             the violations of the last compilation.
+        project_path (str): Full path of the .PrjPcb to compile.
 
     Returns:
-        str: JSON with total, fatal, errors, warnings and violations
+        str: JSON with project_path, unsaved_in_altium, missing_on_disk,
+             total, fatal, errors, warnings and violations
              [{level, type, detail}]
     """
-    return await _simple_command("get_erc_violations", {"compile": compile}, "ERC violations")
+    project_path, error = _project_path(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    return await _simple_command("get_erc_violations", {"compile": compile, "project_path": project_path},
+                                 "ERC violations")
 
 
 @_tool(read_only=True)

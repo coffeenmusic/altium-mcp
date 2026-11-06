@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from pcb_shapes import encode, outline_points  # noqa: E402
+from pcb_shapes import area_box, encode, outline_points, polygon_names, unmatched_names  # noqa: E402
 
 
 class OutlineTest(unittest.TestCase):
@@ -33,6 +33,30 @@ class OutlineTest(unittest.TestCase):
         self.assertIn("cross", outline_points([[0, 0], [20, 0], [20, 10], [10, -5], [0, 10]])[1])
         self.assertIn("[x, y]", outline_points([[0, 0, 0], [1, 1], [2, 0]])[1])
         self.assertIn("[x, y]", outline_points([["a", 0], [1, 1], [2, 0]])[1])
+
+
+class AreaTest(unittest.TestCase):
+    def test_area_box(self):
+        self.assertEqual(area_box(None), ("", ""))
+        self.assertEqual(area_box([100, 50, 0, 0]), ("0|0|1000000|500000", ""))
+        self.assertIn("no size", area_box([0, 0, 0, 10])[1])
+        self.assertIn("[x1, y1, x2, y2]", area_box([0, 0, 10])[1])
+        self.assertIn("[x1, y1, x2, y2]", area_box([0, 0, float("inf"), 10])[1])
+
+    def test_area_beyond_the_design_space_is_clamped(self):
+        # unclamped, -1e7 mils is -1e11 internal units: past 32 bits in Altium
+        self.assertEqual(area_box([-1e7, 0, 1e7, 10]), ("-1000000000|0|1000000000|100000", ""))
+
+
+class PolygonNamesTest(unittest.TestCase):
+    def test_encoding(self):
+        self.assertEqual(polygon_names(None), ([], "", ""))
+        self.assertEqual(polygon_names([" GND ", "", "VBAT"]), (["GND", "VBAT"], "|GND|VBAT|", ""))
+        self.assertIn("'|'", polygon_names(["A|B"])[2])
+
+    def test_unmatched_ignores_case_and_counts_shelved(self):
+        result = {"polygons": [{"name": "GND"}], "shelved_skipped": ["P018 (Bottom Layer)"]}
+        self.assertEqual(unmatched_names(["gnd", "p018", "NOPE"], result), ["NOPE"])
 
 
 if __name__ == "__main__":
