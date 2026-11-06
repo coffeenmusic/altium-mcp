@@ -16,8 +16,11 @@
 The pure parts (parsing, choosing a window, clipping) are here so they can be
 tested without Altium; the window walking needs pywin32 and runs on Windows.
 """
+import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+from altium_files import long_path
 
 KINDS = ("current", "document", "dialog", "panel", "region")
 
@@ -25,6 +28,9 @@ KINDS = ("current", "document", "dialog", "panel", "region")
 FRAME_CLASSES = {"TDocumentForm", "TApplication"}
 # Smaller than this, a top-level window is a tooltip or a hint, not a dialog
 MIN_DIALOG_SIZE = 60
+# Altium's document kinds by file extension
+DOCUMENT_KINDS = {".schdoc": "SCH", ".pcbdoc": "PCB", ".schlib": "SCHLIB",
+                  ".pcblib": "PCBLIB", ".outjob": "OUTPUTJOB"}
 
 Rect = Tuple[int, int, int, int]  # left, top, right, bottom
 
@@ -80,6 +86,14 @@ def parse_target(target: Optional[str]) -> Target:
     return Target("region", region=(x, y, x + w, y + h))
 
 
+def implied_view_type(target: Optional[str], view_type: Optional[str],
+                      zoom_to: Optional[Sequence[str]]) -> Optional[str]:
+    """view_type to go by. zoom_to on its own means a board, as it always has."""
+    if zoom_to and not (target and target.strip()) and not (view_type and view_type.strip()):
+        return "pcb"
+    return view_type
+
+
 def resolve(target: Optional[str], view_type: Optional[str]) -> Optional[Target]:
     """The target to capture, or None for the old view_type behaviour.
 
@@ -102,6 +116,7 @@ class Win:
     rect: Rect
     parent_cls: str = ""
     children: List["Win"] = field(default_factory=list)
+    pid: int = 0
 
     @property
     def width(self) -> int:
@@ -110,6 +125,20 @@ class Win:
     @property
     def height(self) -> int:
         return self.rect[3] - self.rect[1]
+
+
+def should_return_foreground(previous_pid: int, front_pid: int, altium_pids: Set[int]) -> bool:
+    """Altium is in front and another program was before: hand the foreground
+    back. Not when Altium was in front anyway, or the user has moved on."""
+    return bool(previous_pid) and previous_pid not in altium_pids and front_pid in altium_pids
+
+
+def pick_main_window(top_windows: Sequence[Win], altium_pids: Set[int]) -> Optional[Win]:
+    """Altium's main frame: the largest window of an Altium process with its
+    name in the title. The title alone is not enough: a maximised browser tab
+    called 'Altium...' has it too."""
+    frames = [w for w in top_windows if w.pid in altium_pids and "Altium" in w.text]
+    return max(frames, key=lambda w: w.width * w.height, default=None)
 
 
 def pick_dialog(top_windows: Sequence[Win]) -> Optional[Win]:
@@ -172,6 +201,45 @@ def pick_document_view(children: Sequence[Win], document: str) -> Optional[Win]:
         if title == want or title.endswith(" " + want) or title.endswith("]" + want):
             return v
     return None
+
+
+def focus_params(t: Target, zoom_to: Optional[Sequence[str]], open_if_closed: bool) -> Dict:
+    """The focus_document request for a document target. The path goes the way
+    Altium writes it: as written, an open document may not be recognised, and
+    open_if_closed would then open a second copy of it."""
+    params = {"path": long_path(t.name), "open_if_closed": "true" if open_if_closed else "false"}
+    if zoom_to:
+        params["designators"] = list(zoom_to)
+    return params
+
+
+def view_document(title: Optional[str]) -> str:
+    """The file name in a document view's title: Altium puts the sheet number
+    in front ('[24] PD_Mon.SchDoc') and marks unsaved changes with a star."""
+    text = (title or "").strip()
+    if text.startswith("[") and "]" in text:
+        text = text.split("]", 1)[1]
+    return text.rstrip(" *").strip()
+
+
+def document_kind(name: str) -> str:
+    """Altium's kind for a file name, '' for anything else."""
+    return DOCUMENT_KINDS.get(os.path.splitext(name or "")[1].lower(), "")
+
+
+def captured_metadata(t: Target, document: Optional[str], kind: Optional[str],
+                      view_title: Optional[str]) -> Dict:
+    """What was captured, under the keys view_type captures report too.
+
+    document and kind are what Altium said, when it was asked; otherwise the
+    view's title tells. All None for a dialog, panel or region: no document.
+    """
+    if t.kind not in ("current", "document"):
+        return {"captured_kind": None, "captured_document": None, "view_type": None}
+    name = _file_name(document) if document else view_document(view_title)
+    kind = (kind or document_kind(name)).upper()
+    return {"captured_kind": kind or None, "captured_document": name or None,
+            "view_type": {"PCB": "pcb", "SCH": "sch"}.get(kind)}
 
 
 def clip(rect: Rect, bounds: Rect) -> Optional[Rect]:

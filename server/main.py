@@ -4348,6 +4348,21 @@ def _bring_to_front(hwnd):
             win32process.AttachThreadInput(this_thread, front_thread, False)
 
 
+def _return_foreground(previous_window):
+    """Give the window that was in front back the foreground, when Altium
+    still has it. Starting any command in Altium brings Altium up, so this is
+    due again after every command, not only after the capture."""
+    try:
+        previous_pid = win32process.GetWindowThreadProcessId(previous_window)[1] if previous_window else 0
+        front = win32gui.GetForegroundWindow()
+        front_pid = win32process.GetWindowThreadProcessId(front)[1] if front else 0
+        if screenshot_target.should_return_foreground(
+                previous_pid, front_pid, set(win_processes.pids_by_name("X2.EXE"))):
+            _bring_to_front(previous_window)
+    except Exception as e:
+        logger.debug(f"Could not give the foreground back: {e}")
+
+
 def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
     """Copy a window's pixels, frame included, into an RGB image.
 
@@ -4375,6 +4390,23 @@ def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
         if mfc_dc is not None:
             mfc_dc.DeleteDC()
         win32gui.ReleaseDC(hwnd, hwnd_dc)
+
+
+def _save_debug_screenshot(label: str, png_bytes: bytes):
+    """Path of a debug copy of a capture, or None. A copy only on request, and
+    with the per-user data: the install folder is replaced on every update
+    (non-fatal if it fails)."""
+    if os.environ.get("ALTIUM_MCP_DEBUG_SCREENSHOTS", "") in ("", "0"):
+        return None
+    try:
+        debug_path = _data_dir() / f"screenshot_{label}.png"
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        debug_path.write_bytes(png_bytes)
+        logger.info(f"Saved debug screenshot to {debug_path}")
+        return str(debug_path)
+    except Exception as save_error:
+        logger.warning(f"Could not save debug screenshot: {save_error}")
+        return None
 
 
 @_tool(read_only=True)
@@ -4407,14 +4439,17 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
             open) and captures the whole window. Ignored when target is given.
         zoom_to (list, optional): Component designators (e.g. ["U12", "R42"]).
             PCB only: Altium zooms to them before the capture. Works with
-            "document" / "document:<board>" (and view_type 'pcb').
+            "document" / "document:<board>" and view_type 'pcb'; given on its
+            own it means view_type 'pcb'.
         open_if_closed (bool): Let "document:<name>" open a document of the
             open projects that is not open yet. Default false.
 
     Returns:
-        JSON metadata (what was captured: target, rectangle, document, whether
-        anything was switched, opened or closed) plus the PNG image.
+        JSON metadata (what was captured: target, rectangle, captured_kind,
+        captured_document, view_type, whether anything was switched, opened or
+        closed) plus the PNG image.
     """
+    view_type = screenshot_target.implied_view_type(target, view_type, zoom_to)
     try:
         resolved = screenshot_target.resolve(target, view_type)
     except screenshot_target.TargetError as e:
@@ -4434,14 +4469,14 @@ def _altium_main_window():
     def collect(hwnd, _):
         if win32gui.IsWindowVisible(hwnd) and "Altium" in win32gui.GetWindowText(hwnd) \
                 and not win32gui.IsIconic(hwnd):
-            l, t, r, b = win32gui.GetWindowRect(hwnd)
-            found.append(((r - l) * (b - t), hwnd, win32gui.GetWindowText(hwnd)))
+            found.append(screenshot_target.Win(
+                hwnd=hwnd, cls="", text=win32gui.GetWindowText(hwnd),
+                rect=tuple(win32gui.GetWindowRect(hwnd)),
+                pid=win32process.GetWindowThreadProcessId(hwnd)[1]))
         return True
     win32gui.EnumWindows(collect, 0)
-    if not found:
-        return None, None
-    _, hwnd, title = max(found)
-    return hwnd, title
+    frame = screenshot_target.pick_main_window(found, set(win_processes.pids_by_name("X2.EXE")))
+    return (frame.hwnd, frame.text) if frame else (None, None)
 
 
 def _win(hwnd, parent_cls=""):
@@ -4531,21 +4566,22 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
     info = {"success": True, "target": t.describe(), "switched_document": False,
             "opened_document": False, "closed_again": False, "restored_document": None}
     restore_path = opened_path = None
+    focused_kind = ""
 
     # Only a named document (or a zoom) needs Altium itself; everything else
     # is read from the windows, so it also works while a dialog is open
     if t.kind == "document" and (t.name or zoom_to):
-        params = {"path": t.name, "open_if_closed": "true" if open_if_closed else "false"}
-        if zoom_to:
-            params["designators"] = list(zoom_to)
-        response = await altium_bridge.execute_command("focus_document", params)
+        response = await altium_bridge.execute_command(
+            "focus_document", screenshot_target.focus_params(t, zoom_to, open_if_closed))
         if not response.get("success", False):
+            await asyncio.to_thread(_return_foreground, previous_window)
             return json.dumps({"success": False, "target": t.describe(),
                                "error": response.get("error", "Could not bring the document to the front")})
         focus = response.get("result", {})
         focus = focus if isinstance(focus, dict) else {}
         before = focus.get("previous_document") or ""
         now = focus.get("focused_document") or ""
+        focused_kind = focus.get("focused_kind") or ""
         info["document"] = now or None
         info["switched_document"] = bool(before and now and before.lower() != now.lower())
         info["opened_document"] = bool(focus.get("opened"))
@@ -4561,7 +4597,6 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
         if not hwnd:
             return {"success": False, "error": "No Altium window found"}
         pid = win32process.GetWindowThreadProcessId(hwnd)[1]
-        previous_pid = win32process.GetWindowThreadProcessId(previous_window)[1] if previous_window else 0
 
         def altium_in_front():
             fg = win32gui.GetForegroundWindow()
@@ -4632,14 +4667,16 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
             info["blank"] = screenshot_target.is_blank(img)
             info["paint_retries"] = tries
         finally:
-            # Not when the user has already moved on by themselves
-            if previous_pid not in (0, pid) and altium_in_front():
-                _bring_to_front(previous_window)
+            _return_foreground(previous_window)
         buffer = io.BytesIO()
         img.save(buffer, format='PNG')
+        png_bytes = buffer.getvalue()
+        info.update(screenshot_target.captured_metadata(
+            t, info.get("document"), focused_kind, info.get("active_document_view")))
         info.update({"rect": list(rect), "width": rect[2] - rect[0], "height": rect[3] - rect[1],
-                     "foreground_confirmed": activated, "image_format": "PNG"})
-        return {"success": True, "png": buffer.getvalue()}
+                     "foreground_confirmed": activated, "image_format": "PNG",
+                     "debug_file": _save_debug_screenshot(t.kind, png_bytes)})
+        return {"success": True, "png": png_bytes}
 
     try:
         try:
@@ -4659,6 +4696,8 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
             info["closed_again"] = bool(res.get("closed"))
             if not ok:
                 info["restore_error"] = back.get("error", "unknown error")
+            # That command brought Altium up again
+            await asyncio.to_thread(_return_foreground, previous_window)
 
     if not result.get("success", False):
         out = {"success": False, "target": t.describe(), "error": result.get("error", "unknown error")}
@@ -4842,20 +4881,7 @@ async def _view_type_screenshot(view_type: str, zoom_to: list = None):
                     buffer = io.BytesIO()
                     img.save(buffer, format='PNG')
                     png_bytes = buffer.getvalue()
-
-                    # A debug copy only on request, and with the per-user
-                    # data: the install folder is replaced on every update
-                    # (non-fatal if it fails)
-                    debug_filename = None
-                    if os.environ.get("ALTIUM_MCP_DEBUG_SCREENSHOTS", "") not in ("", "0"):
-                        try:
-                            debug_path = _data_dir() / f"screenshot_{view_type}.png"
-                            debug_path.parent.mkdir(parents=True, exist_ok=True)
-                            debug_path.write_bytes(png_bytes)
-                            debug_filename = str(debug_path)
-                            logger.info(f"Saved debug screenshot to {debug_filename}")
-                        except Exception as save_error:
-                            logger.warning(f"Could not save debug screenshot: {save_error}")
+                    debug_filename = _save_debug_screenshot(view_type, png_bytes)
 
                     return {
                         "success": True,

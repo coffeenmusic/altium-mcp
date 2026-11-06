@@ -217,6 +217,10 @@ begin
             Result := Result + Path;
         end;
     end;
+    // A view that is in no project, such as the Home Page: the document to go
+    // back to after a capture can be one
+    if (Result = '') and (Client.GetDocumentByPath(Name) <> nil) then
+        Result := Name;
 end;
 
 // File names of the open documents of the open projects, for error messages
@@ -301,7 +305,7 @@ begin
         if ClosePath <> '' then
         begin
             Doc := Client.GetDocumentByPath(ClosePath);
-            if (Doc <> nil) and (not Doc.Modified) then
+            if (Doc <> nil) and (not DocumentModified(Doc)) then
             begin
                 Client.CloseDocument(Doc);
                 Closed := True;
