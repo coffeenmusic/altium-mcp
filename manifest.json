@@ -249,7 +249,7 @@
     },
     {
       "name": "get_screenshot",
-      "description": "Take a screenshot of the Altium window"
+      "description": "Take a screenshot of one named thing in Altium: the window, a document, a dialog, a panel or a screen region"
     },
     {
       "name": "run_altium_script",

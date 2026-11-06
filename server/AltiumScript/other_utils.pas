@@ -455,7 +455,8 @@ begin
        (CommandName = 'create_pcb_footprint') or
        (CommandName = 'get_project_info') or
        (CommandName = 'get_project_components') or
-       (CommandName = 'get_erc_violations') then
+       (CommandName = 'get_erc_violations') or
+       (CommandName = 'focus_document') then
     begin
         Result := True;
         Exit;

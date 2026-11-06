@@ -168,6 +168,219 @@ begin
     end;
 end;
 
+// Document kind Client.OpenDocument expects for a file, from its extension
+function DocumentKindForPath(Path: String): String;
+var
+    Ext : String;
+begin
+    Ext := UpperCase(ExtractFileExt(Path));
+    if Ext = '.SCHDOC' then Result := 'SCH'
+    else if Ext = '.PCBDOC' then Result := 'PCB'
+    else if Ext = '.SCHLIB' then Result := 'SCHLIB'
+    else if Ext = '.PCBLIB' then Result := 'PCBLIB'
+    else if Ext = '.OUTJOB' then Result := 'OUTPUTJOB'
+    else Result := '';
+end;
+
+// Full paths of the documents in the open projects (free documents included)
+// that Name means, joined with '|'. Name is a full path or a bare file name
+// (case-insensitive). OpenOnly keeps the documents Altium has open.
+function DocumentPathsFor(Name: String; OpenOnly: Boolean): String;
+var
+    P, I    : Integer;
+    Project : IProject;
+    Path    : String;
+    ByPath  : Boolean;
+begin
+    Result := '';
+    ByPath := (Pos('\', Name) > 0) or (Pos('/', Name) > 0);
+    if ByPath then
+    begin
+        if (Client.GetDocumentByPath(Name) <> nil) or ((not OpenOnly) and FileExists(Name)) then
+            Result := Name;
+        Exit;
+    end;
+    for P := -1 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        if P < 0 then
+            Project := GetWorkspace.DM_FreeDocumentsProject
+        else
+            Project := GetWorkspace.DM_Projects(P);
+        if Project = nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            if UpperCase(ExtractFileName(Path)) <> UpperCase(Name) then Continue;
+            if OpenOnly and (Client.GetDocumentByPath(Path) = nil) then Continue;
+            if Pos('|' + UpperCase(Path) + '|', '|' + UpperCase(Result) + '|') > 0 then Continue;
+            if Result <> '' then Result := Result + '|';
+            Result := Result + Path;
+        end;
+    end;
+    // A view that is in no project, such as the Home Page: the document to go
+    // back to after a capture can be one
+    if (Result = '') and (Client.GetDocumentByPath(Name) <> nil) then
+        Result := Name;
+end;
+
+// File names of the open documents of the open projects, for error messages
+function OpenDocumentNames: String;
+var
+    P, I    : Integer;
+    Project : IProject;
+    Path    : String;
+begin
+    Result := '';
+    for P := -1 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        if P < 0 then
+            Project := GetWorkspace.DM_FreeDocumentsProject
+        else
+            Project := GetWorkspace.DM_Projects(P);
+        if Project = nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            // Project files are open too, but are no document to capture
+            if Pos('.PRJ', UpperCase(ExtractFileExt(Path))) = 1 then Continue;
+            if Client.GetDocumentByPath(Path) = nil then Continue;
+            if Pos(', ' + UpperCase(ExtractFileName(Path)) + ', ', ', ' + UpperCase(Result) + ', ') > 0 then Continue;
+            if Result <> '' then Result := Result + ', ';
+            Result := Result + ExtractFileName(Path);
+        end;
+    end;
+end;
+
+// focus_document: bring one named document to the front for a screenshot,
+// and put things back afterwards. Never opens a closed document unless the
+// request says open_if_closed, and only closes (close_path) a document that
+// has no unsaved changes. With no path it only reports what has focus.
+function ExecuteFocusDocument(RequestData: TStringList): String;
+var
+    i            : Integer;
+    Name         : String;
+    ClosePath    : String;
+    OpenIfClosed : Boolean;
+    Designators  : TStringList;
+    Paths        : String;
+    Doc          : IServerDocument;
+    PrevPath     : String;
+    PrevKind     : String;
+    Opened       : Boolean;
+    Closed       : Boolean;
+    Zoomed       : Integer;
+    Props        : TStringList;
+begin
+    Result := '';
+    Name := '';
+    ClosePath := '';
+    OpenIfClosed := False;
+    Opened := False;
+    Closed := False;
+    Zoomed := 0;
+    Designators := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"path"', RequestData[i]) > 0) then
+                Name := Trim(JSONLineValue(RequestData[i]))
+            else if (Pos('"close_path"', RequestData[i]) > 0) then
+                ClosePath := Trim(JSONLineValue(RequestData[i]))
+            else if (Pos('"open_if_closed"', RequestData[i]) > 0) then
+                OpenIfClosed := LowerCase(Trim(JSONLineValue(RequestData[i]))) = 'true'
+            else if (Pos('"designators"', RequestData[i]) > 0) then
+                i := ReadJSONStringArray(RequestData, i, Designators);
+        end;
+
+        PrevPath := '';
+        PrevKind := '';
+        if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+        begin
+            PrevPath := Client.CurrentView.OwnerDocument.FileName;
+            PrevKind := Client.CurrentView.OwnerDocument.Kind;
+        end;
+
+        // Close first: a document this command opened for an earlier capture
+        if ClosePath <> '' then
+        begin
+            Doc := Client.GetDocumentByPath(ClosePath);
+            if (Doc <> nil) and (not DocumentModified(Doc)) then
+            begin
+                Client.CloseDocument(Doc);
+                Closed := True;
+            end;
+        end;
+
+        if Name <> '' then
+        begin
+            Paths := DocumentPathsFor(Name, True);
+            if (Paths = '') and OpenIfClosed then
+            begin
+                Paths := DocumentPathsFor(Name, False);
+                if (Paths <> '') and (Pos('|', Paths) = 0) then
+                begin
+                    Doc := Client.OpenDocument(DocumentKindForPath(Paths), Paths);
+                    Opened := Doc <> nil;
+                    if not Opened then
+                    begin
+                        Result := 'ERROR: Could not open ' + Paths;
+                        Exit;
+                    end;
+                end;
+            end;
+            if Paths = '' then
+            begin
+                if OpenIfClosed then
+                    Result := 'ERROR: No document "' + Name + '" in the open projects'
+                else
+                    Result := 'ERROR: "' + Name + '" is not open, and open_if_closed is false. Open documents: ' + OpenDocumentNames;
+                Exit;
+            end;
+            if Pos('|', Paths) > 0 then
+            begin
+                Result := 'ERROR: "' + Name + '" could mean several documents (' +
+                          StringReplace(Paths, '|', ', ', REPLACEALL) + '); give the full path';
+                Exit;
+            end;
+            Doc := Client.GetDocumentByPath(Paths);
+            if Doc = nil then
+            begin
+                Result := 'ERROR: Could not find the open document ' + Paths;
+                Exit;
+            end;
+            Client.ShowDocument(Doc);
+        end;
+
+        // zoom_to acts on the board in front: the named one, or the active one
+        if (Designators.Count > 0) and (Client.CurrentView <> nil) and
+           (Client.CurrentView.OwnerDocument <> nil) and
+           (UpperCase(Client.CurrentView.OwnerDocument.Kind) = 'PCB') then
+            Zoomed := ZoomToComponents(Designators);
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'previous_document', PrevPath);
+        AddJSONProperty(Props, 'previous_kind', PrevKind);
+        if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+        begin
+            AddJSONProperty(Props, 'focused_document', Client.CurrentView.OwnerDocument.FileName);
+            AddJSONProperty(Props, 'focused_kind', Client.CurrentView.OwnerDocument.Kind);
+        end
+        else
+        begin
+            AddJSONProperty(Props, 'focused_document', '');
+            AddJSONProperty(Props, 'focused_kind', '');
+        end;
+        AddJSONBoolean(Props, 'opened', Opened);
+        AddJSONBoolean(Props, 'closed', Closed);
+        AddJSONInteger(Props, 'zoomed_component_count', Zoomed);
+        Result := BuildJSONObject(Props);
+    finally
+        Designators.Free;
+        Props.Free;
+    end;
+end;
+
 // Extract the create schematic symbol logic
 function ExecuteCreateSchematicSymbol(RequestData: TStringList): String;
 var
@@ -1307,6 +1520,8 @@ begin
             Result := GetAllComponentData(ROOT_DIR, False);            
         'take_view_screenshot':
             Result := ExecuteTakeViewScreenshot(RequestData);            
+        'focus_document':
+            Result := ExecuteFocusDocument(RequestData);
         'get_library_symbol_reference':
             Result := GetLibrarySymbolReference(ROOT_DIR);            
         'create_schematic_symbol':
