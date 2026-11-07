@@ -8,6 +8,7 @@ import asyncio
 import logging
 import logging.handlers
 import subprocess
+import tempfile
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
@@ -28,7 +29,7 @@ import script_bundle
 import pcblib_file
 import uuid
 
-from altium_files import long_path, read_altium_text, write_altium_text
+from altium_files import long_path, read_altium_text, spec_with_long_library, write_altium_text
 from exchange_lock import ExchangeLock
 from altium_install import find_altium_exe
 import routing
@@ -2452,10 +2453,30 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     """
     logger.info(f"Creating symbols batch from {spec_file}")
 
-    response = await altium_bridge.execute_command(
-        "create_symbols_batch",
-        {"spec_file": spec_file}
-    )
+    # The script opens or focuses the LIBRARY| path as written, so a short
+    # (8.3) or forward-slash path would open a second copy of a library that
+    # is open. Altium gets a copy with the long path; the caller's file is
+    # left as it is.
+    copy = None
+    try:
+        fixed = spec_with_long_library(read_altium_text(spec_file))
+    except OSError:
+        fixed = None  # missing or unreadable: the script reports it
+    if fixed is not None:
+        fd, copy = tempfile.mkstemp(prefix="symbols_spec_", suffix=".txt", dir=EXCHANGE_DIR)
+        os.close(fd)
+        write_altium_text(copy, fixed)
+    try:
+        response = await altium_bridge.execute_command(
+            "create_symbols_batch",
+            {"spec_file": copy or spec_file}
+        )
+    finally:
+        if copy:
+            try:
+                os.remove(copy)
+            except OSError:
+                pass
 
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
