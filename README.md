@@ -46,7 +46,7 @@ You shouldn't need to restart Claude and you should now see altium-mcp in the to
 
 ### Bootstrap Venv (Recommended)
 
-This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is tiny (~60 KB) and works on Python 3.10 to 3.14.
+This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is small (about 300 KB) and works on Python 3.10 to 3.14.
 
 **Python versions:** 3.10 to 3.13 install the hash-locked `requirements.txt`. 3.14 has no wheel for the locked pillow, so it installs the fallback list in `start_server.py` instead. With `mcp` 1.30 that list no longer caps pydantic, so it also resolves on 3.15, but 3.15 has not been tested.
 
@@ -74,6 +74,7 @@ On a slow network the first build can exceed the client's 60-second startup time
 Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, requirements.txt, server -DestinationPath altium-mcp.zip
 Rename-Item altium-mcp.zip altium-mcp.dxt
 ```
+   Build from a clean checkout. Release packages leave out `server/tests/`, `__pycache__` folders, `*.pyc` and log files.
 
 **Do NOT include `server/lib/` or `server/.venv/` in the .dxt.** The whole point is that these are created on the user's machine.
 
@@ -123,7 +124,7 @@ This approach bundles all dependencies in `server/lib/` and sets `PYTHONPATH` to
 
 ## Configuration
 
-When launching claude for the first time, the server will automatically try to locate your Altium Designer installation. It will search for all directories that start with `C:\Program Files\Altium\AD*` and use the one with the largest revision number. If it cannot find any, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server. Altium's DelphiScript scripting is used to create an API between the mcp server and Altium. 
+The server finds your Altium Designer installation by itself, and uses the newest build when several are installed. It looks first at the builds Altium's installers record in the registry (`HKLM\SOFTWARE\Altium\Builds`), wherever Altium was installed, then at a running Altium, and last in `C:\Program Files\Altium`. If it finds none, it asks you to select the Altium executable (X2.EXE) the first time a tool runs; it never asks while the server is starting. The choice is kept in `config.json` in the data folder (see above). Altium's DelphiScript scripting is used to create an API between the mcp server and Altium.
 
 ## Available Tools
 
@@ -164,7 +165,7 @@ The server provides several tools to interact with Altium Designer:
 
   These records work after `SYMBOL` and `EDITSYMBOL` alike. An unknown pin number, edge, symbol or justification is listed under `problems`; the rest of the batch still runs.
 
-  The result lists `created`, `edited`, `failed` and `problems`. Created and edited symbols leave the library modified and unsaved, so the user reviews them and saves; the tool never saves a library. Objects a script adds through PreProcess/PostProcess do not reliably set Altium's modified flag (in a PCB library they never do), so the symbol and footprint tools set it themselves. A `LIBRARY|<path>` line focuses that library if it is already open (it never reloads it, which would discard unsaved symbols) and opens it otherwise. If that library cannot be focused, the batch stops before changing anything.
+  The result lists `created`, `edited`, `failed` and `problems`. Created and edited symbols leave the library modified and unsaved, so the user reviews them and saves; the tool never saves a library. Objects a script adds through PreProcess/PostProcess do not reliably set Altium's modified flag (in a PCB library they never do), so the symbol and footprint tools set it themselves. A `LIBRARY|<path>` line focuses that library if it is already open (it never reloads it, which would discard unsaved symbols) and opens it otherwise. If that library cannot be focused, the batch stops before changing anything. The library editor draws the symbol it shows from a picture made when that symbol was shown, so new parameters on it would not appear: a batch that edited symbols therefore ends by showing another symbol and then that one again. A library with a single symbol has nothing to switch to; `problems` then says the new parameters appear once the library is reopened.
 - `build_schematic`: Build a wired schematic on a new sheet from a circuit description: parts from a `.SchLib` (full path; `.IntLib` is not supported), wires, junctions, net labels, power ports and notes, in mils (fractions are kept, so metric positions are exact). Returns every placed pin's true connection point, so a second call can route wires from measured coordinates, and lists any part it could not place. The new sheet is kept out of your project.
 - `check_schematic`: Check saved sheets for drafting problems: two-pin parts tapping their net at the pin, net labels away from their wire's free end or hanging off it, text touching wires, pins or other text (with a clear layout suggested), dangling wires, wires slightly out of level, parts whose pins sit a few microns off the grid, and sheet symbol layout. Takes a `.SchDoc`, a `.PrjPcb` or a folder and reads the saved files, so it needs no running Altium. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #64](https://github.com/coffeenmusic/altium-mcp/pull/64), pins off the grid [PR #73](https://github.com/coffeenmusic/altium-mcp/pull/73)).
 - `edit_schematic`: Change an existing sheet: move, rotate, mirror, delete or place parts, set parameters, move designator and parameter text, add wires, net labels, power ports, junctions and no-ERC markers, and delete objects at a point. Coordinates are in mil or mm, so `check_schematic`'s suggestions apply directly. The whole edit is one undo step in Altium, and the sheet is saved only when asked. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #70](https://github.com/coffeenmusic/altium-mcp/pull/70)).
@@ -172,7 +173,7 @@ The server provides several tools to interact with Altium Designer:
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 - `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
 
-Library paths (`library_path`, `LIBRARY|`, `FPLIB|`) may contain commas and may be spelled in a different case or with forward slashes. An open library is matched to its path after normalizing case and separators, so the tools never open a second copy of it.
+Library paths (`library_path`, `LIBRARY|`, `FPLIB|`) may contain commas and may be spelled in a different case or with forward slashes; `LIBRARY|` and `FPLIB|` paths may also use short (8.3) folder names. An open library is matched to its path after normalizing case and separators, so the tools never open a second copy of it.
 
 ![Symbol Creator](assets/symbol_creator.gif)
 
@@ -275,9 +276,17 @@ Files exchanged with the scripts are read and written the way Altium does: in th
 - Jeff Collins has an XIA_Release_Manager.pas script that taught me the art of the Output Job. See his post on the Altium Forums: https://forum.live.altium.com/#/posts/189423
 
 ## Contributors
+- [SiboVG](https://github.com/SiboVG) — the PCB editing and checking tools (`run_drc`, `create_pcb_rule`, `place_vias`, `place_polygon_pour`, `place_cutout`, `repour_polygons`, `get_pour_report`, `check_routing`, `route_track`), `check_schematic` and `edit_schematic`, and much of the server's reliability: sandbox runs that report Altium's errors and recover, commands kept in order across servers, finding Altium from the registry, log rotation, the `mcp` 1.30 upgrade and CI ([25 PRs](https://github.com/coffeenmusic/altium-mcp/pulls?q=is%3Apr+is%3Amerged+author%3ASiboVG))
 - [daescobarh](https://github.com/daescobarh) — project validation tools (`get_project_info`, `get_project_components`, `get_erc_violations`, `get_board_summary`, `get_component_primitives`, `get_outjob_settings`) and safer dialog dismissal ([PR #18](https://github.com/coffeenmusic/altium-mcp/pull/18))
+- [Glomma](https://github.com/Glomma) — `outjob_path` for the OutJob tools and PDF containers that really publish ([PR #28](https://github.com/coffeenmusic/altium-mcp/pull/28)), plus fixes to the bridge and the bootstrap venv ([PR #26](https://github.com/coffeenmusic/altium-mcp/pull/26), [PR #27](https://github.com/coffeenmusic/altium-mcp/pull/27))
+- [Dziersk](https://github.com/Dziersk) — automatic recovery from a stuck script ([PR #23](https://github.com/coffeenmusic/altium-mcp/pull/23)) and sandbox safeguards against calls that crash Altium ([PR #36](https://github.com/coffeenmusic/altium-mcp/pull/36))
 - [coffeedust](https://github.com/coffeedust) — `create_pcb_footprint` tool for PcbLib automation ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7))
-- [fwolter](https://github.com/fwolter) — Fix JSON parsing error when the decimal separator is a comma ([PR #3](https://github.com/coffeenmusic/altium-mcp/pull/3))
+- [Dcatfly](https://github.com/Dcatfly) — `get_screenshot` captures the whole window on scaled displays ([PR #24](https://github.com/coffeenmusic/altium-mcp/pull/24))
+- [SC5KSystems](https://github.com/SC5KSystems) — the server fails fast on a broken venv instead of hanging for 60 seconds ([PR #15](https://github.com/coffeenmusic/altium-mcp/pull/15))
+- [fwolter](https://github.com/fwolter) — Fix JSON parsing error when the decimal separator is a comma ([PR #3](https://github.com/coffeenmusic/altium-mcp/pull/3)), and a typo fix ([PR #1](https://github.com/coffeenmusic/altium-mcp/pull/1))
+- [dishishshawn](https://github.com/dishishshawn) — the supported Python versions in this README ([PR #63](https://github.com/coffeenmusic/altium-mcp/pull/63))
+
+Thanks also to everyone who has [reported issues](https://github.com/coffeenmusic/altium-mcp/issues?q=is%3Aissue), especially [RSO-KME](https://github.com/RSO-KME) for detailed testing reports.
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)
