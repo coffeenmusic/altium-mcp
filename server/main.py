@@ -4522,8 +4522,8 @@ def _names(values, what):
 
 @_tool(read_only=True)
 async def get_layout(ctx: Context, designators: list = None, area: list = None, margin_mils: float = 40,
-                     include_touching: bool = False, include_local_nets: bool = True, board_path: str = "",
-                     out_file: str = "") -> str:
+                     include_touching: bool = False, include_local_nets: bool = True, include_pads: bool = False,
+                     board_path: str = "", out_file: str = "") -> str:
     """
     Read the layout of a group of components or of an area: the components'
     placement and the copper around them (tracks, arcs, vias, fills, copper
@@ -4550,6 +4550,9 @@ async def get_layout(ctx: Context, designators: list = None, area: list = None, 
             their own nets (nets with no pad on any other part) wherever it
             runs, such as a route between two of them that leaves the area
             (default true).
+        include_pads (bool): Also list every pad reaching into the area
+            (designator, pad, x, y, layer, shape, size [x, y], rotation,
+            hole, net), e.g. to see what new copper must keep clear of.
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
         out_file (str): Write the layout to this JSON file and return only a
@@ -4592,6 +4595,7 @@ async def get_layout(ctx: Context, designators: list = None, area: list = None, 
         return json.dumps({"success": False, "error": "margin_mils must be a number from 0 to 10000"})
     params = {"layout_designators": ";".join(names), "layout_margin": int(round(margin * pcb_layout.COORD_PER_MIL)),
               "layout_touching": bool(include_touching), "layout_local_nets": bool(include_local_nets),
+              "layout_pads": bool(include_pads),
               "layout_area": "" if box is None else "|".join(str(int(round(v * pcb_layout.COORD_PER_MIL))) for v in box)}
     if board_path:
         params["board_path"] = long_path(board_path)
@@ -4605,7 +4609,10 @@ async def get_layout(ctx: Context, designators: list = None, area: list = None, 
     found = {d.upper() for d in layout.pop("found")}
     layout["missing_designators"] = [d for d in names if d.upper() not in found]
     layout["counts"] = {k: len(layout[k]) for k in ("components", "tracks", "arcs", "vias", "fills", "regions", "cutouts",
-                                                     "pours")}
+                                                     "pours", "pads")}
+    if not include_pads:
+        layout.pop("pads")
+        layout["counts"].pop("pads")
     layout["success"] = True
     if out_file:
         path = Path(out_file)
@@ -4796,6 +4803,360 @@ async def get_unrouted_connections(ctx: Context, designators: list = None, nets:
                        "by_net": dict(sorted(by_net.items(), key=lambda kv: -kv[1])),
                        "area": [round(v, 2) for v in box] if box else None,
                        "missing_designators": missing, "connections": labelled[:max(0, limit)]}, indent=1)
+
+
+def _exact_segments(layer, net, width, pts):
+    """place_copper tracks through pts (mils), every segment exactly 0, 45 or
+    90 degrees: routing.route adds a short leg where an end point snapped
+    onto the grid leaves a bend off 45."""
+    ipts = [(int(round(x * routing.COORD_PER_MIL)), int(round(y * routing.COORD_PER_MIL))) for x, y in pts]
+    segs = routing.route(ipts)
+    c = routing.COORD_PER_MIL
+    return [{"net": net, "layer": layer, "width": width, "start": [x1 / c, y1 / c], "end": [x2 / c, y2 / c]}
+            for x1, y1, x2, y2 in segs if (x1, y1) != (x2, y2)]
+
+
+def _route_params(width_mils, clearance_mils, via_diameter_mils, via_hole_mils, grid_mils):
+    for name, v in (("width_mils", width_mils), ("clearance_mils", clearance_mils),
+                    ("via_diameter_mils", via_diameter_mils), ("via_hole_mils", via_hole_mils), ("grid_mils", grid_mils)):
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 < v < 1000:
+            return f"{name} must be a positive number of mils"
+    if via_hole_mils >= via_diameter_mils:
+        return "via_hole_mils must be smaller than via_diameter_mils"
+    if not 0.5 <= grid_mils <= 25:
+        return "grid_mils must be from 0.5 to 25"
+    return ""
+
+
+async def _net_rules(nets, layer, board_path):
+    """{net: {"min", "preferred", "max", "rule", "clearance"}} in mils, from the
+    board's width and clearance rules for a track of each net on layer."""
+    nets = sorted({n for n in nets if n and ";" not in n and "|" not in n})
+    if not nets:
+        return {}
+    params = {"net_rules_nets": ";".join(nets), "net_rules_layer": layer}
+    if board_path:
+        params["board_path"] = long_path(board_path)
+    response = await altium_bridge.execute_command("net_rules", params)
+    text = response.get("result", "") if response.get("success") else ""
+    out = {}
+    for line in (text if isinstance(text, str) else "").splitlines():
+        f = line.split("|")
+        if f[0] == "N" and len(f) >= 7:
+            mil = lambda v: int(v) / routing.COORD_PER_MIL if v.strip().lstrip("-").isdigit() else None
+            out[f[1]] = {"min": mil(f[2]), "preferred": mil(f[3]), "max": mil(f[4]), "rule": f[5].strip(),
+                         "clearance": mil(f[6]) if mil(f[6]) and mil(f[6]) > 0 else None}
+    return out
+
+
+@_tool()
+async def route_connections(ctx: Context, designators: list = None, nets: list = None, area: list = None,
+                            layers: list = None, width_mils: float = None, clearance_mils: float = None,
+                            via_diameter_mils: float = 24, via_hole_mils: float = 12, grid_mils: float = 2.5,
+                            include_leaving: bool = False, max_connections: int = 100, dry_run: bool = False,
+                            board_path: str = "") -> str:
+    """
+    Route unrouted connections automatically: a maze router finds a path for
+    each connection, every segment 0, 45 or 90 degrees, keeping the clearance
+    from other nets' copper and changing layer through a via where a route
+    needs it. For a group's local routing after it is placed (and fanned out
+    with fanout_pads). Each net gets the preferred width of its width rule
+    (the minimum where the preferred width finds no path) and the gap of
+    its clearance rule, unless width_mils or clearance_mils is given. Wider
+    nets are routed first, then shortest first; each route becomes an
+    obstacle for the next. Polygon pours are not obstacles: they pour again
+    around new copper (repour_polygons). Everything is added in one undo
+    step; check with run_drc and get_unrouted_connections.
+
+    Args:
+        designators (list): Route the connections of these components that
+            lie wholly inside their area (their pads' extent, as
+            get_unrouted_connections gives it); include_leaving adds those
+            leaving the group.
+        nets (list): Route the connections of these nets (inside area when
+            given).
+        area (list): [x1, y1, x2, y2] in mils from the board origin.
+        layers (list): Layers routes may use, e.g. ["Top Layer"] (default)
+            or ["Top Layer", "Bottom Layer"]; with more than one, vias
+            (through, Top to Bottom) change layer.
+        width_mils (float): One width for every net, instead of the rules.
+        clearance_mils (float): Gap to other nets' copper, instead of the
+            largest clearance rule gap of the nets routed.
+        via_diameter_mils, via_hole_mils (float): Size of a layer-change via.
+        grid_mils (float): Routing grid (default 2.5); finer finds paths
+            between fine-pitch pads but is slower.
+        include_leaving (bool): See designators.
+        max_connections (int): Most connections routed in one call.
+        dry_run (bool): Find the routes and return them without adding them.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        JSON: routed and failed connections (net, from, to, pads, width, and
+        why a route failed), tracks and vias added, the widths used per
+        net, and the connections still unrouted afterwards. With dry_run,
+        the tracks and vias themselves.
+    """
+    import router
+
+    layers = layers or ["Top Layer"]
+    if not isinstance(layers, list) or not all(isinstance(l, str) and l.strip() for l in layers):
+        return json.dumps({"success": False, "error": "layers must be a list of layer names"})
+    err = _route_params(width_mils or 6, clearance_mils or 6, via_diameter_mils, via_hole_mils, grid_mils)
+    if err:
+        return json.dumps({"success": False, "error": err})
+    if not designators and not nets:
+        return json.dumps({"success": False, "error": "Give designators or nets to route"})
+    un = json.loads(await get_unrouted_connections(ctx, designators=designators, nets=nets, area=area,
+                                                   max_connections=100000, board_path=board_path))
+    if not un.get("success"):
+        return json.dumps(un)
+    conns = [c for c in un["connections"] if include_leaving or c["inside"] or (not designators and area is None)]
+    conns.sort(key=lambda c: c["length"])
+    conns = conns[:max(0, int(max_connections))]
+    if not conns:
+        return json.dumps({"success": True, "routed": 0, "failed": [], "note": "Nothing to route",
+                           "unrouted": un.get("connection_count", 0)})
+    rules = await _net_rules({c["net"] for c in conns}, layers[0], board_path)
+    clearance = clearance_mils or max([r["clearance"] for r in rules.values() if r.get("clearance")] or [6.0])
+
+    def widths(net):
+        """The widths to try for a net: preferred, then minimum."""
+        if width_mils:
+            return [float(width_mils)]
+        r = rules.get(net) or {}
+        pref, low = r.get("preferred") or 6.0, r.get("min") or r.get("preferred") or 6.0
+        return [pref] if abs(pref - low) < 1e-6 else [pref, low]
+
+    xs = [p[0] for c in conns for p in (c["from"], c["to"])]
+    ys = [p[1] for c in conns for p in (c["from"], c["to"])]
+    margin = 150.0
+    box = [min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin]
+    lay = json.loads(await get_layout(ctx, area=box, include_touching=True, include_local_nets=False,
+                                      include_pads=True, board_path=board_path))
+    if not lay.get("success"):
+        return json.dumps(lay)
+    signal = sorted({p["layer"] for p in lay["pads"] if p["layer"] != "Multi Layer"} |
+                    {t["layer"] for t in lay["tracks"]} | {a["layer"] for a in lay["arcs"]} | set(layers))
+    base_shapes = router.shapes_from_layout(lay, signal)
+
+    def end_layers(layer):
+        return list(layers) if layer == "Multi Layer" else [layer]
+
+    def attempt(order):
+        """One routing pass over the connections in this order, in memory."""
+        new_shapes, routed, failed, tracks, vias = [], [], [], [], []
+        pending = [(c, 0) for c in order]   # (connection, index into widths(net))
+        used = {}
+        while pending:
+            width = max(widths(c["net"])[k] for c, k in pending)
+            batch = [(c, k) for c, k in pending if abs(widths(c["net"])[k] - width) < 1e-6]
+            pending = [(c, k) for c, k in pending if abs(widths(c["net"])[k] - width) >= 1e-6]
+            try:
+                grid = router.Board(box, grid_mils, signal, width, clearance, via_diameter_mils,
+                                    {c["net"] for c, _ in batch})
+            except router.RouteError as e:
+                return json.dumps({"success": False, "error": str(e)})
+            for s in base_shapes + new_shapes:
+                grid.add(s)
+            for c, k in batch:
+                info = {key: c[key] for key in ("net", "from", "to", "from_pad", "to_pad")}
+                sl = [l for l in end_layers(c["from_layer"]) if l in layers]
+                el = [l for l in end_layers(c["to_layer"]) if l in layers]
+                if not sl or not el:
+                    failed.append(dict(info, why=f"an end is on {c['from_layer'] if not sl else c['to_layer']}, "
+                                                 "not on a routing layer"))
+                    continue
+                i1, j1 = grid.cell(min(c["from"][0], c["to"][0]) - 100, min(c["from"][1], c["to"][1]) - 100)
+                i2, j2 = grid.cell(max(c["from"][0], c["to"][0]) + 100, max(c["from"][1], c["to"][1]) + 100)
+                window = (max(0, i1), max(0, j1), min(grid.nx - 1, i2), min(grid.ny - 1, j2))
+                found = router.route_one(grid, c["net"], c["from"], c["to"], sl, el, window=window) or \
+                    router.route_one(grid, c["net"], c["from"], c["to"], sl, el)
+                if found is None:
+                    if k + 1 < len(widths(c["net"])):
+                        pending.append((c, k + 1))   # try again at the rule's minimum width
+                    else:
+                        failed.append(dict(info, width=width, why="no path keeps the clearance on the routing layers"))
+                    continue
+                legs, via_pts = found
+                for layer, pts in legs:
+                    segs = _exact_segments(layer, c["net"], width, pts)
+                    tracks.extend(segs)
+                    for s in segs:
+                        shape = router.Shape("seg", c["net"], [layer], ax=s["start"][0], ay=s["start"][1],
+                                             bx=s["end"][0], by=s["end"][1], hw=width / 2)
+                        grid.add(shape)
+                        new_shapes.append(shape)
+                for vx, vy in via_pts:
+                    vias.append({"net": c["net"], "x": round(vx, 4), "y": round(vy, 4), "diameter": via_diameter_mils,
+                                 "hole": via_hole_mils, "start_layer": "Top Layer", "end_layer": "Bottom Layer"})
+                    shape = router.Shape("circle", c["net"], signal, cx=vx, cy=vy, r=via_diameter_mils / 2)
+                    grid.add(shape)
+                    new_shapes.append(shape)
+                used[c["net"]] = width
+                routed.append(dict(info, width=width))
+        return routed, failed, tracks, vias, used
+
+    # A connection that fails is often walled in by routes made before it:
+    # route again with the failures first, and keep the best pass
+    order, best = list(conns), None
+    for _ in range(3):
+        outcome = attempt(order)
+        if isinstance(outcome, str):
+            return outcome
+        if best is None or len(outcome[1]) < len(best[1]):
+            best = outcome
+        if not outcome[1]:
+            break
+        failed_keys = {(f["net"], tuple(f["from"]), tuple(f["to"])) for f in outcome[1]}
+        key = lambda c: (c["net"], tuple(c["from"]), tuple(c["to"]))
+        order = [c for c in conns if key(c) in failed_keys] + [c for c in conns if key(c) not in failed_keys]
+    routed, failed, tracks, vias, used = best
+    result = {"success": True, "routed": len(routed), "failed": failed, "tracks": len(tracks), "vias": len(vias),
+              "clearance_mils": clearance, "widths": used}
+    if dry_run:
+        result.update({"dry_run": True, "track_list": tracks, "via_list": vias})
+        return json.dumps(result, indent=1)
+    if tracks or vias:
+        placed = json.loads(await place_copper(ctx, tracks=tracks, vias=vias, board_path=board_path))
+        if not placed.get("success"):
+            return json.dumps({"success": False, "error": f"Routes found but not added: {placed.get('error')}",
+                               "problems": placed.get("problems")})
+    after = json.loads(await get_unrouted_connections(ctx, designators=designators, nets=nets, area=area,
+                                                      max_connections=20, board_path=board_path))
+    result["unrouted_after"] = after.get("connection_count")
+    result["inside_unrouted_after"] = after.get("inside_count")
+    return json.dumps(result, indent=1)
+
+MUTATING_COMMANDS.add("route_connections")
+
+
+@_tool()
+async def fanout_pads(ctx: Context, designators: list, nets: list = None, pads: list = None,
+                      width_mils: float = None, clearance_mils: float = None, via_diameter_mils: float = 24,
+                      via_hole_mils: float = 12, max_distance_mils: float = 80, grid_mils: float = 2.5,
+                      dry_run: bool = False, board_path: str = "") -> str:
+    """
+    Fan out pads: a short track from each pad to a via next to it, e.g. to
+    take an IC's ground and power pads down to their planes, or to free a
+    pad for routing on another layer. Each via goes outward from the
+    component first (then the other 45 degree directions), as near as
+    clearance_mils from other nets' copper allows, within max_distance_mils.
+    Pads that already have a track or via on them are left alone. One undo
+    step; vias are through (Top to Bottom).
+
+    Args:
+        designators (list): Components whose pads to fan out.
+        nets (list): Only pads on these nets, e.g. ["GND", "3V3"].
+        pads (list): Only these pads, as "U1-5" or pad names.
+        width_mils, clearance_mils (float): Track width and gap to other
+            nets' copper. By default each net's width rule (its preferred
+            width, but no wider than the pad and never below the rule's
+            minimum) and the largest clearance rule gap of the nets.
+        via_diameter_mils, via_hole_mils (float): Via size.
+        max_distance_mils (float): Farthest a via may sit from its pad's
+            centre (default 80).
+        grid_mils (float): Grid for the clearance check (default 2.5).
+        dry_run (bool): Return the vias and tracks without adding them.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        JSON: fanned out pads with their via positions, pads skipped (and
+        why), and the counts added.
+    """
+    import router
+
+    names, err = _names(designators, "designators")
+    if err or not names:
+        return json.dumps({"success": False, "error": err or "Give designators"})
+    err = _route_params(width_mils or 8, clearance_mils or 6, via_diameter_mils, via_hole_mils, grid_mils)
+    if err:
+        return json.dumps({"success": False, "error": err})
+    lay = json.loads(await get_layout(ctx, designators=names, margin_mils=max_distance_mils + 60,
+                                      include_touching=True, include_local_nets=False, include_pads=True,
+                                      board_path=board_path))
+    if not lay.get("success"):
+        return json.dumps(lay)
+    want_nets = {n.upper() for n in (nets or [])}
+    want_pads = {str(p).upper() for p in (pads or [])}
+    upper = {n.upper() for n in names}
+    comps = {c["designator"].upper(): c for c in lay["components"]}
+    sel = [p for p in lay["pads"] if p["designator"].upper() in upper and p["net"]
+           and (not want_nets or p["net"].upper() in want_nets)
+           and (not want_pads or p["pad"].upper() in want_pads
+                or f"{p['designator']}-{p['pad']}".upper() in want_pads)]
+    signal = sorted({p["layer"] for p in lay["pads"] if p["layer"] != "Multi Layer"} |
+                    {t["layer"] for t in lay["tracks"]} | {"Top Layer", "Bottom Layer"})
+    rules = await _net_rules({p["net"] for p in sel}, "Top Layer", board_path)
+    clearance = clearance_mils or max([r["clearance"] for r in rules.values() if r.get("clearance")] or [6.0])
+
+    def width_for(p):
+        if width_mils:
+            return float(width_mils)
+        r = rules.get(p["net"]) or {}
+        pref, low = r.get("preferred") or 8.0, r.get("min") or 6.0
+        return max(low, min(pref, min(p["size"])))
+
+    widest = max([width_for(p) for p in sel] or [width_mils or 8.0])
+    try:
+        grid = router.Board(lay["area"], grid_mils, signal, widest, clearance, via_diameter_mils,
+                            {p["net"] for p in sel})
+    except router.RouteError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    shapes = router.shapes_from_layout(lay, signal)
+    for s in shapes:
+        grid.add(s)
+    # Copper already on a pad: a track end or a via (not the pads themselves)
+    ends = {}
+    for s in shapes:
+        if s.g.get("pad"):
+            continue
+        if s.kind == "seg":
+            ends.setdefault(s.net, []).extend([(s.g["ax"], s.g["ay"]), (s.g["bx"], s.g["by"])])
+        elif s.kind == "circle":
+            ends.setdefault(s.net, []).append((s.g["cx"], s.g["cy"]))
+    done, skipped, tracks, vias = [], [], [], []
+    for p in sorted(sel, key=lambda p: (p["net"], p["designator"], p["pad"])):
+        name = f"{p['designator']}-{p['pad']}"
+        if p["layer"] == "Multi Layer":
+            skipped.append({"pad": name, "why": "through-hole pad: it already reaches every layer"})
+            continue
+        pad_shape = router.shapes_from_layout({"pads": [p]}, signal)[0]
+        if any(pad_shape.dist(x, y) <= 0.01 for x, y in ends.get(p["net"], [])):
+            skipped.append({"pad": name, "why": "already has a track or via on it"})
+            continue
+        comp = comps.get(p["designator"].upper())
+        center = (comp["x"], comp["y"]) if comp else (p["x"], p["y"])
+        site = router.fanout_site(grid, p, p["net"], width_for(p), via_diameter_mils, max_distance_mils, center,
+                                  [p["layer"]])
+        if site is None:
+            skipped.append({"pad": name, "why": f"no via site within {max_distance_mils} mil keeps the clearance"})
+            continue
+        (vx, vy), legs = site
+        w = width_for(p)
+        for layer, pts in legs:
+            segs = _exact_segments(layer, p["net"], w, pts)
+            tracks.extend(segs)
+            for s in segs:
+                grid.add(router.Shape("seg", p["net"], [layer], ax=s["start"][0], ay=s["start"][1],
+                                      bx=s["end"][0], by=s["end"][1], hw=w / 2))
+        vias.append({"net": p["net"], "x": round(vx, 4), "y": round(vy, 4), "diameter": via_diameter_mils,
+                     "hole": via_hole_mils, "start_layer": "Top Layer", "end_layer": "Bottom Layer"})
+        grid.add(router.Shape("circle", p["net"], signal, cx=vx, cy=vy, r=via_diameter_mils / 2))
+        done.append({"pad": name, "net": p["net"], "via": [round(vx, 2), round(vy, 2)]})
+    result = {"success": True, "fanned_out": done, "skipped": skipped, "tracks": len(tracks), "vias": len(vias)}
+    if dry_run or not vias:
+        if dry_run:
+            result.update({"dry_run": True, "track_list": tracks, "via_list": vias})
+        return json.dumps(result, indent=1)
+    placed = json.loads(await place_copper(ctx, tracks=tracks, vias=vias, board_path=board_path))
+    if not placed.get("success"):
+        return json.dumps({"success": False, "error": f"Fanout found but not added: {placed.get('error')}",
+                           "problems": placed.get("problems")})
+    return json.dumps(result, indent=1)
+
+MUTATING_COMMANDS.add("fanout_pads")
 
 
 def _bring_to_front(hwnd):

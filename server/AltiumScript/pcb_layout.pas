@@ -191,7 +191,7 @@ end;
 // Copper that belongs to a component or that a pour poured is never listed:
 // the pour itself is.
 function GetLayout(Designators: TStringList; HasArea: Boolean; AX1, AY1, AX2, AY2: Integer;
-                   Margin: Integer; Touching: Boolean; LocalNets: Boolean): String;
+                   Margin: Integer; Touching: Boolean; LocalNets: Boolean; Pads: Boolean): String;
 var
     Board    : IPCB_Board;
     Comps    : TInterfaceList;
@@ -280,6 +280,39 @@ begin
                       LayoutAngle(Comp.Comment.Rotation) + '|' + IntToStr(Comp.Comment.Size) + '|' + IntToStr(Comp.Comment.Width) + '|' +
                       BoolToStr(Comp.CommentOn, True) + '|' + IntToStr(Comp.NameAutoPosition) + '|' +
                       IntToStr(Comp.CommentAutoPosition));
+        end;
+
+        // Pads reaching into the area, of any component or free:
+        // P|designator|pad|x|y|layer|shape|x size|y size|rotation|hole|net
+        if Pads then
+        begin
+            Iterator := Board.SpatialIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(ePadObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Area(X1, Y1, X2, Y2);
+            Prim := Iterator.FirstPCBObject;
+            while Prim <> nil do
+            begin
+                Addr := IntToStr(Prim.I_ObjectAddress);
+                if Seen.IndexOf(Addr) < 0 then
+                begin
+                    Seen.Add(Addr);
+                    NetName := '';
+                    if Prim.Net <> nil then NetName := Prim.Net.Name;
+                    if Prim.InComponent and (Prim.Component <> nil) then
+                        Lines.Add('P|' + Prim.Component.Name.Text + '|' + Prim.Name + '|' + IntToStr(Prim.X - Board.XOrigin) + '|' +
+                                  IntToStr(Prim.Y - Board.YOrigin) + '|' + Layer2String(Prim.Layer) + '|' + IntToStr(Prim.TopShape) + '|' +
+                                  IntToStr(Prim.TopXSize) + '|' + IntToStr(Prim.TopYSize) + '|' + LayoutAngle(Prim.Rotation) + '|' +
+                                  IntToStr(Prim.HoleSize) + '|' + NetName)
+                    else
+                        Lines.Add('P||' + Prim.Name + '|' + IntToStr(Prim.X - Board.XOrigin) + '|' +
+                                  IntToStr(Prim.Y - Board.YOrigin) + '|' + Layer2String(Prim.Layer) + '|' + IntToStr(Prim.TopShape) + '|' +
+                                  IntToStr(Prim.TopXSize) + '|' + IntToStr(Prim.TopYSize) + '|' + LayoutAngle(Prim.Rotation) + '|' +
+                                  IntToStr(Prim.HoleSize) + '|' + NetName);
+                end;
+                Prim := Iterator.NextPCBObject;
+            end;
+            Board.SpatialIterator_Destroy(Iterator);
         end;
 
         // Pours: the spatial iterator returns their poured pieces, not the
@@ -795,6 +828,71 @@ begin
         Result := Lines.Text;
     finally
         Comps.Free;
+        Lines.Free;
+    end;
+end;
+
+// net_rules: the width rule and the clearance gap Altium applies to a track
+// of each net in NetNames on LayerName, one N|net|min|preferred|max|rule|gap
+// line each (internal units). The rules are evaluated on a probe track added
+// off the board for the query and removed straight after (rule lookups need
+// the object on the board), and the gap against a probe track with no net.
+function NetRules(NetNames: TStringList; LayerName: String): String;
+var
+    Board  : IPCB_Board;
+    Net    : IPCB_Net;
+    T, T2  : IPCB_Track;
+    R      : IPCB_Rule;
+    Lines  : TStringList;
+    Layer, i, Gap : Integer;
+    Line   : String;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Layer := LayoutLayer(Board, LayerName);
+    if not LayoutIsSignal(Layer) then Layer := eTopLayer;
+    Lines := TStringList.Create;
+    try
+        T2 := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        T2.Layer := Layer;
+        T2.Width := 10000;
+        T2.x1 := Board.XOrigin - 900000000; T2.y1 := Board.YOrigin - 900000000;
+        T2.x2 := Board.XOrigin - 899000000; T2.y2 := Board.YOrigin - 900000000;
+        Board.AddPCBObject(T2);
+        for i := 0 to NetNames.Count - 1 do
+        begin
+            Net := FindBoardNet(Board, NetNames[i]);
+            if Net = nil then
+            begin
+                Lines.Add('M|' + NetNames[i]);
+                Continue;
+            end;
+            T := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+            T.Layer := Layer;
+            T.Width := 10000;
+            T.Net := Net;
+            T.x1 := Board.XOrigin - 900000000; T.y1 := Board.YOrigin - 899000000;
+            T.x2 := Board.XOrigin - 899000000; T.y2 := Board.YOrigin - 899000000;
+            Board.AddPCBObject(T);
+            R := Board.FindDominantRuleForObject(T, eRule_MaxMinWidth);
+            if R <> nil then
+                Line := 'N|' + Net.Name + '|' + IntToStr(R.MinWidth[Layer]) + '|' + IntToStr(R.FavoredWidth[Layer]) + '|' +
+                        IntToStr(R.MaxWidth[Layer]) + '|' + R.Name
+            else
+                Line := 'N|' + Net.Name + '|||| ';
+            Gap := -1;
+            R := Board.FindDominantRuleForObjectPair(T, T2, eRule_Clearance);
+            if R <> nil then Gap := R.Gap;
+            Lines.Add(Line + '|' + IntToStr(Gap));
+            Board.RemovePCBObject(T);
+        end;
+        Board.RemovePCBObject(T2);
+        Result := Lines.Text;
+    finally
         Lines.Free;
     end;
 end;

@@ -192,6 +192,14 @@
       "description": "List the connections still to be routed for some components, nets or the whole board, naming the pads at each end, with no DRC limit"
     },
     {
+      "name": "fanout_pads",
+      "description": "Fan out pads to vias beside them (e.g. ground and power pads to their planes), widths and gaps from the board's rules"
+    },
+    {
+      "name": "route_connections",
+      "description": "Route a group's unrouted connections with a maze router at 0/45/90 degrees, widths and clearance from the board's rules, vias between the layers allowed"
+    },
+    {
       "name": "delete_pcb_objects",
       "description": "Rip up copper: tracks, arcs, vias, pours, regions, fills or cutouts picked by kind, net, layer, area or a group's designators; locked objects kept"
     },

@@ -31,6 +31,8 @@ AUTOPOSITION = ["manual", "top_left", "center_left", "bottom_left", "top_center"
 HATCH = {0: "hatched_90", 1: "hatched_45", 2: "vertical", 3: "horizontal", 4: "none", 5: "solid"}
 HATCH_CODE = {v: k for k, v in HATCH.items()}
 POUR_OVER = {0: "none", 1: "same_net", 2: "same_net_polygons"}
+# TShape of a pad's top layer
+PAD_SHAPES = {1: "round", 2: "rectangle", 3: "octagon", 9: "rounded_rectangle"}
 POUR_OVER_CODE = {v: k for k, v in POUR_OVER.items()}
 # Coordinates beyond Altium's design space (about 100,000 mil) overflow the bridge
 LIMIT_MILS = 100000
@@ -86,7 +88,7 @@ def _vertex(f):
 def parse_layout(text):
     """The bridge's get_layout lines as a layout dict in mils."""
     out = {"area": None, "components": [], "tracks": [], "arcs": [], "vias": [], "fills": [],
-           "regions": [], "cutouts": [], "pours": [], "skipped": 0, "board": "", "found": []}
+           "regions": [], "cutouts": [], "pours": [], "pads": [], "skipped": 0, "board": "", "found": []}
     shape = None
     for line in text.splitlines():
         f = line.split("|")
@@ -140,6 +142,10 @@ def parse_layout(text):
             cut = {"layer": f[1], "outline": []}
             out["cutouts"].append(cut)
             shape = cut["outline"]
+        elif k == "P" and len(f) >= 12:
+            out["pads"].append({"designator": f[1], "pad": f[2], "x": _mil(f[3]), "y": _mil(f[4]), "layer": f[5],
+                                "shape": PAD_SHAPES.get(int(f[6]), f[6]), "size": [_mil(f[7]), _mil(f[8])],
+                                "rotation": _deg(f[9]), "hole": _mil(f[10]), "net": "|".join(f[11:])})
         elif k == "X":
             out["skipped"] = int(f[1])
         elif k == "B":

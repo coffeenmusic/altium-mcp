@@ -1237,12 +1237,14 @@ var
     Area        : String;
     Touching    : Boolean;
     LocalNets   : Boolean;
+    Pads        : Boolean;
     Designators : TStringList;
 begin
     Area := '';
     Margin := 0;
     Touching := False;
     LocalNets := False;
+    Pads := False;
     Designators := TStringList.Create;
     try
         for i := 0 to RequestData.Count - 1 do
@@ -1256,14 +1258,16 @@ begin
             else if Pos('"layout_touching"', RequestData[i]) > 0 then
                 Touching := Pos('true', RequestData[i]) > 0
             else if Pos('"layout_local_nets"', RequestData[i]) > 0 then
-                LocalNets := Pos('true', RequestData[i]) > 0;
+                LocalNets := Pos('true', RequestData[i]) > 0
+            else if Pos('"layout_pads"', RequestData[i]) > 0 then
+                Pads := Pos('true', RequestData[i]) > 0;
         end;
         if Area <> '' then
             Result := GetLayout(Designators, True, StrToInt(GetFieldFromPipeString(Area, 0)),
                                 StrToInt(GetFieldFromPipeString(Area, 1)), StrToInt(GetFieldFromPipeString(Area, 2)),
-                                StrToInt(GetFieldFromPipeString(Area, 3)), Margin, Touching, LocalNets)
+                                StrToInt(GetFieldFromPipeString(Area, 3)), Margin, Touching, LocalNets, Pads)
         else
-            Result := GetLayout(Designators, False, 0, 0, 0, 0, Margin, Touching, LocalNets);
+            Result := GetLayout(Designators, False, 0, 0, 0, 0, Margin, Touching, LocalNets, Pads);
     finally
         Designators.Free;
     end;
@@ -1307,6 +1311,29 @@ begin
         Result := GetUnroutedConnections(Nets, Designators);
     finally
         Designators.Free;
+        Nets.Free;
+    end;
+end;
+
+// net_rules: net_rules_nets (';'-separated) and net_rules_layer
+function ExecuteNetRules(RequestData: TStringList): String;
+var
+    i : Integer;
+    Nets : TStringList;
+    Layer : String;
+begin
+    Nets := TStringList.Create;
+    Layer := '';
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if Pos('"net_rules_nets"', RequestData[i]) > 0 then
+                Nets.Text := StringReplace(JSONLineValue(RequestData[i]), ';', #13#10, REPLACEALL)
+            else if Pos('"net_rules_layer"', RequestData[i]) > 0 then
+                Layer := JSONLineValue(RequestData[i]);
+        end;
+        Result := NetRules(Nets, Layer);
+    finally
         Nets.Free;
     end;
 end;
@@ -1516,6 +1543,8 @@ begin
             Result := ExecutePlaceCopper(RequestData);
         'get_unrouted_connections':
             Result := ExecuteGetUnroutedConnections(RequestData);
+        'net_rules':
+            Result := ExecuteNetRules(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;
