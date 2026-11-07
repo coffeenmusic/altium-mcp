@@ -1199,6 +1199,105 @@ begin
     end;
 end;
 
+// A ';'-separated request string as an upper-case list
+procedure LayoutRequestList(Text: String; List: TStringList);
+var
+    i : Integer;
+    Parts : TStringList;
+begin
+    Parts := TStringList.Create;
+    try
+        Parts.Text := StringReplace(Text, ';', #13#10, REPLACEALL);
+        for i := 0 to Parts.Count - 1 do
+            if Trim(Parts[i]) <> '' then List.Add(UpperCase(Trim(Parts[i])));
+    finally
+        Parts.Free;
+    end;
+end;
+
+// get_layout: layout_designators (';'-separated), layout_area ('x1|y1|x2|y2'
+// in internal units from the board origin, or empty), layout_margin and
+// layout_touching
+function ExecuteGetLayout(RequestData: TStringList): String;
+var
+    i, Margin   : Integer;
+    Area        : String;
+    Touching    : Boolean;
+    LocalNets   : Boolean;
+    Designators : TStringList;
+begin
+    Area := '';
+    Margin := 0;
+    Touching := False;
+    LocalNets := False;
+    Designators := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if Pos('"layout_designators"', RequestData[i]) > 0 then
+                LayoutRequestList(JSONLineValue(RequestData[i]), Designators)
+            else if Pos('"layout_area"', RequestData[i]) > 0 then
+                Area := JSONLineValue(RequestData[i])
+            else if Pos('"layout_margin"', RequestData[i]) > 0 then
+                Margin := StrToInt(JSONLineValue(RequestData[i]))
+            else if Pos('"layout_touching"', RequestData[i]) > 0 then
+                Touching := Pos('true', RequestData[i]) > 0
+            else if Pos('"layout_local_nets"', RequestData[i]) > 0 then
+                LocalNets := Pos('true', RequestData[i]) > 0;
+        end;
+        if Area <> '' then
+            Result := GetLayout(Designators, True, StrToInt(GetFieldFromPipeString(Area, 0)),
+                                StrToInt(GetFieldFromPipeString(Area, 1)), StrToInt(GetFieldFromPipeString(Area, 2)),
+                                StrToInt(GetFieldFromPipeString(Area, 3)), Margin, Touching, LocalNets)
+        else
+            Result := GetLayout(Designators, False, 0, 0, 0, 0, Margin, Touching, LocalNets);
+    finally
+        Designators.Free;
+    end;
+end;
+
+// place_copper: copper_spec_file, the spec pcb_layout.py wrote
+function ExecutePlaceCopper(RequestData: TStringList): String;
+var
+    i : Integer;
+    SpecPath : String;
+begin
+    SpecPath := '';
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"copper_spec_file"', RequestData[i]) > 0 then
+            SpecPath := JSONLineValue(RequestData[i]);
+    if SpecPath = '' then
+    begin
+        Result := 'ERROR: place_copper needs copper_spec_file';
+        Exit;
+    end;
+    Result := PlaceCopper(SpecPath);
+end;
+
+// get_unrouted_connections: unrouted_nets and unrouted_designators, each
+// ';'-separated (both may be empty: every net)
+function ExecuteGetUnroutedConnections(RequestData: TStringList): String;
+var
+    i : Integer;
+    Nets, Designators : TStringList;
+begin
+    Nets := TStringList.Create;
+    Designators := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if Pos('"unrouted_nets"', RequestData[i]) > 0 then
+                LayoutRequestList(JSONLineValue(RequestData[i]), Nets)
+            else if Pos('"unrouted_designators"', RequestData[i]) > 0 then
+                LayoutRequestList(JSONLineValue(RequestData[i]), Designators);
+        end;
+        Result := GetUnroutedConnections(Nets, Designators);
+    finally
+        Designators.Free;
+        Nets.Free;
+    end;
+end;
+
 // Function to execute a command with parameters
 // create_route_tracks: net_name, layer, width (internal units) and segments,
 // one string of 'x1|y1|x2|y2' records separated by ';'. A single string, not
@@ -1396,6 +1495,12 @@ begin
             Result := ExecuteCreateRouteTracks(RequestData);
         'create_vias':
             Result := ExecuteCreateVias(RequestData);
+        'get_layout':
+            Result := ExecuteGetLayout(RequestData);
+        'place_copper':
+            Result := ExecutePlaceCopper(RequestData);
+        'get_unrouted_connections':
+            Result := ExecuteGetUnroutedConnections(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;

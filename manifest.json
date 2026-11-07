@@ -153,7 +153,7 @@
     },
     {
       "name": "place_components",
-      "description": "Place any number of components at absolute positions (x, y, rotation, side) in one undo step"
+      "description": "Place any number of components at absolute positions (x, y, rotation, side, lock, designator and comment text) on a named board, in one undo step"
     },
     {
       "name": "check_placement",
@@ -180,6 +180,18 @@
       "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
     },
     {
+      "name": "get_layout",
+      "description": "Read the layout of a group of components or an area: placement, texts, tracks, arcs, vias, fills, regions, cutouts and pours with their full outlines and settings, in place_copper's form"
+    },
+    {
+      "name": "place_copper",
+      "description": "Add tracks and arcs at any angle, vias, fills, regions, cutouts and polygon pours in one undo step, all checked first; can move and rename nets to repeat a layout"
+    },
+    {
+      "name": "get_unrouted_connections",
+      "description": "List the connections still to be routed for some components, nets or the whole board, naming the pads at each end, with no DRC limit"
+    },
+    {
       "name": "place_polygon_pour",
       "description": "Add a polygon pour from an outline to a PCB and pour it"
     },
@@ -189,7 +201,7 @@
     },
     {
       "name": "repour_polygons",
-      "description": "Repour all polygon pours on a PCB, or those picked by name, net, layer or area, as one undo step"
+      "description": "Repour all polygon pours on a PCB, or those picked by name, net, layer or area, in pour order, as one undo step"
     },
     {
       "name": "get_pour_report",

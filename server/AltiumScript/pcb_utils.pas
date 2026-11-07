@@ -3072,6 +3072,65 @@ end;
 // Each entry in PlacementsList is 'Designator|X|Y|Rotation|Layer' where X/Y
 // are mils relative to the board origin, Rotation is degrees CCW (-1 = keep
 // current) and Layer is 'top', 'bottom' or '' (keep current side).
+// Set a component's designator (IsName) or comment text from a spec
+// 'x;y;rotation;height;stroke width;visible[;autoposition]' (mils, degrees,
+// 1/0, TTextAutoposition) as get_layout reports it: x and y are the text's
+// anchor, as Altium stores it. The text is placed manually positioned, or
+// Altium would move it while placing it; a non-zero autoposition is set
+// back afterwards. The text is added to Moved, whose stroke geometry is
+// rebuilt afterwards.
+procedure PlaceComponentText(Comp: IPCB_Component; IsName: Boolean; Spec: String; XO, YO: TCoord; Moved: TStringList);
+var
+    Txt    : IPCB_Text;
+    TX, TY : TCoord;
+    Parts  : TStringList;
+begin
+    if Trim(Spec) = '' then Exit;
+    Parts := TStringList.Create;
+    try
+        Parts.Text := StringReplace(Spec, ';', #13#10, REPLACEALL);
+        if Parts.Count < 6 then Exit;
+        if IsName then Txt := Comp.Name else Txt := Comp.Comment;
+        PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        if IsName then
+        begin
+            Comp.NameOn := Parts[5] = '1';
+            Comp.NameAutoPosition := eAutoPos_Manual;
+        end
+        else
+        begin
+            Comp.CommentOn := Parts[5] = '1';
+            Comp.CommentAutoPosition := eAutoPos_Manual;
+        end;
+        Txt.Size := MilsToCoord(SafeStrToFloat(Parts[3]));
+        Txt.Width := MilsToCoord(SafeStrToFloat(Parts[4]));
+        Txt.Rotation := SafeStrToFloat(Parts[2]);
+        PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        TX := MilsToCoord(SafeStrToFloat(Parts[0])) + XO;
+        TY := MilsToCoord(SafeStrToFloat(Parts[1])) + YO;
+        if (TX <> Txt.XLocation) or (TY <> Txt.YLocation) then
+        begin
+            PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            Txt.MoveByXY(TX - Txt.XLocation, TY - Txt.YLocation);
+            PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        end;
+        if (Parts.Count > 6) and (Trim(Parts[6]) <> '') and (Trim(Parts[6]) <> '0') then
+        begin
+            PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            if IsName then
+                Comp.NameAutoPosition := StrToInt(Trim(Parts[6]))
+            else
+                Comp.CommentAutoPosition := StrToInt(Trim(Parts[6]));
+            PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        end;
+        Moved.AddObject(Comp.Name.Text, Txt);
+    finally
+        Parts.Free;
+    end;
+end;
+
 function PlaceComponentsFromList(PlacementsList: TStringList): String;
 var
     Board            : IPCB_Board;
@@ -3084,6 +3143,9 @@ var
     Designator       : String;
     FieldValue       : String;
     LayerStr         : String;
+    LockStr          : String;
+    MovedTexts       : TStringList;
+    Txt              : IPCB_Text;
     NewX, NewY       : Double;
     Rotation         : Double;
     xorigin, yorigin : TCoord;
@@ -3103,6 +3165,7 @@ begin
     ResultProps := TStringList.Create;
     MissingArray := TStringList.Create;
     PlacedArray := TStringList.Create;
+    MovedTexts := TStringList.Create;
     PlacedCount := 0;
 
     try
@@ -3126,6 +3189,8 @@ begin
                     Rotation := -1;
 
                 LayerStr := LowerCase(Trim(GetFieldFromPipeString(Entry, 4)));
+                // Locked: '1' locks, '0' unlocks, '' (or absent) leaves it
+                LockStr := Trim(GetFieldFromPipeString(Entry, 5));
 
                 Component := Board.GetPcbComponentByRefDes(Designator);
 
@@ -3146,7 +3211,16 @@ begin
                     if (Rotation >= 0) then
                         Component.Rotation := Rotation;
 
+                    if LockStr = '1' then
+                        Component.Moveable := False
+                    else if LockStr = '0' then
+                        Component.Moveable := True;
+
                     PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                    // Designator and comment text, when given (get_layout's form)
+                    PlaceComponentText(Component, True, GetFieldFromPipeString(Entry, 6), xorigin, yorigin, MovedTexts);
+                    PlaceComponentText(Component, False, GetFieldFromPipeString(Entry, 7), xorigin, yorigin, MovedTexts);
 
                     // Report the final state as Altium sees it
                     CompProps := TStringList.Create;
@@ -3156,6 +3230,7 @@ begin
                         AddJSONNumber(CompProps, 'y', CoordToMils(Component.y - yorigin));
                         AddJSONNumber(CompProps, 'rotation', Component.Rotation);
                         AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                        AddJSONBoolean(CompProps, 'locked', not Component.Moveable);
                         PlacedArray.Add(BuildJSONObject(CompProps, 2));
                     finally
                         CompProps.Free;
@@ -3171,6 +3246,17 @@ begin
         end;
 
         PCBServer.PostProcess;
+
+        // Rebuild the stroke geometry of every text placed: batch DRC checks a
+        // cached copy that scripted moves leave stale (see PlaceDesignatorsFromList)
+        for i := 0 to MovedTexts.Count - 1 do
+        begin
+            Txt := MovedTexts.Objects[i];
+            Txt.BeginModify;
+            Txt.SetState_XSizeYSize;
+            Txt.EndModify;
+            Txt.GraphicallyInvalidate;
+        end;
 
         // Update PCB document
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
@@ -3192,6 +3278,7 @@ begin
         ResultProps.Free;
         MissingArray.Free;
         PlacedArray.Free;
+        MovedTexts.Free;
     end;
 end;
 
@@ -5212,8 +5299,8 @@ var
     Iterator : IPCB_BoardIterator;
     Poly     : IPCB_Polygon;
     Net      : IPCB_Net;
-    Layer, Repoured : Integer;
-    Done, Shelved, Item, Props : TStringList;
+    Layer, Repoured, i : Integer;
+    Done, Shelved, Item, Props, Order : TStringList;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then
@@ -5247,6 +5334,11 @@ begin
     Shelved := TStringList.Create;
     Item := TStringList.Create;
     Props := TStringList.Create;
+    // The polygons to repour, sorted by pour index: where pours of different
+    // nets overlap, the order decides which gets the copper, and Altium's own
+    // Repour All goes by the Polygon Pour Order (the pour index)
+    Order := TStringList.Create;
+    Order.Sorted := True;
     try
         Repoured := 0;
         // PostProcess must run whatever happens, or Altium's undo stays broken
@@ -5267,21 +5359,25 @@ begin
                     if (not Poly.Poured) and (not IncludeShelved) then
                         Shelved.Add('"' + JSONEscapeString(Poly.Name + ' (' + Layer2String(Poly.Layer) + ')') + '"')
                     else
-                    begin
-                        Poly.Rebuild;
-                        Repoured := Repoured + 1;
-                        Item.Clear;
-                        AddJSONProperty(Item, 'name', Poly.Name);
-                        AddJSONProperty(Item, 'layer', Layer2String(Poly.Layer));
-                        if Poly.Net <> nil then AddJSONProperty(Item, 'net', Poly.Net.Name) else AddJSONProperty(Item, 'net', '');
-                        AddJSONInteger(Item, 'poured_regions', PolygonPourCount(Poly, True));
-                        AddJSONInteger(Item, 'hatch_tracks', PolygonPourCount(Poly, False));
-                        Done.Add(BuildJSONObject(Item, 1));
-                    end;
+                        Order.AddObject(IntToStr(1000000000 + Poly.PourIndex) + '|' + IntToStr(100000000 + Order.Count), Poly);
                 end;
                 Poly := Iterator.NextPCBObject;
             end;
             Board.BoardIterator_Destroy(Iterator);
+            for i := 0 to Order.Count - 1 do
+            begin
+                Poly := Order.Objects[i];
+                Poly.Rebuild;
+                Repoured := Repoured + 1;
+                Item.Clear;
+                AddJSONProperty(Item, 'name', Poly.Name);
+                AddJSONProperty(Item, 'layer', Layer2String(Poly.Layer));
+                if Poly.Net <> nil then AddJSONProperty(Item, 'net', Poly.Net.Name) else AddJSONProperty(Item, 'net', '');
+                AddJSONInteger(Item, 'pour_index', Poly.PourIndex);
+                AddJSONInteger(Item, 'poured_regions', PolygonPourCount(Poly, True));
+                AddJSONInteger(Item, 'hatch_tracks', PolygonPourCount(Poly, False));
+                Done.Add(BuildJSONObject(Item, 1));
+            end;
         finally
             PCBServer.PostProcess;
         end;
@@ -5298,6 +5394,7 @@ begin
         Shelved.Free;
         Item.Free;
         Props.Free;
+        Order.Free;
     end;
 end;
 
