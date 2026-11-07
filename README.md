@@ -22,6 +22,13 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 - Check my project is ready for fabrication: unsaved documents, ERC errors, and which layers my Gerber output job plots
 - Draw a schematic of an LED with a current-limiting resistor on a new sheet, using symbols from my library
 
+## Videos
+- [RP2354B Symbol & Footprint w/ Claude](https://youtu.be/m8W89txJ2wY): tell Claude to build a symbol and footprint, and it handles the rest
+- [Can Opus 5.5 make a 6,545 pin symbol in Altium?](https://youtu.be/H8aqGX4gpH8): a symbol for the XCVP1902, made in Claude Code
+- [Can Opus 5.5 make difficult Altium footprints?](https://youtu.be/DOWtJsfCKPw): examples of Claude making difficult footprints
+
+More on the [altium-mcp YouTube channel](https://www.youtube.com/@altium-mcp), including the install walkthrough and videos for individual tools below.
+
 ## Installing the MCP Server
 The easiest way to install is to use Claude Code, point it to this repo and ask it to install it for you. Or alternatively, see below.
 
