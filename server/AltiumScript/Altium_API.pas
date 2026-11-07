@@ -588,7 +588,9 @@ function ExecuteEditPCBObjects(RequestData: TStringList): String;
 begin
     Result := EditPCBObjects(RequestText(RequestData, 'action', ''), RequestText(RequestData, 'kinds', ''),
         RequestText(RequestData, 'net', ''), RequestText(RequestData, 'layer', ''),
-        RequestText(RequestData, 'area', ''), RequestText(RequestData, 'dry_run', 'true') = 'true',
+        RequestText(RequestData, 'area', ''), RequestText(RequestData, 'designators', ''),
+        StrToInt(RequestText(RequestData, 'margin', '400000')), RequestText(RequestData, 'include_locked', 'false') = 'true',
+        RequestText(RequestData, 'dry_run', 'true') = 'true',
         StrToInt(RequestText(RequestData, 'width', '-1')), StrToInt(RequestText(RequestData, 'via_size', '-1')),
         StrToInt(RequestText(RequestData, 'via_hole', '-1')), RequestText(RequestData, 'set_net', 'false') = 'true',
         RequestText(RequestData, 'new_net', ''), RequestText(RequestData, 'new_layer', ''));

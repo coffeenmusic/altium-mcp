@@ -3361,15 +3361,20 @@ async def _edit_pcb_objects(params: dict, board_path: str) -> str:
 
 @_tool()
 async def delete_pcb_objects(ctx: Context, kinds: list = None, net: str = "", layer: str = "",
-                             area: list = None, dry_run: bool = False, board_path: str = "") -> str:
+                             area: list = None, designators: list = None, margin_mils: float = 40,
+                             include_locked: bool = False, dry_run: bool = False, board_path: str = "") -> str:
     """
-    Delete tracks, arcs, vias, polygons, regions or fills from a PCB.
+    Delete copper from a PCB: tracks, arcs, vias, polygon pours, copper
+    regions, fills or pour cutouts. Use it to rip up routing.
 
-    Objects are picked by every filter given: kinds, net, layer and area. At
-    least one must narrow the match; deleting everything is refused. Pads,
-    anything belonging to a component, and the copper a polygon poured (it
-    goes with its polygon) are never touched. One undo step in Altium.
-    Use dry_run first to see what would go.
+    Objects are picked by every filter given: kinds, net, layer and area,
+    or a group's copper by designators. At least one must narrow the match;
+    deleting all the copper on the board is refused. Only copper is ever
+    touched: never pads, anything belonging to a component, keepouts, or
+    objects on other layers (board outline, silkscreen, mechanical). The
+    copper a pour poured goes with its pour. Locked objects are left alone
+    and listed, unless include_locked. One undo step in Altium. Use dry_run
+    first to see what would go.
 
     Deleting copper inside a pour leaves the pour as it was: repour it.
     Remove a via stitching group with Altium's own command rather than
@@ -3377,56 +3382,68 @@ async def delete_pcb_objects(ctx: Context, kinds: list = None, net: str = "", la
 
     Args:
         kinds (list): Some of "track", "arc", "via", "polygon", "region",
-            "fill"; empty for all of them.
+            "fill", "cutout" (a pour cutout). Empty: all but cutouts.
         net (str): Only objects on this net.
         layer (str): Only objects on this copper layer, by stack name or
             Altium's name ("Top Layer"); a via matches every layer it spans.
         area (list): [x1, y1, x2, y2] in mils from the board origin; only
             objects lying inside it.
+        designators (list): Rip up a group's copper, as get_layout lists it:
+            what lies inside the group's extent (grown by margin_mils, or
+            area when given) plus the copper of its own nets (nets with no
+            pad on another part) wherever it runs.
+        margin_mils (float): See designators (default 40).
+        include_locked (bool): Delete locked objects too.
         dry_run (bool): List what matches without deleting.
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
 
     Returns:
-        str: JSON with matched, deleted, and the first 50 objects (kind,
-             net, layer, position in mils).
+        str: JSON with matched, deleted, the first 50 objects (kind, net,
+             layer, position in mils), and locked_skipped with the first
+             20 locked objects left alone.
     """
     import pcb_edit
 
     board_path = long_path(board_path)
-    params, error = pcb_edit.filters(kinds, net, layer, area)
+    params, error = pcb_edit.filters(kinds, net, layer, area, designators, margin_mils, include_locked)
     if error:
         return json.dumps({"success": False, "error": error})
-    if not pcb_edit.narrowed(kinds, net, layer, area):
+    if not pcb_edit.narrowed(kinds, net, layer, area, designators):
         return json.dumps({"success": False, "error": (
-            "Give at least one filter (kinds, net, layer or area): this would delete every track, "
-            "via, polygon, region and fill on the board.")})
+            "Give at least one filter (kinds, net, layer, area or designators): this would delete all the "
+            "copper on the board.")})
     logger.info(f"Deleting PCB objects {params} (dry run: {dry_run})")
     return await _edit_pcb_objects({**params, "action": "delete", "dry_run": "true" if dry_run else "false"},
                                    board_path)
 
 @_tool()
 async def modify_pcb_objects(ctx: Context, kinds: list = None, net: str = "", layer: str = "",
-                             area: list = None, width_mils: float = None, via_diameter_mils: float = None,
+                             area: list = None, designators: list = None, margin_mils: float = 40,
+                             width_mils: float = None, via_diameter_mils: float = None,
                              via_hole_mils: float = None, new_net: str = None, new_layer: str = "",
-                             dry_run: bool = False, board_path: str = "") -> str:
+                             include_locked: bool = False, dry_run: bool = False, board_path: str = "") -> str:
     """
-    Change tracks, arcs, vias, polygons, regions or fills on a PCB: width,
-    via size, net or layer.
+    Change copper on a PCB: the width of tracks and arcs, the size of vias,
+    the net, or the layer.
 
-    Objects are picked as for delete_pcb_objects: every filter given must
-    match. Each change applies where it makes sense: width_mils to tracks and
-    arcs, via_diameter_mils and via_hole_mils to vias, new_layer to tracks,
-    arcs, fills and regions, new_net to all ("" removes the net). A polygon
-    given another net pours again. One undo step in Altium.
+    Objects are picked as for delete_pcb_objects, and at least one filter
+    must narrow the match. Each change applies where it makes sense:
+    width_mils to tracks and arcs, via_diameter_mils and via_hole_mils to
+    vias, new_layer to tracks, arcs, fills and regions, new_net to all ("" removes
+    the net). A via whose hole would not fit inside its diameter is left as
+    it is and counted. A polygon given another net pours again. Locked
+    objects are left alone unless include_locked. One undo step in Altium.
 
     Changed copper inside a pour leaves the pour as it was: repour it, and
     run DRC after changing widths or via sizes.
 
     Args:
-        kinds, net, layer, area: The filters, as for delete_pcb_objects.
+        kinds, net, layer, area, designators, margin_mils, include_locked:
+            The filters, as for delete_pcb_objects.
         width_mils (float): New width of tracks and arcs.
-        via_diameter_mils, via_hole_mils (float): New via size.
+        via_diameter_mils, via_hole_mils (float): New via size; either alone
+            is checked against each via's other size.
         new_net (str): New net; "" removes the net; leave out to keep it.
         new_layer (str): Copper layer to move tracks, arcs, fills and
             regions to.
@@ -3436,14 +3453,19 @@ async def modify_pcb_objects(ctx: Context, kinds: list = None, net: str = "", la
 
     Returns:
         str: JSON with matched, changed, unchanged (matched objects none of
-             the changes applies to), and the first 50 objects as they were.
+             the changes applies to), vias_left_as_hole_would_not_fit,
+             locked_skipped, and the first 50 objects as they were.
     """
     import pcb_edit
 
     board_path = long_path(board_path)
-    params, error = pcb_edit.filters(kinds, net, layer, area)
+    params, error = pcb_edit.filters(kinds, net, layer, area, designators, margin_mils, include_locked)
     if error:
         return json.dumps({"success": False, "error": error})
+    if not pcb_edit.narrowed(kinds, net, layer, area, designators):
+        return json.dumps({"success": False, "error": (
+            "Give at least one filter (kinds, net, layer, area or designators): this would change all the "
+            "copper on the board.")})
     change, error = pcb_edit.changes(width_mils, via_diameter_mils, via_hole_mils, new_net, new_layer)
     if error:
         return json.dumps({"success": False, "error": error})

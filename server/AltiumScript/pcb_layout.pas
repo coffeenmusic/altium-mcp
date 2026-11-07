@@ -62,6 +62,29 @@ begin
         Result := 'S|L|' + IntToStr(Seg.vx - Board.XOrigin) + '|' + IntToStr(Seg.vy - Board.YOrigin);
 end;
 
+// The area of a group of components: their extent (pads, bodies, everything
+// but name and comment) grown by Margin, as 'x1|y1|x2|y2' in absolute
+// internal units, or '' when Comps is empty
+function LayoutGroupArea(Comps: TInterfaceList; Margin: Integer): String;
+var
+    Rect : TCoordRect;
+    X1, Y1, X2, Y2, i : Integer;
+begin
+    Result := '';
+    if Comps.Count = 0 then Exit;
+    Rect := Comps.Items[0].BoundingRectangleNoNameComment;
+    X1 := Rect.Left; Y1 := Rect.Bottom; X2 := Rect.Right; Y2 := Rect.Top;
+    for i := 1 to Comps.Count - 1 do
+    begin
+        Rect := Comps.Items[i].BoundingRectangleNoNameComment;
+        if Rect.Left < X1 then X1 := Rect.Left;
+        if Rect.Bottom < Y1 then Y1 := Rect.Bottom;
+        if Rect.Right > X2 then X2 := Rect.Right;
+        if Rect.Top > Y2 then Y2 := Rect.Top;
+    end;
+    Result := IntToStr(X1 - Margin) + '|' + IntToStr(Y1 - Margin) + '|' + IntToStr(X2 + Margin) + '|' + IntToStr(Y2 + Margin);
+end;
+
 // One get_layout record (lines) for a free primitive: a track, arc, via, fill,
 // copper region or pour cutout. Returns 1 when it is not one of those (a
 // keepout, or not on a copper layer) and was skipped, else 0.
@@ -218,17 +241,11 @@ begin
                 Result := 'ERROR: None of the designators is on the board, and no area was given';
                 Exit;
             end;
-            Rect := Comps.Items[0].BoundingRectangleNoNameComment;
-            X1 := Rect.Left; Y1 := Rect.Bottom; X2 := Rect.Right; Y2 := Rect.Top;
-            for i := 1 to Comps.Count - 1 do
-            begin
-                Rect := Comps.Items[i].BoundingRectangleNoNameComment;
-                if Rect.Left < X1 then X1 := Rect.Left;
-                if Rect.Bottom < Y1 then Y1 := Rect.Bottom;
-                if Rect.Right > X2 then X2 := Rect.Right;
-                if Rect.Top > Y2 then Y2 := Rect.Top;
-            end;
-            X1 := X1 - Margin; Y1 := Y1 - Margin; X2 := X2 + Margin; Y2 := Y2 + Margin;
+            Addr := LayoutGroupArea(Comps, Margin);
+            X1 := StrToInt(GetFieldFromPipeString(Addr, 0));
+            Y1 := StrToInt(GetFieldFromPipeString(Addr, 1));
+            X2 := StrToInt(GetFieldFromPipeString(Addr, 2));
+            Y2 := StrToInt(GetFieldFromPipeString(Addr, 3));
         end;
         Lines.Add('O|' + IntToStr(X1 - Board.XOrigin) + '|' + IntToStr(Y1 - Board.YOrigin) + '|' +
                   IntToStr(X2 - Board.XOrigin) + '|' + IntToStr(Y2 - Board.YOrigin));

@@ -4792,42 +4792,81 @@ begin
 end;
 
 // The kind of a free primitive delete_pcb_objects and modify_pcb_objects act
-// on, or '' for one they leave alone: pads, anything of a component, and the
-// copper a polygon poured (it is the polygon's own and goes with it)
+// on, or '' for one they leave alone: pads, anything of a component, the
+// copper a polygon poured (it is the polygon's own and goes with it),
+// keepouts, and anything not on a copper layer (board outline, silkscreen,
+// mechanical layers). A region is copper ('region') or a polygon pour
+// cutout ('cutout'); board cutouts and named regions are left alone.
 function EditableKind(Prim: IPCB_Primitive): String;
+var
+    Copper : Boolean;
 begin
     Result := '';
     if Prim.InComponent or Prim.InPolygon then Exit;
+    if Prim.ObjectId = eViaObject then
+    begin
+        Result := 'via';
+        Exit;
+    end;
+    if Prim.IsKeepout then Exit;
+    Copper := (Prim.Layer >= eTopLayer) and (Prim.Layer <= eBottomLayer);
     case Prim.ObjectId of
-        eTrackObject:  Result := 'track';
-        eArcObject:    Result := 'arc';
-        eViaObject:    Result := 'via';
-        ePolyObject:   Result := 'polygon';
-        eRegionObject: Result := 'region';
-        eFillObject:   Result := 'fill';
+        eTrackObject:  if Copper then Result := 'track';
+        eArcObject:    if Copper then Result := 'arc';
+        ePolyObject:   if Copper then Result := 'polygon';
+        eFillObject:   if Copper then Result := 'fill';
+        eRegionObject:
+            begin
+                if (Prim.Kind = 0) and Copper then Result := 'region'
+                else if (Prim.Kind = 1) and (Copper or (Prim.Layer = eMultiLayer)) then Result := 'cutout';
+            end;
     end;
 end;
 
 // The primitives matching every filter: Kinds is '|track|via|...|', NetName
 // and LayerName '' for any, Area 'x1|y1|x2|y2' (internal units from the board
 // origin) or '' for anywhere; an object matches the area when it lies inside.
-// A via matches a layer it spans.
+// A via matches a layer it spans. With Designators (upper-case names), the
+// group's copper as get_layout lists it: inside Area (or the group's extent
+// grown by Margin) or on one of the group's own nets. Locked objects are
+// left out unless IncludeLocked, and listed in Locked.
 function MatchPCBObjects(Board: IPCB_Board; Kinds: String; NetName: String; Layer: Integer;
-                         Area: String; Found: TInterfaceList): Integer;
+                         Area: String; Designators: TStringList; Margin: Integer; IncludeLocked: Boolean;
+                         Found: TInterfaceList; Locked: TInterfaceList): Integer;
 var
     Iterator : IPCB_BoardIterator;
     Prim     : IPCB_Primitive;
-    Kind     : String;
+    Comps    : TInterfaceList;
+    Local    : TStringList;
+    Kind, GroupArea : String;
     R        : TCoordRect;
     X1, Y1, X2, Y2 : Integer;
-    Ok       : Boolean;
+    Ok, HasArea, InArea : Boolean;
 begin
-    if Area <> '' then
+    HasArea := Area <> '';
+    if HasArea then
     begin
         X1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 0));
         Y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 1));
         X2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 2));
         Y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 3));
+    end;
+    Local := TStringList.Create;
+    Local.Sorted := True;
+    Comps := TInterfaceList.Create;
+    if Designators.Count > 0 then
+    begin
+        LayoutFindComponents(Board, Designators, Comps);
+        LayoutLocalNets(Board, Designators, Local);
+        if (not HasArea) and (Comps.Count > 0) then
+        begin
+            GroupArea := LayoutGroupArea(Comps, Margin);
+            X1 := StrToInt(GetFieldFromPipeString(GroupArea, 0));
+            Y1 := StrToInt(GetFieldFromPipeString(GroupArea, 1));
+            X2 := StrToInt(GetFieldFromPipeString(GroupArea, 2));
+            Y2 := StrToInt(GetFieldFromPipeString(GroupArea, 3));
+            HasArea := True;
+        end;
     end;
     Iterator := Board.BoardIterator_Create;
     Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
@@ -4842,20 +4881,35 @@ begin
             Ok := (Prim.Net <> nil) and (UpperCase(Prim.Net.Name) = UpperCase(NetName));
         if Ok and (Layer <> eNoLayer) then
         begin
+            // Layer IDs are not in stack order: ask the via whether it spans it
             if Prim.ObjectId = eViaObject then
-                Ok := (Prim.LowLayer <= Layer) and (Layer <= Prim.HighLayer)
+                Ok := Prim.IntersectLayer(Layer)
             else
                 Ok := Prim.Layer = Layer;
         end;
-        if Ok and (Area <> '') then
+        if Ok and HasArea then
         begin
             R := Prim.BoundingRectangle;
-            Ok := (R.Left >= X1) and (R.Right <= X2) and (R.Bottom >= Y1) and (R.Top <= Y2);
+            InArea := (R.Left >= X1) and (R.Right <= X2) and (R.Bottom >= Y1) and (R.Top <= Y2);
+            if Designators.Count > 0 then
+                Ok := InArea or ((Prim.Net <> nil) and (Local.IndexOf(UpperCase(Prim.Net.Name)) >= 0))
+            else
+                Ok := InArea;
+        end
+        else if Ok and (Designators.Count > 0) then
+            Ok := (Prim.Net <> nil) and (Local.IndexOf(UpperCase(Prim.Net.Name)) >= 0);
+        if Ok then
+        begin
+            if (not IncludeLocked) and (not Prim.Moveable) then
+                Locked.Add(Prim)
+            else
+                Found.Add(Prim);
         end;
-        if Ok then Found.Add(Prim);
         Prim := Iterator.NextPCBObject;
     end;
     Board.BoardIterator_Destroy(Iterator);
+    Comps.Free;
+    Local.Free;
     Result := Found.Count;
 end;
 
@@ -4911,16 +4965,17 @@ end;
 // ('' removes it), NewLayerName (tracks, arcs, fills, regions); -1 or ''
 // leaves a value alone. All of it is one undo step.
 function EditPCBObjects(Action: String; Kinds: String; NetName: String; LayerName: String; Area: String;
+                        DesignatorText: String; Margin: Integer; IncludeLocked: Boolean;
                         DryRun: Boolean; Width: Integer; ViaSize: Integer; ViaHole: Integer;
                         SetNet: Boolean; NewNetName: String; NewLayerName: String): String;
 var
     Board    : IPCB_Board;
-    Found, Polys : TInterfaceList;
+    Found, Polys, Locked : TInterfaceList;
     Prim     : IPCB_Primitive;
-    Layer, NewLayer, i, Changed, Skipped : Integer;
+    Layer, NewLayer, i, Changed, Skipped, BadSize, NewSize, NewHole : Integer;
     NewNet   : IPCB_Net;
     Kind     : String;
-    Items, Props : TStringList;
+    Items, Props, LockedItems, Designators : TStringList;
     Did      : Boolean;
 begin
     Board := GetBoardSafe(0);
@@ -4967,15 +5022,22 @@ begin
 
     Found := TInterfaceList.Create;
     Polys := TInterfaceList.Create;
+    Locked := TInterfaceList.Create;
     Items := TStringList.Create;
     Props := TStringList.Create;
+    LockedItems := TStringList.Create;
+    Designators := TStringList.Create;
     try
-        MatchPCBObjects(Board, Kinds, NetName, Layer, Area, Found);
+        Designators.Text := UpperCase(StringReplace(DesignatorText, ';', #13#10, REPLACEALL));
+        MatchPCBObjects(Board, Kinds, NetName, Layer, Area, Designators, Margin, IncludeLocked, Found, Locked);
         for i := 0 to Found.Count - 1 do
             if i < 50 then Items.Add(PCBObjectJSON(Board, Found.Items[i]));
+        for i := 0 to Locked.Count - 1 do
+            if i < 20 then LockedItems.Add(PCBObjectJSON(Board, Locked.Items[i]));
 
         Changed := 0;
         Skipped := 0;
+        BadSize := 0;
         if (not DryRun) and (Found.Count > 0) then
         begin
             // PostProcess must run whatever happens, or Altium's undo stays broken
@@ -4997,8 +5059,22 @@ begin
                         PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
                         if (Width >= 0) and (Kind = 'track') then begin Prim.Width := Width; Did := True; end;
                         if (Width >= 0) and (Kind = 'arc') then begin Prim.LineWidth := Width; Did := True; end;
-                        if (ViaSize >= 0) and (Kind = 'via') then begin Prim.Size := ViaSize; Did := True; end;
-                        if (ViaHole >= 0) and (Kind = 'via') then begin Prim.HoleSize := ViaHole; Did := True; end;
+                        if (Kind = 'via') and ((ViaSize >= 0) or (ViaHole >= 0)) then
+                        begin
+                            // A size given alone is checked against the via's other size
+                            NewSize := Prim.Size;
+                            NewHole := Prim.HoleSize;
+                            if ViaSize >= 0 then NewSize := ViaSize;
+                            if ViaHole >= 0 then NewHole := ViaHole;
+                            if NewHole < NewSize then
+                            begin
+                                Prim.Size := NewSize;
+                                Prim.HoleSize := NewHole;
+                                Did := True;
+                            end
+                            else
+                                BadSize := BadSize + 1;
+                        end;
                         if SetNet then begin Prim.Net := NewNet; Did := True; end;
                         if (NewLayer <> eNoLayer) and ((Kind = 'track') or (Kind = 'arc') or (Kind = 'fill') or (Kind = 'region')) then
                         begin
@@ -5028,15 +5104,21 @@ begin
         begin
             AddJSONInteger(Props, 'changed', Changed);
             AddJSONInteger(Props, 'unchanged', Skipped);
+            AddJSONInteger(Props, 'vias_left_as_hole_would_not_fit', BadSize);
         end;
         if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'objects')) else Props.Add('"objects": []');
+        AddJSONInteger(Props, 'locked_skipped', Locked.Count);
+        if LockedItems.Count > 0 then Props.Add(BuildJSONArray(LockedItems, 'locked'));
         AddJSONProperty(Props, 'board', Board.FileName);
         Result := BuildJSONObject(Props);
     finally
         Found.Free;
         Polys.Free;
+        Locked.Free;
         Items.Free;
         Props.Free;
+        LockedItems.Free;
+        Designators.Free;
     end;
 end;
 

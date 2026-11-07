@@ -192,6 +192,14 @@
       "description": "List the connections still to be routed for some components, nets or the whole board, naming the pads at each end, with no DRC limit"
     },
     {
+      "name": "delete_pcb_objects",
+      "description": "Rip up copper: tracks, arcs, vias, pours, regions, fills or cutouts picked by kind, net, layer, area or a group's designators; locked objects kept"
+    },
+    {
+      "name": "modify_pcb_objects",
+      "description": "Change the width, via size, net or layer of copper picked as for delete_pcb_objects, in one undo step"
+    },
+    {
       "name": "place_polygon_pour",
       "description": "Add a polygon pour from an outline to a PCB and pour it"
     },
