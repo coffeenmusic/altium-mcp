@@ -317,9 +317,39 @@ def describe_violations(result: dict, unit: str) -> List[dict]:
             item["distance"] = round(v.get("distance", 0) / k, 4)
         if "gap" in v:
             item["rule_gap"] = round(v["gap"] / k, 4)
+        if v.get("same_net_pour"):
+            item["same_net_pour"] = True
         item["descriptor"] = v.get("descriptor")
         out.append(item)
     return out
+
+
+def check_reply(result: dict, unit: str) -> dict:
+    """check_objects_drc's reply from the 'check' command's result. "No
+    violations" only when something was checked."""
+    k = unit_factor(unit)
+    violations = describe_violations(result, unit)
+    checked = result.get("objects_checked", 0)
+    reply = {"board_path": result.get("board_path"), "unit": unit, "objects_checked": checked,
+             "pairs_checked": result.get("pairs_checked"), "violations": violations}
+    if result.get("search_margin"):
+        reply["search_margin"] = round(result["search_margin"] / k, 4)
+    if result.get("objects_found", 0) > checked:
+        reply["truncated"] = f"{result['objects_found']} objects in the box; checked {checked}"
+    if result.get("not_found"):
+        reply["not_found"] = result["not_found"]
+    if not checked:
+        reply["success"] = False
+        reply["note"] = ("Nothing was checked: no ref was found (a ref goes stale when its object moves; "
+                         "take fresh ones from objects_in_area) and no copper lies in the box.")
+    elif not violations:
+        reply["note"] = "No violations." + (" Some refs were not found and not checked." if result.get("not_found")
+                                            else "")
+    elif any(v.get("same_net_pour") for v in violations):
+        reply["same_net_pour_note"] = ("same_net_pour: one side is pour copper of the other's net. The pour's "
+                                       "copper has no net of its own, so Altium may judge the pair as two nets; "
+                                       "confirm with run_drc.")
+    return reply
 
 
 def describe_clearance(result: dict, unit: str) -> dict:

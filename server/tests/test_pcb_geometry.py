@@ -87,6 +87,24 @@ class ViolationTest(unittest.TestCase):
         self.assertEqual((out[0]["distance"], out[0]["rule_gap"]), (2.0, 5.0))
         self.assertNotIn("b", out[1])
 
+    def test_check_reply_says_when_nothing_was_checked(self):
+        base = {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "pairs_checked": 0, "violations": []}
+        out = geo.check_reply(dict(base, objects_checked=0, objects_found=0, not_found=["via|1|2"]), "mil")
+        self.assertFalse(out["success"])
+        self.assertIn("Nothing was checked", out["note"])
+        self.assertEqual(out["not_found"], ["via|1|2"])
+        out = geo.check_reply(dict(base, objects_checked=2, objects_found=2, search_margin=210000), "mil")
+        self.assertNotIn("success", out)
+        self.assertEqual((out["note"], out["search_margin"]), ("No violations.", 21.0))
+        out = geo.check_reply(dict(base, objects_checked=1, objects_found=1, not_found=["via|1|2"]), "mil")
+        self.assertIn("not found", out["note"])
+        flagged = dict(base, objects_checked=1, objects_found=1, violations=[
+            {"rule": "Clearance", "kind": "clearance", "a": RECORDS[3], "b": RECORDS[8], "distance": 0,
+             "gap": 50000, "descriptor": "d", "same_net_pour": True}])
+        out = geo.check_reply(flagged, "mil")
+        self.assertTrue(out["violations"][0]["same_net_pour"])
+        self.assertIn("run_drc", out["same_net_pour_note"])
+
 
 class SelectTest(unittest.TestCase):
     def test_layers_and_nets(self):

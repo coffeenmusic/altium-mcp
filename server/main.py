@@ -5482,15 +5482,17 @@ async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, 
         board_path (str): Full path of the .PcbDoc; default the focused board.
 
     Returns:
-        str: JSON with objects_checked, pairs_checked and the violations:
-             rule, kind, both objects, their distance and the rule's gap.
+        str: JSON with objects_checked, pairs_checked, search_margin (how
+             far neighbours were looked for) and the violations: rule, kind,
+             both objects, their distance and the rule's gap. When nothing
+             was checked (no ref found, nothing in the box) success is false.
     """
     import pcb_geometry as geo
 
     if not refs and not bbox:
         return json.dumps({"success": False, "error": "give refs, bbox or both"})
-    params = {"geometry": "check", "limit": str(max(1, int(limit)))}
     try:
+        params = {"geometry": "check", "limit": str(max(1, int(limit)))}
         params["refs"] = "~".join(geo.normalize_ref(r) for r in (refs or []))
         if bbox:
             if not isinstance(bbox, list) or len(bbox) != 4:
@@ -5502,20 +5504,11 @@ async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, 
         return json.dumps({"success": False, "error": str(e)})
     if "~" in "".join(refs or []):
         return json.dumps({"success": False, "error": "a ref cannot contain '~'"})
-    result, error = await _geometry(params, board_path)
+    params["board_path"] = long_path(board_path)
+    result, error = await _bridge_json("geometry", params)
     if error:
         return json.dumps({"success": False, "error": error})
-    violations = geo.describe_violations(result, unit)
-    reply = {"board_path": result.get("board_path"), "unit": unit,
-             "objects_checked": result.get("objects_checked"), "pairs_checked": result.get("pairs_checked"),
-             "violations": violations}
-    if result.get("objects_found", 0) > result.get("objects_checked", 0):
-        reply["truncated"] = f"{result['objects_found']} objects in the box; checked {result['objects_checked']}"
-    if result.get("not_found"):
-        reply["not_found"] = result["not_found"]
-    if not violations:
-        reply["note"] = "No violations."
-    return json.dumps(reply, indent=1)
+    return json.dumps(geo.check_reply(result, unit), indent=1)
 
 
 @_tool(read_only=True)

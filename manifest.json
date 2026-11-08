@@ -152,6 +152,10 @@
       "description": "Run the design rule check on a PCB and list the violations with measured values, optionally filtered by rule, net or area"
     },
     {
+      "name": "check_objects_drc",
+      "description": "Run the board's design rules on chosen PCB objects only, without a batch DRC"
+    },
+    {
       "name": "get_selected_components_coordinates",
       "description": "Get coordinates and positioning information for selected components in Altium layout"
     },

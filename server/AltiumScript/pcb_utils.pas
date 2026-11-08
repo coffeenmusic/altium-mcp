@@ -6965,7 +6965,6 @@ begin
     end;
 end;
 
-// geometry requests: "geometry" names the command (area, clearance, drag)
 // ---------------------------------------------------------------- object DRC
 // The board's own rules run on chosen objects only: each object's
 // width / hole rule, and the clearance, short-circuit and hole-to-hole
@@ -6985,14 +6984,38 @@ begin
     end;
 end;
 
-// The largest clearance gap of the board's enabled rules: how far to look
-// for neighbours
+// The largest entry of a clearance rule's per-object table (track to pad,
+// pad to pour, ...), which can exceed its Gap. GetClearance is the call
+// the Board Outline Clearance rule answers (see the silkscreen code); the
+// object kinds are tried by number, since their names differ between
+// versions, and a kind the rule does not know is skipped.
+function GeoLargestTableGap(Rule: IPCB_Rule): Integer;
+var
+    I, J, V : Integer;
+begin
+    Result := 0;
+    for I := 0 to 31 do
+        for J := I to 31 do
+        begin
+            V := 0;
+            try V := Rule.GetClearance(I, J); except V := 0; end;
+            // a value no board uses would be a kind read wrongly
+            if (V > Result) and (V < MilsToCoord(1000)) then Result := V;
+        end;
+end;
+
+// How far to look for neighbours: the largest clearance of the board's
+// enabled clearance and hole-to-hole rules, their per-object tables
+// included, and never less than twice the largest Gap plus 10 mil, in
+// case the table cannot be read
 function GeoLargestGap(Board: IPCB_Board): Integer;
 var
     It   : IPCB_BoardIterator;
     Rule : IPCB_Rule;
+    Gap, TableGap, RuleTable : Integer;
 begin
-    Result := 0;
+    Gap := 0;
+    TableGap := 0;
     It := Board.BoardIterator_Create;
     It.AddFilter_ObjectSet(MkSet(eRuleObject));
     It.AddFilter_LayerSet(AllLayers);
@@ -7001,12 +7024,17 @@ begin
     while Rule <> nil do
     begin
         if Rule.Enabled and (Rule.RuleKind = eRule_Clearance) then
-            if Rule.Gap > Result then Result := Rule.Gap;
+        begin
+            if Rule.Gap > Gap then Gap := Rule.Gap;
+            RuleTable := GeoLargestTableGap(Rule);
+            if RuleTable > TableGap then TableGap := RuleTable;
+        end;
         if Rule.Enabled and (Rule.RuleKind = eRule_HoleToHoleClearance) then
-            if Rule.Gap > Result then Result := Rule.Gap;
+            if Rule.Gap > Gap then Gap := Rule.Gap;
         Rule := It.NextPCBObject;
     end;
     Board.BoardIterator_Destroy(It);
+    Result := Max(TableGap, 2 * Gap + MilsToCoord(10));
 end;
 
 function GeoHasHole(Prim: IPCB_Primitive): Boolean;
@@ -7014,6 +7042,17 @@ begin
     Result := False;
     if Prim.ObjectId = eViaObject then Result := True
     else if Prim.ObjectId = ePadObject then Result := Prim.HoleSize > 0;
+end;
+
+// Pour copper with no net of its own, on the net of Other: a pair the rule
+// may judge as two nets (to be confirmed in Altium), so it is flagged
+function GeoSameNetPour(Pour, Other: IPCB_Primitive): Boolean;
+begin
+    Result := False;
+    if Pour.InPolygon then
+        if Pour.Net = nil then
+            if GeoNet(Pour) <> '' then
+                Result := SameText(GeoNet(Pour), GeoNet(Other));
 end;
 
 procedure GeoAddViolation(Board: IPCB_Board; Items: TStringList; Rule: IPCB_Rule; A, B: IPCB_Primitive);
@@ -7029,6 +7068,7 @@ begin
         begin
             AddJSONProperty(Item, 'b', GeoRecord(B));
             AddJSONInteger(Item, 'distance', Board.PrimPrimDistance(A, B));
+            if GeoSameNetPour(A, B) or GeoSameNetPour(B, A) then AddJSONBoolean(Item, 'same_net_pour', True);
         end;
         if Rule.RuleKind = eRule_Clearance then AddJSONInteger(Item, 'gap', Rule.Gap);
         AddJSONProperty(Item, 'descriptor', Rule.Descriptor);
@@ -7038,18 +7078,19 @@ begin
     end;
 end;
 
-// Checks Objects; Items gets one JSON object per violation
-procedure GeoCheckObjects(Board: IPCB_Board; Objects: TInterfaceList; Items: TStringList; var Pairs: Integer);
+// Checks Objects against what lies within Margin of them; Items gets one
+// JSON object per violation
+procedure GeoCheckObjects(Board: IPCB_Board; Objects: TInterfaceList; Items: TStringList; Margin: Integer;
+                          var Pairs: Integer);
 var
     A, B  : IPCB_Primitive;
     Rule  : IPCB_Rule;
     It    : IPCB_SpatialIterator;
     R     : TCoordRect;
-    i, k, Margin, Kind : Integer;
+    i, k, Kind : Integer;
     Seen  : TStringList;
     Key   : String;
 begin
-    Margin := GeoLargestGap(Board) + MilsToCoord(1);
     Seen := TStringList.Create;
     try
         Seen.Sorted := True;
@@ -7121,7 +7162,7 @@ var
     Prim : IPCB_Primitive;
     It   : IPCB_SpatialIterator;
     Ref  : String;
-    i, Pairs, Total : Integer;
+    i, Pairs, Total, Margin : Integer;
 begin
     Objects := TInterfaceList.Create;
     Items := TStringList.Create;
@@ -7157,13 +7198,19 @@ begin
             Board.SpatialIterator_Destroy(It);
         end;
         Pairs := 0;
-        GeoCheckObjects(Board, Objects, Items, Pairs);
+        Margin := 0;
+        if Objects.Count > 0 then
+        begin
+            Margin := GeoLargestGap(Board) + MilsToCoord(1);
+            GeoCheckObjects(Board, Objects, Items, Margin, Pairs);
+        end;
         AddJSONProperty(Props, 'board_path', Board.FileName);
         AddJSONInteger(Props, 'origin_x', Board.XOrigin);
         AddJSONInteger(Props, 'origin_y', Board.YOrigin);
         AddJSONInteger(Props, 'objects_checked', Objects.Count);
         AddJSONInteger(Props, 'objects_found', Total);
         AddJSONInteger(Props, 'pairs_checked', Pairs);
+        AddJSONInteger(Props, 'search_margin', Margin);
         Props.Add(BuildJSONArray(Missing, 'not_found'));
         Props.Add(BuildJSONArray(Items, 'violations'));
         Result := BuildJSONObject(Props);
@@ -7176,6 +7223,8 @@ begin
     end;
 end;
 
+// geometry requests: "geometry" names the command (area, outline, clearance,
+// check, drag)
 function ExecuteGeometry(RequestData: TStringList): String;
 var
     Board : IPCB_Board;
