@@ -84,3 +84,50 @@ def encode_values(kind: str, values: dict, partial: bool = False) -> Tuple[str, 
         if hole in vals and diameter in vals and vals[hole] >= vals[diameter]:
             return "", f"{hole}_mils must be smaller than {diameter}_mils"
     return ";".join(out), ""
+
+
+def check_merged(kind: str, current: dict, changes: dict) -> str:
+    """'' when an edit's values, merged with the rule's current ones (as
+    pcb_rule_info reads them), pass create_pcb_rule's checks, else why not:
+    an edit of one value must not leave min above max, or a via hole as
+    large as the via."""
+    spec = RULE_KINDS.get(kind, {})
+    merged = {k: v for k, v in (current or {}).items() if k in spec}
+    merged.update(changes or {})
+    _, error = encode_values(kind, merged)
+    if error:
+        now = ", ".join(f"{k}={v}" for k, v in sorted((current or {}).items()) if k in spec and k not in changes)
+        return f"{error} (with the rule's other values: {now})" if now else error
+    return ""
+
+
+def move_notes(result: dict, name: str) -> dict:
+    """Notes for a reply of edit_pcb_rule or set_rule_priority that re-added
+    rules to keep or set an order: how to undo the move, and a warning when
+    a re-added rule came from the design (a schematic directive or a room),
+    or its unique id changed, which Update PCB uses to match rules."""
+    notes = {}
+    if not result.get("rules_moved"):
+        return notes
+    before = result.get("priority_before")
+    if before is not None and before != result.get("priority"):
+        notes["undo"] = (f"Altium's Undo may not restore the old order (re-adding a rule renumbers "
+                         f"it). set_rule_priority(name={result.get('name', name)!r}, "
+                         f"priority={before}) puts it back.")
+    design = result.get("readded_from_design") or []
+    changed = result.get("unique_id_changed") or []
+    if design or changed:
+        parts = []
+        if design:
+            parts.append(f"{', '.join(design)} came from the design (directive or room) and "
+                         f"were taken off and added again")
+        if changed:
+            parts.append(f"{', '.join(changed)} got a new unique id")
+        notes["move_warning"] = ("; ".join(parts) + ". Check that the next Update PCB does not add "
+                                 "them a second time.")
+    return notes
+
+
+def scope_or_all(scope) -> str:
+    """A rule scope as sent to Altium: an empty or blank one is "All"."""
+    return (scope or "").strip() or "All"

@@ -6539,8 +6539,11 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
     their priorities. Check the result's "descriptor": it is what Altium
     stored.
 
-    Scopes are first run through Altium's query engine (check_scope): one
-    Altium cannot evaluate is refused with its message.
+    Scopes are first run through Altium's query engine (check_scope), as
+    query_objects runs them: one bridge call per scope that is not "All".
+    A scope Altium cannot evaluate is refused with its message; generic
+    layer names in OnLayer() are stored as the board names them. Set
+    check_scope=False to skip the check. An empty scope is "All".
 
     Args:
         rule_type (str): One of the kinds above.
@@ -6557,7 +6560,9 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
 
     Returns:
         str: JSON with the rule's name, descriptor, scopes, priority and
-             whether it replaced an existing rule.
+             whether it replaced an existing rule; with check_scope,
+             scope_check ({scope1/scope2: {matched, stored_as}}) and
+             scope_warning when a scope matches nothing now.
     """
     import pcb_rules
 
@@ -6567,6 +6572,7 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
         return json.dumps({"success": False, "error": error})
     if not name.strip():
         return json.dumps({"success": False, "error": "name is empty"})
+    scope1, scope2 = pcb_rules.scope_or_all(scope1), pcb_rules.scope_or_all(scope2)
     checks = {}
     if check_scope:
         checks, error = await _check_scopes({"scope1": scope1, "scope2": scope2}, board_path)
@@ -6594,25 +6600,11 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
     if others and (scope1 or "All").strip().lower() == "all" and (scope2 or "All").strip().lower() == "all":
         result["warning"] = (f"This rule applies to everything at priority 1, so it now overrides the "
                              f"{others} other {rule_type} rule(s) on the board. Narrow its scope or "
-                             f"move it down in Altium's rules editor if that is not intended.")
+                             f"move it down with set_rule_priority if that is not intended.")
     return json.dumps(result, indent=2)
 
 # Changes the design: a timeout leaves its outcome unknown, so no blind retry
 MUTATING_COMMANDS.add("create_pcb_rule")
-
-async def _rule_command(command: str, params: dict):
-    """The bridge's result as a dict, or (None, error)."""
-    response = await altium_bridge.execute_command(command, params)
-    if not response.get("success", False):
-        return None, response.get("error", "unknown error")
-    result = response.get("result", {})
-    if isinstance(result, str):
-        try:
-            result = json.loads(result, strict=False)
-        except ValueError:
-            return None, f"unexpected reply: {result[:200]}"
-    return result, ""
-
 
 async def _check_scopes(scopes: dict, board_path: str) -> Tuple[dict, str]:
     """Run each rule scope through Altium's query engine, which rules use
@@ -6630,6 +6622,7 @@ async def _check_scopes(scopes: dict, board_path: str) -> Tuple[dict, str]:
         if error:
             return {}, f"{field}: {error}"
         # Bare numbers stay as they are: a rule reads them as Altium does
+        expr = pcb_query.layer_arguments(expr)
         result, error = await _run_query("query_objects", {
             "expr_mm": expr, "expr_mil": expr, "limit": 0, "area": "", "board_path": board_path})
         if result is None:
@@ -6649,7 +6642,14 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
 
     Only the arguments given change. values takes create_pcb_rule's keys
     for the rule's kind, any subset of them (e.g. {"gap_mils": 10} for a
-    clearance rule).
+    clearance rule); merged with the rule's other values they must pass
+    create_pcb_rule's checks (min <= preferred <= max, via hole smaller
+    than the via). A width rule with different widths per layer is
+    refused; a width changes on the layers that had the old one. An empty
+    scope is "All"; new_name may not be blank.
+
+    Altium moves a modified rule to priority 1, so the rule and those above
+    it are taken off and added again to put it back (see set_rule_priority).
 
     Each new scope is first run through Altium's query engine, as the rule
     will be: a scope Altium cannot evaluate is refused with Altium's
@@ -6670,13 +6670,18 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
 
     Returns:
         str: JSON with the rule as Altium now has it (descriptor, scopes,
-             enabled, priority and priority_before), the order of its kind,
-             and the scope check.
+             values, enabled, priority and priority_before), the order of
+             its kind, the rules re-added to keep the order, and the scope
+             check.
     """
     import pcb_rules
 
     board_path = long_path(board_path)
-    info, error = await _rule_command("pcb_rule_info", {"rule_name": name, "board_path": board_path})
+    if new_name is not None:
+        new_name = new_name.strip()
+        if not new_name:
+            return json.dumps({"success": False, "error": "new_name is empty"})
+    info, error = await _bridge_json("pcb_rule_info", {"rule_name": name, "board_path": board_path})
     if info is None:
         return json.dumps({"success": False, "error": error})
     encoded = ""
@@ -6684,9 +6689,18 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
         if not info.get("kind"):
             return json.dumps({"success": False, "error": f"{name} is a rule kind whose values this tool "
                                                           f"cannot set ({info.get('descriptor')})"})
+        if info.get("per_layer_widths"):
+            return json.dumps({"success": False, "error": f"{name} has different widths per layer; edit them "
+                                                          f"in Altium's PCB Rules and Constraints Editor"})
         encoded, error = pcb_rules.encode_values(info["kind"], values, partial=True)
+        if not error:
+            error = pcb_rules.check_merged(info["kind"], info.get("values"), values)
         if error:
             return json.dumps({"success": False, "error": error})
+    if scope1 is not None:
+        scope1 = pcb_rules.scope_or_all(scope1)
+    if scope2 is not None:
+        scope2 = pcb_rules.scope_or_all(scope2)
     fields = {"scope1": scope1, "scope2": scope2, "comment": comment, "name": new_name}
     if enabled is not None:
         fields["enabled"] = "true" if enabled else "false"
@@ -6704,7 +6718,7 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
               "scope2": given.get("scope2", ""), "comment": given.get("comment", ""),
               "enabled": given.get("enabled", ""), "values": encoded,
               "set": "|" + "|".join(given) + "|", "board_path": board_path}
-    result, error = await _rule_command("edit_pcb_rule", params)
+    result, error = await _bridge_json("edit_pcb_rule", params)
     if result is None:
         return json.dumps({"success": False, "error": error})
     if checks:
@@ -6712,6 +6726,7 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
         empty = [k for k, c in checks.items() if not c["matched"]]
         if empty:
             result["warning"] = f"{', '.join(empty)} matches no object on the board now."
+    result.update(pcb_rules.move_notes(result, name))
     return json.dumps(result, indent=2)
 
 MUTATING_COMMANDS.add("edit_pcb_rule")
@@ -6726,7 +6741,11 @@ async def set_rule_priority(ctx: Context, name: str, priority: int, board_path: 
     Altium does not let a script set a priority, but a rule added again
     becomes priority 1 while the others keep their order. So the rule and
     the rules that stay above it are taken off and added again, lowest
-    first; the rules below are not touched. One undo step in Altium.
+    first; the rules below are not touched. This is one undo group, but
+    Altium's Undo may not restore the old order, since re-adding a rule
+    renumbers it: call set_rule_priority again with priority_before to put
+    it back. Rules that came from the design (schematic directives, rooms)
+    and were re-added are listed in readded_from_design.
 
     Args:
         name (str): The rule.
@@ -6735,15 +6754,20 @@ async def set_rule_priority(ctx: Context, name: str, priority: int, board_path: 
             board, or the one the PCB tools last used.
 
     Returns:
-        str: JSON with priority_before, the new priority and the order of
-             every rule of that kind.
+        str: JSON with priority_before, the new priority, the order of every
+             rule of that kind and the rules re-added (readded_rules,
+             readded_from_design, unique_id_changed).
     """
-    if not isinstance(priority, int) or priority < 1:
+    import pcb_rules
+
+    # bool is an int in Python: True would pass as priority 1
+    if isinstance(priority, bool) or not isinstance(priority, int) or priority < 1:
         return json.dumps({"success": False, "error": "priority is a whole number from 1"})
-    result, error = await _rule_command("set_rule_priority", {"rule_name": name, "priority": priority,
-                                                                "board_path": long_path(board_path)})
+    result, error = await _bridge_json("set_rule_priority", {"rule_name": name, "priority": priority,
+                                                              "board_path": long_path(board_path)})
     if result is None:
         return json.dumps({"success": False, "error": error})
+    result.update(pcb_rules.move_notes(result, name))
     return json.dumps(result, indent=2)
 
 MUTATING_COMMANDS.add("set_rule_priority")

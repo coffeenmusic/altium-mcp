@@ -6517,10 +6517,101 @@ begin
     end;
 end;
 
+// The board's first signal layer
+function FirstSignalLayer(Board: IPCB_Board): Integer;
+var
+    LayerIt : IPCB_LayerObjectIterator;
+begin
+    Result := eTopLayer;
+    LayerIt := Board.ElectricalLayerIterator;
+    while LayerIt.Next do
+        if LayerIt.LayerObject.LayerID <= eBottomLayer then
+        begin
+            Result := LayerIt.LayerObject.LayerID;
+            Exit;
+        end;
+end;
+
+// Whether a width rule has the same minimum, maximum and preferred width on
+// every signal layer of the board
+function WidthRuleUniform(Board: IPCB_Board; Width: IPCB_MaxMinWidthConstraint): Boolean;
+var
+    LayerIt : IPCB_LayerObjectIterator;
+    First, L : Integer;
+begin
+    Result := True;
+    First := FirstSignalLayer(Board);
+    LayerIt := Board.ElectricalLayerIterator;
+    while LayerIt.Next do
+    begin
+        L := LayerIt.LayerObject.LayerID;
+        if L <= eBottomLayer then
+            if (Width.MinWidth(L) <> Width.MinWidth(First)) or (Width.MaxWidth(L) <> Width.MaxWidth(First)) or
+               (Width.FavoredWidth(L) <> Width.FavoredWidth(First)) then
+                Result := False;
+    end;
+end;
+
+// The rule's values under create_pcb_rule's names, in mils, so an edit can
+// be checked against them. A width rule gives those of the first signal
+// layer, and per_layer_widths when the board's signal layers differ.
+procedure RuleValuesJSON(Board: IPCB_Board; Rule: IPCB_Rule; Props: TStringList);
+var
+    Item  : TStringList;
+    L     : Integer;
+    Style : String;
+begin
+    Item := TStringList.Create;
+    try
+        case Rule.RuleKind of
+            eRule_Clearance:
+                AddJSONNumber(Item, 'gap_mils', CoordToMils(Rule.Gap));
+            eRule_MaxMinWidth:
+                begin
+                    L := FirstSignalLayer(Board);
+                    AddJSONNumber(Item, 'min_mils', CoordToMils(Rule.MinWidth(L)));
+                    AddJSONNumber(Item, 'max_mils', CoordToMils(Rule.MaxWidth(L)));
+                    AddJSONNumber(Item, 'preferred_mils', CoordToMils(Rule.FavoredWidth(L)));
+                    AddJSONBoolean(Props, 'per_layer_widths', not WidthRuleUniform(Board, Rule));
+                end;
+            eRule_MaxMinHoleSize:
+                begin
+                    AddJSONNumber(Item, 'min_mils', CoordToMils(Rule.MinLimit));
+                    AddJSONNumber(Item, 'max_mils', CoordToMils(Rule.MaxLimit));
+                end;
+            eRule_RoutingViaStyle:
+                begin
+                    AddJSONNumber(Item, 'min_diameter_mils', CoordToMils(Rule.MinWidth));
+                    AddJSONNumber(Item, 'max_diameter_mils', CoordToMils(Rule.MaxWidth));
+                    AddJSONNumber(Item, 'preferred_diameter_mils', CoordToMils(Rule.PreferedWidth));
+                    AddJSONNumber(Item, 'min_hole_mils', CoordToMils(Rule.MinHoleWidth));
+                    AddJSONNumber(Item, 'max_hole_mils', CoordToMils(Rule.MaxHoleWidth));
+                    AddJSONNumber(Item, 'preferred_hole_mils', CoordToMils(Rule.PreferedHoleWidth));
+                end;
+            eRule_SolderMaskExpansion, eRule_PasteMaskExpansion:
+                AddJSONNumber(Item, 'expansion_mils', CoordToMils(Rule.Expansion));
+            eRule_PolygonConnectStyle:
+                begin
+                    if Rule.ConnectStyle = eDirectConnectToPlane then Style := 'direct'
+                    else if Rule.ConnectStyle = eNoConnect then Style := 'none'
+                    else Style := 'relief';
+                    AddJSONProperty(Item, 'connect_style', Style);
+                    AddJSONNumber(Item, 'conductor_width_mils', CoordToMils(Rule.ReliefConductorWidth));
+                    AddJSONNumber(Item, 'air_gap_mils', CoordToMils(Rule.ReliefAirGap));
+                    AddJSONInteger(Item, 'entries', Rule.ReliefEntries);
+                end;
+        end;
+        Props.Add('"values": ' + BuildJSONObject(Item, 1));
+    finally
+        Item.Free;
+    end;
+end;
+
 procedure RuleStateJSON(Board: IPCB_Board; Rule: IPCB_Rule; Props: TStringList);
 begin
     AddJSONProperty(Props, 'name', Rule.Name);
     AddJSONProperty(Props, 'kind', RuleKindWord(Rule));
+    RuleValuesJSON(Board, Rule, Props);
     AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
     AddJSONProperty(Props, 'scope1', Rule.Scope1Expression);
     AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
@@ -6532,8 +6623,11 @@ begin
 end;
 
 // Sets the values given in Values (create_pcb_rule's keys) on Rule; values
-// not given keep what the rule has
-procedure ApplyRuleValues(Rule: IPCB_Rule; Values: TStringList);
+// not given keep what the rule has. A width changes only on the layers that
+// had the old one (that of the first signal layer): the caller refuses
+// rules whose signal layers differ, so layers the board does not use and
+// that hold something else keep it.
+procedure ApplyRuleValues(Board: IPCB_Board; Rule: IPCB_Rule; Values: TStringList);
 var
     Clear    : IPCB_ClearanceConstraint;
     Width    : IPCB_MaxMinWidthConstraint;
@@ -6542,7 +6636,8 @@ var
     SMask    : IPCB_SolderMaskExpansionRule;
     PMask    : IPCB_PasteMaskExpansionRule;
     Connect  : IPCB_PolygonConnectStyleRule;
-    L        : Integer;
+    L, First : Integer;
+    OldMin, OldMax, OldPreferred : Integer;
     Style    : String;
 begin
     case Rule.RuleKind of
@@ -6554,11 +6649,18 @@ begin
         eRule_MaxMinWidth:
             begin
                 Width := Rule;
+                First := FirstSignalLayer(Board);
+                OldMin := Width.MinWidth(First);
+                OldMax := Width.MaxWidth(First);
+                OldPreferred := Width.FavoredWidth(First);
                 for L := eTopLayer to eBottomLayer do
                 begin
-                    if RuleHasValue(Values, 'min') then Width.MinWidth(L) := RuleValue(Values, 'min', 0);
-                    if RuleHasValue(Values, 'max') then Width.MaxWidth(L) := RuleValue(Values, 'max', 0);
-                    if RuleHasValue(Values, 'preferred') then Width.FavoredWidth(L) := RuleValue(Values, 'preferred', 0);
+                    if RuleHasValue(Values, 'min') and (Width.MinWidth(L) = OldMin) then
+                        Width.MinWidth(L) := RuleValue(Values, 'min', 0);
+                    if RuleHasValue(Values, 'max') and (Width.MaxWidth(L) = OldMax) then
+                        Width.MaxWidth(L) := RuleValue(Values, 'max', 0);
+                    if RuleHasValue(Values, 'preferred') and (Width.FavoredWidth(L) = OldPreferred) then
+                        Width.FavoredWidth(L) := RuleValue(Values, 'preferred', 0);
                 end;
             end;
         eRule_MaxMinHoleSize:
@@ -6666,6 +6768,63 @@ begin
     end;
 end;
 
+// The rules a move of Rule to priority Wanted may take off and add again:
+// Rule and those of its kind that stay above it. Read before the move, so
+// the reply can say which of them came from the design (schematic
+// directives, rooms) and whether any unique id changed. Ids gets their
+// unique ids, Design the JSON-quoted names of those from the design; both
+// are read here, before anything changes.
+procedure RulesReadded(Board: IPCB_Board; Rule: IPCB_Rule; Wanted: Integer; Moves: TInterfaceList;
+                       Ids: TStringList; Design: TStringList);
+var
+    Rules : TInterfaceList;
+    i     : Integer;
+begin
+    Rules := TInterfaceList.Create;
+    try
+        RulesOfKindByPriority(Board, Rule.RuleKind, Rules);
+        for i := Rules.Count - 1 downto 0 do
+            if Rules.Items[i].I_ObjectAddress = Rule.I_ObjectAddress then Rules.Delete(i);
+        Moves.Add(Rule);
+        for i := 0 to Rules.Count - 1 do
+            if i <= Wanted - 2 then Moves.Add(Rules.Items[i]);
+        for i := 0 to Moves.Count - 1 do
+        begin
+            Ids.Add(Moves.Items[i].UniqueId);
+            if Moves.Items[i].DefinedByLogicalDocument then
+                Design.Add('"' + JSONEscapeString(Moves.Items[i].Name) + '"');
+        end;
+    finally
+        Rules.Free;
+    end;
+end;
+
+// "readded_rules", "readded_from_design" and "unique_id_changed" for the
+// rules RulesReadded listed, after a move
+procedure RuleMoveJSON(Props: TStringList; Moves: TInterfaceList; Ids: TStringList; Design: TStringList);
+var
+    Names, Changed : TStringList;
+    i : Integer;
+    Quoted : String;
+begin
+    Names := TStringList.Create;
+    Changed := TStringList.Create;
+    try
+        for i := 0 to Moves.Count - 1 do
+        begin
+            Quoted := '"' + JSONEscapeString(Moves.Items[i].Name) + '"';
+            Names.Add(Quoted);
+            if Moves.Items[i].UniqueId <> Ids[i] then Changed.Add(Quoted);
+        end;
+        Props.Add(BuildJSONArray(Names, 'readded_rules'));
+        Props.Add(BuildJSONArray(Design, 'readded_from_design'));
+        Props.Add(BuildJSONArray(Changed, 'unique_id_changed'));
+    finally
+        Names.Free;
+        Changed.Free;
+    end;
+end;
+
 // edit_pcb_rule: changes what is given and keeps the rule where it is in
 // its kind's priority order. Fields is '|scope1|scope2|comment|enabled|name|'
 // for the fields to change.
@@ -6673,8 +6832,9 @@ function EditPCBRule(Name, NewName, Scope1, Scope2, Comment, Enabled, Fields: St
 var
     Board : IPCB_Board;
     Rule, Clash : IPCB_Rule;
-    Props : TStringList;
-    Before : Integer;
+    Props, Ids, Design : TStringList;
+    Moves : TInterfaceList;
+    Before, Moved : Integer;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
@@ -6682,35 +6842,53 @@ begin
     if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
     if Pos('|name|', Fields) > 0 then
     begin
+        if Trim(NewName) = '' then begin Result := 'ERROR: The new name is empty'; Exit; end;
         Clash := FindRuleByName(Board, NewName);
-        if (Clash <> nil) and (Clash.I_ObjectAddress <> Rule.I_ObjectAddress) then
+        if Clash <> nil then
+            if Clash.I_ObjectAddress <> Rule.I_ObjectAddress then
+            begin
+                Result := 'ERROR: A rule named ' + NewName + ' already exists';
+                Exit;
+            end;
+    end;
+    if (Rule.RuleKind = eRule_MaxMinWidth) and (Values.Count > 0) then
+        if not WidthRuleUniform(Board, Rule) then
         begin
-            Result := 'ERROR: A rule named ' + NewName + ' already exists';
+            Result := 'ERROR: ' + Name + ' has different widths per layer; edit them in Altium''s ' +
+                      'PCB Rules and Constraints Editor';
             Exit;
         end;
-    end;
     Before := Rule.Priority;
-    PCBServer.PreProcess;
-    try
-        PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-        if Pos('|scope1|', Fields) > 0 then Rule.Scope1Expression := Scope1;
-        if Pos('|scope2|', Fields) > 0 then Rule.Scope2Expression := Scope2;
-        if Pos('|comment|', Fields) > 0 then Rule.Comment := Comment;
-        if Pos('|enabled|', Fields) > 0 then Rule.Enabled := Enabled = 'true';
-        if Pos('|name|', Fields) > 0 then Rule.Name := NewName;
-        ApplyRuleValues(Rule, Values);
-        PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-        MoveRuleTo(Board, Rule, Before);
-    finally
-        PCBServer.PostProcess;
-    end;
+    Moves := TInterfaceList.Create;
+    Ids := TStringList.Create;
+    Design := TStringList.Create;
     Props := TStringList.Create;
     try
+        RulesReadded(Board, Rule, Before, Moves, Ids, Design);
+        PCBServer.PreProcess;
+        try
+            PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            if Pos('|scope1|', Fields) > 0 then Rule.Scope1Expression := Scope1;
+            if Pos('|scope2|', Fields) > 0 then Rule.Scope2Expression := Scope2;
+            if Pos('|comment|', Fields) > 0 then Rule.Comment := Comment;
+            if Pos('|enabled|', Fields) > 0 then Rule.Enabled := Enabled = 'true';
+            if Pos('|name|', Fields) > 0 then Rule.Name := NewName;
+            ApplyRuleValues(Board, Rule, Values);
+            PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+            Moved := MoveRuleTo(Board, Rule, Before);
+        finally
+            PCBServer.PostProcess;
+        end;
         AddJSONBoolean(Props, 'success', True);
         AddJSONInteger(Props, 'priority_before', Before);
+        AddJSONInteger(Props, 'rules_moved', Moved);
+        if Moved > 0 then RuleMoveJSON(Props, Moves, Ids, Design);
         RuleStateJSON(Board, Rule, Props);
         Result := BuildJSONObject(Props);
     finally
+        Moves.Free;
+        Ids.Free;
+        Design.Free;
         Props.Free;
     end;
 end;
@@ -6720,7 +6898,8 @@ function SetRulePriority(Name: String; Wanted: Integer): String;
 var
     Board : IPCB_Board;
     Rule  : IPCB_Rule;
-    Props : TStringList;
+    Props, Ids, Design : TStringList;
+    Moves : TInterfaceList;
     Before, Moved : Integer;
 begin
     Board := GetBoardSafe(0);
@@ -6728,20 +6907,28 @@ begin
     Rule := FindRuleByName(Board, Name);
     if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
     Before := Rule.Priority;
-    PCBServer.PreProcess;
-    try
-        Moved := MoveRuleTo(Board, Rule, Wanted);
-    finally
-        PCBServer.PostProcess;
-    end;
+    Moves := TInterfaceList.Create;
+    Ids := TStringList.Create;
+    Design := TStringList.Create;
     Props := TStringList.Create;
     try
+        RulesReadded(Board, Rule, Wanted, Moves, Ids, Design);
+        PCBServer.PreProcess;
+        try
+            Moved := MoveRuleTo(Board, Rule, Wanted);
+        finally
+            PCBServer.PostProcess;
+        end;
         AddJSONBoolean(Props, 'success', True);
         AddJSONInteger(Props, 'priority_before', Before);
         AddJSONInteger(Props, 'rules_moved', Moved);
+        if Moved > 0 then RuleMoveJSON(Props, Moves, Ids, Design);
         RuleStateJSON(Board, Rule, Props);
         Result := BuildJSONObject(Props);
     finally
+        Moves.Free;
+        Ids.Free;
+        Design.Free;
         Props.Free;
     end;
 end;
