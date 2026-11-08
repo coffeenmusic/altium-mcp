@@ -5335,21 +5335,39 @@ begin
     if SameText(Result, Layer2String(Layer)) then Result := '';
 end;
 
+// Generic replaced by Named where a layer name is expected: OnLayer('..')
+// (ExistsOnLayer too), Layer = '..' and Layer <> '..', written as
+// pcb_query.layer_arguments writes them. Other quoted text is left alone.
+function QueryRenameLayer(Expr: String; Generic: String; Named: String): String;
+begin
+    Result := Expr;
+    if (Named = '') or SameText(Named, Generic) then Exit;
+    Result := StringReplace(Result, 'OnLayer(''' + Generic + ''')', 'OnLayer(''' + Named + ''')',
+                            MkSet(rfReplaceAll, rfIgnoreCase));
+    Result := StringReplace(Result, 'Layer = ''' + Generic + '''', 'Layer = ''' + Named + '''',
+                            MkSet(rfReplaceAll, rfIgnoreCase));
+    Result := StringReplace(Result, 'Layer <> ''' + Generic + '''', 'Layer <> ''' + Named + '''',
+                            MkSet(rfReplaceAll, rfIgnoreCase));
+end;
+
 // The engine knows layers only by the board's names: OnLayer('Mid Layer 3')
-// matches nothing on a board that calls it 'SIG/PWR'. Each quoted generic
-// layer name is replaced by the board's name for it.
+// matches nothing on a board that calls it 'SIG/PWR'. Each generic layer
+// name given as a layer is replaced by the board's name for it, mechanical
+// layers past 16 included (their V6 ids stop at Mechanical 16, #32).
 function QueryLayerNames(Board: IPCB_Board; Expr: String): String;
 var
-    L     : Integer;
-    Named : String;
+    L, i      : Integer;
+    MechLayer : IPCB_MechanicalLayer;
 begin
     Result := Expr;
     for L := eTopLayer to eMultiLayer do
+        Result := QueryRenameLayer(Result, Layer2String(L), QueryBoardLayerName(Board, L));
+    if Pos('MECHANICAL ', UpperCase(Result)) = 0 then Exit;
+    for i := 17 to MAX_MECH_LAYERS do
     begin
-        Named := QueryBoardLayerName(Board, L);
-        if Named <> '' then
-            Result := StringReplace(Result, '''' + Layer2String(L) + '''', '''' + Named + '''',
-                                    MkSet(rfReplaceAll, rfIgnoreCase));
+        MechLayer := Board.LayerStack_V7.LayerObject_V7[ILayer.MechanicalLayer(i)];
+        if MechLayer <> nil then
+            Result := QueryRenameLayer(Result, 'Mechanical ' + IntToStr(i), MechLayer.Name);
     end;
 end;
 

@@ -18,6 +18,7 @@ import re
 from ctypes import wintypes
 from typing import List, Tuple
 
+import pcb_shapes
 from sandbox import _process_name
 
 _VALUE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?|\.\d+)\s*(mils?|mm|um|µm|in|inch)\b", re.I)
@@ -112,14 +113,33 @@ def rule_note(kind: str, result: dict) -> str:
     return f"No {kind} rule applies to " + ("this object." if kind in UNARY_RULE_KINDS else "this pair.")
 
 
+# A function call's argument list (not And/Or/Not before a bracket)
+_CALL_ARGUMENTS = re.compile(r"(?<=\w)(?<!\band)(?<!\bnot)(?<!\bor)\s*\([^()']*\)", re.I)
+
+# Where the engine expects a layer name, so pcb_utils' QueryLayerNames can
+# give a generic one the board's name: OnLayer('..') (ExistsOnLayer too) and
+# Layer = / <> '..', written in one form
+_LAYER_CALL = re.compile(r"(?<![\w.])(OnLayer|ExistsOnLayer)\s*\(\s*'([^']*)'\s*\)", re.I)
+_LAYER_COMPARE = re.compile(r"(?<![\w.])Layer\s*(=|<>)\s*'", re.I)
+
+
+def layer_arguments(expression: str) -> str:
+    """The expression with its layer arguments written as QueryLayerNames
+    looks for them: OnLayer('Mid Layer 1'), Layer = 'Mid Layer 1'."""
+    expression = _LAYER_CALL.sub(lambda m: f"{m.group(1)}('{m.group(2)}')", expression)
+    return _LAYER_COMPARE.sub(lambda m: f"Layer {m.group(1)} '", expression)
+
+
 def check(expression: str) -> str:
     """'' when the expression can be sent, else what is wrong."""
     if not expression.strip():
         return "the expression is empty"
     if any(c in expression for c in '"\r\n'):
         return 'the expression cannot contain " or a line break; quote names with \' as Altium does'
-    # Commas inside quoted text are part of a name (InNet('D0,1'))
-    if re.search(r"\d,\d", _VALUE.sub("", _blank_quotes(expression))):
+    # A comma between digits is a decimal comma, except between the
+    # arguments of a function such as InRegionAbsolute(10,20,30,40) and
+    # inside quoted text, where it is part of a name (InNet('D0,1'))
+    if re.search(r"\d,\d", _CALL_ARGUMENTS.sub("()", _VALUE.sub("", _blank_quotes(expression)))):
         return "write decimals with a dot (0.25mm), not a comma"
     # The engine has no position properties ("Undeclared identifier: X")
     unquoted = re.sub(r"'[^']*'", "''", expression)
@@ -148,20 +168,24 @@ _MILS_PER = {"mil": 1.0, "mm": 1 / 0.0254}
 
 def area_text(area, unit: str = "mil") -> Tuple[str, str]:
     """An area [x1, y1, x2, y2] from the board origin as the bridge takes it
-    ('x1|y1|x2|y2' in internal units, 10000 per mil), or ('', error).
-    None or [] is the whole board: ('', '')."""
+    ('x1|y1|x2|y2' in internal units), or ('', error). None or [] is the
+    whole board: ('', ''). Clamped to Altium's design space by
+    pcb_shapes.area_box: past about 214,748 mil the bridge's StrToInt
+    overflows."""
     if not area:
         return "", ""
     if unit not in _MILS_PER:
         return "", "unit must be 'mil' or 'mm'"
+    if not isinstance(area, (list, tuple)) or len(area) != 4:
+        return "", "area must be [x1, y1, x2, y2]"
     try:
-        if len(area) != 4:
-            raise ValueError
-        x1, y1, x2, y2 = (float(v) * _MILS_PER[unit] for v in area)
+        mils = [float(v) * _MILS_PER[unit] for v in area]
     except (TypeError, ValueError):
         return "", "area must be [x1, y1, x2, y2]"
-    box = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
-    return "|".join(str(int(round(v * 10000))) for v in box), ""
+    box, error = pcb_shapes.area_box(mils)
+    if error:
+        return "", error.replace(" in mils", "")
+    return box, ""
 
 
 _proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)

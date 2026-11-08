@@ -3722,14 +3722,15 @@ async def query_objects(ctx: Context, expression: str, area: list = None, unit: 
     left waiting.
 
     Layers are named as the board names them in its layer stack
-    (OnLayer('GND1')); Altium's generic names ('Mid Layer 1') are translated
-    to the board's, so both work. Each object gives both: layer (generic) and
+    (OnLayer('GND1')); Altium's generic names ('Mid Layer 1', 'Mechanical
+    17') given to OnLayer(), ExistsOnLayer() or Layer = are translated to
+    the board's, so both work. Each object gives both: layer (generic) and
     layer_name (the board's, when it has its own).
 
     The engine has no position properties (X, Y): give a box as area
-    instead. It keeps the objects whose bounds touch the box, so a pour
-    larger than the box is kept wherever its copper is; objects_in_area
-    tests the real shape.
+    instead (clamped to Altium's design space, +-100,000 mil). It keeps the
+    objects whose bounds touch the box, so a pour larger than the box is
+    kept wherever its copper is.
 
     Give sizes with a unit (6mil, 0.15mm). The engine reads bare numbers in
     its own unit, which is not always the board's display unit, and a unit
@@ -3769,7 +3770,7 @@ async def query_objects(ctx: Context, expression: str, area: list = None, unit: 
     box, area_error = pcb_query.area_text(area, unit)
     if error or area_error:
         return json.dumps({"success": False, "error": error or area_error})
-    in_mm, in_mil, values = pcb_query.with_units(expression)
+    in_mm, in_mil, values = pcb_query.with_units(pcb_query.layer_arguments(expression))
     result, error = await _run_query("query_objects", {
         "expr_mm": in_mm, "expr_mil": in_mil, "limit": int(limit), "area": box,
         "board_path": long_path(board_path)})
@@ -3837,8 +3838,8 @@ async def which_rule(ctx: Context, object_a: str, object_b: str = "", rule_kind:
     box_b, error_b = pcb_query.area_text(area_b, unit)
     if error_a or error_b:
         return json.dumps({"success": False, "error": error_a or error_b})
-    a_mm, a_mil, _ = pcb_query.with_units(object_a)
-    b_mm, b_mil, _ = pcb_query.with_units(object_b.strip())
+    a_mm, a_mil, _ = pcb_query.with_units(pcb_query.layer_arguments(object_a))
+    b_mm, b_mil, _ = pcb_query.with_units(pcb_query.layer_arguments(object_b.strip()))
     result, error = await _run_query("which_rule", {
         "a_mm": a_mm, "a_mil": a_mil, "b_mm": b_mm, "b_mil": b_mil, "area_a": box_a, "area_b": box_b,
         "rule_kind": kind, "board_path": long_path(board_path)})

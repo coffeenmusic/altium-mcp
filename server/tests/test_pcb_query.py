@@ -12,7 +12,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import pcb_query  # noqa: E402
-from pcb_query import area_text, bare_numbers, check, check_limit, check_rule_kind, rule_note, with_units  # noqa: E402
+from pcb_query import (area_text, bare_numbers, check, check_limit, check_rule_kind,  # noqa: E402
+                       layer_arguments, rule_note, with_units)
 
 
 class UnitsTest(unittest.TestCase):
@@ -75,6 +76,13 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(check("InNet('X') And IsPad And (HoleSize > 1mm)"), "")
         self.assertEqual(check("InComponent('Y') And (SizeX > 1mm)"), "")
 
+    def test_function_arguments_may_have_commas(self):
+        self.assertEqual(check("IsVia And InRegionAbsolute(100,200,300,400)"), "")
+        self.assertEqual(check("IsVia And InRegion(1,2,3,4)"), "")
+        self.assertIn("dot", check("IsVia And(HoleSize > 0,3)"))
+        self.assertIn("dot", check("Not (Size < 0,4)"))
+        self.assertIn("dot", check("IsVia Or (Size < 1,5)"))
+
 
 class AreaTest(unittest.TestCase):
     def test_area(self):
@@ -83,6 +91,27 @@ class AreaTest(unittest.TestCase):
         self.assertEqual(area_text([0, 0, 1, 1], "mm")[0], "0|0|393701|393701")
         self.assertIn("x1", area_text([1, 2, 3])[1])
         self.assertIn("unit", area_text([1, 2, 3, 4], "inch")[1])
+
+    def test_whole_board_box_is_clamped(self):
+        # past about 214,748 mil the bridge's StrToInt overflows
+        self.assertEqual(area_text([-1e6, -1e6, 1e6, 1e6]),
+                         ("-1000000000|-1000000000|1000000000|1000000000", ""))
+        self.assertEqual(area_text([-5000, 0, 5000, 1e9], "mm")[0], "-1000000000|0|1000000000|1000000000")
+        self.assertIn("no size", area_text([1, 1, 1, 5])[1])
+        self.assertIn("[x1, y1, x2, y2]", area_text([1, "a", 2, 3])[1])
+        self.assertIn("[x1, y1, x2, y2]", area_text("1,2,3,4")[1])
+
+
+class LayerArgumentsTest(unittest.TestCase):
+    def test_layer_arguments_are_written_in_one_form(self):
+        self.assertEqual(layer_arguments("onlayer ( 'Mid Layer 1' ) And ExistsOnLayer('Mechanical 17')"),
+                         "onlayer('Mid Layer 1') And ExistsOnLayer('Mechanical 17')")
+        self.assertEqual(layer_arguments("IsTrack And (Layer='Top Layer') Or (Layer<>'Bottom Layer')"),
+                         "IsTrack And (Layer = 'Top Layer') Or (Layer <> 'Bottom Layer')")
+
+    def test_other_quoted_text_is_left_alone(self):
+        e = "InNet('Mid Layer 1') And InComponent('Top Layer') And (Name = 'Bottom Layer')"
+        self.assertEqual(layer_arguments(e), e)
 
 
 class RuleKindTest(unittest.TestCase):
