@@ -2202,7 +2202,14 @@ async def _schematic_pins(sheet_path: str, designators=None):
         "designators": "|" + "|".join(designators) + "|" if designators else ""})
     if result is None:
         return None, error
-    return result.get("pins", []), ""
+    pins = result.get("pins", [])
+    # Some libraries pad pin numbers and names with spaces ("B4   "): a
+    # reference such as "U1.B4" must still find the pin
+    for p in pins:
+        for key in ("pin", "name", "designator"):
+            if isinstance(p.get(key), str):
+                p[key] = p[key].strip()
+    return pins, ""
 
 @_tool(read_only=True)
 async def get_schematic_pins(ctx: Context, sheet_path: str, designators: list = None, unit: str = "mil") -> str:
