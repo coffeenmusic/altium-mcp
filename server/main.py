@@ -6586,50 +6586,69 @@ async def get_erc_violations(ctx: Context, compile: bool = True, project_path: s
                                  "ERC violations")
 
 
-async def _eco_compare(project_path: str, pcb_path: str):
-    """(source, target, diff, error): the compiled project against the board."""
+async def _eco_compare(project_path: str, pcb_path: str, board_in_project: bool = False):
+    """(source, target, diff, error): the compiled project against the board,
+    following the project's comparator, ECO and class generation options
+    (source["project_options_read"] says whether the .PrjPcb could be read
+    for them). board_in_project refuses a pcb_path that is not one of the
+    project's documents."""
+    import eco_dialog
     import eco_preview
 
-    source, error = await _bridge_json("get_eco_source", {"project_path": long_path(project_path)})
+    source, error = await _bridge_json("get_eco_source", {"project_path": project_path})
     if error:
         return None, None, None, error
     board = long_path(pcb_path) if pcb_path else source.get("pcb_path", "")
     if not board:
         return None, None, None, "the project has no PCB; give pcb_path"
-    target, error = await _bridge_json("get_eco_target", {"pcb_path": board})
-    if error:
-        return None, None, None, error
     try:
         prj_text = read_altium_text(Path(source["project_path"]))
     except (OSError, KeyError):
         prj_text = ""
-    single_pin = re.search(r"^NetlistSinglePinNets=1\s*$", prj_text, re.MULTILINE) is not None
-    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target), single_pin)
+    if board_in_project and pcb_path and prj_text and \
+            not eco_dialog.board_in_project(board, prj_text, source["project_path"]):
+        return None, None, None, f"{pcb_path} is not a board of the project {source['project_path']}"
+    target, error = await _bridge_json("get_eco_target", {"pcb_path": board})
+    if error:
+        return None, None, None, error
+    options = eco_preview.parse_project_options(prj_text) if prj_text else None
+    source["project_options_read"] = options is not None
+    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target),
+                               bool(options and options["single_pin_nets"]), options)
     return source, target, diff, None
 
 
 @_tool()
 async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", execute: bool = False,
                      allow_errors: bool = False, allow_room_removal: bool = False,
-                     link_by_designator: bool = False, max_changes: int = 200) -> str:
+                     allow_component_removal: bool = False, link_by_designator: bool = False,
+                     max_changes: int = 200) -> str:
     """
     Import the schematic's changes into the board (Design > Import Changes /
     Update PCB): validate them, and with execute=True apply them.
 
-    1. preview_eco's comparison is run first. Rooms the update would delete
-       stop it unless allow_room_removal.
+    1. preview_eco's comparison is run first. Rooms or components the update
+       would delete stop it unless allow_room_removal /
+       allow_component_removal. The preview does not decide whether there is
+       anything to import (it does not compare everything the ECO does):
+       Altium does.
     2. Altium's Engineering Change Order dialog is opened on the board and
        driven from here: Validate Changes, then the list of changes is read
        with each failed one's message ('Class already exists: X', 'Footprint
-       not found', ...).
-    3. Only with execute=True, and when no change failed (or allow_errors,
-       which applies the rest), Execute Changes is pressed. The dialog is
-       always closed again.
-    4. After executing, the comparison is run again: what is still
-       different (failed or skipped changes) is reported. Altium's
-       validation does not check everything (a footprint missing from the
-       libraries fails only on execute): such changes are reported in
-       failed_on_execute, and success is false.
+       not found', ...). When Altium finds nothing to change it shows a
+       message instead, which is answered and returned as altium_messages.
+    3. Only with execute=True, and when the list read checks out, Execute
+       Changes is pressed: every change row names the board, each group's
+       count matches the rows read, no change failed (or allow_errors,
+       which applies the rest), and no component is removed (or
+       allow_component_removal). Otherwise not_executed says why. The
+       dialog is always closed again, and any other dialog Altium opens
+       meanwhile is answered (Cancel first) or closed.
+    4. After executing, executed_changes lists what was applied and the
+       comparison is run again: what is still different (failed or skipped
+       changes) is reported. Altium's validation does not check everything
+       (a footprint missing from the libraries fails only on execute): such
+       changes are reported in failed_on_execute, and success is false.
 
     When parts on either side cannot be matched by unique id (a new part,
     and board parts with no schematic link such as a logo), Altium first
@@ -6637,7 +6656,12 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
     keeps unique-id matching: new parts are added, gone ones removed, as
     preview_eco reports. link_by_designator answers "Automatically Create
     Component Links" instead, which pairs unmatched parts by designator
-    (for a board placed without a link to these schematics).
+    (for a board placed without a link to these schematics). Altium may
+    write those links as soon as the question is answered, so even with
+    execute=False the board or project can be left changed by it.
+
+    Removing components needs care: when unique-id links are broken, the
+    ECO deletes the placed parts and adds them back unplaced.
 
     The board is left modified, not saved, for review; Altium's undo
     reverts the update. Altium comes to the front on the board while the
@@ -6646,87 +6670,108 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
     Args:
         project_path (str): Full path of the .PrjPcb; empty for the focused
             project.
-        pcb_path (str): The board; default the project's board.
+        pcb_path (str): The board, one of the project's; default the
+            project's board.
         execute (bool): Apply the changes (default False: validate only).
         allow_errors (bool): Execute even when some changes failed
             validation; those are skipped.
         allow_room_removal (bool): Go on when the update would remove rooms.
+        allow_component_removal (bool): Go on when the update would remove
+            components from the board.
         link_by_designator (bool): Let Altium link unmatched parts by
             designator (see above).
         max_changes (int): At most this many changes listed.
 
     Returns:
         str: JSON with the preview summary, the changes by group, the
-             failed ones with Altium's message, whether they were executed,
-             and the differences left afterwards.
+             failed ones with Altium's message, whether they were executed
+             and which, Altium's messages, and the differences left
+             afterwards.
     """
     import eco_dialog
     import eco_preview
 
-    source, target, diff, error = await _eco_compare(project_path, pcb_path)
+    path, error = _project_path(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    source, target, diff, error = await _eco_compare(path, pcb_path, board_in_project=True)
     if error:
         return json.dumps({"success": False, "error": error})
     project, board = source.get("project_path"), target.get("board_path") or long_path(pcb_path)
     reply = {"project_path": project, "pcb_path": board, "preview": eco_preview.summary(diff)}
     if source.get("unsaved_in_altium"):
         reply["unsaved_in_altium"] = source["unsaved_in_altium"]
-    if not reply["preview"]:
-        reply.update({"success": True, "note": "Nothing to import: the board matches the schematic."})
-        return json.dumps(reply, indent=1)
     rooms = diff.get("remove_rooms") or []
     if rooms and not allow_room_removal:
         reply.update({"success": False, "error": f"the update would remove {len(rooms)} room(s); "
                                                  "pass allow_room_removal=true if that is intended",
                       "remove_rooms": rooms[:50]})
         return json.dumps(reply, indent=1)
+    parts = diff.get("remove_components") or []
+    if parts and not allow_component_removal:
+        reply.update({"success": False, "error": f"the update would remove {len(parts)} component(s) from the "
+                                                 "board; pass allow_component_removal=true if that is intended",
+                      "remove_components": parts[:50]})
+        return json.dumps(reply, indent=1)
 
+    before = await asyncio.get_running_loop().run_in_executor(None, eco_dialog.open_windows)
     outcome = eco_dialog.EcoOutcome()
+    stop = asyncio.Event()
+    # The driver answers Altium's dialogs for as long as the bridge call runs
     driver = asyncio.create_task(eco_dialog.drive(outcome, Path(board).name, execute, allow_errors,
-                                                  link_by_designator))
+                                                  link_by_designator, stop, before, allow_component_removal))
     try:
         # The bridge waits for the dialog to close: validating and executing
         # a large update takes a while
-        response = await altium_bridge.execute_command(
-            "run_update_pcb", {"project_path": project, "pcb_path": board}, timeout=1800)
-        result, error = None, None
-        if not response.get("success", False):
-            error = response.get("error", "unknown error")
-        else:
-            result = response.get("result", {})
-            if isinstance(result, str):
-                try:
-                    result = json.loads(result, strict=False)
-                except ValueError:
-                    error = result
+        result, error = await _bridge_json("run_update_pcb", {"project_path": project, "pcb_path": board},
+                                           timeout=1800)
     finally:
+        stop.set()
         try:
-            await asyncio.wait_for(driver, 30)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(driver, 120)
+        except asyncio.TimeoutError:
             driver.cancel()
+            outcome.problem = outcome.problem or "the dialog driver did not finish"
+    if outcome.messages:
+        reply["altium_messages"] = outcome.messages
     if error:
         reply.update({"success": False, "error": f"Import Changes failed: {error}"})
+        if outcome.problem:
+            reply["dialog_problem"] = outcome.problem
         return json.dumps(reply, indent=1)
-    if outcome.message and not outcome.found:
-        reply.update({"success": True, "altium_message": outcome.message, "executed": False})
+    if not outcome.found:
+        reply.update({"success": not outcome.problem, "executed": False})
+        reply["note"] = ("Altium showed a message instead of the Engineering Change Order dialog "
+                         "(altium_messages), such as that there is nothing to change."
+                         if outcome.messages else "Altium did not open the Engineering Change Order dialog.")
+        if outcome.problem:
+            reply["error"] = outcome.problem
         return json.dumps(reply, indent=1)
     if outcome.component_links:
         reply["component_links"] = outcome.component_links
     groups = {}
     for r in outcome.rows:
         groups[r["group"]] = groups.get(r["group"], 0) + 1
-    reply.update({"success": not outcome.problem and (not outcome.errors or allow_errors or not execute),
+    reply.update({"success": not outcome.problem and (outcome.executed or not execute),
                   "validated": outcome.validated, "changes": len(outcome.rows), "by_group": groups,
                   "failed": outcome.errors[:max_changes], "executed": outcome.executed,
                   "dialog_closed": outcome.closed})
     if outcome.problem:
         reply["error"] = outcome.problem
+    if outcome.validation_problems:
+        reply["validation_problems"] = outcome.validation_problems[:max_changes]
     if not execute:
         reply["change_list"] = outcome.rows[:max_changes]
         reply["note"] = "Validated only; execute=true applies the changes."
-    elif outcome.errors and not allow_errors:
-        reply["note"] = "Not executed: some changes failed validation (allow_errors=true applies the rest)."
+    elif outcome.not_executed:
+        reply["not_executed"] = outcome.not_executed
+        reply["change_list"] = outcome.rows[:max_changes]
+        reply["note"] = "Not executed; not_executed says why."
     if outcome.executed:
         reply["pcb_modified"] = bool(result and result.get("pcb_modified"))
+        reply["executed_changes"] = outcome.executed_changes[:max_changes]
+        if len(outcome.executed_changes) > max_changes:
+            reply["executed_changes_total"] = len(outcome.executed_changes)
         if outcome.execute_errors:
             reply["execute_errors"] = outcome.execute_errors[:max_changes]
             # Validation does not check everything: a footprint missing from
@@ -6889,28 +6934,17 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
     project, error = _project_path(project_path)
     if error:
         return json.dumps({"success": False, "error": error})
-    source, error = await _bridge_json("get_eco_source", {"project_path": project})
+    source, target, diff, error = await _eco_compare(project, pcb_path)
     if error:
         return json.dumps({"success": False, "error": error})
     board = long_path(pcb_path) if pcb_path else source.get("pcb_path", "")
-    if not board:
-        return json.dumps({"success": False, "error": "the project has no PCB; give pcb_path"})
-    target, error = await _bridge_json("get_eco_target", {"pcb_path": board})
-    if error:
-        return json.dumps({"success": False, "error": error})
-    try:
-        options = eco_preview.parse_project_options(read_altium_text(Path(source["project_path"])))
-    except (OSError, KeyError):
-        options = None
-    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target),
-                               bool(options and options["single_pin_nets"]), options)
     shown, cut = eco_preview.limit(diff, max(1, int(max_per_kind)))
     reply = {"project_path": source.get("project_path"), "pcb_path": target.get("board_path", board),
              "unsaved_in_altium": source.get("unsaved_in_altium", []),
              "summary": eco_preview.summary(diff)}
     if not reply["summary"]:
         reply["note"] = eco_preview.no_differences_note()
-    if options is None:
+    if not source.get("project_options_read"):
         reply["project_options_note"] = ("The .PrjPcb could not be read, so its comparator, ECO and class "
                                          "generation options were not applied: every difference is listed.")
     if cut:

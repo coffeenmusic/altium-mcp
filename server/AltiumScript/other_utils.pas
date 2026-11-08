@@ -459,7 +459,8 @@ begin
        (CommandName = 'get_erc_violations') or
        (CommandName = 'focus_document') or
        (CommandName = 'get_eco_source') or
-       (CommandName = 'get_eco_target') then
+       (CommandName = 'get_eco_target') or
+       (CommandName = 'run_update_pcb') then
     begin
         Result := True;
         Exit;
@@ -1795,53 +1796,6 @@ end;
 // Schematic side: components (unique id|designator|footprint|comment), their
 // pins (designator|pin|net), component classes (name|sheet|members joined by
 // ','), rooms (name|descriptor) and net classes (name|nets).
-// run_update_pcb: Design > Import Changes on the project's board, as the PCB
-// editor runs it. RunProcess returns once the Engineering Change Order
-// dialog is closed; the server drives that dialog meanwhile (eco_dialog.py).
-function RunUpdatePCB(ProjectPath: String; PcbPath: String): String;
-var
-    Project : IProject;
-    Doc     : IServerDocument;
-    Err     : String;
-    Props   : TStringList;
-begin
-    Project := TargetProject(ProjectPath, Err);
-    if Project = nil then
-    begin
-        Result := 'ERROR: ' + Err;
-        Exit;
-    end;
-    if PcbPath = '' then
-        if Project.DM_PrimaryImplementationDocument <> nil then
-            PcbPath := Project.DM_PrimaryImplementationDocument.DM_FullPath;
-    if (PcbPath = '') or not FileExists(PcbPath) then
-    begin
-        Result := 'ERROR: the project has no board; give pcb_path';
-        Exit;
-    end;
-    Doc := Client.OpenDocument('PCB', PcbPath);
-    if Doc = nil then
-    begin
-        Result := 'ERROR: Altium could not open ' + PcbPath;
-        Exit;
-    end;
-    // Import Changes works on the focused board
-    Client.ShowDocument(Doc);
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Project');
-    AddStringParameter('Action', 'UpdateMe');
-    RunProcess('WorkspaceManager:Compare');
-    Props := TStringList.Create;
-    try
-        AddJSONProperty(Props, 'project_path', Project.DM_ProjectFullPath);
-        AddJSONProperty(Props, 'pcb_path', PcbPath);
-        AddJSONBoolean(Props, 'pcb_modified', Doc.Modified);
-        Result := BuildJSONObject(Props);
-    finally
-        Props.Free;
-    end;
-end;
-
 function GetEcoSource(ProjectPath: String): String;
 var
     Project : IProject;
@@ -2086,6 +2040,84 @@ begin
         CompClasses.Free;
         NetClasses.Free;
         Rooms.Free;
+        Props.Free;
+    end;
+end;
+
+// run_update_pcb: Design > Import Changes on the project's board, as the PCB
+// editor runs it. RunProcess returns once the Engineering Change Order
+// dialog is closed; the server drives that dialog meanwhile (eco_dialog.py).
+// The board must be one of the project's documents: Import Changes updates
+// the focused board from its own project, so a board of another project
+// would be updated from the wrong schematics.
+function RunUpdatePCB(ProjectPath: String; PcbPath: String): String;
+var
+    Project : IProject;
+    Doc     : IServerDocument;
+    Board   : IPCB_Board;
+    I       : Integer;
+    Err, Found : String;
+    Props   : TStringList;
+begin
+    Project := TargetProject(ProjectPath, Err);
+    if Project = nil then
+    begin
+        Result := 'ERROR: ' + Err;
+        Exit;
+    end;
+    if PcbPath = '' then
+        if Project.DM_PrimaryImplementationDocument <> nil then
+            PcbPath := Project.DM_PrimaryImplementationDocument.DM_FullPath;
+    if (PcbPath = '') or not FileExists(PcbPath) then
+    begin
+        Result := 'ERROR: the project has no board; give pcb_path';
+        Exit;
+    end;
+    Found := '';
+    for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        if Project.DM_LogicalDocuments(I).DM_DocumentKind = 'PCB' then
+            if SameText(NormalizePath(Project.DM_LogicalDocuments(I).DM_FullPath), NormalizePath(PcbPath)) then
+                Found := Project.DM_LogicalDocuments(I).DM_FullPath;
+    if Found = '' then
+    begin
+        Result := 'ERROR: ' + PcbPath + ' is not a board of the project ' + Project.DM_ProjectFullPath;
+        Exit;
+    end;
+    // An open board is used as it is: opening it again could reload it
+    Doc := FindOpenDocument(Found);
+    if Doc = nil then
+        Doc := Client.OpenDocument('PCB', Found);
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Altium could not open ' + Found;
+        Exit;
+    end;
+    // Import Changes works on the focused board
+    Client.ShowDocument(Doc);
+    Board := nil;
+    if PCBServer <> nil then
+        Board := PCBServer.GetCurrentPCBBoard;
+    if Board = nil then
+    begin
+        Result := 'ERROR: Could not bring the board ' + Found + ' to the front';
+        Exit;
+    end;
+    if not SameText(NormalizePath(Board.FileName), NormalizePath(Found)) then
+    begin
+        Result := 'ERROR: Could not bring the board ' + Found + ' to the front';
+        Exit;
+    end;
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Project');
+    AddStringParameter('Action', 'UpdateMe');
+    RunProcess('WorkspaceManager:Compare');
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'project_path', Project.DM_ProjectFullPath);
+        AddJSONProperty(Props, 'pcb_path', Found);
+        AddJSONBoolean(Props, 'pcb_modified', Doc.Modified);
+        Result := BuildJSONObject(Props);
+    finally
         Props.Free;
     end;
 end;

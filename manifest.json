@@ -48,6 +48,10 @@
       "description": "Compile a project and compare its netlist with a saved snapshot: nets and pins added, removed, renamed or moved"
     },
     {
+      "name": "update_pcb",
+      "description": "Run Update PCB (Import Changes) on a project's board: validate, read the change list and execute it on request, refusing removals unless allowed"
+    },
+    {
       "name": "get_board_summary",
       "description": "Summarise the focused PCB: outline, origin, dimensions, vias by hole size, components per side, primitives per layer and overlay texts"
     },
