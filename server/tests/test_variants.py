@@ -211,6 +211,48 @@ class NormalizeTest(unittest.TestCase):
         fixed, report = variants.normalize(text.replace("ParamDesignator1=R2", "ParamDesignator1=C1"))
         self.assertIn("left_alone", report[0])
 
+    def test_shared_designators_with_rows_past_counts_left_alone(self):
+        # Two R? variations, nothing misplaced, a stale row past the counts:
+        # regrouping would hand every row to the first R? and the second
+        # would lose its Comment
+        text = "\r\n".join([
+            "[ProjectVariant1]", "Description=Proto", "VariationCount=2",
+            r"Variation1=Designator=R?|UniqueId=\A|Kind=0",
+            "ParamVariation1=ParameterName=Value|VariantValue=1k", "ParamDesignator1=R?",
+            r"Variation2=Designator=R?|UniqueId=\B|Kind=0",
+            "ParamVariation2=ParameterName=Comment|VariantValue=X", "ParamDesignator2=R?",
+            "ParamVariationCount=2", "ParamVariation3=ParameterName=Old|VariantValue=1", "ParamDesignator3=R?", ""])
+        fixed, report = variants.normalize(text)
+        self.assertEqual(fixed, text)
+        self.assertIn("left_alone", report[0])
+
+    def test_only_the_edited_variants(self):
+        text = self.SHIFTED.replace("[Other]", "[ProjectVariant2]\r\nDescription=Flight\r\nVariationCount=1\r\n"
+                                               "Variation1=Designator=C1|UniqueId=\\COMPC|Kind=1\r\n"
+                                               "Variation2=Designator=R5|UniqueId=\\X|Kind=1\r\n\r\n[Other]")
+        fixed, report = variants.normalize(text, ["Flight"])
+        self.assertEqual([r["section"] for r in report], ["ProjectVariant2"])
+        self.assertIn("Variation3=Designator=R9", fixed)          # Original untouched
+        self.assertNotIn("Variation2=Designator=R5", fixed)
+        self.assertEqual(variants.normalize(text, []), (text, []))
+
+    def test_non_ascii_bytes_survive(self):
+        # U+00C5 is C3 85 in UTF-8: read as latin-1 the 0x85 is U+0085, which
+        # str.splitlines would treat as a line break
+        raw = ("[Document1]\r\nDocumentPath=\u00c5rhus.SchDoc\r\n\r\n" + self.SHIFTED).encode("utf-8")
+        text = raw.decode("latin-1")
+        fixed, report = variants.normalize(text)
+        self.assertTrue(report[0]["rewritten"])
+        out = fixed.encode("latin-1")
+        out.decode("utf-8")                                        # still valid UTF-8
+        self.assertTrue(out.startswith("[Document1]\r\nDocumentPath=\u00c5rhus.SchDoc\r\n".encode("utf-8")))
+        self.assertEqual(variants.split_lines("a\x85b\r\nc\n"), ["a\x85b", "c"])
+
+    def test_edited_variants(self):
+        lines = ["KIND|Original|\\U|R1|1", "NEW|Proto", "RENAME|Proto|Proto 2", "PARAM|flight|\\U|R1|A|1",
+                 "RENAME|Original|Base"]
+        self.assertEqual(variants.edited_variants(lines), ["Base", "Proto 2", "flight"])
+
 
 class DescribeTest(unittest.TestCase):
     def test_logical_channel_and_filters(self):
@@ -254,7 +296,21 @@ class DbLibSourceTest(unittest.TestCase):
                 held = file_locks.lock_report(p)
             self.assertFalse(held["writable"])
             self.assertTrue(any(h["pid"] == os.getpid() for h in held["held_by"]))
+            self.assertEqual(held["reason"], "in_use")
             self.assertIn("advice", held)
+
+    def test_read_only_told_apart(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "Parts.xlsx")
+            open(p, "w").close()
+            os.chmod(p, 0o444)
+            try:
+                report = file_locks.lock_report(p)
+            finally:
+                os.chmod(p, 0o666)
+            self.assertFalse(report["writable"])
+            self.assertEqual(report["reason"], "read_only")
+            self.assertIn("read-only", report["advice"])
 
 
 if __name__ == "__main__":

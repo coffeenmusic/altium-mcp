@@ -32,6 +32,18 @@
       "description": "Get the focused project's parameters, documents with unsaved-changes state, sheet count and variants"
     },
     {
+      "name": "get_variants",
+      "description": "List a project's variants with each variation's physical and logical designator, channel, sheet, kind and varied parameters"
+    },
+    {
+      "name": "edit_variants",
+      "description": "Fit or leave out parts, vary parameters, add or rename variants by logical designator and channel; saved through Altium"
+    },
+    {
+      "name": "check_file_lock",
+      "description": "Tell whether a file (or a DbLib's spreadsheet) can be written now, why not, and which processes hold it"
+    },
+    {
       "name": "get_project_components",
       "description": "List every component of the compiled project with comment, footprint, library reference, sheet and optional parameters"
     },

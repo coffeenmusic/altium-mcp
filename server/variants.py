@@ -38,6 +38,19 @@ KIND_CODES = {v: k for k, v in KINDS.items()}
 
 OPS = ("add_variant", "rename_variant", "not_fitted", "fitted", "set_param", "remove_param")
 
+_NEWLINE_RE = re.compile(r"\r\n|\r|\n")
+
+
+def split_lines(text: str) -> List[str]:
+    """The lines of text, split at CR LF, CR or LF only. str.splitlines also
+    splits at U+0085, U+2028 and others; a .PrjPcb read as latin-1 holds
+    U+0085 wherever a UTF-8 character has the byte 0x85 (A ring, Cyrillic
+    ha, ...), so splitting there would cut a line in two."""
+    lines = _NEWLINE_RE.split(text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
 
 def _fields(value: str) -> Dict[str, str]:
     out = {}
@@ -79,7 +92,7 @@ def parse_variants(text: str) -> List[dict]:
         variants.append({"name": keys.get("Description", ""), "unique_id": keys.get("UniqueId", ""),
                          "variations": variations})
 
-    for raw in text.splitlines():
+    for raw in split_lines(text):
         line = raw.strip()
         m = re.match(r"^\[(.+)\]$", line)
         if m:
@@ -128,13 +141,15 @@ def _layout(block: List[str]) -> dict:
         elif kind == "ParamDesignator" and k <= np_ and rows["ParamDesignator"][k].strip().lower() != current:
             misplaced += 1
     designators = [_fields(v).get("Designator", "").lower() for v in variations]
+    description = next((ln.partition("=")[2] for ln in other if ln.startswith("Description=")), "")
     return {"other": other, "variations": variations, "params": params, "stale": stale,
-            "misplaced": misplaced, "duplicates": len(designators) != len(set(designators))}
+            "misplaced": misplaced, "duplicates": len(designators) != len(set(designators)),
+            "description": description}
 
 
 def _sections(text: str):
     """(line index range, name) of every [ProjectVariantN] section."""
-    lines = text.splitlines()
+    lines = split_lines(text)
     found, start, name = [], None, None
     for i, ln in enumerate(lines):
         m = _SECTION_RE.match(ln.strip())
@@ -159,9 +174,13 @@ def layout_problems(text: str) -> List[dict]:
     return out
 
 
-def normalize(text: str) -> Tuple[str, List[dict]]:
+def normalize(text: str, only: Optional[List[str]] = None) -> Tuple[str, List[dict]]:
     """Rewrite the variant sections Altium would misread, in the layout it
     writes itself; returns the text and what was rewritten or left alone.
+    only: the variant names (Description) to touch, e.g. the ones an edit
+    changed; None for every variant. Lines are split at CR and LF only, so a
+    file read as latin-1 keeps its bytes outside what is rewritten (given
+    one kind of line ending throughout, as Altium writes it).
 
     Altium's save updates the variation keys where they stand and never
     removes keys past the counts, but its loader reads a parameter row as
@@ -172,8 +191,9 @@ def normalize(text: str) -> Tuple[str, List[dict]]:
     variation's parameter rows (by ParamDesignator) right under it, numbered
     in order, and drops what lies past the counts. A section where two
     variations share a designator (unannotated parts) cannot be regrouped by
-    designator and is left alone.
+    designator and is left alone, misplaced or not.
     """
+    wanted = None if only is None else {n.lower() for n in only}
     nl = "\r\n" if "\r\n" in text else "\n"
     lines, found = _sections(text)
     report = []
@@ -182,7 +202,9 @@ def normalize(text: str) -> Tuple[str, List[dict]]:
         lay = _layout(block)
         if not (lay["misplaced"] or lay["stale"]):
             continue
-        if lay["misplaced"] and lay["duplicates"]:
+        if wanted is not None and lay["description"].lower() not in wanted:
+            continue
+        if lay["duplicates"]:
             report.append({"section": name, "left_alone": "two variations share a designator, so their "
                                                           "parameter rows cannot be told apart"})
             continue
@@ -209,6 +231,21 @@ def normalize(text: str) -> Tuple[str, List[dict]]:
         report.append({"section": name, "rewritten": True, "misplaced_rows": lay["misplaced"],
                        "rows_past_counts": lay["stale"]})
     return nl.join(lines) + (nl if text.endswith(("\n", "\r")) else ""), list(reversed(report))
+
+
+def edited_variants(lines: List[str]) -> List[str]:
+    """The names, as they are after the edit, of the variants the spec
+    lines change (a renamed variant by its new name)."""
+    names: List[str] = []
+    for ln in lines:
+        f = ln.split("|")
+        if f[0] == "RENAME" and len(f) > 2:
+            names = [f[2] if n.lower() == f[1].lower() else n for n in names]
+            if f[2].lower() not in (n.lower() for n in names):
+                names.append(f[2])
+        elif len(f) > 1 and f[1].lower() not in (n.lower() for n in names):
+            names.append(f[1])
+    return names
 
 
 def shared_designators(variants: List[dict]) -> Dict[str, List[str]]:

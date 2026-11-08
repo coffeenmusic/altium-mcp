@@ -1855,14 +1855,14 @@ begin
         end;
 end;
 
-// Index of the variation of UniqueId in Variant, or -1
-function FindVariationIndex(Variant: IProjectVariant; UniqueId: String): Integer;
+// Index of the variation of UniqueId in ProjVariant, or -1
+function FindVariationIndex(ProjVariant: IProjectVariant; UniqueId: String): Integer;
 var
     I : Integer;
 begin
     Result := -1;
-    for I := 0 to Variant.DM_VariationCount - 1 do
-        if SameText(Variant.DM_Variations(I).DM_UniqueId, UniqueId) then
+    for I := 0 to ProjVariant.DM_VariationCount - 1 do
+        if SameText(ProjVariant.DM_Variations(I).DM_UniqueId, UniqueId) then
         begin
             Result := I;
             Exit;
@@ -1870,17 +1870,17 @@ begin
 end;
 
 // The variation of UniqueId, made (with Kind) when there is none
-function EnsureVariation(Variant: IProjectVariant; UniqueId, Physical: String; Kind: Integer): IComponentVariation;
+function EnsureVariation(ProjVariant: IProjectVariant; UniqueId, Physical: String; Kind: Integer): IComponentVariation;
 var
     I : Integer;
 begin
-    I := FindVariationIndex(Variant, UniqueId);
+    I := FindVariationIndex(ProjVariant, UniqueId);
     if I >= 0 then
     begin
-        Result := Variant.DM_Variations(I);
+        Result := ProjVariant.DM_Variations(I);
         Exit;
     end;
-    Result := Variant.DM_AddComponentVariation;
+    Result := ProjVariant.DM_AddComponentVariation;
     Result.DM_SetPhysicalDesignator(Physical);
     Result.DM_SetUniqueId(UniqueId);
     Result.DM_SetVariationKind(Kind);
@@ -1895,7 +1895,7 @@ end;
 function ApplyVariantEdit(Project: IProject; Rec: String; var Msg: String): Boolean;
 var
     Kind     : String;
-    Variant  : IProjectVariant;
+    ProjVariant : IProjectVariant;
     CV       : IComponentVariation;
     PV       : IParameterVariation;
     I        : Integer;
@@ -1915,33 +1915,33 @@ begin
         Result := True;
         Exit;
     end;
-    Variant := FindProjectVariant(Project, GetFieldFromPipeString(Rec, 1));
-    if Variant = nil then
+    ProjVariant := FindProjectVariant(Project, GetFieldFromPipeString(Rec, 1));
+    if ProjVariant = nil then
     begin
         Msg := 'no variant named ' + GetFieldFromPipeString(Rec, 1);
         Exit;
     end;
     if Kind = 'RENAME' then
-        Variant.DM_SetDescription(GetFieldFromPipeString(Rec, 2))
+        ProjVariant.DM_SetDescription(GetFieldFromPipeString(Rec, 2))
     else if Kind = 'KIND' then
     begin
-        CV := EnsureVariation(Variant, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3),
+        CV := EnsureVariation(ProjVariant, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3),
                               StrToInt(GetFieldFromPipeString(Rec, 4)));
         CV.DM_SetVariationKind(StrToInt(GetFieldFromPipeString(Rec, 4)));
     end
     else if Kind = 'DEL' then
     begin
-        I := FindVariationIndex(Variant, GetFieldFromPipeString(Rec, 2));
+        I := FindVariationIndex(ProjVariant, GetFieldFromPipeString(Rec, 2));
         if I < 0 then
         begin
             Msg := 'no variation of ' + GetFieldFromPipeString(Rec, 2);
             Exit;
         end;
-        Variant.DM_RemoveComponentVariation(I);
+        ProjVariant.DM_RemoveComponentVariation(I);
     end
     else if Kind = 'PARAM' then
     begin
-        CV := EnsureVariation(Variant, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), 0);
+        CV := EnsureVariation(ProjVariant, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), 0);
         PV := CV.DM_FindParameterVariation(GetFieldFromPipeString(Rec, 4));
         if PV = nil then
         begin
@@ -1963,13 +1963,17 @@ end;
 // Apply the variant spec in SpecPath to the project and save it through
 // Altium, so the open project and the file agree. Refused when the project
 // file already has unsaved changes in Altium: saving would write those too.
+// Stops at the first line that fails and saves nothing: a remove_param is a
+// removal and a re-add, and saving half of it would lose the part's other
+// parameter variations. What ran before the failure stays in Altium's copy,
+// which is marked modified so the user can see it and discard it.
 function ApplyVariantEdits(ProjectPath, SpecPath: String): String;
 var
     Project   : IProject;
     ServerDoc : IServerDocument;
     Spec, Errors, Props : TStringList;
     I, Applied : Integer;
-    Ok        : Boolean;
+    Ok, Saved : Boolean;
     Msg, Err  : String;
 begin
     Project := TargetProject(ProjectPath, Err);
@@ -2005,20 +2009,27 @@ begin
             except
                 Msg := 'failed: ' + ExceptionMessage;
             end;
-            if Ok then
-                Applied := Applied + 1
-            else
+            if not Ok then
+            begin
                 Errors.Add('"' + JSONEscapeString('line ' + IntToStr(I + 1) + ': ' + Msg) + '"');
+                Break;
+            end;
+            Applied := Applied + 1;
         end;
+        Saved := False;
         if Applied > 0 then
         begin
             ServerDoc.SetModified(True);
-            ServerDoc.DoFileSave('');
+            if Errors.Count = 0 then
+            begin
+                ServerDoc.DoFileSave('');
+                Saved := not DocumentModified(ServerDoc);
+            end;
         end;
-        AddJSONBoolean(Props, 'success', True);
+        AddJSONBoolean(Props, 'success', Errors.Count = 0);
         AddJSONProperty(Props, 'project_path', Project.DM_ProjectFullPath);
         AddJSONInteger(Props, 'applied', Applied);
-        AddJSONBoolean(Props, 'saved', (Applied > 0) and not DocumentModified(ServerDoc));
+        AddJSONBoolean(Props, 'saved', Saved);
         Props.Add(BuildJSONArray(Errors, 'errors'));
         Result := BuildJSONObject(Props);
     finally

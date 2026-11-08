@@ -6590,16 +6590,12 @@ async def _variant_context(project_path: str):
     """(targets reply, variants parsed from the saved .PrjPcb, error)."""
     import variants
 
-    response = await altium_bridge.execute_command("get_variant_targets",
-                                                   {"project_path": long_path(project_path)})
-    if not response.get("success", False):
-        return None, None, response.get("error", "unknown error")
-    data = response.get("result", {})
-    if isinstance(data, str):
-        try:
-            data = json.loads(data, strict=False)
-        except ValueError:
-            return None, None, data
+    project_path, error = _project_path(project_path)
+    if error:
+        return None, None, error
+    data, error = await _bridge_json("get_variant_targets", {"project_path": project_path})
+    if data is None:
+        return None, None, error
     try:
         text = read_altium_text(Path(data["project_path"]))
     except OSError as e:
@@ -6651,7 +6647,8 @@ async def get_variants(ctx: Context, project_path: str = "", variant: str = "",
         reply["file_layout_problems"] = problems
         reply["file_layout_note"] = ("Altium reads a parameter row as belonging to the variation line above "
                                      "it and reads rows past the counts, so on the next load these sections "
-                                     "attach parameters to other parts. Any edit_variants call regroups them.")
+                                     "attach parameters to other parts. An edit_variants call regroups the "
+                                     "variants it changes.")
     reply["variants"] = vmod.describe(parsed, targets, variant, designators)
     return json.dumps(reply, indent=1)
 
@@ -6719,33 +6716,32 @@ async def edit_variants(ctx: Context, operations: list, project_path: str = "", 
     if dry_run or not lines:
         return json.dumps({"success": True, "dry_run": dry_run, "plan": plan, "applied": 0}, indent=1)
     write_altium_text(EXCHANGE_DIR / "variant_edit_spec.txt", "\n".join(lines) + "\n")
-    response = await altium_bridge.execute_command("apply_variant_edits",
-                                                   {"project_path": data["project_path"]})
-    if not response.get("success", False):
-        return json.dumps({"success": False, "error": response.get("error", "unknown error"), "plan": plan})
-    result = response.get("result", {})
-    if isinstance(result, str):
-        try:
-            result = json.loads(result, strict=False)
-        except ValueError:
-            return result
+    result, error = await _bridge_json("apply_variant_edits", {"project_path": data["project_path"]})
+    if result is None:
+        return json.dumps({"success": False, "error": error, "plan": plan})
     result["plan"] = plan
+    if result.get("errors"):
+        # The bridge stops at the first failing line and saves nothing
+        result["success"] = False
+        if result.get("applied"):
+            result["note"] = ("Nothing was saved. The lines before the failure changed Altium's copy of the "
+                              "project, which is left modified: close the project without saving (or "
+                              "reopen it) to discard them.")
     if result.get("saved"):
         # Altium's save updates the variation rows where they stand, but its
         # loader reads each parameter row as belonging to the variation line
-        # above it: regroup them, or the next load mixes parts up
+        # above it: regroup the variants this edit changed, or the next load
+        # mixes parts up. Bytes, through latin-1, so any encoding survives.
         prj = Path(data["project_path"])
         try:
             text = prj.read_bytes().decode("latin-1")
-            fixed, report = vmod.normalize(text)
+            fixed, report = vmod.normalize(text, vmod.edited_variants(lines))
             if fixed != text:
                 prj.write_bytes(fixed.encode("latin-1"))
             if report:
                 result["file_layout"] = report
         except OSError as e:
             result["warning"] = f"could not regroup the variant rows in the file: {e}"
-    if result.get("errors"):
-        result["success"] = False
     return json.dumps(result, indent=1)
 
 # Changes the project: a timeout leaves its outcome unknown, so no blind retry
@@ -6767,8 +6763,10 @@ async def check_file_lock(ctx: Context, path: str) -> str:
 
     Returns:
         str: JSON with path (the data file for a .DbLib), exists, writable,
-             held_by [{pid, name}], office_owner_file? and advice when it is
-             held
+             held_by [{pid, name}], reason when it is not writable
+             ("in_use", "read_only", "access_denied"), office_owner_file?
+             and advice. When no program is listed as holding the file, it
+             is opened exclusively for an instant to test it.
     """
     import file_locks
 
