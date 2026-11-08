@@ -236,33 +236,27 @@ def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = 
     return out
 
 
-# How many objects Altium sends at most when a layer or net filter is set:
-# the filters run here, after Altium's limit, so it sends this many and the
-# caller's limit is applied to what passes
+# How many objects Altium sends at most. The layer and net filters, hidden
+# texts and records sent twice are dropped here, after Altium's limit, so it
+# sends this many and the caller's limit is applied to what is left
 SCAN_CAP = 20000
 
 
-def scan_limit(limit: int, layers=None, nets=None) -> int:
+def scan_limit(limit: int) -> int:
     """The limit to give Altium for objects_in_area's `limit`."""
-    limit = max(1, int(limit))
-    return max(limit, SCAN_CAP) if (layers or nets) else limit
+    return max(max(1, int(limit)), SCAN_CAP)
 
 
 def area_reply(result: dict, unit: str, limit: int, layers=None, nets=None, include_hidden: bool = True) -> dict:
     """objects_in_area's reply from the 'area' command's result: filtered by
-    layer and net first, then cut to limit. total counts the objects that
-    pass the filters; None when Altium stopped at its cap before the filters
-    ran, so the count is not known."""
+    layer and net, hidden texts and duplicates dropped, then cut to limit.
+    total counts what is left; None when Altium stopped at its cap before
+    the filters ran, so the count is not known."""
     records = result.get("objects", [])
     origin = (result.get("origin_x", 0), result.get("origin_y", 0))
     matched = select(records, origin, unit, layers, nets, result.get("copper_layers"), include_hidden)
     altium_total = result.get("total", len(records))
-    if not (layers or nets):
-        total = altium_total
-    elif altium_total <= len(records):
-        total = len(matched)
-    else:
-        total = None
+    total = len(matched) if altium_total <= len(records) else None
     objects = matched[:max(1, int(limit))]
     reply = {"board_path": result.get("board_path"), "unit": unit, "total": total, "returned": len(objects),
              "truncated": total is None or len(objects) < total, "objects": objects}
@@ -289,6 +283,21 @@ def normalize_ref(ref: str) -> str:
         if designator and pad:
             return f"pad|{designator}|{pad}"
     raise ValueError(f"'{ref}' is not a ref from objects_in_area or a pad like 'U1-3'")
+
+
+# What clearance measures: copper and texts, not a component as a whole
+# or a polygon (its copper is the regions in it)
+CLEARANCE_KINDS = ("track", "arc", "via", "pad", "fill", "region", "text")
+
+
+def clearance_ref(ref: str) -> str:
+    """normalize_ref for clearance: refused for a component or polygon."""
+    ref = normalize_ref(ref)
+    kind = ref.split("|", 1)[0]
+    if kind not in CLEARANCE_KINDS:
+        raise ValueError(f"clearance measures {', '.join(CLEARANCE_KINDS)}, not a {kind}; for a component "
+                         "give one of its pads (U1-3)")
+    return ref
 
 
 def describe_clearance(result: dict, unit: str) -> dict:

@@ -5962,7 +5962,10 @@ begin
             Result := 2;
             Exit;
         end;
-        if ((BY > CY) <> (AY > CY)) and (CX < (AX - BX) * (CY - BY) / (AY - BY) + BX) then Inside := not Inside;
+        // Nested: DelphiScript may not short-circuit 'and', and the division
+        // is only safe once the edge is known not to be horizontal
+        if (BY > CY) <> (AY > CY) then
+            if CX < (AX - BX) * (CY - BY) / (AY - BY) + BX then Inside := not Inside;
         J := I;
     end;
     if Inside then Result := 1 else Result := 0;

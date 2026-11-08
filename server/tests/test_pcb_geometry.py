@@ -130,17 +130,18 @@ class SelectTest(unittest.TestCase):
 
 
 class AreaReplyTest(unittest.TestCase):
-    TRACK = "track|{}|GND||1010000|2020000|1030000|2020000|80000|0"
+    TRACK = "track|{}|GND||{}|2020000|1030000|2020000|80000|0"
 
-    def result(self, n_top, n_bottom, total=None):
-        recs = [self.TRACK.format("Bottom Layer")] * n_bottom + [self.TRACK.format("Top Layer")] * n_top
+    def result(self, n_top, n_bottom, total=None, twice=0):
+        recs = [self.TRACK.format("Bottom Layer", 1000000 + i) for i in range(n_bottom)]
+        recs += [self.TRACK.format("Top Layer", 1000000 + i) for i in range(n_top)]
+        recs += recs[:twice]
         return {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "objects": recs,
                 "total": len(recs) if total is None else total}
 
     def test_limit_applies_after_the_filters(self):
-        self.assertEqual(geo.scan_limit(500), 500)
-        self.assertEqual(geo.scan_limit(500, layers=["Top Layer"]), geo.SCAN_CAP)
-        self.assertEqual(geo.scan_limit(50000, nets=["GND"]), 50000)
+        self.assertEqual(geo.scan_limit(500), geo.SCAN_CAP)
+        self.assertEqual(geo.scan_limit(50000), 50000)
         # many bottom-layer objects come first, yet the top-layer ones are found
         out = geo.area_reply(self.result(3, 600), "mil", 2, layers=["Top Layer"])
         self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 2, True))
@@ -149,14 +150,20 @@ class AreaReplyTest(unittest.TestCase):
         self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 3, False))
         self.assertNotIn("note", out)
 
+    def test_duplicates_and_hidden_not_counted(self):
+        # Altium counted 8, two of them sent twice: total and limit see 6
+        out = geo.area_reply(self.result(3, 3, twice=2), "mil", 6)
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (6, 6, False))
+        hidden = {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "total": 2, "objects": RECORDS[10:12]}
+        self.assertEqual(geo.area_reply(hidden, "mil", 5, include_hidden=False)["total"], 1)
+        self.assertEqual(geo.area_reply(hidden, "mil", 5)["total"], 2)
+
     def test_cut_by_altium_is_said(self):
-        out = geo.area_reply(self.result(1, 4, total=9000), "mil", 10, layers=["Top Layer"])
-        self.assertIsNone(out["total"])
-        self.assertTrue(out["truncated"])
-        self.assertIn("9000", out["note"])
-        # unfiltered, Altium's own count is the total
-        out = geo.area_reply(self.result(2, 3, total=40), "mil", 5)
-        self.assertEqual((out["total"], out["returned"], out["truncated"]), (40, 5, True))
+        for layers in (["Top Layer"], None):
+            out = geo.area_reply(self.result(1, 4, total=90000), "mil", 10, layers=layers)
+            self.assertIsNone(out["total"])
+            self.assertTrue(out["truncated"])
+            self.assertIn("90000", out["note"])
 
 
 class RefTest(unittest.TestCase):
@@ -167,6 +174,13 @@ class RefTest(unittest.TestCase):
         for bad in ("", "U1", "polygon|x|1", "-3"):
             with self.assertRaises(ValueError):
                 geo.normalize_ref(bad)
+
+    def test_clearance_takes_no_components(self):
+        self.assertEqual(geo.clearance_ref("U1-3"), "pad|U1|3")
+        self.assertEqual(geo.clearance_ref("text|Top Overlay|1|2"), "text|Top Overlay|1|2")
+        self.assertEqual(geo.normalize_ref("component|U1"), "component|U1")
+        with self.assertRaises(ValueError):
+            geo.clearance_ref("component|U1")
 
     def test_units_and_clearance(self):
         self.assertEqual(geo.to_coord(1, "mil"), 10000)

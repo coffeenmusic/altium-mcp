@@ -5420,8 +5420,8 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
         nets (list): Only objects on these nets.
         unit (str): "mil" (default) or "mm", for bbox and the reply.
         limit (int): At most this many objects (default 500), counted after
-            the layer and net filters; total says how many match, and
-            truncated whether the list was cut.
+            the filters and without duplicates; total says how many match,
+            and truncated whether the list was cut.
         include_hidden (bool): Also list component designators and comments
             that are switched off (hidden: true). Default False.
         board_path (str): Full path of the .PcbDoc; default the focused board.
@@ -5439,7 +5439,7 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
         bad = [k for k in (kinds or []) if k not in geo.KINDS]
         if bad:
             raise ValueError(f"unknown kinds {bad}; use {', '.join(geo.KINDS)}")
-        scan = geo.scan_limit(limit, layers, nets)
+        scan = geo.scan_limit(limit)
     except (TypeError, ValueError) as e:
         return json.dumps({"success": False, "error": str(e)})
     kind_filter = "|" + "|".join(kinds) + "|" if kinds else ""
@@ -5472,7 +5472,7 @@ async def clearance(ctx: Context, object_a: str, object_b: str, unit: str = "mil
     import pcb_geometry as geo
 
     try:
-        a, b = geo.normalize_ref(object_a), geo.normalize_ref(object_b)
+        a, b = geo.clearance_ref(object_a), geo.clearance_ref(object_b)
         geo.unit_factor(unit)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
