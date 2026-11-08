@@ -104,6 +104,10 @@
       "description": "List a schematic sheet's pins live from Altium: connection point, number, name and electrical type"
     },
     {
+      "name": "render_sheet",
+      "description": "Draw a schematic sheet or part of it as a picture, read from the saved .SchDoc file"
+    },
+    {
       "name": "get_symbol_placement_rules",
       "description": "Get schematic symbol placement rules from a local configuration file"
     },
@@ -242,6 +246,10 @@
     {
       "name": "drag_copper",
       "description": "Move a via or a track segment and keep it connected: attached track ends stretch and vias move along"
+    },
+    {
+      "name": "render_pcb",
+      "description": "Draw a PCB area as a picture from its objects, without touching Altium's view"
     },
     {
       "name": "layout_duplicator",

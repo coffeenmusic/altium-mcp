@@ -146,6 +146,27 @@ def _arc(draw, cv: Canvas, o: dict, colour):
     draw.arc([a, b], start=-end, end=-start, fill=colour, width=max(1, int(round(cv.d(o["width"])))))
 
 
+def _region(sheet: Image.Image, cv: Canvas, contours: List[dict], colour):
+    """One region onto sheet: its solid contours less its holes, through a
+    mask of the region's own box, so its holes cut nothing else."""
+    polys = [(c["hole"], [cv.p(x, y) for x, y in c["points"]]) for c in contours if len(c["points"]) >= 3]
+    if not polys:
+        return
+    xs = [x for _, pts in polys for x, _ in pts]
+    ys = [y for _, pts in polys for _, y in pts]
+    x0, y0 = max(0, int(math.floor(min(xs)))), max(0, int(math.floor(min(ys))))
+    x1, y1 = min(sheet.size[0], int(math.ceil(max(xs))) + 1), min(sheet.size[1], int(math.ceil(max(ys))) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return
+    mask = Image.new("L", (x1 - x0, y1 - y0), 0)
+    md = ImageDraw.Draw(mask)
+    for hole in (False, True):
+        for h, pts in polys:
+            if h == hole:
+                md.polygon([(x - x0, y - y0) for x, y in pts], fill=0 if hole else 255)
+    sheet.paste(tuple(colour) + (255,), (x0, y0, x1, y1), mask)
+
+
 def _outline_points(segments: List[dict]) -> List[Tuple[float, float]]:
     pts = []
     n = len(segments)
@@ -190,9 +211,11 @@ def render_pcb(objects: List[dict], bbox, layers: Optional[List[str]] = None, dp
     drawn = {}
     for layer in sorted(by_layer, key=layer_order):
         colour = layer_colour(layer)
+        # Pours on an image of their own, each region with its holes cut, and
+        # the other copper on top: copper in a pour's cut-out stays visible
         sheet = Image.new("RGBA", cv.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(sheet)
-        holes = []
+        copper = Image.new("RGBA", cv.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(copper)
         for o in by_layer[layer]:
             k = o["kind"]
             if k == "track":
@@ -207,16 +230,10 @@ def render_pcb(objects: List[dict], bbox, layers: Optional[List[str]] = None, dp
                 draw.polygon([cv.p(x, y) for x, y in _rect_corners(cx, cy, w, h, o.get("rotation", 0))], fill=colour)
             elif k == "region":
                 l, b, r, t = o["bounds"]
-                for c in o.get("contours") or [{"hole": False, "points": [(l, b), (r, b), (r, t), (l, t)]}]:
-                    if len(c["points"]) < 3:
-                        continue
-                    if c["hole"]:
-                        holes.append(c)
-                    else:
-                        draw.polygon([cv.p(x, y) for x, y in c["points"]], fill=colour)
+                _region(sheet, cv, o.get("contours") or [{"hole": False, "points": [(l, b), (r, b), (r, t), (l, t)]}],
+                        colour)
             drawn[layer] = drawn.get(layer, 0) + 1
-        for c in holes:
-            draw.polygon([cv.p(x, y) for x, y in c["points"]], fill=(0, 0, 0, 0))
+        sheet.alpha_composite(copper)
         # Copper slightly see-through, so the layers below still show
         alpha = 255 if layer in ("multi-layer", "top overlay", "bottom overlay") else 190
         sheet.putalpha(sheet.getchannel("A").point(lambda v: alpha if v else 0))

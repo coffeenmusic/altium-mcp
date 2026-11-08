@@ -5604,10 +5604,16 @@ async def render_pcb(ctx: Context, bbox: list = None, layers: list = None, dpi: 
         "shapes": "true", "board_path": long_path(board_path)})
     if error:
         return json.dumps({"success": False, "error": error})
-    objects = geo.select(reply.get("objects", []), origin, "mil")
-    image, info = render.render_pcb(objects, box, layers, dpi, outline)
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
+
+    def draw():
+        # A large board takes seconds to draw: off the event loop, in a thread
+        objects = geo.select(reply.get("objects", []), origin, "mil")
+        image, info = render.render_pcb(objects, box, layers, dpi, outline)
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf, info
+
+    buf, info = await asyncio.to_thread(draw)
     info.update({"board_path": reply.get("board_path"), "bbox_mil": [round(v, 2) for v in box],
                  "objects": reply.get("total")})
     return [json.dumps(info, indent=1), MCPImage(data=buf.getvalue(), format="png")]

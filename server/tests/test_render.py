@@ -50,6 +50,26 @@ class PcbTest(unittest.TestCase):
         self.assertNotEqual(px(image, self.BOX, 200, 30, 1000), (0, 0, 0))
         self.assertIn("mid layer 1", info["drawn"])
 
+    def test_copper_inside_a_pour_hole_shows(self):
+        pour = {"kind": "region", "layer": "Top Layer", "bounds": [0, 0, 400, 200], "contours": [
+            {"hole": False, "points": [(0, 0), (400, 0), (400, 200), (0, 200)]},
+            {"hole": True, "points": [(100, 50), (300, 50), (300, 150), (100, 150)]}]}
+        # a pad and a track of another net in the cut-out, drawn before or after the pour
+        pad = {"kind": "pad", "layer": "Top Layer", "x": 150, "y": 100, "x_size": 40, "y_size": 40,
+               "shape": "rectangle", "hole": 0, "rotation": 0}
+        track = {"kind": "track", "layer": "Top Layer", "x1": 220, "y1": 100, "x2": 280, "y2": 100, "width": 20}
+        for objects in ([pour, pad, track], [pad, track, pour]):
+            image, _ = render.render_pcb(objects, self.BOX, dpi=1000)
+            self.assertEqual(px(image, self.BOX, 150, 100, 1000), (190, 0, 0))   # pad
+            self.assertEqual(px(image, self.BOX, 250, 100, 1000), (190, 0, 0))   # track
+            self.assertEqual(px(image, self.BOX, 200, 130, 1000), (0, 0, 0))     # the cut-out around them
+            self.assertEqual(px(image, self.BOX, 50, 100, 1000), (190, 0, 0))    # the pour
+        # a hole of one region does not cut another region of the layer
+        other = {"kind": "region", "layer": "Top Layer", "bounds": [180, 80, 220, 120], "contours": [
+            {"hole": False, "points": [(180, 80), (220, 80), (220, 120), (180, 120)]}]}
+        image, _ = render.render_pcb([other, pour], self.BOX, dpi=1000)
+        self.assertEqual(px(image, self.BOX, 200, 100, 1000), (190, 0, 0))
+
     def test_dpi_capped_and_outline(self):
         image, info = render.render_pcb([], [0, 0, 100000, 1000], dpi=1000,
                                         outline=[{"x": 0, "y": 0, "kind": 0, "cx": 0, "cy": 0, "radius": 0},
