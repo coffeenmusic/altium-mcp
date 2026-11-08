@@ -3241,7 +3241,6 @@ begin
     Result := True;
 end;
 
-// One edit record; Msg says why it failed
 // The sheet symbol whose sheet name (or, failing that, file name) is Name;
 // nil with Msg set when there is none or several
 function FindSheetSymbol(Doc: ISch_Document; Name: String; var Msg: String): ISch_SheetSymbol;
@@ -3291,29 +3290,74 @@ begin
     Sym.SchIterator_Destroy(Iterator);
 end;
 
-// An integer field of Rec, or Default when it is empty (keep)
-function SchField(Rec: String; i: Integer; Default: Integer): Integer;
+// An integer field of Rec, or Keep when it is empty
+function SchField(Rec: String; i: Integer; Keep: Integer): Integer;
 begin
-    Result := StrToIntDef(GetFieldFromPipeString(Rec, i), Default);
+    Result := StrToIntDef(GetFieldFromPipeString(Rec, i), Keep);
+end;
+
+// Whether an entry on Side (0 left, 1 right, 2 top, 3 bottom) at Distance
+// along it (from the top edge, or from the left edge on the top and bottom
+// sides) lies within a symbol Width wide and Height high
+function EntryFits(Side, Distance, Width, Height: Integer): Boolean;
+begin
+    if (Side = 2) or (Side = 3) then
+        Result := (Distance >= 0) and (Distance < Width)
+    else
+        Result := (Distance >= 0) and (Distance < Height);
+end;
+
+// The name of the first entry of Sym that a symbol Width x Height would
+// leave outside it; '' when every entry fits
+function EntryOutside(Sym: ISch_SheetSymbol; Width, Height: Integer): String;
+var
+    Iterator : ISch_Iterator;
+    Entry    : ISch_SheetEntry;
+begin
+    Result := '';
+    Iterator := Sym.SchIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eSheetEntry));
+    Entry := Iterator.FirstSchObject;
+    while Entry <> nil do
+    begin
+        if Result = '' then
+            if not EntryFits(Entry.Side, Entry.DistanceFromTop, Width, Height) then
+                Result := Entry.Name;
+        Entry := Iterator.NextSchObject;
+    end;
+    Sym.SchIterator_Destroy(Iterator);
 end;
 
 // SHEETSYM|sheet|x|y|width|height|fill|border|line_width|name_x|name_y|file_x|file_y
-// (x, y: top left; '' keeps a value)
+// (x, y: top left; '' keeps a value). A size that would leave an entry
+// outside the symbol is refused.
 function EditSheetSymbol(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
     Sym : ISch_SheetSymbol;
-    X, Y : Integer;
+    X, Y, W, H : Integer;
+    Outside : String;
 begin
     Result := False;
     Sym := FindSheetSymbol(Doc, GetFieldFromPipeString(Rec, 1), Msg);
     if Sym = nil then Exit;
+    W := SchField(Rec, 4, Sym.XSize);
+    H := SchField(Rec, 5, Sym.YSize);
+    if (W <> Sym.XSize) or (H <> Sym.YSize) then
+    begin
+        Outside := EntryOutside(Sym, W, H);
+        if Outside <> '' then
+        begin
+            Msg := 'entry ' + Outside + ' would be outside the resized symbol; move it first (edit_sheet_entry distance)';
+            Exit;
+        end;
+    end;
     SchBeginModify(Sym);
     // MoveByXY carries the entries and the name and file texts along
     X := SchField(Rec, 2, Sym.Location.X);
     Y := SchField(Rec, 3, Sym.Location.Y);
     if (X <> Sym.Location.X) or (Y <> Sym.Location.Y) then Sym.MoveByXY(X - Sym.Location.X, Y - Sym.Location.Y);
-    Sym.XSize := SchField(Rec, 4, Sym.XSize);
-    Sym.YSize := SchField(Rec, 5, Sym.YSize);
+    Sym.XSize := W;
+    Sym.YSize := H;
     Sym.AreaColor := SchField(Rec, 6, Sym.AreaColor);
     Sym.Color := SchField(Rec, 7, Sym.Color);
     Sym.LineWidth := SchField(Rec, 8, Sym.LineWidth);
@@ -3335,11 +3379,14 @@ begin
     Result := True;
 end;
 
-// SHEETENTRY|sheet|entry|side|distance from top|io type|style|new name
+// SHEETENTRY|sheet|entry|side|distance|io type|style|new name: distance is
+// from the top edge on the left and right sides, from the left edge on the
+// top and bottom; a place outside the symbol is refused
 function EditSheetEntry(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
     Sym   : ISch_SheetSymbol;
     Entry : ISch_SheetEntry;
+    NewSide, NewDistance : Integer;
 begin
     Result := False;
     Sym := FindSheetSymbol(Doc, GetFieldFromPipeString(Rec, 1), Msg);
@@ -3350,9 +3397,16 @@ begin
         Msg := 'sheet symbol ' + GetFieldFromPipeString(Rec, 1) + ' has no entry ' + GetFieldFromPipeString(Rec, 2);
         Exit;
     end;
+    NewSide := SchField(Rec, 3, Entry.Side);
+    NewDistance := SchField(Rec, 4, Entry.DistanceFromTop);
+    if not EntryFits(NewSide, NewDistance, Sym.XSize, Sym.YSize) then
+    begin
+        Msg := 'that distance puts entry ' + Entry.Name + ' outside the sheet symbol';
+        Exit;
+    end;
     SchBeginModify(Entry);
-    Entry.Side := SchField(Rec, 3, Entry.Side);
-    Entry.DistanceFromTop := SchField(Rec, 4, Entry.DistanceFromTop);
+    Entry.Side := NewSide;
+    Entry.DistanceFromTop := NewDistance;
     Entry.IOType := SchField(Rec, 5, Entry.IOType);
     Entry.Style := SchField(Rec, 6, Entry.Style);
     if GetFieldFromPipeString(Rec, 7) <> '' then Entry.Name := GetFieldFromPipeString(Rec, 7);
@@ -3360,22 +3414,50 @@ begin
     Result := True;
 end;
 
+// Whether (X, Y) lies on the segment A-B within Tol, away from its ends
+function InsideSegment(AX, AY, BX, BY, X, Y, Tol: Integer): Boolean;
+var
+    Lo, Hi : Integer;
+    Len, Cross : Double;
+begin
+    Result := False;
+    if (Abs(AX - X) <= Tol) and (Abs(AY - Y) <= Tol) then Exit;
+    if (Abs(BX - X) <= Tol) and (Abs(BY - Y) <= Tol) then Exit;
+    if AX < BX then begin Lo := AX; Hi := BX; end else begin Lo := BX; Hi := AX; end;
+    if (X < Lo - Tol) or (X > Hi + Tol) then Exit;
+    if AY < BY then begin Lo := AY; Hi := BY; end else begin Lo := BY; Hi := AY; end;
+    if (Y < Lo - Tol) or (Y > Hi + Tol) then Exit;
+    Len := Sqrt(Sqr(1.0 * (BX - AX)) + Sqr(1.0 * (BY - AY)));
+    if Len = 0 then Exit;
+    Cross := (1.0 * (BX - AX)) * (Y - AY) - (1.0 * (BY - AY)) * (X - AX);
+    Result := Abs(Cross) / Len <= Tol;
+end;
+
 // WIREVTX|x|y|to_x|to_y: moves the vertex at x, y of every wire with one
-// there, so wires that meet at it stay joined
+// there, so wires that meet at it stay joined, and a junction placed there
+// along with them. Refused when a wire passes through the point between
+// its vertices: moving the vertex would break that T connection.
 function MoveWireVertex(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
     Iterator : ISch_Iterator;
     Wire     : ISch_Wire;
-    Hits, Index : TList;
-    X, Y, Tol, k, i : Integer;
+    Junc     : ISch_Junction;
+    Hits, VertexNos : TList;
+    Juncs    : TInterfaceList;
+    X, Y, TX, TY, Tol, k, i : Integer;
+    Through  : Boolean;
     P        : TLocation;
 begin
     Result := False;
     X := SchField(Rec, 1, 0);
     Y := SchField(Rec, 2, 0);
+    TX := SchField(Rec, 3, 0);
+    TY := SchField(Rec, 4, 0);
     Tol := MilsToCoord(1);
+    Through := False;
     Hits := TList.Create;
-    Index := TList.Create;
+    VertexNos := TList.Create;
+    Juncs := TInterfaceList.Create;
     try
         Iterator := Doc.SchIterator_Create;
         Iterator.AddFilter_ObjectSet(MkSet(eWire));
@@ -3383,11 +3465,17 @@ begin
         while Wire <> nil do
         begin
             for k := 1 to Wire.VerticesCount do
+            begin
                 if (Abs(Wire.Vertex[k].X - X) <= Tol) and (Abs(Wire.Vertex[k].Y - Y) <= Tol) then
                 begin
                     Hits.Add(Wire);
-                    Index.Add(k);
+                    VertexNos.Add(k);
                 end;
+                if k < Wire.VerticesCount then
+                    if InsideSegment(Wire.Vertex[k].X, Wire.Vertex[k].Y, Wire.Vertex[k + 1].X,
+                                     Wire.Vertex[k + 1].Y, X, Y, Tol) then
+                        Through := True;
+            end;
             Wire := Iterator.NextSchObject;
         end;
         Doc.SchIterator_Destroy(Iterator);
@@ -3396,20 +3484,42 @@ begin
             Msg := 'no wire has a vertex at that point';
             Exit;
         end;
+        if Through then
+        begin
+            Msg := 'a wire passes through that point between its vertices; moving the vertex would disconnect it';
+            Exit;
+        end;
+        Iterator := Doc.SchIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eJunction));
+        Junc := Iterator.FirstSchObject;
+        while Junc <> nil do
+        begin
+            if (Abs(Junc.Location.X - X) <= Tol) and (Abs(Junc.Location.Y - Y) <= Tol) then Juncs.Add(Junc);
+            Junc := Iterator.NextSchObject;
+        end;
+        Doc.SchIterator_Destroy(Iterator);
         for i := 0 to Hits.Count - 1 do
         begin
             Wire := Hits[i];
             SchBeginModify(Wire);
-            P := Wire.Vertex[Index[i]];
-            P.X := SchField(Rec, 3, 0);
-            P.Y := SchField(Rec, 4, 0);
-            Wire.Vertex[Index[i]] := P;
+            P := Wire.Vertex[VertexNos[i]];
+            P.X := TX;
+            P.Y := TY;
+            Wire.Vertex[VertexNos[i]] := P;
             SchEndModify(Wire);
+        end;
+        for i := 0 to Juncs.Count - 1 do
+        begin
+            Junc := Juncs.Items[i];
+            SchBeginModify(Junc);
+            Junc.MoveToXY(TX, TY);
+            SchEndModify(Junc);
         end;
         Result := True;
     finally
         Hits.Free;
-        Index.Free;
+        VertexNos.Free;
+        Juncs.Free;
     end;
 end;
 
@@ -3502,6 +3612,7 @@ begin
     Result := True;
 end;
 
+// One edit record; Msg says why it failed
 function ApplySchEdit(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
     Kind       : String;

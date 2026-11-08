@@ -190,6 +190,12 @@ class SheetAndWireTest(unittest.TestCase):
         self.assertIn("side", encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN",
                                                   "side": "up"}])[1])
 
+    def test_sheet_entry_styles_follow_altium(self):
+        # The same TPortArrowStyle order as ports: top_bottom is 7, none_vertical 4
+        for name, n in (("left_right", 3), ("none_vertical", 4), ("top", 5), ("bottom", 6), ("top_bottom", 7)):
+            lines, _ = encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN", "style": name}])
+            self.assertEqual(lines[0].split("|")[6], str(n), name)
+
     def test_wire_vertex_and_label(self):
         lines, _ = encode_operations([{"op": "move_wire_vertex", "x": 1, "y": 2, "to_x": 3, "to_y": 4},
                                       {"op": "move_net_label", "x": 1, "y": 2, "text": "A", "snap_to_wire_end": True},

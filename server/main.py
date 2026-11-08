@@ -2298,13 +2298,17 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         [width, height], [fill_color, border_color]
                         ("#RRGGBB"), [line_width smallest/small/medium/
                         large], [name_x, name_y], [file_x, file_y] (where
-                        the sheet name and file name texts sit)
+                        the sheet name and file name texts sit). A size
+                        that would leave an entry outside is refused
       edit_sheet_entry  sheet, name, [side left/right/top/bottom],
-                        [distance] (from the symbol's top edge), [io_type],
-                        [style], [new_name]
+                        [distance] (from the symbol's top edge on the left
+                        and right sides, from its left edge on the top and
+                        bottom), [io_type], [style, as add_port], [new_name]
       move_wire_vertex  x, y, to_x, to_y: moves the vertex at x, y of every
                         wire with one there (an end or a corner), so wires
-                        that meet there stay joined; also to trim a wire
+                        that meet there stay joined, and a junction there
+                        with them; also to trim a wire. Refused when a wire
+                        passes through x, y mid-segment (a T connection)
       move_net_label    x, y (the label's location), [text], [to_x, to_y],
                         [orientation], [justification],
                         [snap_to_wire_end] (true, or a search radius in
