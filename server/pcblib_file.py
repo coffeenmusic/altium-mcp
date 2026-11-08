@@ -129,6 +129,39 @@ def body_placements(path, footprints):
                 pass
 
 
+def storage_streams(path, stream="Data", storage_filter=None):
+    """{storage name: bytes} of one stream in each top-level storage of a
+    compound file (.PcbLib, .PcbDoc), optionally only the storages whose name
+    storage_filter accepts. Each stream is read whole through the storage
+    API, so a record spread over sectors comes back in one piece. Storages
+    without the stream are left out; {} when the file cannot be read."""
+    temp = None
+    root = None
+    out = {}
+    try:
+        root, temp = _open_root(path)
+        for name in [e[0] for e in root.EnumElements() if e[1] == _STORAGE]:
+            if storage_filter is not None and not storage_filter(name):
+                continue
+            try:
+                storage = root.OpenStorage(name, None, _CHILD, None, 0)
+                out[name] = _read_stream(storage, stream)
+            except pythoncom.com_error:
+                continue
+            finally:
+                storage = None   # released, so a temporary copy can be removed
+        return out
+    except (pythoncom.com_error, OSError):
+        return {}
+    finally:
+        root = None
+        if temp:
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
+
+
 _PLACEMENT = ("rotation_x", "rotation_y", "rotation_z", "model_z_offset")
 
 

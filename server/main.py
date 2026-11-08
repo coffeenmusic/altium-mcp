@@ -3475,34 +3475,65 @@ async def modify_pcb_objects(ctx: Context, kinds: list = None, net: str = "", la
 
 MUTATING_COMMANDS.add("edit_pcb_objects")
 
-async def _bridge_result(command: str, params: dict):
-    """The bridge's result as a dict, or (None, error)."""
-    response = await altium_bridge.execute_command(command, params)
-    if not response.get("success", False):
-        return None, response.get("error", "unknown error")
-    result = response.get("result", {})
-    if isinstance(result, str):
-        try:
-            result = json.loads(result, strict=False)
-        except ValueError:
-            return None, f"unexpected reply: {result[:200]}"
-    return result, ""
+def _bridge_pickup():
+    """A test of whether the bridge script has picked the request up: the
+    request file has been written and is gone again (the script deletes it
+    once read). A dialog driver counts its wait for the dialog from then,
+    so Altium starting up does not count against it."""
+    written = [False]
 
-async def _stitch_once(net: str, settings: dict, stagger, board_path: str, toggle: bool = False) -> dict:
-    """Run Altium's Add Stitching to Net with the dialog filled in from outside."""
+    def started() -> bool:
+        if REQUEST_FILE.exists():
+            written[0] = True
+            return False
+        return written[0]
+    return started
+
+async def _with_driver(driver_coro, dialog_class: str, command: str, params: dict):
+    """Run a bridge command while a driver answers its dialog. However the
+    command ends, the driver stops, a dialog it left open is closed, and the
+    window that was in front gets the foreground back."""
     import via_stitching
 
-    outcome = via_stitching.StitchOutcome()
-    driver = asyncio.create_task(via_stitching.drive_dialog(outcome, net, settings, stagger, PROGRESS_FILE,
-                                                            toggle_stagger=toggle))
+    previous = via_stitching.foreground_window()
+    driver = asyncio.create_task(driver_coro)
     try:
-        result, error = await _bridge_result("run_via_stitching", {"net": net, "board_path": board_path})
+        return await _bridge_json(command, params)
     finally:
         driver.cancel()
         try:
             await driver
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.warning(f"The {command} dialog driver failed: {e}")
+        if dialog_class and via_stitching.close_dialogs(dialog_class):
+            logger.warning(f"Closed a {dialog_class} left open after {command}")
+        via_stitching.hand_foreground_back(previous)
+
+async def _remove_via_group(union_index, board_path: str):
+    """Remove a stitching group with Altium's delete, closing any message
+    box it raises without confirming it. (result, error, notes)."""
+    import via_stitching
+
+    if not via_stitching.valid_union_index(union_index):
+        return None, f"not a via group: union index {union_index!r}", []
+    outcome = via_stitching.StitchOutcome()
+    ignore = via_stitching.open_message_boxes()
+    result, error = await _with_driver(via_stitching.watch_messages(outcome, ignore), "",
+                                       "remove_via_stitching",
+                                       {"union_index": union_index, "board_path": board_path})
+    return result, error, outcome.notes
+
+async def _stitch_once(net: str, settings: dict, stagger, board_path: str, toggle: bool = False) -> dict:
+    """Run Altium's Add Stitching to Net with the dialog filled in from outside."""
+    import via_stitching
+
+    outcome = via_stitching.StitchOutcome()
+    result, error = await _with_driver(
+        via_stitching.drive_dialog(outcome, net, settings, stagger, PROGRESS_FILE, toggle_stagger=toggle,
+                                   started=_bridge_pickup()),
+        via_stitching.DIALOG_CLASS, "run_via_stitching", {"net": net, "board_path": board_path})
     if result is None:
         return {"success": False, "error": f"Via stitching failed: {error}"}
     rows = result.pop("rows", [])
@@ -3538,15 +3569,15 @@ async def _run_stitching(net: str, settings: dict, stagger, board_path: str) -> 
             if out["notes"] is None:
                 del out["notes"]
         return out
-    removed, error = await _bridge_result("remove_via_stitching", {
-        "union_index": out.get("union_index", 0), "board_path": board_path})
+    removed, error, closed = await _remove_via_group(out.get("union_index"), board_path)
     if removed is None:
         out["warning"] = (f"Asked for stagger={stagger} but Altium placed the vias "
                           f"{'staggered' if out['stagger'] else 'in straight rows'}, and they could not "
-                          f"be removed to try again: {error}")
+                          f"be removed to try again: {error}" + (f" ({'; '.join(closed)})" if closed else ""))
         return out
     again = await _stitch_once(net, settings, stagger, board_path, toggle=True)
-    again["retried"] = "the first stitching came out " + ("staggered" if out["stagger"] else "in straight rows")         + " and was removed"
+    again["retried"] = ("the first stitching came out " + ("staggered" if out["stagger"] else "in straight rows")
+                        + " and was removed: three undo steps in Altium (stitch, remove, stitch again)")
     if again.get("success") and again.get("stagger") not in (None, stagger):
         again["warning"] = f"Asked for stagger={stagger}, but Altium placed the vias otherwise twice."
     return again
@@ -3561,7 +3592,11 @@ async def stitch_vias(ctx: Context, net: str, grid_mils: float = None, via_diame
     Altium places the vias on a grid wherever the net has copper on both
     layers of the via and the design rules leave room, and keeps them as one
     stitching group. The dialog is filled in and confirmed from outside
-    Altium, so it may flash on screen. Altium's command is one undo step.
+    Altium, so it may flash on screen; the window that was in front gets
+    the foreground back afterwards. Altium's command is one undo step;
+    when the stagger came out wrong and was redone ("retried" in the
+    result), it is three: the stitching, its removal and the new stitching.
+    Nothing is stitched when Constrain Area cannot be read and turned off.
 
     A setting left out keeps what the dialog last used. The via goes from
     the dialog's layer pair (normally top to bottom), reported in the result.
@@ -3594,7 +3629,7 @@ async def stitch_vias(ctx: Context, net: str, grid_mils: float = None, via_diame
         return json.dumps({"success": False, "error": error})
     if not net.strip():
         return json.dumps({"success": False, "error": "net is required"})
-    existing, error = await _bridge_result("get_via_stitching", {"net": net, "board_path": board_path})
+    existing, error = await _bridge_json("get_via_stitching", {"net": net, "board_path": board_path})
     if existing is None:
         return json.dumps({"success": False, "error": f"Could not read the board: {error}"})
     logger.info(f"Stitching net {net}")
@@ -3628,11 +3663,10 @@ async def get_via_stitching(ctx: Context, net: str = "", board_path: str = "") -
     import via_stitching
 
     board_path = long_path(board_path)
-    result, error = await _bridge_result("get_via_stitching", {"net": net, "board_path": board_path})
+    result, error = await _bridge_json("get_via_stitching", {"net": net, "board_path": board_path})
     if result is None:
         return json.dumps({"success": False, "error": f"Could not read the board: {error}"})
-    stored = via_stitching.read_stored_groups(result.get("board", ""))
-    shielding = via_stitching.read_stored_shielding(result.get("board", ""))
+    stored, shielding = ({}, {}) if not result.get("groups") else via_stitching.read_stored(result.get("board", ""))
     for g in result.get("groups", []):
         s, sh = stored.get(g.get("union_index")), shielding.get(g.get("union_index"))
         g["settings_saved"] = s is not None or sh is not None
@@ -3660,15 +3694,18 @@ async def update_via_stitching(ctx: Context, union_index: int = 0, net: str = ""
     (save the board first if the group is new). Use it after changing the
     copper, or to change the grid or via size.
 
-    Two undo steps in Altium: the removal and the new stitching. If the new
-    stitching fails, the old vias are already gone; undo restores them.
+    Two undo steps in Altium: the removal and the new stitching (four when
+    the stagger came out wrong and was redone). If the new stitching fails,
+    the old vias are already gone; undo restores them. Refused when the
+    saved group is on another net than the board shows (save the board),
+    or when any of its vias is locked.
 
     A group limited to an area (Constrain Area) is refused: its area cannot
     be given to Altium's dialog from outside.
 
     Args:
-        union_index (int): The group, as get_via_stitching lists it. 0 to
-            pick by net instead.
+        union_index (int): The group, as get_via_stitching lists it (always
+            above 0). 0 to pick by net instead.
         net (str): The net whose only stitching group to change.
         grid_mils, via_diameter_mils, via_hole_mils, via_pad_clearance_mils,
         pullback_mils, stagger: New values, as for stitch_vias.
@@ -3687,10 +3724,13 @@ async def update_via_stitching(ctx: Context, union_index: int = 0, net: str = ""
     error = via_stitching.check_settings(given)
     if error:
         return json.dumps({"success": False, "error": error})
-    listing, error = await _bridge_result("get_via_stitching", {"net": net, "board_path": board_path})
+    listing, error = await _bridge_json("get_via_stitching", {"net": net, "board_path": board_path})
     if listing is None:
         return json.dumps({"success": False, "error": f"Could not read the board: {error}"})
     groups = listing.get("groups", [])
+    if isinstance(union_index, bool) or not isinstance(union_index, int) or union_index < 0:
+        return json.dumps({"success": False,
+                           "error": "union_index must be a group's union index, or 0 to pick by net"})
     if union_index:
         group = next((g for g in groups if g.get("union_index") == union_index), None)
         if group is None:
@@ -3703,14 +3743,20 @@ async def update_via_stitching(ctx: Context, union_index: int = 0, net: str = ""
                            "error": "Give union_index: " + ("no stitching found" if not groups else
                                                             f"{len(groups)} groups match")})
 
-    stored = via_stitching.read_stored_groups(listing.get("board", "")).get(group["union_index"])
-    if stored is None and group["union_index"] in via_stitching.read_stored_shielding(listing.get("board", "")):
+    if not via_stitching.valid_union_index(group.get("union_index")):
+        return json.dumps({"success": False, "error": f"Not a via group: union index {group.get('union_index')!r}"})
+    saved_groups, saved_shielding = via_stitching.read_stored(listing.get("board", ""))
+    stored = saved_groups.get(group["union_index"])
+    if stored is None and group["union_index"] in saved_shielding:
         return json.dumps({"success": False, "error": (
             f"Group {group['union_index']} is shielding: change it with shield_net and replace=true.")})
     if stored is None:
         return json.dumps({"success": False, "error": (
             f"Group {group['union_index']} is not a stitching group in the saved board: it is not "
             "stitching, or it was added after the last save. Save the board and try again.")})
+    problem = via_stitching.stored_net_problem(group, stored)
+    if problem:
+        return json.dumps({"success": False, "error": problem})
     if stored["constrained_to_area"]:
         return json.dumps({"success": False, "error": (
             f"Group {group['union_index']} is limited to an area (Constrain Area), which cannot be "
@@ -3722,10 +3768,10 @@ async def update_via_stitching(ctx: Context, union_index: int = 0, net: str = ""
     new_stagger = stored["stagger"] if stagger is None else stagger
 
     logger.info(f"Updating via stitching group {group['union_index']} on {group['net']}")
-    removed, error = await _bridge_result("remove_via_stitching", {
-        "union_index": group["union_index"], "board_path": board_path})
+    removed, error, closed = await _remove_via_group(group["union_index"], board_path)
     if removed is None:
-        return json.dumps({"success": False, "error": f"Could not remove the old vias: {error}"})
+        return json.dumps({"success": False, "error": f"Could not remove the old vias: {error}",
+                           **({"dialog_notes": closed} if closed else {})})
     out = await _run_stitching(group["net"], settings, new_stagger, board_path)
     out["vias_removed"] = removed.get("vias_removed", 0)
     out["replaced_union_index"] = group["union_index"]
@@ -3741,16 +3787,10 @@ async def _shield_once(net: str, via_net: str, settings: dict, rows, toggle: lis
     import via_stitching
 
     outcome = via_stitching.StitchOutcome()
-    driver = asyncio.create_task(via_stitching.drive_shield_dialog(
-        outcome, net, via_net, settings, rows, toggle, replace, PROGRESS_FILE))
-    try:
-        result, error = await _bridge_result("run_via_shielding", {"net": net, "board_path": board_path})
-    finally:
-        driver.cancel()
-        try:
-            await driver
-        except asyncio.CancelledError:
-            pass
+    result, error = await _with_driver(
+        via_stitching.drive_shield_dialog(outcome, net, via_net, settings, rows, toggle, replace, PROGRESS_FILE,
+                                          started=_bridge_pickup()),
+        via_stitching.SHIELD_DIALOG_CLASS, "run_via_shielding", {"net": net, "board_path": board_path})
     if result is None:
         return {"success": False, "error": f"Via shielding failed: {error}"}
     out = {"success": outcome.pressed, **{k: v for k, v in result.items() if k != "success"}}

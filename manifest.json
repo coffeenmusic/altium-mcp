@@ -224,6 +224,22 @@
       "description": "Report what each polygon pour poured: pieces, islands, slivers, and pours with no net or no copper"
     },
     {
+      "name": "stitch_vias",
+      "description": "Stitch a net with vias using Altium's own Add Stitching to Net (grid, via size, clearances, stagger)"
+    },
+    {
+      "name": "get_via_stitching",
+      "description": "List the via stitching and shielding groups on a PCB with their saved settings"
+    },
+    {
+      "name": "update_via_stitching",
+      "description": "Change a via stitching group: its vias are removed and the net stitched again with new settings"
+    },
+    {
+      "name": "shield_net",
+      "description": "Fence a net's tracks with vias using Altium's own Add Shielding to Net, optionally replacing its shielding"
+    },
+    {
       "name": "layout_duplicator",
       "description": "First step of layout duplication. Selects source components and returns data to match with destination components"
     },

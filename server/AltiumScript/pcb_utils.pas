@@ -5503,7 +5503,9 @@ end;
 
 // Delete the stitching group UnionIndex with Altium's own delete (PCB:Clear on
 // its selected vias), which removes the group too. Deleting the vias from a
-// script (RemovePCBObject) leaves an empty group in the saved board.
+// script (RemovePCBObject) leaves an empty group in the saved board. Union
+// index 0 is every via in no group, so only a positive index is taken; a
+// group with locked vias is refused, so PCB:Clear has nothing to ask about.
 function RemoveViaStitchingGroup(UnionIndex: Integer): String;
 var
     Board    : IPCB_Board;
@@ -5511,9 +5513,14 @@ var
     Via      : IPCB_Via;
     Found    : TInterfaceList;
     Saved    : TInterfaceList;
-    i, Left  : Integer;
+    i, Left, LockedVias : Integer;
     Props    : TStringList;
 begin
+    if UnionIndex <= 0 then
+    begin
+        Result := 'ERROR: Not a via group: union index ' + IntToStr(UnionIndex);
+        Exit;
+    end;
     Board := GetBoardSafe(0);
     if Board = nil then
     begin
@@ -5537,6 +5544,18 @@ begin
         if Found.Count = 0 then
         begin
             Result := 'ERROR: No vias in group ' + IntToStr(UnionIndex);
+            Exit;
+        end;
+        LockedVias := 0;
+        for i := 0 to Found.Count - 1 do
+        begin
+            Via := Found.Items[i];
+            if not Via.Moveable then LockedVias := LockedVias + 1;
+        end;
+        if LockedVias > 0 then
+        begin
+            Result := 'ERROR: ' + IntToStr(LockedVias) + ' of the ' + IntToStr(Found.Count) + ' vias in group ' +
+                      IntToStr(UnionIndex) + ' are locked; unlock them in Altium first';
             Exit;
         end;
 
