@@ -6679,7 +6679,8 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
         allow_component_removal (bool): Go on when the update would remove
             components from the board.
         link_by_designator (bool): Let Altium link unmatched parts by
-            designator (see above).
+            designator (see above). Altium writes those links into the board
+            as soon as it is asked, also when nothing is executed.
         max_changes (int): At most this many changes listed.
 
     Returns:
@@ -6752,6 +6753,12 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
         if outcome.problem:
             reply["error"] = outcome.problem
         return json.dumps(reply, indent=1)
+    if link_by_designator and outcome.component_links.startswith("automatic") and not outcome.executed:
+        # Checked on AD25: Altium writes the links into the board when the
+        # question is answered, before anything is executed
+        reply["links_written"] = ("Automatically Create Component Links changed the board even though nothing "
+                                  "was executed: it is left modified, not saved. Close it without saving to drop "
+                                  "the links, or save to keep them.")
     if outcome.component_links:
         reply["component_links"] = outcome.component_links
     groups = {}
