@@ -45,13 +45,17 @@ the tool waited until its timeout).
 Snapshots
 ---------
 Before a run the tool copies the Altium documents the script names in its
-strings (or the paths it is given) next to the run file. rollback() puts
+strings (or the paths it is given) into a per-user folder; a rollback puts
 them back. The template logs whether each one had unsaved changes in Altium
-before the script ran: those changes were never on disk, so a rollback that
-closes the document would lose them, and it refuses unless told to.
+before and after the script ran, and the tool records the hash of each file
+once the run has ended. A rollback refuses a document that had unsaved
+changes before the run (they were never on disk), one changed on disk since
+the run (saved later by the user or by another run), and, unless told to, one
+that has unsaved changes now that it did not have when the run ended.
 """
 
 import ctypes
+import hashlib
 import itertools
 import json
 import os
@@ -72,6 +76,7 @@ ROUTINES_END = "// === END USER ROUTINES"
 DOCS_BEGIN = "// === SNAPSHOT DOCS"
 DOCS_END = "// === END SNAPSHOT DOCS"
 DOC_STATE_PREFIX = "DOC STATE: "    # logged by SbxNoteDoc
+DOC_AFTER_PREFIX = "DOC AFTER: "    # logged by SbxNoteDocsAfter
 EXCEPTION_PREFIX = "EXCEPTION: "   # logged by the template's except block
 GUARD_PREFIX = "LOOP GUARD: "       # logged by SandboxTick when it ends the loops
 UNDO_PREFIX = "UNDO GROUP LEFT OPEN: "  # logged by SbxCloseUndo
@@ -99,12 +104,14 @@ TEMPLATE_GLOBALS = [
     "REPLACEALL", "SbxGuardUntil", "SbxGuardTripped", "SbxUndoDocs", "SbxUndoNames", "SbxUndoPath",
     "SandboxLog", "SandboxTick", "SbxSaveUndo", "SbxPreProcess", "SbxPostProcess", "SbxPcbPreProcess",
     "SbxPcbPostProcess", "SbxCloseUndo", "MM", "OpenSchDoc", "SaveDoc", "FmtNum", "FmtMM", "ParseNum",
-    "ParseMM", "SbxNoteDoc", "SbxBody", "Run",
+    "ParseMM", "SbxSnapDocs", "SbxDocState", "SbxNoteDoc", "SbxNoteDocsAfter", "SbxCloseDoc",
+    "SbxProjectUnsaved", "SbxBody", "Run",
 ]
 
-# Pascal's reserved words. Used as a name they fail with messages such as
-# "Error in declaration block" or "Label name expected" (checked in AD25 for
-# Label, Object, Unit, File, Out and Property).
+# Pascal's reserved words, and the directives and type names that failed the
+# same way when used as a name, with messages such as "Error in declaration
+# block" or "Label name expected" (checked in AD25 for Label, Object, Unit,
+# File, Out and Property; the directives broke the production units).
 RESERVED_WORDS = {
     "and", "array", "as", "asm", "begin", "case", "class", "const", "constructor", "destructor", "div",
     "do", "downto", "else", "end", "except", "exports", "file", "finalization", "finally", "for",
@@ -113,6 +120,8 @@ RESERVED_WORDS = {
     "procedure", "program", "property", "raise", "record", "repeat", "resourcestring", "set", "shl",
     "shr", "string", "then", "threadvar", "to", "try", "type", "unit", "until", "uses", "var", "while",
     "with", "xor",
+    # directives and type names
+    "absolute", "at", "default", "index", "message", "on", "read", "stored", "variant", "write",
 }
 
 _DECL_RE = re.compile(r"^\s*[A-Za-z_]\w*(\s*,\s*[A-Za-z_]\w*)*\s*:\s*[A-Za-z_][\w.]*\s*;\s*(//.*)?$")
@@ -367,6 +376,8 @@ def track_undo(code: str) -> str:
 
 
 _PARAM_RE = re.compile(r"([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:(?!=)")
+_IDISPATCH_PARAM_RE = re.compile(r"([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:\s*IDispatch\b", re.IGNORECASE)
+_IDISPATCH_RESULT_RE = re.compile(r"(?:\)|^\s*)\s*:\s*IDispatch\s*;", re.IGNORECASE)
 
 
 @dataclass
@@ -375,6 +386,7 @@ class Routine:
     lines: List[str]
     first_line: int               # 1-based line of its header in the submitted script
     names: List[str]              # its parameters and local variables
+    untyped: List[str] = field(default_factory=list)  # those declared IDispatch, and Result if it is
 
 
 def routines(split: SplitScript) -> List[Routine]:
@@ -390,8 +402,11 @@ def routines(split: SplitScript) -> List[Routine]:
         b = re.search(r"\bbegin\b", head, re.IGNORECASE)
         head = head[:b.start()] if b else head
         names = [x.strip() for g in _PARAM_RE.findall(head) for x in g.split(",")]
+        untyped = [x.strip() for g in _IDISPATCH_PARAM_RE.findall(head) for x in g.split(",")]
+        if _IDISPATCH_RESULT_RE.search(head):
+            untyped.append("Result")
         found.append(Routine(m.group(1) if m else "", split.routines[k:stop],
-                             split.routines_offset + k + 1, names))
+                             split.routines_offset + k + 1, names, untyped))
     return found
 
 
@@ -524,12 +539,20 @@ def precedence_problems(code: str, line_offset: int = 0) -> List[str]:
     return problems
 
 
-def lint_script(body_lines: List[str], line_offset: int = 0, decls: List[str] = ()) -> List[str]:
+def _record_read_re(untyped: List[str]):
+    return re.compile(r"\b(" + "|".join(map(re.escape, untyped)) + r")\s*\.\s*"
+                      r"(Corner|BoundingRectangle\w*)\b(?!\s*:=)", re.IGNORECASE)
+
+
+def lint_script(body_lines: List[str], line_offset: int = 0, decls: List[str] = (),
+                routine_list: List[Routine] = ()) -> List[str]:
     """Calls known to crash Altium, and document edits that are never closed.
 
     decls are the script's own declarations: a variable declared IDispatch is
-    checked as Obj1..Obj9 are. Strings and comments are ignored. Returns a
-    list of problems; empty means the script may run.
+    checked as Obj1..Obj9 are. So are the IDispatch parameters and locals of
+    each routine in routine_list, on that routine's lines. Strings and
+    comments are ignored. Returns a list of problems; empty means the script
+    may run.
     """
     code = strip_strings_and_comments("\n".join(body_lines))
     untyped = ["Obj%d" % i for i in range(1, 10)] + [
@@ -538,14 +561,20 @@ def lint_script(body_lines: List[str], line_offset: int = 0, decls: List[str] = 
     # A record property (TLocation, TCoordRect) read through an IDispatch
     # variable crashed Altium; through a typed variable (ISch_GraphicalObject,
     # IPCB_Component, ...) it reads fine, and the production units do so
-    record_read = re.compile(r"\b(" + "|".join(map(re.escape, untyped)) + r")\s*\.\s*"
-                             r"(Corner|BoundingRectangle\w*)\b(?!\s*:=)", re.IGNORECASE)
+    record_read = _record_read_re(untyped)
+    # Submitted-script line -> the record-read check with that routine's own names
+    scoped = {}
+    for r in routine_list:
+        if r.untyped:
+            check = _record_read_re(untyped + r.untyped)
+            for n in range(r.first_line, r.first_line + len(r.lines)):
+                scoped[n] = check
     problems = []
     for lineno, line in enumerate(code.splitlines(), 1):
         for pat, why in KNOWN_CRASHES:
             if re.search(pat, line, re.IGNORECASE):
                 problems.append(f"line {lineno + line_offset}: {why}")
-        m = record_read.search(line)
+        m = scoped.get(lineno + line_offset, record_read).search(line)
         if m:
             problems.append(f"line {lineno + line_offset}: reading .{m.group(2)} through an IDispatch "
                             f"variable ({m.group(1)}) crashes; declare it with its interface type, "
@@ -658,6 +687,34 @@ def doc_paths(script: str) -> List[str]:
     return found
 
 
+def file_sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def unique_paths(paths: List[str], normalise=lambda p: p) -> List[str]:
+    """`paths` through `normalise`, in order, without repeats (ignoring case)."""
+    found, seen = [], set()
+    for p in paths:
+        p = normalise(p)
+        if p.lower() not in seen:
+            seen.add(p.lower())
+            found.append(p)
+    return found
+
+
+def nothing_snapshotted_note(paths_given: bool) -> str:
+    """What a run's result says when it copied no document."""
+    why = ("snapshot=[] was passed." if paths_given else
+           "the script names no document by its full path (a script working on GetCurrentPCBBoard "
+           "or the focused document names none). Pass snapshot=[paths] to copy documents before "
+           "a run.")
+    return "Nothing was snapshotted, so rollback_altium_script cannot undo this run: " + why
+
+
 def take_snapshot(directory: Path, paths: List[str]) -> List[dict]:
     """Copy `paths` into `directory` and write its manifest; returns the entries."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -665,33 +722,118 @@ def take_snapshot(directory: Path, paths: List[str]) -> List[dict]:
     for n, path in enumerate(paths):
         copy = directory / f"{n}_{os.path.basename(path)}"
         shutil.copy2(path, copy)
-        entries.append({"path": path, "copy": copy.name, "bytes": copy.stat().st_size})
-    (directory / "manifest.json").write_text(json.dumps(entries, indent=1), encoding="utf-8")
+        entries.append({"path": path, "copy": copy.name, "bytes": copy.stat().st_size,
+                        "sha256": file_sha256(copy)})
+    write_manifest(directory, entries)
     return entries
 
 
-def doc_states(log_lines: List[str]) -> dict:
-    """Document path (lower case) -> 'closed', 'open' or 'unsaved', from SbxNoteDoc's log lines."""
+def read_manifest(directory: Path) -> Optional[List[dict]]:
+    try:
+        return json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def write_manifest(directory: Path, entries: List[dict]) -> None:
+    (directory / "manifest.json").write_text(json.dumps(entries, indent=1), encoding="utf-8")
+
+
+def record_run_end(directory: Path, log_lines: List[str]) -> List[dict]:
+    """Add to the manifest what the run left: each document's state in Altium
+    before and after the script (None when not logged), and the hash of the
+    file on disk now. A rollback refuses a file whose hash has changed since:
+    it was saved later, by the user or by another run."""
+    entries = read_manifest(directory) or []
+    before = doc_states(log_lines)
+    after = doc_states(log_lines, DOC_AFTER_PREFIX)
+    for e in entries:
+        e["state_before"] = before.get(e["path"].lower())
+        e["state_after"] = after.get(e["path"].lower())
+        try:
+            e["sha256_after"] = file_sha256(e["path"])
+        except OSError:
+            e["sha256_after"] = None      # the run deleted or locked it
+    write_manifest(directory, entries)
+    return entries
+
+
+def changed_since_run(entries: List[dict]) -> List[str]:
+    """Snapshotted files whose content on disk differs from when the run ended
+    (or whose end state was never recorded)."""
+    changed = []
+    for e in entries:
+        if "sha256_after" not in e:
+            changed.append(e["path"])
+            continue
+        try:
+            now = file_sha256(e["path"])
+        except OSError:
+            now = None
+        if now != e["sha256_after"]:
+            changed.append(e["path"])
+    return changed
+
+
+def doc_states(log_lines: List[str], prefix: str = None) -> dict:
+    """Document path (lower case) -> 'closed', 'open' or 'unsaved', from the
+    log lines SbxNoteDoc (before the script) or SbxNoteDocsAfter
+    (prefix=DOC_AFTER_PREFIX) writes."""
+    prefix = prefix or DOC_STATE_PREFIX
     states = {}
     for ln in log_lines:
-        if ln.startswith(DOC_STATE_PREFIX):
-            state, _, path = ln[len(DOC_STATE_PREFIX):].partition("|")
+        if ln.startswith(prefix):
+            state, _, path = ln[len(prefix):].partition("|")
             states[path.strip().lower()] = state.strip()
     return states
 
 
-def close_script(paths: List[str]) -> str:
-    """A sandbox script that closes `paths` in Altium without saving and
-    reports, one line each, 'open|path' or 'closed|path' for how it found them."""
+def _is_project(path: str) -> bool:
+    return DOC_KINDS.get(os.path.splitext(path)[1].lower()) == "PROJECT"
+
+
+def _skip_list(paths: List[str]) -> str:
+    return "".join(f"|{p.upper()}|" for p in paths)
+
+
+def state_script(paths: List[str]) -> str:
+    """A sandbox script that reports each of `paths` as 'state|path' (closed,
+    open or unsaved), and for a project each open document of it with unsaved
+    changes that is not in `paths`, as 'child|project|document'."""
     lines = []
     for p in paths:
         q = _pascal_string(p)
-        lines += [f"if Client.IsDocumentOpen({q}) then",
-                  "begin",
-                  f"    Client.CloseDocument(Client.GetDocumentByPath({q}));",
-                  f"    S1 := S1 + 'open|' + {q} + #13#10;",
-                  "end",
-                  f"else S1 := S1 + 'closed|' + {q} + #13#10;"]
+        lines.append(f"S1 := S1 + SbxDocState({q}) + '|' + {q} + #13#10;")
+        if _is_project(p):
+            lines += [f"S2 := SbxProjectUnsaved({q}, {_pascal_string(_skip_list(paths))});",
+                      f"S1 := S1 + 'children|' + {q} + '|' + S2 + #13#10;"]
+    lines.append("ResultText := S1;")
+    return "\n".join(lines)
+
+
+def parse_states(text: str):
+    """state_script's result as ({path lower: state}, {project lower: [documents]})."""
+    states, children = {}, {}
+    for ln in (text or "").splitlines():
+        kind, _, rest = ln.partition("|")
+        if kind == "children":
+            proj, _, docs = rest.partition("|")
+            children[proj.lower()] = [d for d in docs.split("*") if d]
+        elif kind in ("closed", "open", "unsaved"):
+            states[rest.lower()] = kind
+    return states, children
+
+
+def close_script(paths: List[str]) -> str:
+    """A sandbox script that closes `paths` in Altium without saving and
+    reports, one line each, 'closed|path' (was not open), 'open|path' (was
+    open, now closed) or 'stillopen|path'. Documents close before projects:
+    closing a project first would close its sheets with it, and a sheet with
+    unsaved changes would make Altium ask to save it."""
+    lines = []
+    for p in sorted(paths, key=_is_project):
+        q = _pascal_string(p)
+        lines.append(f"S1 := S1 + SbxCloseDoc({q}) + '|' + {q} + #13#10;")
     lines.append("ResultText := S1;")
     return "\n".join(lines)
 
@@ -937,20 +1079,36 @@ class RunFiles:
         return self.script.with_name(self.script.stem + "_undo.txt")
 
     @property
-    def snapshot(self) -> Path:
-        """Copies of the documents taken before the run, with manifest.json."""
-        return self.script.with_name(self.script.stem + "_snapshot")
+    def run_id(self) -> str:
+        return self.script.stem
+
+
+# Run file name prefix of a user's script; helper, probe and undo runs have their own
+SCRIPT_TAG = "Sbx"
 
 
 @dataclass
 class Sandbox:
-    """One Altium instance's sandbox: where run files go and how Altium is started."""
+    """One Altium instance's sandbox: where run files go and how Altium is started.
+
+    Run files go to runs_dir, which Altium must be able to read. Snapshots
+    hold copies of the user's documents and only this server reads them, so
+    they go to a per-user folder (snapshots_dir), not to the shared one.
+    """
     altium_exe: str
     template: Path
     runs_dir: Path
     keep_runs: int = 20
+    snapshots_dir: Optional[Path] = None
+    dialogs_dir: Optional[Path] = None
 
-    def new_run_files(self, tag: str = "Sbx") -> RunFiles:
+    def snapshot_dir(self, run_id: str) -> Optional[Path]:
+        """Copies of the documents taken before a run, with manifest.json."""
+        if self.snapshots_dir is None or not re.fullmatch(r"[\w-]+", run_id or ""):
+            return None
+        return self.snapshots_dir / run_id
+
+    def new_run_files(self, tag: str = SCRIPT_TAG) -> RunFiles:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{next(_RUN_COUNTER)}"
         return RunFiles(self.runs_dir / f"{stem}.pas", self.runs_dir / f"{stem}_log.txt",
@@ -963,19 +1121,18 @@ class Sandbox:
         files.script.write_text(built.text, encoding="utf-8")
         return built
 
-    def run_files(self, run_id: str) -> Optional[RunFiles]:
-        """The files of an earlier run by its id (the run file's name without .pas)."""
-        if not re.fullmatch(r"[\w-]+", run_id or ""):
-            return None
-        script = self.runs_dir / f"{run_id}.pas"
-        if not script.exists():
-            return None
-        return RunFiles(script, script.with_name(f"{run_id}_log.txt"), script.with_name(f"{run_id}_result.txt"))
+    def run_quick(self, script: str, timeout: float = 30.0,
+                  closed_dialogs: Optional[list] = None) -> Optional[str]:
+        """Run a small helper script; its ResultText, or None when it did not finish.
 
-    def run_quick(self, script: str, timeout: float = 30.0) -> Optional[str]:
-        """Run a small helper script; its ResultText, or None when it did not finish."""
+        With closed_dialogs (a list), any other Altium dialog that opens while
+        the script runs is closed too and added to it, as {"title", "picture"}:
+        a helper that closes documents must not hang on a Save prompt. Closing
+        such a prompt is its Cancel, so the document stays open and nothing is
+        saved or lost.
+        """
         files = self.new_run_files("Helper")
-        if not self._run_until_done(files, script, timeout):
+        if not self._run_until_done(files, script, timeout, closed_dialogs):
             return None
         return read_when_ready(files.result, lambda p: p.read_text(encoding="utf-8", errors="replace"))
 
@@ -987,7 +1144,11 @@ class Sandbox:
     def stop_debugger(self) -> None:
         subprocess.Popen(f'"{self.altium_exe}" -REditScript:Stop', shell=True)
 
-    def _run_until_done(self, files: RunFiles, script: str, timeout: float) -> bool:
+    def _run_until_done(self, files: RunFiles, script: str, timeout: float,
+                        closed_dialogs: Optional[list] = None) -> bool:
+        # Dialogs open before the launch are the user's; leave them alone
+        before = {d.hwnd for d in altium_dialogs()} if closed_dialogs is not None else set()
+        seen = set()
         self.write(files, script)
         self.launch(files)
         end = time.time() + timeout
@@ -996,6 +1157,17 @@ class Sandbox:
                 return True
             for d in altium_dialogs():
                 if d.is_error_box:
+                    answer_dialog(d)
+                elif closed_dialogs is not None and d.hwnd not in before:
+                    if d.hwnd not in seen:
+                        seen.add(d.hwnd)
+                        picture = None
+                        if self.dialogs_dir is not None:
+                            try:
+                                picture = snapshot_dialog(d, self.dialogs_dir)
+                            except Exception:
+                                picture = None
+                        closed_dialogs.append({"title": d.title, "picture": picture})
                     answer_dialog(d)
             time.sleep(0.5)
         return False
@@ -1052,16 +1224,33 @@ class Sandbox:
         return {"recovered": False, "attempts": attempts}
 
     def prune(self) -> None:
-        """Keep only the newest run files."""
+        """Keep only the newest run files, and the snapshots of the newest
+        script runs. Helper, probe and undo runs are kept apart, so they never
+        push a script run's snapshot out."""
+        def newest_first(paths):
+            return sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
+
         try:
-            files = sorted(self.runs_dir.glob("*.pas"), key=lambda p: p.stat().st_mtime)
-            for old in files[:-self.keep_runs]:
+            runs = list(self.runs_dir.glob("*.pas"))
+            scripts = newest_first([p for p in runs if p.stem.split("_", 1)[0] == SCRIPT_TAG])
+            others = newest_first([p for p in runs if p.stem.split("_", 1)[0] != SCRIPT_TAG])
+            for old in scripts[self.keep_runs:] + others[self.keep_runs:]:
                 for p in (old, old.with_name(old.stem + "_log.txt"), old.with_name(old.stem + "_result.txt"),
                           old.with_name(old.stem + "_undo.txt")):
                     try:
                         p.unlink()
                     except OSError:
                         pass
-                shutil.rmtree(old.with_name(old.stem + "_snapshot"), ignore_errors=True)
+            # Snapshots used to be kept beside the run files, readable by every account
+            for old in self.runs_dir.glob("*_snapshot"):
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
+        if self.snapshots_dir is None:
+            return
+        try:
+            snaps = newest_first([p for p in self.snapshots_dir.iterdir() if p.is_dir()])
+            for old in snaps[self.keep_runs:]:
+                shutil.rmtree(old, ignore_errors=True)
         except OSError:
             pass

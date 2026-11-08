@@ -46,6 +46,8 @@ var
     SbxUndoDocs  : TList;
     SbxUndoNames : TStringList;
     SbxUndoPath  : String;
+    // Documents the tool snapshotted, see SbxNoteDoc
+    SbxSnapDocs  : TStringList;
     // The script's own var block (filled in by the run_altium_script tool).
     // Global, so the script's functions and procedures can use it too.
     // === USER VARS (filled in by the run_altium_script tool) ===
@@ -235,22 +237,91 @@ begin
     end;
 end;
 
+// 'closed', 'open' or 'unsaved' (open with changes not on disk). Modified is
+// read through BoolToStr: read directly in a condition it is always False.
+function SbxDocState(Path : String) : String;
+var
+    D : IServerDocument;
+begin
+    Result := 'closed';
+    if Client.IsDocumentOpen(Path) then
+    begin
+        Result := 'open';
+        D := Client.GetDocumentByPath(Path);
+        if D <> nil then
+            if BoolToStr(D.Modified, True) = 'True' then Result := 'unsaved';
+    end;
+end;
+
 // Logs whether a document the tool snapshotted is open in Altium and has
 // unsaved changes before the script runs: a rollback restores the file on
 // disk, so changes that were only in Altium before the run cannot come back.
 procedure SbxNoteDoc(Path : String);
+begin
+    SbxSnapDocs.Add(Path);
+    SandboxLog('DOC STATE: ' + SbxDocState(Path) + '|' + Path);
+end;
+
+// The same once the script has ended, so a rollback can tell the script's
+// unsaved changes from changes made in Altium after the run
+procedure SbxNoteDocsAfter;
+var
+    K : Integer;
+begin
+    for K := 0 to SbxSnapDocs.Count - 1 do
+        SandboxLog('DOC AFTER: ' + SbxDocState(SbxSnapDocs[K]) + '|' + SbxSnapDocs[K]);
+end;
+
+// Close a document without saving, for a rollback. Its changes are dropped
+// first, so Altium does not ask to save them. Returns 'closed' (it was not
+// open), 'open' (it was open and is now closed) or 'stillopen'.
+function SbxCloseDoc(Path : String) : String;
 var
     D : IServerDocument;
-    State : String;
 begin
-    State := 'closed';
+    Result := 'closed';
     if Client.IsDocumentOpen(Path) then
     begin
-        State := 'open';
+        Result := 'open';
         D := Client.GetDocumentByPath(Path);
-        if (D <> nil) and (BoolToStr(D.Modified, True) = 'True') then State := 'unsaved';
+        if D <> nil then
+        begin
+            D.SetModified(False);
+            Client.CloseDocument(D);
+        end;
+        if Client.IsDocumentOpen(Path) then Result := 'stillopen';
     end;
-    SandboxLog('DOC STATE: ' + State + '|' + Path);
+end;
+
+// The open documents of the project at ProjPath with unsaved changes, other
+// than those in Skip ('|' + upper-case path + '|' for each), each followed by
+// '*'. Closing the project would ask to save them.
+function SbxProjectUnsaved(ProjPath : String; Skip : String) : String;
+var
+    P, K : Integer;
+    Prj : IProject;
+    Doc : IDocument;
+    D : IServerDocument;
+begin
+    Result := '';
+    for P := 0 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        Prj := GetWorkspace.DM_Projects(P);
+        if Prj <> nil then
+            if UpperCase(Prj.DM_ProjectFullPath) = UpperCase(ProjPath) then
+                for K := 0 to Prj.DM_LogicalDocumentCount - 1 do
+                begin
+                    Doc := Prj.DM_LogicalDocuments(K);
+                    if Pos('|' + UpperCase(Doc.DM_FullPath) + '|', Skip) = 0 then
+                        if Client.IsDocumentOpen(Doc.DM_FullPath) then
+                        begin
+                            D := Client.GetDocumentByPath(Doc.DM_FullPath);
+                            if D <> nil then
+                                if BoolToStr(D.Modified, True) = 'True' then
+                                    Result := Result + Doc.DM_FullPath + '*';
+                        end;
+                end;
+    end;
 end;
 
 // === USER ROUTINES (filled in by the run_altium_script tool) ===
@@ -281,6 +352,7 @@ begin
     List2 := TStringList.Create;
     List3 := TStringList.Create;
     ResultText := '{"sandbox": "no result set"}';
+    SbxSnapDocs := TStringList.Create;
     // === SNAPSHOT DOCS (filled in by the run_altium_script tool) ===
     // === END SNAPSHOT DOCS ===
     SandboxLog('sandbox start');
@@ -305,6 +377,8 @@ begin
         List3.Free;
 
         SbxCloseUndo;
+        SbxNoteDocsAfter;
+        SbxSnapDocs.Free;
         SandboxLog('sandbox end');
 
         OutLines := TStringList.Create;

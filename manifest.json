@@ -292,6 +292,10 @@
       "description": "Run a DelphiScript snippet in an isolated sandbox and get a step-by-step log, its result, and the statement that failed"
     },
     {
+      "name": "rollback_altium_script",
+      "description": "Undo a run_altium_script run by restoring the documents it copied before the run, refusing any changed or edited since"
+    },
+    {
       "name": "ensure_altium_script_skill",
       "description": "Check whether the altium-script skill (Altium DelphiScript API reference) is installed, and install it on request"
     },
