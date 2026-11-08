@@ -809,16 +809,23 @@ begin
         RequestText(RequestData, 'new_net', ''), RequestText(RequestData, 'new_layer', ''));
 end;
 
-// Function to execute query_objects and which_rule
+// Function to execute query_objects, which_rule and query_restore. The
+// user's selection is kept in a file while the queries run, so that one a
+// stopped query left behind can be restored.
 function ExecuteQuery(CommandName: String; RequestData: TStringList): String;
+var
+    StoreFile : String;
 begin
+    StoreFile := ROOT_DIR + 'query_selection.txt';
     if CommandName = 'query_objects' then
         Result := QueryObjects(RequestText(RequestData, 'expr_mm', ''), RequestText(RequestData, 'expr_mil', ''),
-                               StrToInt(RequestText(RequestData, 'limit', '200')))
-    else
+                               StrToInt(RequestText(RequestData, 'limit', '200')), StoreFile)
+    else if CommandName = 'which_rule' then
         Result := WhichRule(RequestText(RequestData, 'a_mm', ''), RequestText(RequestData, 'a_mil', ''),
                             RequestText(RequestData, 'b_mm', ''), RequestText(RequestData, 'b_mil', ''),
-                            RequestText(RequestData, 'rule_kind', 'clearance'));
+                            RequestText(RequestData, 'rule_kind', 'clearance'), StoreFile)
+    else
+        Result := QueryRestore(StoreFile);
 end;
 
 // Extract the create symbols batch logic
@@ -1762,6 +1769,8 @@ begin
         'query_objects':
             Result := ExecuteQuery(CommandName, RequestData);
         'which_rule':
+            Result := ExecuteQuery(CommandName, RequestData);
+        'query_restore':
             Result := ExecuteQuery(CommandName, RequestData);
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);

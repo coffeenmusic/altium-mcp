@@ -5124,10 +5124,16 @@ end;
 
 // Altium's query engine, as the PCB Filter panel runs it: PCB:RunQuery with
 // Apply selects the objects an expression matches, which are read from the
-// selection; the user's selection is restored and the filter cleared after.
-// The engine reads bare numbers in its own unit, which is not the board's
-// display unit (a board shown in mil queried in mm), so it is found once per
-// call by asking for a known via or track size.
+// selection. The engine reads bare numbers in its own unit, which is not the
+// board's display unit (a board shown in mil queried in mm), so it is found
+// once per call by asking for a known via or track size.
+//
+// Queries change the selection and apply a filter. Each call saves the
+// user's selection first, in memory and as object addresses in StoreFile,
+// and selects it again and clears the filter when done. A call the server
+// stops (an expression Altium cannot evaluate) never gets there: query_restore,
+// or the next query call, selects it again from StoreFile. A filter the user
+// had applied cannot be read by a script, so it is cleared, not restored.
 
 // Number as the query engine reads it: always a dot, whatever the locale
 function QueryNumber(V: Double): String;
@@ -5135,35 +5141,137 @@ begin
     Result := StringReplace(FormatFloat('0.######', V), DecimalSeparator, '.', REPLACEALL);
 end;
 
-// The objects Expr matches, in Found
+procedure QueryClearFilter(Dummy: Integer);
+begin
+    ResetParameters;
+    AddStringParameter('Clear', 'True');
+    RunProcess('PCB:RunQuery');
+end;
+
+// The objects Expr matches, in Found; the selection is left empty
 procedure RunBoardQuery(Board: IPCB_Board; Expr: String; Found: TInterfaceList);
 var
-    Saved : TInterfaceList;
+    i : Integer;
+begin
+    Board.SelectedObjects_Clear;
+    try
+        ResetParameters;
+        AddStringParameter('Apply', 'True');
+        AddStringParameter('Expr', Expr);
+        AddStringParameter('Select', 'True');
+        RunProcess('PCB:RunQuery');
+        for i := 0 to Board.SelectecObjectCount - 1 do
+            Found.Add(Board.SelectecObject[i]);
+    finally
+        Board.SelectedObjects_Clear;
+        QueryClearFilter(0);
+    end;
+end;
+
+// Selects again what a stopped query call saved in StoreFile for this board,
+// clears the filter and deletes the file. How many objects were selected,
+// or -1 when nothing was saved for this board.
+function QueryRestoreSelection(Board: IPCB_Board; StoreFile: String): Integer;
+var
+    Lines    : TStringList;
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+begin
+    Result := -1;
+    if not FileExists(StoreFile) then Exit;
+    Lines := TStringList.Create;
+    try
+        Lines.LoadFromFile(StoreFile);
+        if Lines.Count = 0 then Exit;
+        // Saved for another board: left for a query call on that board
+        if UpperCase(Lines[0]) <> UpperCase(Board.FileName) then Exit;
+        Lines.Delete(0);
+        Lines.Sorted := True;
+        Result := 0;
+        Board.SelectedObjects_Clear;
+        QueryClearFilter(0);
+        if Lines.Count > 0 then
+        begin
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(eArcObject, ePadObject, eViaObject, eTrackObject, eTextObject,
+                eFillObject, eComponentObject, ePolyObject, eRegionObject, eDimensionObject, eComponentBodyObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Prim := Iterator.FirstPCBObject;
+            while Prim <> nil do
+            begin
+                if Lines.IndexOf(IntToStr(Prim.I_ObjectAddress)) >= 0 then
+                begin
+                    Prim.Selected := True;
+                    Result := Result + 1;
+                end;
+                Prim := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        end;
+        DeleteFile(StoreFile);
+    finally
+        Lines.Free;
+    end;
+end;
+
+// Saves the selection in Saved and in StoreFile, first selecting again what
+// a stopped call left in StoreFile
+procedure QuerySaveSelection(Board: IPCB_Board; StoreFile: String; Saved: TInterfaceList);
+var
+    Lines : TStringList;
+    Prim  : IPCB_Primitive;
     i     : Integer;
 begin
-    Saved := TInterfaceList.Create;
+    QueryRestoreSelection(Board, StoreFile);
+    Lines := TStringList.Create;
     try
+        Lines.Add(Board.FileName);
         for i := 0 to Board.SelectecObjectCount - 1 do
-            Saved.Add(Board.SelectecObject[i]);
-        Board.SelectedObjects_Clear;
-        try
-            ResetParameters;
-            AddStringParameter('Apply', 'True');
-            AddStringParameter('Expr', Expr);
-            AddStringParameter('Select', 'True');
-            RunProcess('PCB:RunQuery');
-            for i := 0 to Board.SelectecObjectCount - 1 do
-                Found.Add(Board.SelectecObject[i]);
-        finally
-            Board.SelectedObjects_Clear;
-            ResetParameters;
-            AddStringParameter('Clear', 'True');
-            RunProcess('PCB:RunQuery');
-            for i := 0 to Saved.Count - 1 do
-                Saved.Items[i].Selected := True;
+        begin
+            Prim := Board.SelectecObject[i];
+            Saved.Add(Prim);
+            Lines.Add(IntToStr(Prim.I_ObjectAddress));
         end;
+        Lines.SaveToFile(StoreFile);
     finally
-        Saved.Free;
+        Lines.Free;
+    end;
+end;
+
+// Selects again what QuerySaveSelection saved, with the filter cleared
+procedure QueryEndSelection(Board: IPCB_Board; StoreFile: String; Saved: TInterfaceList);
+var
+    i : Integer;
+begin
+    Board.SelectedObjects_Clear;
+    for i := 0 to Saved.Count - 1 do
+        Saved.Items[i].Selected := True;
+    DeleteFile(StoreFile);
+end;
+
+// query_restore: the selection a stopped query call left behind
+function QueryRestore(StoreFile: String): String;
+var
+    Board : IPCB_Board;
+    Props : TStringList;
+    Count : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Count := QueryRestoreSelection(Board, StoreFile);
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONBoolean(Props, 'restored', Count >= 0);
+        if Count >= 0 then AddJSONInteger(Props, 'selected', Count);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
     end;
 end;
 
@@ -5242,7 +5350,7 @@ begin
     try
         AddJSONProperty(Item, 'kind', QueryKindName(Prim));
         case Prim.ObjectId of
-            eComponentObject: AddJSONProperty(Item, 'designator', Prim.Name.Text);
+            eComponentObject: AddJSONProperty(Item, 'name', Prim.Name.Text);
             ePadObject:
                 begin
                     if Prim.Component <> nil then
@@ -5275,11 +5383,12 @@ begin
 end;
 
 // query_objects: ExprMM and ExprMil are the expression with its unit values
-// written in mm and in mil; the one in the engine's unit is run
-function QueryObjects(ExprMM: String; ExprMil: String; Limit: Integer): String;
+// written in mm and in mil; the one in the engine's unit is run. StoreFile
+// keeps the user's selection while the queries run.
+function QueryObjects(ExprMM: String; ExprMil: String; Limit: Integer; StoreFile: String): String;
 var
     Board : IPCB_Board;
-    Found : TInterfaceList;
+    Found, Saved : TInterfaceList;
     Items, Kinds, Counts, Props : TStringList;
     Units, Expr, Kind : String;
     i, k  : Integer;
@@ -5290,15 +5399,21 @@ begin
         Result := 'ERROR: No PCB document is focused';
         Exit;
     end;
-    Units := QueryUnit(Board);
-    if Units = 'mil' then Expr := ExprMil else Expr := ExprMM;
     Found := TInterfaceList.Create;
+    Saved := TInterfaceList.Create;
     Items := TStringList.Create;
     Kinds := TStringList.Create;
     Counts := TStringList.Create;
     Props := TStringList.Create;
     try
-        RunBoardQuery(Board, Expr, Found);
+        QuerySaveSelection(Board, StoreFile, Saved);
+        try
+            Units := QueryUnit(Board);
+            if Units = 'mil' then Expr := ExprMil else Expr := ExprMM;
+            RunBoardQuery(Board, Expr, Found);
+        finally
+            QueryEndSelection(Board, StoreFile, Saved);
+        end;
         for i := 0 to Found.Count - 1 do
         begin
             if i < Limit then Items.Add(QueryObjectJSON(Board, Found.Items[i]));
@@ -5322,6 +5437,7 @@ begin
         Result := BuildJSONObject(Props);
     finally
         Found.Free;
+        Saved.Free;
         Items.Free;
         Kinds.Free;
         Counts.Free;
@@ -5364,16 +5480,38 @@ begin
     else if Name = 'component_clearance' then Result := eRule_ComponentClearance;
 end;
 
-// which_rule: the rule of RuleName that applies between the one object ExprA
-// matches and the one ExprB matches, with the distance between them
-function WhichRule(ExprAMM, ExprAMil, ExprBMM, ExprBMil, RuleName: String): String;
+// Rule kinds that apply to one object (FindDominantRuleForObject), not to a pair
+function RuleKindIsUnary(Kind: Integer): Boolean;
+begin
+    Result := (Kind = eRule_MaxMinWidth) or (Kind = eRule_MaxMinHoleSize) or (Kind = eRule_RoutingViaStyle) or
+              (Kind = eRule_SolderMaskExpansion) or (Kind = eRule_PasteMaskExpansion) or
+              (Kind = eRule_PowerPlaneConnectStyle);
+end;
+
+// Rule kinds the DRC tests, so that Rule.ActualCheck says whether objects pass
+function RuleKindIsChecked(Kind: Integer): Boolean;
+begin
+    Result := (Kind = eRule_Clearance) or (Kind = eRule_MaxMinWidth) or (Kind = eRule_MaxMinHoleSize) or
+              (Kind = eRule_RoutingViaStyle) or (Kind = eRule_ShortCircuit) or
+              (Kind = eRule_HoleToHoleClearance) or (Kind = eRule_SilkToSilkClearance) or
+              (Kind = eRule_SilkToSolderMaskClearance) or (Kind = eRule_ComponentClearance);
+end;
+
+// which_rule: the rule of RuleName that applies to the one object ExprA
+// matches, or between it and the one ExprB matches with the distance between
+// them, and whether they pass it. ExprB is empty for a one-object kind.
+// StoreFile keeps the user's selection while the queries run.
+function WhichRule(ExprAMM, ExprAMil, ExprBMM, ExprBMil, RuleName, StoreFile: String): String;
 var
-    Board : IPCB_Board;
-    A, B  : TInterfaceList;
-    Rule  : IPCB_Rule;
-    Kind  : Integer;
-    Units : String;
-    Props : TStringList;
+    Board     : IPCB_Board;
+    A, B      : TInterfaceList;
+    Saved     : TInterfaceList;
+    Rule      : IPCB_Rule;
+    Violation : IPCB_Violation;
+    Kind      : Integer;
+    Unary     : Boolean;
+    Units     : String;
+    Props     : TStringList;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then
@@ -5387,14 +5525,39 @@ begin
         Result := 'ERROR: Unknown rule kind ' + RuleName;
         Exit;
     end;
-    Units := QueryUnit(Board);
+    Unary := RuleKindIsUnary(Kind);
+    if Unary and (ExprBMM <> '') then
+    begin
+        Result := 'ERROR: ' + RuleName + ' rules apply to one object: leave object_b empty';
+        Exit;
+    end;
+    if (not Unary) and (ExprBMM = '') then
+    begin
+        Result := 'ERROR: ' + RuleName + ' rules apply between two objects: give object_b';
+        Exit;
+    end;
     A := TInterfaceList.Create;
     B := TInterfaceList.Create;
+    Saved := TInterfaceList.Create;
     Props := TStringList.Create;
     try
-        if Units = 'mil' then RunBoardQuery(Board, ExprAMil, A) else RunBoardQuery(Board, ExprAMM, A);
-        if Units = 'mil' then RunBoardQuery(Board, ExprBMil, B) else RunBoardQuery(Board, ExprBMM, B);
-        if (A.Count <> 1) or (B.Count <> 1) then
+        QuerySaveSelection(Board, StoreFile, Saved);
+        try
+            Units := QueryUnit(Board);
+            if Units = 'mil' then RunBoardQuery(Board, ExprAMil, A) else RunBoardQuery(Board, ExprAMM, A);
+            if not Unary then
+            begin
+                if Units = 'mil' then RunBoardQuery(Board, ExprBMil, B) else RunBoardQuery(Board, ExprBMM, B);
+            end;
+        finally
+            QueryEndSelection(Board, StoreFile, Saved);
+        end;
+        if Unary and (A.Count <> 1) then
+        begin
+            Result := 'ERROR: The expression must match exactly one object; object_a matched ' + IntToStr(A.Count);
+            Exit;
+        end;
+        if (not Unary) and ((A.Count <> 1) or (B.Count <> 1)) then
         begin
             Result := 'ERROR: Each expression must match exactly one object; object_a matched ' +
                       IntToStr(A.Count) + ' and object_b ' + IntToStr(B.Count);
@@ -5402,9 +5565,14 @@ begin
         end;
         AddJSONBoolean(Props, 'success', True);
         Props.Add('"object_a": ' + QueryObjectJSON(Board, A.Items[0]));
-        Props.Add('"object_b": ' + QueryObjectJSON(Board, B.Items[0]));
-        AddJSONNumber(Props, 'distance_mils', CoordToMils(Board.PrimPrimDistance(A.Items[0], B.Items[0])));
-        Rule := Board.FindDominantRuleForObjectPair(A.Items[0], B.Items[0], Kind);
+        if Unary then
+            Rule := Board.FindDominantRuleForObject(A.Items[0], Kind)
+        else
+        begin
+            Props.Add('"object_b": ' + QueryObjectJSON(Board, B.Items[0]));
+            AddJSONNumber(Props, 'distance_mils', CoordToMils(Board.PrimPrimDistance(A.Items[0], B.Items[0])));
+            Rule := Board.FindDominantRuleForObjectPair(A.Items[0], B.Items[0], Kind);
+        end;
         if Rule = nil then
             AddJSONProperty(Props, 'rule', '')
         else
@@ -5412,16 +5580,28 @@ begin
             AddJSONProperty(Props, 'rule', Rule.Name);
             AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
             AddJSONInteger(Props, 'priority', Rule.Priority);
+            AddJSONBoolean(Props, 'enabled', Rule.Enabled);
             AddJSONProperty(Props, 'scope1', Rule.Scope1Expression);
-            AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
+            if not Unary then AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
             if Kind = eRule_Clearance then
                 AddJSONNumber(Props, 'gap_mils', CoordToMils(Rule.Gap));
+            // ActualCheck is the DRC's own test of one object or pair, net
+            // scope and clearance matrix included: nil when they comply
+            if RuleKindIsChecked(Kind) then
+            begin
+                if Unary then
+                    Violation := Rule.ActualCheck(A.Items[0], nil)
+                else
+                    Violation := Rule.ActualCheck(A.Items[0], B.Items[0]);
+                AddJSONBoolean(Props, 'passes', Violation = nil);
+            end;
         end;
         AddJSONProperty(Props, 'board', Board.FileName);
         Result := BuildJSONObject(Props);
     finally
         A.Free;
         B.Free;
+        Saved.Free;
         Props.Free;
     end;
 end;

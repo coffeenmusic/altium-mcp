@@ -45,11 +45,52 @@ def with_units(expression: str) -> Tuple[str, str, List[str]]:
     return in_mm, in_mil, found[: len(found) // 2]
 
 
+# Properties that hold a length, so a bare number compared with them is read
+# in the engine's unit. Angles, counts and the like are left alone.
+_SIZE_PROPERTY = re.compile(
+    r"^(?:[XY]\d?|.*(?:width|size|hole|radius|diameter|height|length|gap|clearance|expansion|"
+    r"thickness|distance|offset|margin|standoff|pullback))$", re.I)
+
+
 def bare_numbers(expression: str) -> List[str]:
-    """Numbers without a unit that look like sizes (compared with < > =), so
-    the reply can warn that the engine reads them in its own unit."""
+    """Numbers without a unit compared with a length property (Width > 6),
+    so the reply can warn that the engine reads them in its own unit."""
     stripped = _VALUE.sub("", expression)
-    return re.findall(r"[<>=]\s*(\d+(?:\.\d+)?)(?![\w.])", stripped)
+    return [number for prop, number in
+            re.findall(r"(\w+)\s*(?:<=|>=|<>|<|>|=)\s*(\d+(?:\.\d+)?)(?![\w.])", stripped)
+            if _SIZE_PROPERTY.match(prop)]
+
+
+# which_rule's rule kinds; the one-object ones take no object_b
+RULE_KINDS = ("clearance", "short_circuit", "hole_to_hole", "silk_to_silk", "silk_to_mask",
+              "component_clearance", "polygon_connect", "width", "hole_size", "routing_via",
+              "solder_mask_expansion", "paste_mask_expansion", "plane_connect")
+UNARY_RULE_KINDS = ("width", "hole_size", "routing_via", "solder_mask_expansion",
+                    "paste_mask_expansion", "plane_connect")
+
+
+def check_rule_kind(kind: str, object_b: str) -> str:
+    """'' when which_rule can run kind with this object_b, else what is wrong."""
+    if kind not in RULE_KINDS:
+        return f"unknown rule_kind {kind!r}; one of {', '.join(RULE_KINDS)}"
+    if kind in UNARY_RULE_KINDS and object_b.strip():
+        return f"{kind} rules apply to one object: leave object_b empty"
+    if kind not in UNARY_RULE_KINDS and not object_b.strip():
+        return f"{kind} rules apply between two objects: give object_b"
+    return ""
+
+
+def rule_note(kind: str, result: dict) -> str:
+    """A note for which_rule's reply: why no rule applies, or that the rule
+    found is disabled."""
+    if result.get("rule"):
+        return "" if result.get("enabled", True) else "The rule is disabled, so the DRC does not test it."
+    a, b = result.get("object_a") or {}, result.get("object_b") or {}
+    if kind not in UNARY_RULE_KINDS and a.get("net") and a.get("net") == b.get("net"):
+        return (f"No {kind} rule applies to this pair. Both are on net {a['net']}: a rule whose net "
+                f"scope is Different Nets Only (the default for clearance) does not apply between "
+                f"objects of the same net.")
+    return f"No {kind} rule applies to " + ("this object." if kind in UNARY_RULE_KINDS else "this pair.")
 
 
 def check(expression: str) -> str:
@@ -67,8 +108,12 @@ _proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
 def _text(h) -> str:
+    """A window's text, '' when its thread does not answer within 0.5 s
+    (SMTO_ABORTIFHUNG): a hung window must not block the server."""
     b = ctypes.create_unicode_buffer(512)
-    ctypes.windll.user32.SendMessageW(h, 0x000D, 512, b)
+    answered = ctypes.c_size_t()
+    if not ctypes.windll.user32.SendMessageTimeoutW(h, 0x000D, 512, b, 0x0002, 500, ctypes.byref(answered)):
+        return ""
     return b.value
 
 
@@ -101,8 +146,9 @@ def _message_boxes(title: str):
     found = []
 
     def cb(h, _):
-        if (user32.IsWindowVisible(h) and _cls(h) == "TMessageForm" and _text(h) == title
-                and _process_name(h).lower() == "x2.exe"):
+        # Altium's own windows only: the text is asked for last
+        if (user32.IsWindowVisible(h) and _cls(h) == "TMessageForm"
+                and _process_name(h).lower() == "x2.exe" and _text(h) == title):
             found.append(h)
         return True
     user32.EnumWindows(_proto(cb), 0)
