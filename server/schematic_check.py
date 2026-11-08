@@ -385,7 +385,7 @@ class Sheet:
         x, y = coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")
         w, h = self.text_size(text, r.get("FONTID", 1))
         o, j = int(r.get("ORIENTATION", 0) or 0), int(r.get("JUSTIFICATION", 0) or 0)
-        lab = {"kind": "net label", "owner": None, "text": text, "anchor": (x, y),
+        lab = {"kind": "net label", "owner": None, "text": text, "anchor": (x, y), "size": (w, h),
                "orientation": o, "justification": j, "box": text_box(x, y, w, h, o, j)}
         self.labels.append(lab)
         self.texts.append(lab)
@@ -587,18 +587,20 @@ class Checker:
             # the end whose text continues past it like a port. What reads
             # wrong is bottom-justified text hanging off the end of the wire.
             end_cap = outward and lab["justification"] // 3 == 1 and anchor_gap <= self.grid / 2
-            suggest = {"x": self.fmt(end[0]), "y": self.fmt(end[1]),
+            # exact, not fmt: a label moved there must land on the wire's end
+            to = self.exact(end)
+            suggest = {"x": to[0], "y": to[1],
                        "orientation": 0 if abs(back[0]) >= abs(back[1]) else 1,
                        "justification": self._label_justification(back)}
             if not outward and near_edge > LABEL_INSET * self.grid:
                 self.add("label_not_at_end", p,
                          f"net label {lab['text']} sits {self.fmt(near_edge)} {self.unit} short of its wire's free end",
-                         label=lab["text"], free_end=self.at(end), suggest=suggest)
+                         label=lab["text"], location=self.exact(p), free_end=self.at(end), suggest=suggest)
             elif not end_cap and min(near_edge, far_edge) < -self.grid / 2:
                 self.add("label_justification", p,
                          f"net label {lab['text']} hangs {self.fmt(-min(near_edge, far_edge))} {self.unit} past "
                          "the end of its wire; justify it so the text runs back along the wire",
-                         label=lab["text"], free_end=self.at(end), suggest=suggest)
+                         label=lab["text"], location=self.exact(p), free_end=self.at(end), suggest=suggest)
         self._labelled_ends = labelled_ends
 
     @staticmethod
@@ -720,6 +722,8 @@ class Checker:
                 any(_near(e, p) for p in ends_of_wires) or any(_on_segment(e, seg) for _, seg in segs)
                 or any(_on_segment(e, s) for s in bus_segs) or any(_near(e, a) for a in others)
                 or any(_near(e, pin["hot"]) for pin in self.s.pins)
+                # a no-ERC marker on an end says it is meant to stay open
+                or any(_near(e, q) for q in self.s.no_erc)
                 for e in port["ends"])
             if not touched:
                 self.add("port_unconnected", port["ends"][0], f"port {port['name']} connects to nothing",
@@ -940,7 +944,7 @@ class Checker:
             return
         hits, name, layout = best
         suggest = {"layout": name, "clear": hits == 0, "part": c["part"],
-                   "texts": [{"parameter": t["name"], "x": self.fmt(x), "y": self.fmt(y),
+                   "texts": [{"parameter": t["name"], "x": self.exact((x, y))[0], "y": self.exact((x, y))[1],
                               "orientation": 0, "justification": j}
                              for t, (x, y, j) in zip(texts, layout)]}
         for issue in self.issues:
@@ -1042,15 +1046,18 @@ class Checker:
         return self.issues
 
 
-def check_sheet(path) -> dict:
-    sheet = Sheet(*read_schdoc_streams(path))
-    checker = Checker(sheet)
-    issues = checker.run()
+def _result(path, sheet: Sheet, checker: Checker, issues: list) -> dict:
     counts = defaultdict(int)
     for i in issues:
         counts[i["type"]] += 1
     return {"sheet": str(path), "unit": checker.unit, "grid": checker.fmt(sheet.grid),
             "components": len(sheet.components), "issue_counts": dict(counts), "issues": issues}
+
+
+def check_sheet(path) -> dict:
+    sheet = Sheet(*read_schdoc_streams(path))
+    checker = Checker(sheet)
+    return _result(path, sheet, checker, checker.run())
 
 
 APPLY_KINDS = ("text", "labels")
@@ -1060,7 +1067,8 @@ def fixes(issues: list, kinds) -> list:
     """edit_schematic operations for the suggestions that are clear-cut:
     "text" moves a part's designator and parameters to the suggested layout
     that collides with nothing; "labels" moves a net label to its wire's
-    free end with the suggested justification (removed and placed again)."""
+    free end with the suggested justification (moved, so it keeps its font
+    and colour). Positions are exact, in the sheet's unit."""
     ops, done_parts = [], set()
     for i in issues:
         s = i.get("suggest") or {}
@@ -1074,11 +1082,50 @@ def fixes(issues: list, kinds) -> list:
                             "name": t["parameter"], "x": t["x"], "y": t["y"],
                             "justification": t["justification"], "orientation": t["orientation"]})
         elif "labels" in kinds and i["type"] in ("label_not_at_end", "label_justification") and i.get("label"):
-            ops.append({"op": "delete_at", "kind": "net_label", "x": i["at"][0], "y": i["at"][1],
-                        "text": i["label"]})
-            ops.append({"op": "add_net_label", "x": s["x"], "y": s["y"], "text": i["label"],
-                        "orientation": s["orientation"], "justification": s["justification"]})
+            x, y = i.get("location") or i["at"]
+            ops.append({"op": "move_net_label", "x": x, "y": y, "text": i["label"], "to_x": s["x"],
+                        "to_y": s["y"], "orientation": s["orientation"], "justification": s["justification"]})
     return ops
+
+
+def _move_labels(sheet: Sheet, ops: list):
+    """Moves the sheet's labels as the move_net_label operations do, so a
+    second check sees them where the edit puts them."""
+    scale = 1 / 0.0254 if sheet.metric else 1.0
+    for op in ops:
+        if op["op"] != "move_net_label":
+            continue
+        at = (op["x"] * scale, op["y"] * scale)
+        for lab in sheet.labels:
+            if lab["text"] == op["text"] and _near(lab["anchor"], at):
+                x, y = op["to_x"] * scale, op["to_y"] * scale
+                o, j = op["orientation"], op["justification"]
+                lab.update({"anchor": (x, y), "orientation": o, "justification": j,
+                            "box": text_box(x, y, lab["size"][0], lab["size"][1], o, j)})
+                break
+
+
+def plan_fixes(path, kinds) -> tuple:
+    """(operations, check): the edit_schematic operations that apply the
+    clear-cut suggestions of kinds to one saved sheet, as one edit (one undo
+    step), and the check of the sheet as saved. Labels move first; the text
+    layouts come from a check with the labels already moved, since a label
+    moved to its wire's end can land on a part's text."""
+    return plan_sheet_fixes(Sheet(*read_schdoc_streams(path)), kinds, path)
+
+
+def plan_sheet_fixes(sheet: Sheet, kinds, path="") -> tuple:
+    """plan_fixes on a parsed sheet (its labels are moved in place)."""
+    checker = Checker(sheet)
+    before = _result(path, sheet, checker, checker.run())
+    ops = fixes(before["issues"], ["labels"]) if "labels" in kinds else []
+    if "text" in kinds:
+        issues = before["issues"]
+        if ops:
+            _move_labels(sheet, ops)
+            issues = Checker(sheet).run()
+        ops += fixes(issues, ["text"])
+    return ops, before
 
 
 def project_sheets(prjpcb) -> list:

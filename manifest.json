@@ -89,7 +89,11 @@
     },
     {
       "name": "check_schematic",
-      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires, pins off the grid"
+      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires, pins off the grid, wires into ports, unconnected ports, single-pin nets"
+    },
+    {
+      "name": "apply_schematic_fixes",
+      "description": "Apply check_schematic's clear-cut label and part text suggestions to one saved sheet as one undo step, and save it"
     },
     {
       "name": "check_hierarchy",

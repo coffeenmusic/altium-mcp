@@ -73,13 +73,15 @@ function ExecuteEditSchematic(RequestData: TStringList): String;
 var
     i         : Integer;
     SheetPath : String;
-    Save      : Boolean;
+    Save, RequireSaved : Boolean;
 begin
     SheetPath := '';
     Save := False;
+    RequireSaved := False;
     for i := 0 to RequestData.Count - 1 do
     begin
         if Pos('"sheet_path"', RequestData[i]) > 0 then SheetPath := JSONLineValue(RequestData[i])
+        else if Pos('"require_saved"', RequestData[i]) > 0 then RequireSaved := Pos('true', RequestData[i]) > 0
         else if Pos('"save"', RequestData[i]) > 0 then Save := Pos('true', RequestData[i]) > 0;
     end;
     if SheetPath = '' then
@@ -87,7 +89,7 @@ begin
         Result := 'ERROR: edit_schematic needs sheet_path';
         Exit;
     end;
-    Result := EditSchematic(SheetPath, ROOT_DIR + 'sch_edit_spec.txt', Save);
+    Result := EditSchematic(SheetPath, ROOT_DIR + 'sch_edit_spec.txt', Save, RequireSaved);
 end;
 
 // Extract the create net class logic

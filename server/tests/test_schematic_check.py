@@ -388,6 +388,65 @@ class ElectricalTest(unittest.TestCase):
         self.assertEqual(self.of(issues, "single_pin_net"), [])
 
 
+class PortNoErcTest(unittest.TestCase):
+    def test_no_erc_on_a_port_end_silences_it(self):
+        recs = [{"HEADER": "x"},
+                {"RECORD": 31, "FONTIDCOUNT": 1, "SIZE1": 10, "FONTNAME1": "Times New Roman", "SNAPGRIDSIZE": 10},
+                port_rec("SPARE", 4000, 1000), {"RECORD": 22, **at(4500, 1000)},
+                port_rec("LOOSE", 4000, 2000)]
+        issues = sc.Checker(sc.Sheet(parse_records(records_stream(recs)))).run()
+        self.assertEqual([i["port"] for i in issues if i["type"] == "port_unconnected"], ["LOOSE"])
+
+
+class FixesTest(unittest.TestCase):
+    def setUp(self):
+        self.sheet = sc.Sheet(parse_records(records_stream(scene())))
+        self.issues = sc.Checker(self.sheet).run()
+
+    def test_labels_are_moved_not_replaced(self):
+        ops = sc.fixes(self.issues, ["labels"])
+        self.assertEqual(sorted(o["text"] for o in ops), ["FAR", "HANG"])
+        far = next(o for o in ops if o["text"] == "FAR")
+        self.assertEqual(far, {"op": "move_net_label", "x": 3500, "y": 500, "text": "FAR", "to_x": 3000,
+                               "to_y": 500, "orientation": 0, "justification": 0})
+        self.assertFalse(any(o["op"] in ("delete_at", "add_net_label") for o in ops))
+
+    def test_text_layout_once_per_part(self):
+        ops = sc.fixes(self.issues, ["text"])
+        self.assertTrue(ops)
+        self.assertEqual({(o["op"], o["designator"]) for o in ops}, {("move_text", "C1")})
+        self.assertEqual(len(ops), len({o["name"] for o in ops}))   # each text once
+        self.assertEqual(sc.fixes(self.issues, []), [])
+
+    def test_plan_is_one_edit_labels_first(self):
+        ops, before = sc.plan_sheet_fixes(self.sheet, ["labels", "text"])
+        self.assertEqual(before["issue_counts"]["label_not_at_end"], 1)
+        kinds = [o["op"] for o in ops]
+        self.assertEqual(kinds, sorted(kinds, key=lambda k: k != "move_net_label"))
+        self.assertIn("move_text", kinds)
+        # The model's labels moved where the edit puts them
+        far = next(lab for lab in self.sheet.labels if lab["text"] == "FAR")
+        self.assertEqual(far["anchor"], (3000, 500))
+        # Everything the plan covers is gone from a check of the moved labels
+        left = {i["type"] for i in sc.Checker(self.sheet).run()}
+        self.assertFalse(left & {"label_not_at_end", "label_justification"})
+
+    def test_exact_positions_on_a_metric_sheet(self):
+        checker = sc.Checker(self.sheet)
+        self.sheet.metric = True
+        self.assertEqual(checker.exact((3000.0, 500.0)), [76.2, 12.7])
+        sheet = sc.Sheet(parse_records(records_stream(scene())))
+        sheet.metric = True
+        ops = sc.fixes(sc.Checker(sheet).run(), ["labels"])
+        far = next(o for o in ops if o["text"] == "FAR")
+        # exact to the micron, not rounded to 0.01 mm
+        self.assertEqual((far["x"], far["to_x"]), (88.9, 76.2))
+        sheet2 = sc.Sheet(parse_records(records_stream(scene())))
+        sheet2.metric = True
+        sc._move_labels(sheet2, ops)
+        self.assertAlmostEqual(next(lab for lab in sheet2.labels if lab["text"] == "FAR")["anchor"][0], 3000.0)
+
+
 class ProjectTest(unittest.TestCase):
     def test_project_sheets(self):
         with tempfile.TemporaryDirectory() as tmp:
