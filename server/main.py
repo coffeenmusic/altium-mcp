@@ -6628,8 +6628,8 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
     Update PCB): validate them, and with execute=True apply them.
 
     1. preview_eco's comparison is run first. Rooms or components the update
-       would delete stop it unless allow_room_removal /
-       allow_component_removal. The preview does not decide whether there is
+       would delete stop an execute unless allow_room_removal /
+       allow_component_removal; validating alone lists them as a warning. The preview does not decide whether there is
        anything to import (it does not compare everything the ECO does):
        Altium does.
     2. Altium's Engineering Change Order dialog is opened on the board and
@@ -6701,18 +6701,23 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
     reply = {"project_path": project, "pcb_path": board, "preview": eco_preview.summary(diff)}
     if source.get("unsaved_in_altium"):
         reply["unsaved_in_altium"] = source["unsaved_in_altium"]
+    # Removals stop an execute; validating alone only warns about them
     rooms = diff.get("remove_rooms") or []
-    if rooms and not allow_room_removal:
-        reply.update({"success": False, "error": f"the update would remove {len(rooms)} room(s); "
-                                                 "pass allow_room_removal=true if that is intended",
-                      "remove_rooms": rooms[:50]})
-        return json.dumps(reply, indent=1)
     parts = diff.get("remove_components") or []
+    removals = []
+    if rooms and not allow_room_removal:
+        removals.append(f"the update would remove {len(rooms)} room(s); pass allow_room_removal=true "
+                        "if that is intended")
+        reply["remove_rooms"] = rooms[:50]
     if parts and not allow_component_removal:
-        reply.update({"success": False, "error": f"the update would remove {len(parts)} component(s) from the "
-                                                 "board; pass allow_component_removal=true if that is intended",
-                      "remove_components": parts[:50]})
+        removals.append(f"the update would remove {len(parts)} component(s) from the board; pass "
+                        "allow_component_removal=true if that is intended")
+        reply["remove_components"] = parts[:50]
+    if removals and execute:
+        reply.update({"success": False, "error": "; ".join(removals)})
         return json.dumps(reply, indent=1)
+    if removals:
+        reply["warning"] = "; ".join(removals)
 
     before = await asyncio.get_running_loop().run_in_executor(None, eco_dialog.open_windows)
     outcome = eco_dialog.EcoOutcome()

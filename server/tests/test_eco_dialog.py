@@ -361,10 +361,16 @@ class ToolTest(unittest.TestCase):
 
     def test_component_removal_refused_before_altium_runs_it(self):
         target = {"board_path": self.board, "components": [r"\A|R1|R0603|1k", r"\B|R2|R0603|1k"], "pads": []}
-        reply = self.run_tool(target=target)
+        reply = self.run_tool(target=target, execute=True)
         self.assertFalse(reply["success"])
         self.assertIn("allow_component_removal", reply["error"])
         self.assertNotIn("run_update_pcb", self.calls)
+
+    def test_component_removal_only_warns_when_validating(self):
+        target = {"board_path": self.board, "components": [r"\A|R1|R0603|1k", r"\B|R2|R0603|1k"], "pads": []}
+        reply = self.run_tool(target=target)
+        self.assertIn("allow_component_removal", reply["warning"])
+        self.assertIn("run_update_pcb", self.calls)
 
     def test_empty_preview_still_asks_altium(self):
         async def message(outcome, *args, **kwargs):
