@@ -192,6 +192,10 @@
       "description": "Add a track through waypoints with every segment exactly 0, 45 or 90 degrees"
     },
     {
+      "name": "route_path",
+      "description": "Route a net through waypoints at 0/45/90 degrees, changing layer with vias, in one undo step and checked against the rules"
+    },
+    {
       "name": "place_vias",
       "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
     },

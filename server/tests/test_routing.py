@@ -167,5 +167,71 @@ class PlanPathTest(unittest.TestCase):
         self.assertEqual(vias, [])
         self.assertEqual(len(tracks), 2)
 
+    def test_layer_names_without_case(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(300, 0, "top layer"), (300, 300, "TOP LAYER")])
+        self.assertEqual(vias, [])
+        self.assertEqual({t[0] for t in tracks}, {"Top Layer"})
+
+
+class ResolvePointsTest(unittest.TestCase):
+    LOCATED = {
+        "pad|U1|1": ("pad", 0, 0, "Top Layer", "SIG"),         # surface-mount, top
+        "pad|U2|1": ("pad", 1000, 0, "Bottom Layer", "SIG"),   # surface-mount, bottom
+        "pad|J1|1": ("pad", 2000, 0, "Multi-Layer", "SIG"),    # through-hole
+        "pad|U3|2": ("pad", 3000, 0, "Top Layer", "OTHER"),
+        "via|500|500": ("via", 500, 500, "Multi-Layer", "SIG"),
+        "component|U1": ("component", 10, 10, "", ""),
+    }
+
+    def resolve(self, points, layer="", **kw):
+        return routing.resolve_route_points(points, self.LOCATED, "sig", layer, **kw)
+
+    def test_smd_pad_on_its_layer(self):
+        resolved, first, warnings = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None)), ("ref", "pad|U3|2")],
+                                                 allow_other_net=True)
+        self.assertEqual(first, "Top Layer")
+        self.assertEqual(resolved, [(0, 0, "Top Layer"), (500, 0, None), (3000, 0, "Top Layer")])
+        self.assertEqual(len(warnings), 1)
+
+    def test_no_via_in_an_smd_pad(self):
+        # top pad to bottom pad without changing layer: the via would land in the pad
+        with self.assertRaises(ValueError) as e:
+            self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U2|1")])
+        self.assertIn("allow_via_in_pad", str(e.exception))
+        # changing layer on the way is fine
+        resolved, _, _ = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, "Bottom Layer")), ("ref", "pad|U2|1")])
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), resolved[1:])
+        self.assertEqual(vias, [(500, 0, "Top Layer", "Bottom Layer")])
+        # or allowed explicitly
+        resolved, _, _ = self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U2|1")], allow_via_in_pad=True)
+        self.assertEqual(resolved[-1], (1000, 0, "Bottom Layer"))
+        # a through-hole pad takes any layer
+        self.resolve([("ref", "pad|U2|1"), ("ref", "pad|J1|1")])
+
+    def test_start_layer_against_an_smd_pad(self):
+        with self.assertRaises(ValueError):
+            self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None))], layer="Bottom Layer")
+        resolved, first, _ = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None))], layer="Bottom Layer",
+                                          allow_via_in_pad=True)
+        tracks, vias = routing.plan_path((0, 0, first), resolved[1:])
+        self.assertEqual(vias, [(0, 0, "Top Layer", "Bottom Layer")])
+        self.assertEqual(tracks, [("Bottom Layer", 0, 0, 500, 0)])
+        # same layer in another case is no via
+        _, first, _ = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None))], layer="top layer")
+        self.assertEqual(first, "Top Layer")
+
+    def test_other_net_refused(self):
+        with self.assertRaises(ValueError) as e:
+            self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U3|2")])
+        self.assertIn("allow_other_net", str(e.exception))
+
+    def test_points_vias_and_components(self):
+        resolved, first, _ = self.resolve([("xy", (0, 0, None)), ("ref", "via|500|500"), ("ref", "component|U1")])
+        self.assertEqual(first, "Top Layer")
+        self.assertEqual(resolved, [(0, 0, None), (500, 500, None), (10, 10, None)])
+        _, first, _ = self.resolve([("xy", (0, 0, "Bottom Layer")), ("xy", (1, 1, None))])
+        self.assertEqual(first, "Bottom Layer")
+
+
 if __name__ == "__main__":
     unittest.main()

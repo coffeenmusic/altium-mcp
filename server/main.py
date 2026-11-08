@@ -5460,6 +5460,7 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
                      via_size: float = 0, via_hole: float = 0, via_span: str = "through",
                      diagonal_first: bool = False, corner_chamfer: float = 0, unit: str = "mil",
                      check: bool = True, undo_on_violation: bool = False, dry_run: bool = False,
+                     allow_via_in_pad: bool = False, allow_other_net: bool = False,
                      board_path: str = "") -> str:
     """
     Route a net through waypoints, changing layer with vias, and check the
@@ -5475,14 +5476,21 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
     everything near), and the violations returned. Hits on pour copper are
     listed apart (pour_violations): the pour has not been repoured around
     the new copper yet. With undo_on_violation the route is taken off again
-    when there is a violation other than a pour hit.
+    when there is a violation other than a pour hit, within the same undo
+    step, so nothing of it is left.
+
+    Refused before anything is added: a layer the board does not have, a
+    surface-mount pad reached on another layer than its own (that would put
+    a via in the pad), and a pad or via on another net, unless the
+    allow_ options say otherwise.
 
     Args:
         net (str): The net; it must exist on the board.
-        start: Where to begin: a pad as "U1-3", a ref from objects_in_area,
-            or [x, y] (then give layer).
+        start: Where to begin: a pad as "U1-3", a pad, via or component ref
+            from objects_in_area, or [x, y] (then give layer).
         waypoints (list): Each [x, y], [x, y, "layer"], {"x", "y", "layer"},
-            or a pad "J1-2" (typically the last); x, y from the board origin.
+            or a pad "J1-2" or pad/via/component ref (typically the last);
+            x, y from the board origin. Layer names are not case-sensitive.
         layer (str): The starting layer; default the start pad's layer
             (Top Layer for a through-hole pad or a point).
         width (float): Track width in unit; 0 (default) takes the width
@@ -5499,6 +5507,10 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
         undo_on_violation (bool): Remove the route again when the check
             finds a violation (pour hits do not count).
         dry_run (bool): Only plan: the segments and vias, nothing added.
+        allow_via_in_pad (bool): Allow reaching a surface-mount pad on
+            another layer, with a via in the pad.
+        allow_other_net (bool): Allow a pad or via of another net as start
+            or waypoint (listed under warnings).
         board_path (str): Full path of the .PcbDoc; default the focused board.
 
     Returns:
@@ -5510,13 +5522,13 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
 
     def point(p, what):
         if isinstance(p, str):
-            return ("ref", geo.normalize_ref(p))
+            return ("ref", geo.locate_ref(p))
         if isinstance(p, dict):
             p = [p.get("x"), p.get("y"), p.get("layer")]
         if isinstance(p, (list, tuple)) and len(p) in (2, 3):
             x, y = geo.to_coord(p[0], unit), geo.to_coord(p[1], unit)
             return ("xy", (x, y, p[2] if len(p) == 3 else None))
-        raise ValueError(f"{what} must be a pad like 'U1-3', [x, y] or [x, y, layer]")
+        raise ValueError(f"{what} must be a pad like 'U1-3', a pad, via or component ref, [x, y] or [x, y, layer]")
 
     try:
         geo.unit_factor(unit)
@@ -5525,6 +5537,9 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
         pts = [point(start, "start")] + [point(w, f"waypoint {i + 1}") for i, w in enumerate(waypoints or [])]
         if len(pts) < 2:
             raise ValueError("give at least one waypoint")
+        sizes = {"width": str(geo.to_coord(width, unit)), "via_size": str(geo.to_coord(via_size, unit)),
+                 "via_hole": str(geo.to_coord(via_hole, unit))}
+        chamfer = geo.to_coord(corner_chamfer, unit)
     except (TypeError, ValueError) as e:
         return json.dumps({"success": False, "error": str(e)})
     refs = [p[1] for p in pts if p[0] == "ref"]
@@ -5534,24 +5549,19 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
                                                         "board_path": long_path(board_path)})
         if error:
             return json.dumps({"success": False, "error": error})
-        for ref, item in zip(refs, result.get("located", [])):
-            parts = item.split("|", 3)
-            if len(parts) < 4:
+        found = result.get("located", [])
+        for i, ref in enumerate(refs):
+            parts = found[i].split("|", 4) if i < len(found) else []
+            if len(parts) < 5:
                 return json.dumps({"success": False, "error": f"not found on the board: {ref}"})
-            located[ref] = (int(parts[0]), int(parts[1]), parts[2], parts[3])
-    warnings = []
-    resolved = []
-    for kind, p in pts:
-        if kind == "ref":
-            x, y, pad_layer, pad_net = located[p]
-            if pad_net and pad_net.lower() != net.lower():
-                warnings.append(f"{p} is on net {pad_net}, not {net}")
-            resolved.append((x, y, None if pad_layer == "Multi-Layer" else pad_layer))
-        else:
-            resolved.append(p)
-    first_layer = layer or resolved[0][2] or "Top Layer"
+            located[ref] = (parts[0], int(parts[1]), int(parts[2]), parts[3], parts[4])
+    try:
+        resolved, first_layer, warnings = routing.resolve_route_points(pts, located, net, layer,
+                                                                       allow_via_in_pad, allow_other_net)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
     tracks, vias = routing.plan_path((resolved[0][0], resolved[0][1], first_layer), resolved[1:],
-                                     diagonal_first, geo.to_coord(corner_chamfer, unit), via_span)
+                                     diagonal_first, chamfer, via_span)
     k = geo.unit_factor(unit)
     plan = {"tracks": [[t[0]] + [round(v / k, 4) for v in t[1:]] for t in tracks],
             "vias": [[round(v[0] / k, 4), round(v[1] / k, 4), v[2], v[3]] for v in vias]}
@@ -5564,8 +5574,7 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
         "geometry": "route", "net": net,
         "tracks": "~".join("|".join(str(v) for v in t) for t in tracks),
         "vias": "~".join("|".join(str(v) for v in via) for via in vias),
-        "width": str(geo.to_coord(width, unit)), "via_size": str(geo.to_coord(via_size, unit)),
-        "via_hole": str(geo.to_coord(via_hole, unit)), "check": "true" if check else "false",
+        **sizes, "check": "true" if check else "false",
         "undo_on_violation": "true" if undo_on_violation else "false", "board_path": long_path(board_path)})
     if error:
         return json.dumps({"success": False, "error": error, "plan": plan})

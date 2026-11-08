@@ -305,6 +305,26 @@ def clearance_ref(ref: str) -> str:
     return ref
 
 
+# What route_path can start or stop at: an object with one point
+LOCATE_KINDS = ("pad", "via", "component")
+
+
+def locate_ref(ref: str) -> str:
+    """normalize_ref for a route's start or waypoint: a pad, via or
+    component only (a track or region has no single point), with whole
+    numbers where the ref holds coordinates."""
+    ref = normalize_ref(ref)
+    parts = ref.split("|")
+    if parts[0] not in LOCATE_KINDS:
+        raise ValueError(f"a route starts or stops at a pad, via or component, not a {parts[0]}")
+    numeric = parts[1:3] if parts[0] == "via" else []
+    if parts[0] == "pad" and len(parts) == 3 and parts[1].lstrip("-").isdigit():
+        numeric = parts[1:3]
+    if len(parts) < 2 or any(not p.lstrip("-").isdigit() for p in numeric) or (parts[0] == "via" and len(parts) != 3):
+        raise ValueError(f"'{ref}' is not a ref from objects_in_area")
+    return ref
+
+
 def describe_violations(result: dict, unit: str) -> List[dict]:
     """check's violations with the objects parsed and distances in unit."""
     k = unit_factor(unit)

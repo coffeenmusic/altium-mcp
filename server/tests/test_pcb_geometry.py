@@ -114,6 +114,16 @@ class ViolationTest(unittest.TestCase):
                 geo.clearance_ref(bad)
         self.assertEqual(geo.clearance_ref("U1-3"), "pad|U1|3")
 
+    def test_locate_refs(self):
+        self.assertEqual(geo.locate_ref("U1-3"), "pad|U1|3")
+        self.assertEqual(geo.locate_ref("via|1050000|-2050000"), "via|1050000|-2050000")
+        self.assertEqual(geo.locate_ref("pad|1300000|2300000"), "pad|1300000|2300000")
+        self.assertEqual(geo.locate_ref("component|U1"), "component|U1")
+        for bad in ("track|Top Layer|1|2|3|4", "region|Top Layer|1|2|3|4", "text|Top Overlay|1|2", "via|a|b",
+                    "via|1"):
+            with self.assertRaises(ValueError):
+                geo.locate_ref(bad)
+
 
 class PourSplitTest(unittest.TestCase):
     def test_pour_hits_apart(self):
