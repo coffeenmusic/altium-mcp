@@ -2317,6 +2317,9 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     Returns:
         str: JSON with how many operations were applied and the errors.
     """
+    import configparser
+    import zipfile
+    from xml.etree import ElementTree
     import dblib
     import sch_edit
 
@@ -2328,8 +2331,10 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                 return json.dumps({"success": False, "error": f"operation {i + 1}: a DbLib part takes dblib and "
                                                               f"part_number (and table), not library or symbol"})
             try:
-                op = dblib.place_operation(dict(op, dblib=long_path(op["dblib"])))
-            except (dblib.DbLibError, OSError, KeyError) as e:
+                # In a thread: the DbLib's table and library folders may be on a slow share
+                op = await asyncio.to_thread(dblib.place_operation, dict(op, dblib=long_path(op["dblib"])))
+            except (dblib.DbLibError, OSError, KeyError, ValueError, configparser.Error,
+                    ElementTree.ParseError, zipfile.BadZipFile) as e:
                 return json.dumps({"success": False, "error": f"operation {i + 1}: {e}"})
         expanded.append(op)
     operations = expanded
