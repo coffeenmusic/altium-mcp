@@ -14,16 +14,20 @@ from typing import Dict, List, Optional, Tuple
 
 # Readable name -> (section, key, kind). kind: bool (0/1), int, str.
 # Numeric styles are given as stored; their meaning is the order of the
-# choices in Project Options.
+# choices in Project Options. The cross-reference flags for ports,
+# cross-sheet connectors and sheet entries are not booleans (Altium's AD25
+# example projects are reported to store CrossRefPorts=3), and no project
+# showing what each value means was at hand, so they are read and written
+# as the stored whole number.
 OPTIONS: Dict[str, Dict[str, Tuple[str, str, str]]] = {
     "cross_references": {
         "auto_cross_references": ("Design", "AutoCrossReferences", "bool"),
         "follow_main_settings": ("Design", "CrossRefFollowFromMainSettings", "bool"),
         "sheet_style": ("Design", "CrossRefSheetStyle", "int"),
         "location_style": ("Design", "CrossRefLocationStyle", "int"),
-        "ports": ("Design", "CrossRefPorts", "bool"),
-        "cross_sheet_connectors": ("Design", "CrossRefCrossSheets", "bool"),
-        "sheet_entries": ("Design", "CrossRefSheetEntries", "bool"),
+        "ports": ("Design", "CrossRefPorts", "int"),
+        "cross_sheet_connectors": ("Design", "CrossRefCrossSheets", "int"),
+        "sheet_entries": ("Design", "CrossRefSheetEntries", "int"),
     },
     "netlist": {
         "hierarchy_mode": ("Design", "HierarchyMode", "int"),
@@ -139,8 +143,10 @@ def _write(kind: str, value) -> str:
         if isinstance(value, bool) or not re.fullmatch(r"-?\d+", str(value)):
             raise ValueError(f"expected a whole number, got {value!r}")
         return str(int(value))
+    if isinstance(value, (dict, list)):
+        raise ValueError(f"expected text, got {type(value).__name__}")
     text = str(value)
-    if "\n" in text or "\r" in text:
+    if not _line_safe(text):
         raise ValueError("a value may not hold a line break")
     return text
 
@@ -175,23 +181,47 @@ def read_options(data: bytes) -> dict:
     return out
 
 
+def _line_safe(text: str) -> bool:
+    """A section or key that cannot break the file into other lines."""
+    return not any(c in text for c in "\r\n\x00")
+
+
 def change_options(data: bytes, changes: dict) -> Tuple[bytes, List[dict], List[str]]:
     """Apply changes {group: {name: value}, "sheets": {pattern: {name: value}},
     "raw": [{section, key, value}]}; returns the new file, what changed and
     errors (nothing is applied when there are errors)."""
     ini = Ini(data)
     applied, errors = [], []
-    for group, values in (changes or {}).items():
+    if changes is None:
+        changes = {}
+    if not isinstance(changes, dict):
+        return data, [], [f"changes must be an object of groups, got {type(changes).__name__}"]
+    for group, values in changes.items():
+        if group not in OPTIONS and group not in ("sheets", "raw"):
+            errors.append(f"unknown group '{group}' (use {', '.join(list(OPTIONS) + ['sheets', 'raw'])})")
+            continue
+        if values is None:
+            continue
+        if group == "raw":
+            if not isinstance(values, list):
+                errors.append(f"raw must be a list of {{section, key, value}}, got {type(values).__name__}")
+                continue
+        elif not isinstance(values, dict):
+            errors.append(f"{group} must be an object, got {type(values).__name__}")
+            continue
         if group == "sheets":
             sheets = sheet_sections(ini)
-            for pattern, opts in (values or {}).items():
+            for pattern, opts in values.items():
+                if not isinstance(opts, dict):
+                    errors.append(f"sheets['{pattern}'] must be an object of options, got {type(opts).__name__}")
+                    continue
                 hits = [(sec, path) for sec, path in sheets
                         if fnmatch.fnmatch(ntpath.basename(path).lower(), pattern.lower())
                         or fnmatch.fnmatch(path.lower(), pattern.lower())]
                 if not hits:
                     errors.append(f"sheets: no sheet matches '{pattern}'")
                     continue
-                for name, value in (opts or {}).items():
+                for name, value in opts.items():
                     if name not in SHEET_OPTIONS:
                         errors.append(f"sheets: unknown option '{name}' (use {', '.join(SHEET_OPTIONS)})")
                         continue
@@ -207,10 +237,19 @@ def change_options(data: bytes, changes: dict) -> Tuple[bytes, List[dict], List[
                             applied.append({"sheet": path, "option": name, "from": _read(kind, old or None),
                                             "to": _read(kind, text)})
         elif group == "raw":
-            for item in values or []:
+            for item in values:
+                if not isinstance(item, dict):
+                    errors.append(f"raw: each item must be {{section, key, value}}, got {item!r}")
+                    continue
                 sec, key = str(item.get("section", "")), str(item.get("key", ""))
-                if not sec or not key or "=" in key or "]" in sec:
+                if not sec or not key:
                     errors.append(f"raw: needs section and key, got {item!r}")
+                    continue
+                # A line break in either would write lines of its own
+                if not (_line_safe(sec) and _line_safe(key)) or "=" in key or "[" in sec or "]" in sec \
+                        or key.strip() != key or sec.strip() != sec or key.startswith(("[", ";")):
+                    errors.append(f"raw: a section or key may not hold line breaks, '=', brackets or "
+                                  f"surrounding spaces, got {item!r}")
                     continue
                 try:
                     text = _write("str", item.get("value", ""))
@@ -221,7 +260,7 @@ def change_options(data: bytes, changes: dict) -> Tuple[bytes, List[dict], List[
                 if old != text:
                     applied.append({"section": sec, "key": key, "from": old, "to": text})
         elif group in OPTIONS:
-            for name, value in (values or {}).items():
+            for name, value in values.items():
                 if name not in OPTIONS[group]:
                     errors.append(f"{group}: unknown option '{name}' (use {', '.join(OPTIONS[group])})")
                     continue
@@ -235,8 +274,6 @@ def change_options(data: bytes, changes: dict) -> Tuple[bytes, List[dict], List[
                 if old != text:
                     applied.append({"option": f"{group}.{name}", "from": _read(kind, old or None),
                                     "to": _read(kind, text)})
-        else:
-            errors.append(f"unknown group '{group}' (use {', '.join(list(OPTIONS) + ['sheets', 'raw'])})")
     if errors:
         return data, [], errors
     return ini.to_bytes(), applied, []

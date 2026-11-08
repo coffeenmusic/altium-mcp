@@ -40,6 +40,14 @@
       "description": "Compile a project (the focused one, or one by path) in memory and list ERC/compiler violations by level"
     },
     {
+      "name": "get_project_options",
+      "description": "Read a project's options from its .PrjPcb by readable name: cross references, netlist, multichannel, class generation, per-sheet generation, comparator"
+    },
+    {
+      "name": "set_project_options",
+      "description": "Change a project's options in its .PrjPcb, closing and reopening the project in Altium when it is open"
+    },
+    {
       "name": "get_board_summary",
       "description": "Summarise the focused PCB: outline, origin, dimensions, vias by hole size, components per side, primitives per layer and overlay texts"
     },

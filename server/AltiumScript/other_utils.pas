@@ -1803,13 +1803,17 @@ begin
 end;
 
 // Close the project and its open documents, without saving: refused when
-// any of them has unsaved changes. Reports whether the project was open and
-// which of its documents were, so they can be opened again.
+// any of them has unsaved changes. Reports whether the project was open,
+// whether it closed, its path as Altium spells it, and which of its
+// documents were open, so they can be opened again. The project document is
+// looked up by Altium's own path (DM_ProjectFullPath), not the caller's
+// spelling, which may differ in case or form.
 function CloseProjectForEdit(ProjectPath: String): String;
 var
     Project : IProject;
+    PrjDoc  : IServerDocument;
     I       : Integer;
-    Path    : String;
+    Path, PrjPath : String;
     OpenDocs, Unsaved, Props : TStringList;
 begin
     Project := OpenProjectByPath(ProjectPath);
@@ -1824,8 +1828,13 @@ begin
             Result := BuildJSONObject(Props);
             Exit;
         end;
-        if DocumentModified(Client.GetDocumentByPath(Project.DM_ProjectFullPath)) then
-            Unsaved.Add(Project.DM_ProjectFullPath);
+        PrjPath := Project.DM_ProjectFullPath;
+        PrjDoc := Client.GetDocumentByPath(PrjPath);
+        if PrjDoc = nil then
+            PrjDoc := FindOpenDocument(PrjPath);
+        if PrjDoc <> nil then
+            if DocumentModified(PrjDoc) then
+                Unsaved.Add(PrjPath);
         for I := 0 to Project.DM_LogicalDocumentCount - 1 do
         begin
             Path := Project.DM_LogicalDocuments(I).DM_FullPath;
@@ -1846,9 +1855,13 @@ begin
             if Client.IsDocumentOpen(Path) then
                 Client.CloseDocument(Client.GetDocumentByPath(Path));
         end;
-        Client.CloseDocument(Client.GetDocumentByPath(ProjectPath));
+        // Project is not used past this point: closing it frees it
+        Project := nil;
+        if PrjDoc <> nil then
+            Client.CloseDocument(PrjDoc);
         AddJSONBoolean(Props, 'was_open', True);
-        AddJSONBoolean(Props, 'closed', OpenProjectByPath(ProjectPath) = nil);
+        AddJSONProperty(Props, 'project_path', PrjPath);
+        AddJSONBoolean(Props, 'closed', OpenProjectByPath(PrjPath) = nil);
         Props.Add(BuildJSONArray(OpenDocs, 'open_documents'));
         Result := BuildJSONObject(Props);
     finally

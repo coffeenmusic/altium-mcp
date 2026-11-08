@@ -6586,32 +6586,32 @@ async def get_erc_violations(ctx: Context, compile: bool = True, project_path: s
                                  "ERC violations")
 
 
-async def _bridge_json(command: str, params: dict):
-    """(parsed result, error) of a bridge command that returns JSON."""
-    response = await altium_bridge.execute_command(command, params)
-    if not response.get("success", False):
-        return None, response.get("error", "unknown error")
-    result = response.get("result", {})
-    if isinstance(result, str):
-        try:
-            result = json.loads(result, strict=False)
-        except ValueError:
-            return None, result
-    return result, None
-
-
 async def _project_file(project_path: str):
     """(path of the .PrjPcb, error): project_path, or the focused project's."""
     if project_path:
-        path = long_path(project_path)
-    else:
-        info, error = await _bridge_json("get_project_info", {})
-        if error:
-            return None, error
-        path = info.get("project_path", "")
+        path, error = _project_path(project_path)
+        return (None, error) if error else (path, "")
+    info, error = await _bridge_json("get_project_info", {})
+    if error:
+        return None, error
+    path = info.get("project_path", "")
     if not path.lower().endswith(".prjpcb") or not os.path.isfile(path):
         return None, f"not a .PrjPcb file: {path or '(no project focused)'}"
-    return path, None
+    return path, ""
+
+
+async def _reopen_project(path: str, docs: list, reply: dict) -> None:
+    """Open a project closed by close_project_for_edit again, with the
+    documents that were open; the outcome goes into reply."""
+    write_altium_text(EXCHANGE_DIR / "reopen_documents.txt", "\n".join(docs) + "\n")
+    reopened, error = await _bridge_json("reopen_project", {"project_path": path})
+    if error:
+        reply["reopen_error"] = f"{error}; open the project again by hand"
+        return
+    reply["reopened"] = reopened.get("reopened", [])
+    missing = [d for d in docs if d not in reply["reopened"]]
+    if missing:
+        reply["not_reopened"] = missing
 
 
 @_tool(read_only=True)
@@ -6626,7 +6626,9 @@ async def get_project_options(ctx: Context, project_path: str = "") -> str:
     sheet: component_class, room, net_classes, class_cluster: what the
     sheet generates for the PCB) and comparison (the comparator's matching
     options). Numeric styles are given as stored: their meaning is the order
-    of the choices in Project Options.
+    of the choices in Project Options. The cross-reference flags ports,
+    cross_sheet_connectors and sheet_entries are not booleans; they are
+    given as the stored number, whose meaning is not mapped here.
 
     Reads the file: options changed in Altium and not yet saved are not seen.
 
@@ -6660,9 +6662,14 @@ async def set_project_options(ctx: Context, changes: dict, project_path: str = "
 
     Altium keeps an open project's options in memory and would write them
     back, so when the project is open it is closed (with its open documents),
-    the file is written, and the project and those documents are opened
-    again. Refused when any of them has unsaved changes. Run preview_eco
-    after changing class or room generation, before the next Update PCB.
+    the file is read and written, and the project and those documents are
+    opened again. Refused when any of them has unsaved changes; nothing is
+    written when Altium did not close the project. Run preview_eco after
+    changing class or room generation, before the next Update PCB.
+
+    The cross-reference flags ports, cross_sheet_connectors and
+    sheet_entries are whole numbers as Altium stores them (not booleans);
+    read the current value with get_project_options first.
 
     Args:
         changes (dict): The changes, as above.
@@ -6678,8 +6685,8 @@ async def set_project_options(ctx: Context, changes: dict, project_path: str = "
     path, error = await _project_file(project_path)
     if error:
         return json.dumps({"success": False, "error": error})
-    data = Path(path).read_bytes()
-    new, applied, errors = project_options.change_options(data, changes)
+    # Checked on the file as it is now, so bad input never closes the project
+    _, applied, errors = project_options.change_options(Path(path).read_bytes(), changes)
     if errors:
         return json.dumps({"success": False, "errors": errors, "note": "Nothing was changed."}, indent=1)
     if not applied or dry_run:
@@ -6689,23 +6696,33 @@ async def set_project_options(ctx: Context, changes: dict, project_path: str = "
     closed, error = await _bridge_json("close_project_for_edit", {"project_path": path})
     if error:
         return json.dumps({"success": False, "error": error, "note": "Nothing was changed."})
-    reply = {"success": True, "project_path": path, "applied": applied}
+    was_open = bool(closed.get("was_open"))
+    altium_path = closed.get("project_path") or path
+    docs = closed.get("open_documents", [])
+    if was_open and not closed.get("closed"):
+        # Writing now would be overwritten by Altium's copy
+        reply = {"success": False, "project_path": path,
+                 "error": "Altium did not close the project, so the file was not written. Nothing was changed."}
+        await _reopen_project(altium_path, docs, reply)
+        return json.dumps(reply, indent=1)
+    reply = {"success": True, "project_path": path}
+    # Read and change the file only now that Altium has let go of it: closing
+    # may have written it
     try:
-        Path(path).write_bytes(new)
-    except OSError as e:
-        reply = {"success": False, "error": f"could not write the project file: {e}"}
-    if closed.get("was_open"):
-        docs = closed.get("open_documents", [])
-        write_altium_text(EXCHANGE_DIR / "reopen_documents.txt", "\n".join(docs) + "\n")
-        reopened, error = await _bridge_json("reopen_project", {"project_path": path})
-        reply["closed_and_reopened"] = True
-        if error:
-            reply["reopen_error"] = f"{error}; open the project again by hand"
+        new, applied, errors = project_options.change_options(Path(path).read_bytes(), changes)
+        if errors:
+            reply = {"success": False, "project_path": path, "errors": errors, "note": "Nothing was changed."}
         else:
-            reply["reopened"] = reopened.get("reopened", [])
-            missing = [d for d in docs if d not in reply["reopened"]]
-            if missing:
-                reply["not_reopened"] = missing
+            reply["applied"] = applied
+            if applied:
+                Path(path).write_bytes(new)
+            else:
+                reply["note"] = "The options already have these values."
+    except OSError as e:
+        reply = {"success": False, "project_path": path, "error": f"could not read or write the project file: {e}"}
+    if was_open:
+        reply["closed_and_reopened"] = True
+        await _reopen_project(altium_path, docs, reply)
     return json.dumps(reply, indent=1)
 
 # Closes and reopens the project: a timeout leaves the state unknown
