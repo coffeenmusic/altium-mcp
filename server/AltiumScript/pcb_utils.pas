@@ -5962,6 +5962,43 @@ begin
     if (Kinds = '') or (Pos('|component|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eComponentObject));
 end;
 
+// Components and polygons whose bounds touch the box, of the kinds in Kinds:
+// the spatial iterator never returns these two kinds
+procedure GeoAddGroups(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Kinds: String; Limit: Integer;
+                       Items: TStringList; var Total: Integer);
+var
+    It   : IPCB_BoardIterator;
+    Prim : IPCB_Primitive;
+    R    : TCoordRect;
+    Rec  : String;
+    Wanted : TObjectSet;
+begin
+    Wanted := MkSet();
+    if (Kinds = '') or (Pos('|component|', Kinds) > 0) then Wanted := SetUnion(Wanted, MkSet(eComponentObject));
+    if (Kinds = '') or (Pos('|polygon|', Kinds) > 0) then Wanted := SetUnion(Wanted, MkSet(ePolyObject));
+    if Wanted = MkSet() then Exit;
+    It := Board.BoardIterator_Create;
+    It.AddFilter_ObjectSet(Wanted);
+    It.AddFilter_LayerSet(AllLayers);
+    It.AddFilter_Method(eProcessAll);
+    Prim := It.FirstPCBObject;
+    while Prim <> nil do
+    begin
+        R := Prim.BoundingRectangle;
+        if (R.Left <= X2) and (R.Right >= X1) and (R.Bottom <= Y2) and (R.Top >= Y1) then
+        begin
+            Rec := GeoRecord(Prim);
+            if Rec <> '' then
+            begin
+                Total := Total + 1;
+                if Items.Count < Limit then Items.Add('"' + JSONEscapeString(Rec) + '"');
+            end;
+        end;
+        Prim := It.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(It);
+end;
+
 // Objects touching the box X1,Y1-X2,Y2 (internal units) of the kinds in
 // Kinds ('|track|via|', or '' for all), at most Limit. copper_layers names
 // the board's copper layers top to bottom, so the server knows which layers
@@ -5999,6 +6036,7 @@ begin
             Prim := It.NextPCBObject;
         end;
         Board.SpatialIterator_Destroy(It);
+        GeoAddGroups(Board, X1, Y1, X2, Y2, Kinds, Limit, Items, Total);
         AddJSONProperty(Props, 'board_path', Board.FileName);
         AddJSONInteger(Props, 'origin_x', Board.XOrigin);
         AddJSONInteger(Props, 'origin_y', Board.YOrigin);
