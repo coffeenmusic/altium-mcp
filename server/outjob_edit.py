@@ -28,6 +28,13 @@ _NUMBERED = re.compile(r"^(\D+)(\d+)$")
 
 CONTAINER_TYPES = {"generated_files": "GeneratedFiles", "pdf": "Publish"}
 
+# The keys saying where a container writes and what it calls its files. A new
+# container copies the other settings of one of its type, but not these: two
+# PDF containers with the same base path and file name write one file.
+_LOCATION_KEYS = ("OutputFilePath", "OutputBasePath", "OutputPathMedia", "OutputPathMediaValue",
+                  "OutputPathOutputer", "OutputPathOutputerPrefix", "OutputPathOutputerValue",
+                  "OutputFileName", "OutputFileNameMulti", "OutputFileNameSpecial", "RelativeOutputPath")
+
 # Settings of a new container when the file has none of its type to copy,
 # as Altium writes them (from OutJobs saved by AD25)
 _DEFAULTS = {
@@ -255,6 +262,12 @@ class OutJob:
         if kind not in CONTAINER_TYPES:
             raise OutJobError(f"container type is one of {', '.join(CONTAINER_TYPES)}")
         type_ = CONTAINER_TYPES[kind]
+        others = [c["name"] for c in self.containers() if c["type"] == type_ == "Publish"]
+        if others and not (folder or file_name):
+            # PDFs are named by the container: without its own folder or file
+            # name it writes the same file as the other PDF container
+            raise OutJobError(f"give a folder or file_name: without one the new PDF container writes "
+                              f"the same file as {others[0]!r}")
         m = len(self.containers()) + 1
         self.set(GROUP, f"OutputMedium{m}", name, after=r"OutputMedium\d+")
         self.set(GROUP, f"OutputMedium{m}_Type", type_, after=r"OutputMedium\d+")
@@ -269,12 +282,16 @@ class OutJob:
                         if k is not None and (x := _NUMBERED.match(k)) and int(x.group(2)) == like]
             else:
                 keys = defaults
+            if like is not None:
+                # not where the copied container writes, nor its file name
+                fresh = dict(defaults)
+                keys = [(k, fresh[k] if k in _LOCATION_KEYS and k in fresh else v) for k, v in keys]
             for key, value in keys:
                 self.set(section, f"{key}{m}", value)
         # A new container does not open what it writes unless asked: a BOM
         # opening in Excel after every run is in the way
         self.set_container(name, folder=folder, file_name=file_name,
-                           open_outputs=bool(open_outputs), _fresh=like is None)
+                           open_outputs=bool(open_outputs), _fresh=True)
         return m
 
     def set_container(self, name: str, new_name: str = "", folder: Optional[str] = None,

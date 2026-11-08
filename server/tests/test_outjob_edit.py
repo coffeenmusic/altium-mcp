@@ -113,6 +113,22 @@ class OutJobEditTest(unittest.TestCase):
         with self.assertRaises(oe.OutJobError):
             j.add_container("fab", "pdf")
 
+    def test_a_new_container_does_not_copy_where_another_writes(self):
+        j = job()
+        j.set_container("CAM Data", folder="Cam")
+        j.add_container("Fab", "pdf", folder="Fab", file_name="fab")
+        more = j.add_container("More", "generated_files")
+        self.assertEqual(j.get(oe.PUBLISH, f"OutputPathOutputerValue{more}"), "")   # not CAM Data's "Cam"
+        self.assertEqual(j.get(oe.PUBLISH, f"OutputBasePath{more}"), ".\\")
+        # a second PDF container needs a place or a name of its own
+        with self.assertRaises(oe.OutJobError) as caught:
+            j.add_container("Fab 2", "pdf")
+        self.assertIn("Fab", str(caught.exception))
+        self.assertNotIn("Fab 2", [c["name"] for c in j.containers()])
+        fab2 = j.add_container("Fab 2", "pdf", folder="Other")
+        self.assertEqual(j.get(oe.PUBLISH, f"OutputFileName{fab2}"), "")             # not "fab.PDF"
+        self.assertEqual(j.get(oe.PUBLISH, f"OutputBasePath{fab2}"), ".\\Other\\")
+
     def test_set_output_and_setting(self):
         j = job()
         j.set_output("ODB++ Files", containers={"CAM Data": True, "ODB": False})

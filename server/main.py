@@ -6480,16 +6480,12 @@ async def create_outjob(ctx: Context, outjob_path: str, template_path: str = "",
     outjob_edit.write(path, job)
     out = {"success": True, "outjob_path": str(path), **_outjob_summary(job)}
     if project_path:
-        response = await altium_bridge.execute_command(
+        result, error = await _bridge_json(
             "add_to_project", {"project_path": long_path(project_path), "outjob_path": str(path)})
-        if not response.get("success", False):
+        if result is None:
             out["success"] = False
-            out["error"] = (f"The OutJob was written but not added to the project: "
-                            f"{response.get('error', 'unknown error')}")
+            out["error"] = f"The OutJob was written but not added to the project: {error}"
         else:
-            result = response.get("result", {})
-            if isinstance(result, str):
-                result = json.loads(result, strict=False)
             out["project"] = result.get("project")
     return json.dumps(out, indent=2, ensure_ascii=False)
 
@@ -6501,13 +6497,17 @@ async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run:
     Operations run in order; one that fails is reported in "errors" and the
     rest still run. The file is edited in place, keeping everything not
     changed as Altium wrote it. If the OutJob is open in Altium it is closed
-    first and opened again after (refused when it has unsaved changes there).
+    first and opened again after, also when the write fails (refused when it
+    has unsaved changes there). Altium is not started when it is not running.
 
     Operations, each a dict with "op":
       add_container       name, type ("generated_files" or "pdf"), [folder]
                           (relative to the project, e.g. "Fab"),
                           [file_name] (pdf), [open_outputs] (default false:
-                          the files are not opened after each run)
+                          the files are not opened after each run). Other
+                          settings are copied from a container of the same
+                          type, but not its folder or file name; a second PDF
+                          container needs a folder or file_name.
       set_container       name, [new_name], [folder], [file_name], [open_outputs]
       remove_container    name
       copy_output         output (name or number), [from_outjob] (another
@@ -6548,18 +6548,25 @@ async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run:
         out["written"] = False
         return json.dumps(out, indent=2, ensure_ascii=False)
 
-    response = await altium_bridge.execute_command("release_outjob", {"outjob_path": path})
-    if not response.get("success", False):
-        return json.dumps({"success": False, "error": response.get("error", "unknown error"),
-                           "written": False, "done": done, "errors": errors})
-    result = response.get("result", {})
-    if isinstance(result, str):
-        result = json.loads(result, strict=False)
-    outjob_edit.write(path, job)
-    out["written"] = True
-    if result.get("was_open"):
-        reopened = await altium_bridge.execute_command("reopen_outjob", {"outjob_path": path})
-        out["reopened_in_altium"] = bool(reopened.get("success"))
+    # Close the OutJob in Altium first, so Altium does not keep (and later
+    # save) the old one. Not running: nothing to close, and no reason to start it.
+    was_open = False
+    if altium_bridge._altium_running():
+        result, error = await _bridge_json("release_outjob", {"outjob_path": path})
+        if result is None:
+            return json.dumps({"success": False, "error": error, "written": False,
+                               "done": done, "errors": errors})
+        was_open = bool(result.get("was_open"))
+    try:
+        outjob_edit.write(path, job)
+        out["written"] = True
+    except OSError as e:
+        out.update({"success": False, "written": False, "error": f"Could not write the OutJob: {e}"})
+    finally:
+        # open again what was closed, whether the write worked or not
+        if was_open:
+            reopened = await altium_bridge.execute_command("reopen_outjob", {"outjob_path": path})
+            out["reopened_in_altium"] = bool(reopened.get("success"))
     return json.dumps(out, indent=2, ensure_ascii=False)
 
 MUTATING_COMMANDS.update({"add_to_project", "release_outjob"})
