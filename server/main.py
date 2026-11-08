@@ -5560,8 +5560,13 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
                                                                        allow_via_in_pad, allow_other_net)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
-    tracks, vias = routing.plan_path((resolved[0][0], resolved[0][1], first_layer), resolved[1:],
-                                     diagonal_first, chamfer, via_span)
+    try:
+        tracks, vias = routing.plan_path((resolved[0][0], resolved[0][1], first_layer), resolved[1:],
+                                         diagonal_first, chamfer, via_span)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+    # Every layer named is checked by Altium, not only those that get copper
+    named_layers = sorted({first_layer} | {p[2] for p in resolved[1:] if p[2]})
     k = geo.unit_factor(unit)
     plan = {"tracks": [[t[0]] + [round(v / k, 4) for v in t[1:]] for t in tracks],
             "vias": [[round(v[0] / k, 4), round(v[1] / k, 4), v[2], v[3]] for v in vias]}
@@ -5574,6 +5579,7 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
         "geometry": "route", "net": net,
         "tracks": "~".join("|".join(str(v) for v in t) for t in tracks),
         "vias": "~".join("|".join(str(v) for v in via) for via in vias),
+        "layers": "~".join(named_layers),
         **sizes, "check": "true" if check else "false",
         "undo_on_violation": "true" if undo_on_violation else "false", "board_path": long_path(board_path)})
     if error:

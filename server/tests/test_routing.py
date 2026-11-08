@@ -149,6 +149,10 @@ class ViaRecordsTest(unittest.TestCase):
 
 
 class PlanPathTest(unittest.TestCase):
+    def test_layer_change_at_the_end_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "lead nowhere"):
+            routing.plan_path((0, 0, "Top Layer"), [(10, 10, None), (10, 10, "Bottom Layer")])
+
     def test_layer_change_drops_a_via(self):
         tracks, vias = routing.plan_path((0, 0, "Top Layer"),
                                          [(1000, 500, None), (1000, 500, "Bottom Layer"), (2000, 500, None)])

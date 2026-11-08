@@ -7286,11 +7286,11 @@ end;
 // breaks a rule (other than against pour copper) is taken off again before
 // the undo step closes: nothing of it is left, and Ctrl+Z cannot bring it
 // back.
-function GeoRoute(Board: IPCB_Board; NetName, Tracks, Vias: String; Width, ViaSize, ViaHole: Integer;
+function GeoRoute(Board: IPCB_Board; NetName, Tracks, Vias, Layers: String; Width, ViaSize, ViaHole: Integer;
                   Check, Undo: Boolean): String;
 var
     Net    : IPCB_Net;
-    TrackList, ViaList, Items, Made, Props : TStringList;
+    TrackList, ViaList, LayerList, Items, Made, Props : TStringList;
     Created : TInterfaceList;
     Track  : IPCB_Track;
     Via    : IPCB_Via;
@@ -7308,6 +7308,7 @@ begin
     end;
     TrackList := TStringList.Create;
     ViaList := TStringList.Create;
+    LayerList := TStringList.Create;
     Items := TStringList.Create;
     Made := TStringList.Create;
     Props := TStringList.Create;
@@ -7318,6 +7319,15 @@ begin
         // Every layer is checked before PreProcess, as in CreateVias:
         // String2Layer alone accepts layers the board does not have
         Bad := '';
+        // every layer the route names, also one that gets no copper
+        LayerList.Text := StringReplace(Layers, '~', #13#10, REPLACEALL);
+        for i := 0 to LayerList.Count - 1 do
+            if Trim(LayerList[i]) <> '' then
+            begin
+                L := ResolveBoardLayer(Board, Trim(LayerList[i]));
+                if (L = eNoLayer) or (L > eBottomLayer) then
+                    Bad := Trim(LayerList[i]) + ' is not a signal layer of this board';
+            end;
         for i := 0 to TrackList.Count - 1 do
             if Trim(TrackList[i]) <> '' then
             begin
@@ -7476,7 +7486,8 @@ begin
         Result := GeoLocate(Board, RequestText(RequestData, 'refs', ''))
     else if Cmd = 'route' then
         Result := GeoRoute(Board, RequestText(RequestData, 'net', ''), RequestText(RequestData, 'tracks', ''),
-                           RequestText(RequestData, 'vias', ''), StrToInt(RequestText(RequestData, 'width', '0')),
+                           RequestText(RequestData, 'vias', ''), RequestText(RequestData, 'layers', ''),
+                           StrToInt(RequestText(RequestData, 'width', '0')),
                            StrToInt(RequestText(RequestData, 'via_size', '0')),
                            StrToInt(RequestText(RequestData, 'via_hole', '0')),
                            RequestText(RequestData, 'check', 'true') = 'true',

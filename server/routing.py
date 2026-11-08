@@ -188,6 +188,14 @@ def plan_path(start: Tuple[int, int, str], waypoints: List[Tuple[int, int, Optio
     tracks, vias = [], []
     layer = start[2]
     stretch = [(start[0], start[1])]
+    last = waypoints[-1][2] if waypoints else None
+    before = layer
+    for w in waypoints[:-1]:
+        if w[2]:
+            before = w[2]
+    if last and last.lower() != before.lower():
+        raise ValueError(f"the last waypoint changes layer to {last}: a via there would lead nowhere; "
+                         "add a waypoint on that layer after it")
     for x, y, wl in waypoints:
         stretch.append((x, y))
         if wl and wl.lower() != layer.lower():
