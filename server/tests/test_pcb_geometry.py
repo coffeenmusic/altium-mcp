@@ -86,7 +86,10 @@ class SelectTest(unittest.TestCase):
         mid = geo.select(RECORDS, ORIGIN, "mil", layers=["Mid Layer 1"])
         self.assertEqual([o["kind"] for o in mid], ["via", "via", "pad"])
         sig = geo.select(RECORDS, ORIGIN, "mil", nets=["sig"])
-        self.assertEqual(len(geo.select(RECORDS + RECORDS[:2], ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")))
+        # a region sent twice is one region; two identical tracks are a stack
+        region = [r for r in RECORDS if r.startswith("region|")]
+        self.assertEqual(len(geo.select(RECORDS + region, ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")))
+        self.assertEqual(len(geo.select(RECORDS + RECORDS[:2], ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")) + 2)
         texts = [o for o in geo.select(RECORDS, ORIGIN, "mil", include_hidden=False) if o["kind"] == "text"]
         self.assertEqual([t["text"] for t in texts], ["U1|x"])
         self.assertEqual(texts[0]["ref"], "text|Top Overlay|1010000|2010000")
@@ -131,10 +134,12 @@ class SelectTest(unittest.TestCase):
 
 class AreaReplyTest(unittest.TestCase):
     TRACK = "track|{}|GND||{}|2020000|1030000|2020000|80000|0"
+    REGION = "region|{}|GND||{}|2000000|1100000|2100000|1|GND_POUR"
 
-    def result(self, n_top, n_bottom, total=None, twice=0):
-        recs = [self.TRACK.format("Bottom Layer", 1000000 + i) for i in range(n_bottom)]
-        recs += [self.TRACK.format("Top Layer", 1000000 + i) for i in range(n_top)]
+    def result(self, n_top, n_bottom, total=None, twice=0, kind="TRACK"):
+        rec = getattr(self, kind)
+        recs = [rec.format("Bottom Layer", 1000000 + i) for i in range(n_bottom)]
+        recs += [rec.format("Top Layer", 1000000 + i) for i in range(n_top)]
         recs += recs[:twice]
         return {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "objects": recs,
                 "total": len(recs) if total is None else total}
@@ -151,9 +156,12 @@ class AreaReplyTest(unittest.TestCase):
         self.assertNotIn("note", out)
 
     def test_duplicates_and_hidden_not_counted(self):
-        # Altium counted 8, two of them sent twice: total and limit see 6
-        out = geo.area_reply(self.result(3, 3, twice=2), "mil", 6)
+        # Altium counted 8, two pour pieces sent twice: total and limit see 6
+        out = geo.area_reply(self.result(3, 3, twice=2, kind="REGION"), "mil", 6)
         self.assertEqual((out["total"], out["returned"], out["truncated"]), (6, 6, False))
+        # two identical tracks are a stack, and both count
+        out = geo.area_reply(self.result(3, 3, twice=2), "mil", 10)
+        self.assertEqual(out["total"], 8)
         hidden = {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "total": 2, "objects": RECORDS[10:12]}
         self.assertEqual(geo.area_reply(hidden, "mil", 5, include_hidden=False)["total"], 1)
         self.assertEqual(geo.area_reply(hidden, "mil", 5)["total"], 2)

@@ -214,8 +214,9 @@ def _layer_match(obj: dict, layers: List[str], stack: Optional[List[str]] = None
 def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = None,
            nets: Optional[List[str]] = None, stack: Optional[List[str]] = None,
            include_hidden: bool = True) -> List[dict]:
-    """The records as objects, filtered; a record Altium sends twice is kept
-    once."""
+    """The records as objects, filtered. Pour copper Altium sends twice
+    (the same region record) is kept once; two identical vias or tracks are
+    two objects stacked on each other, and both are listed."""
     out = []
     seen = set()
     want_nets = {n.lower() for n in nets} if nets else None
@@ -225,9 +226,10 @@ def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = 
             continue
         if not include_hidden and obj.get("hidden"):
             continue
-        if rec in seen:
-            continue
-        seen.add(rec)
+        if obj["kind"] == "region":
+            if rec in seen:
+                continue
+            seen.add(rec)
         if layers and not _layer_match(obj, layers, stack):
             continue
         if want_nets is not None and (obj.get("net") or "").lower() not in want_nets:
@@ -237,7 +239,7 @@ def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = 
 
 
 # How many objects Altium sends at most. The layer and net filters, hidden
-# texts and records sent twice are dropped here, after Altium's limit, so it
+# texts and pour copper sent twice are dropped here, after Altium's limit, so it
 # sends this many and the caller's limit is applied to what is left
 SCAN_CAP = 20000
 
