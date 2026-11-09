@@ -3410,6 +3410,15 @@ begin
     Entry.IOType := SchField(Rec, 5, Entry.IOType);
     Entry.Style := SchField(Rec, 6, Entry.Style);
     if GetFieldFromPipeString(Rec, 7) <> '' then Entry.Name := GetFieldFromPipeString(Rec, 7);
+    // Altium recomputes an entry's location from its side and distance only
+    // when the sheet loads; until then it stays drawn where it was. The
+    // symbol's location is its top left corner; the distance runs down from
+    // the top on the left and right sides, right from the left edge on the
+    // top and bottom.
+    if NewSide = 0 then Entry.Location := Point(Sym.Location.X, Sym.Location.Y - NewDistance)
+    else if NewSide = 1 then Entry.Location := Point(Sym.Location.X + Sym.XSize, Sym.Location.Y - NewDistance)
+    else if NewSide = 2 then Entry.Location := Point(Sym.Location.X + NewDistance, Sym.Location.Y)
+    else Entry.Location := Point(Sym.Location.X + NewDistance, Sym.Location.Y - Sym.YSize);
     SchEndModify(Entry);
     Result := True;
 end;
