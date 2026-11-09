@@ -5202,6 +5202,47 @@ begin
 end;
 
 // The first copper primitive on Net, or nil
+// Selects one primitive of Net, trying kind after kind: the PCB Selection
+// Filter (Properties panel) can stop a script selecting some kinds (vias,
+// pads), and Add Stitching to Net with nothing selected waits for a click.
+// True when one is selected.
+function SelectNetPrimitive(Board: IPCB_Board; Net: IPCB_Net): Boolean;
+var
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+    K        : Integer;
+begin
+    Result := False;
+    for K := 0 to 6 do
+    begin
+        Iterator := Board.BoardIterator_Create;
+        case K of
+            0: Iterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+            1: Iterator.AddFilter_ObjectSet(MkSet(eArcObject));
+            2: Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+            3: Iterator.AddFilter_ObjectSet(MkSet(eFillObject));
+            4: Iterator.AddFilter_ObjectSet(MkSet(eRegionObject));
+            5: Iterator.AddFilter_ObjectSet(MkSet(ePadObject));
+            6: Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        end;
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        while (Prim <> nil) and not Result do
+        begin
+            if Prim.Net <> nil then
+                if Prim.Net.I_ObjectAddress = Net.I_ObjectAddress then
+                begin
+                    Prim.Selected := True;
+                    Result := Board.SelectecObjectCount > 0;
+                end;
+            if not Result then Prim := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        if Result then Exit;
+    end;
+end;
+
 function FirstNetPrimitive(Board: IPCB_Board; Net: IPCB_Net): IPCB_Primitive;
 var
     Iterator : IPCB_BoardIterator;
@@ -5281,7 +5322,15 @@ begin
         for i := 0 to Board.SelectecObjectCount - 1 do
             Saved.Add(Board.SelectecObject[i]);
         Board.SelectedObjects_Clear;
-        Prim.Selected := True;
+        if not SelectNetPrimitive(Board, Net) then
+        begin
+            for i := 0 to Saved.Count - 1 do
+                Saved.Items[i].Selected := True;
+            Result := 'ERROR: no object of net ' + NetName + ' can be selected from a script, so Add Stitching ' +
+                      'to Net cannot be given the net. The PCB Selection Filter (Properties panel, with ' +
+                      'nothing selected) probably has its kinds switched off; switch on Tracks or Polygons';
+            Exit;
+        end;
         try
             ResetParameters;
             AddStringParameter('Mode', 'Flood');
@@ -5569,13 +5618,37 @@ begin
             Board.SelectedObjects_Clear;
             for i := 0 to Found.Count - 1 do
                 Found.Items[i].Selected := True;
-            try
-                ResetParameters;
-                RunProcess('PCB:Clear');
-            finally
+            if Board.SelectecObjectCount = Found.Count then
+            begin
+                try
+                    ResetParameters;
+                    RunProcess('PCB:Clear');
+                finally
+                    Board.SelectedObjects_Clear;
+                    for i := 0 to Saved.Count - 1 do
+                        Saved.Items[i].Selected := True;
+                end;
+            end
+            else
+            begin
+                // The PCB Selection Filter stops a script selecting vias, so
+                // PCB:Clear would delete nothing: delete them directly. The
+                // saved board may then keep an empty stitching group.
                 Board.SelectedObjects_Clear;
                 for i := 0 to Saved.Count - 1 do
                     Saved.Items[i].Selected := True;
+                PCBServer.PreProcess;
+                try
+                    for i := 0 to Found.Count - 1 do
+                    begin
+                        Board.RemovePCBObject(Found.Items[i]);
+                        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration,
+                                                      Found.Items[i].I_ObjectAddress);
+                    end;
+                finally
+                    PCBServer.PostProcess;
+                end;
+                AddJSONBoolean(Props, 'deleted_directly', True);
             end;
         finally
             Saved.Free;
