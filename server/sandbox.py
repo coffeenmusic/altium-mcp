@@ -124,7 +124,10 @@ RESERVED_WORDS = {
     "absolute", "at", "default", "index", "message", "on", "read", "stored", "variant", "write",
 }
 
-_DECL_RE = re.compile(r"^\s*[A-Za-z_]\w*(\s*,\s*[A-Za-z_]\w*)*\s*:\s*[A-Za-z_][\w.]*\s*;\s*(//.*)?$")
+_ONE_DECL = r"[A-Za-z_]\w*(\s*,\s*[A-Za-z_]\w*)*\s*:\s*[A-Za-z_][\w.]*\s*;"
+# A declaration line: one or more `Name1, Name2 : Type;` (several may share
+# a line, as in `var D: IServerDocument; P, S: String;`)
+_DECL_RE = re.compile(r"^\s*(" + _ONE_DECL + r"\s*)+(//.*)?$")
 # A line holding only a comment: // ..., { ... } or (* ... *)
 _COMMENT_LINE_RE = re.compile(r"^\s*(//.*|\{[^}]*\}|\(\*.*?\*\))\s*$")
 _ASSIGN_RE = re.compile(r"(?<![\w.\]\)])([A-Za-z_]\w*)\s*:=")
@@ -202,15 +205,20 @@ def split_var_block(script: str) -> SplitScript:
         end = _split_routines(lines, 0)
         return SplitScript([], [], lines[end:], end, lines[:end], 0)
     decls, src = [], []
+
+    def add(line: str, number: int) -> None:
+        # one declaration per entry, also when a line holds several
+        for m in re.finditer(_ONE_DECL, line):
+            decls.append(m.group(0).strip())
+            src.append(number)
+
     first = re.sub(r"^\s*var\b", "", lines[i], flags=re.IGNORECASE).strip()
     if first:
-        decls.append(first)
-        src.append(i + 1)
+        add(first, i + 1)
     i += 1
     while i < len(lines) and (_DECL_RE.match(lines[i]) or skippable(lines[i])):
         if not skippable(lines[i]):
-            decls.append(lines[i].strip())
-            src.append(i + 1)
+            add(lines[i].strip(), i + 1)
         i += 1
     end = _split_routines(lines, i)
     return SplitScript(decls, src, lines[end:], end, lines[i:end], i)

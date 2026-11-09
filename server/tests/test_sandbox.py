@@ -701,5 +701,14 @@ class DialogTest(unittest.TestCase):
         self.assertFalse(sandbox.Dialog(6, "#32770", "Save As", "File name:").is_error_box)
 
 
+
+class OneLineVarBlockTest(unittest.TestCase):
+    def test_several_declarations_on_one_line(self):
+        split = sandbox.split_var_block("var D: IServerDocument; P, S: String;\nS := P;\nResultText := S;")
+        self.assertEqual(split.decls, ["D: IServerDocument;", "P, S: String;"])
+        self.assertEqual(sandbox.declared_names(split.decls), ["D", "P", "S"])
+        self.assertEqual(split.body, ["S := P;", "ResultText := S;"])
+
+
 if __name__ == "__main__":
     unittest.main()
