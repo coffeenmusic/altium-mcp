@@ -3710,9 +3710,12 @@ async def query_objects(ctx: Context, expression: str, limit: int = 200, board_p
     converted to the unit the engine uses on this board before the query
     runs. Decimals take a dot.
 
-    The user's selection is left as it was, also after a query Altium could
-    not evaluate. A filter applied in the PCB Filter panel is cleared: a
-    script cannot read it back to restore it.
+    The engine works through the selection, so the user's selection is
+    selected again afterwards, also after a query Altium could not
+    evaluate; objects of kinds the PCB Selection Filter (Properties panel)
+    leaves out cannot be selected by a script and stay unselected. A filter
+    applied in the PCB Filter panel is cleared: a script cannot read it back
+    to restore it.
 
     Args:
         expression (str): The query.
