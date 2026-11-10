@@ -11,6 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
+import pcb_rules  # noqa: E402
 from pcb_rules import RULE_KINDS, check_merged, encode_values, move_notes, scope_or_all  # noqa: E402
 
 
@@ -152,6 +153,38 @@ class EditToolTest(unittest.TestCase):
         self.assertEqual(params["scope1"], "All")
         self.assertEqual(params["new_name"], "W2")
         self.assertTrue(reply["success"])
+
+
+class ClearanceMatrixTest(unittest.TestCase):
+    """A gap edit sets only Rule.Gap, so a rule with other per-object-kind
+    clearances (the rules editor's matrix) is refused."""
+    UNIFORM = {"success": True, "result": {"name": "C", "kind": "clearance", "values": {"gap_mils": 6}}}
+    MATRIX = {"success": True, "result": {"name": "C", "kind": "clearance", "values": {"gap_mils": 6},
+                                          "object_clearances": {"track-via": 8, "smd_pad-text": 10.5}}}
+
+    def test_matrix_rule_gap_edit_is_refused(self):
+        reply, sent = call_tool("edit_pcb_rule", {"pcb_rule_info": self.MATRIX}, name="C", values={"gap_mils": 7})
+        self.assertIn("per-object clearances", reply["error"])
+        self.assertIn("track-via 8 mil, smd_pad-text 10.5 mil", reply["error"])
+        self.assertIn("the gap is 6 mil", reply["error"])
+        self.assertEqual([c for c, _ in sent], ["pcb_rule_info"])
+
+    def test_other_edits_of_a_matrix_rule_go_ahead(self):
+        edited = {"success": True, "result": {"success": True, "name": "C2", "rules_moved": 0}}
+        reply, sent = call_tool("edit_pcb_rule", {"pcb_rule_info": self.MATRIX, "edit_pcb_rule": edited},
+                                name="C", new_name="C2")
+        self.assertTrue(reply["success"])
+        self.assertEqual([c for c, _ in sent], ["pcb_rule_info", "edit_pcb_rule"])
+
+    def test_uniform_rule_gap_edit_and_warning_after(self):
+        self.assertEqual(pcb_rules.matrix_refusal("C", self.UNIFORM["result"], {"gap_mils": 7}), "")
+        edited = {"success": True, "result": {"success": True, "name": "C", "rules_moved": 0,
+                                              "object_clearances": {"via-via": 6}}}
+        reply, sent = call_tool("edit_pcb_rule", {"pcb_rule_info": self.UNIFORM, "edit_pcb_rule": edited},
+                                name="C", values={"gap_mils": 7})
+        self.assertIn("via-via 6 mil", reply["matrix_warning"])
+        self.assertEqual(dict(sent)["edit_pcb_rule"]["values"], "gap=70000")
+        self.assertEqual(pcb_rules.matrix_warning({"object_clearances": {}}), "")
 
 
 class PriorityToolTest(unittest.TestCase):

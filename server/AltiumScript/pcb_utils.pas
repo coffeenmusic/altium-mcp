@@ -6709,24 +6709,201 @@ begin
     end;
 end;
 
-// pcb_rule_info: a rule's kind, scopes, priority and the order of its kind
+// One free object of each kind the clearance matrix has a row for, never
+// added to the board, named in Names. A kind the factory refuses is left
+// out. Free them with ClearanceProbesFree.
+procedure ClearanceProbes(Probes: TInterfaceList; Names: TStringList);
+var
+    Track   : IPCB_Track;
+    Arc     : IPCB_Arc;
+    Via     : IPCB_Via;
+    Pad     : IPCB_Pad;
+    Fill    : IPCB_Fill;
+    Region  : IPCB_Region;
+    Text    : IPCB_Text;
+    Contour : IPCB_Contour;
+begin
+    try
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.x1 := 0; Track.y1 := 0; Track.x2 := MilsToCoord(100); Track.y2 := 0;
+        Track.Width := MilsToCoord(10);
+        Track.Layer := eTopLayer;
+        Probes.Add(Track); Names.Add('track');
+    except
+    end;
+    try
+        Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+        Arc.XCenter := 0; Arc.YCenter := 0; Arc.Radius := MilsToCoord(50);
+        Arc.StartAngle := 0; Arc.EndAngle := 90; Arc.LineWidth := MilsToCoord(10);
+        Arc.Layer := eTopLayer;
+        Probes.Add(Arc); Names.Add('arc');
+    except
+    end;
+    try
+        Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+        Via.x := 0; Via.y := 0; Via.Size := MilsToCoord(24); Via.HoleSize := MilsToCoord(12);
+        Via.LowLayer := eTopLayer; Via.HighLayer := eBottomLayer;
+        Probes.Add(Via); Names.Add('via');
+    except
+    end;
+    try
+        Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+        Pad.Mode := ePadMode_Simple;
+        Pad.x := 0; Pad.y := 0; Pad.TopXSize := MilsToCoord(40); Pad.TopYSize := MilsToCoord(40);
+        Pad.HoleSize := 0;
+        Pad.Layer := eTopLayer;
+        Probes.Add(Pad); Names.Add('smd_pad');
+    except
+    end;
+    try
+        Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+        Pad.Mode := ePadMode_Simple;
+        Pad.x := 0; Pad.y := 0; Pad.TopXSize := MilsToCoord(60); Pad.TopYSize := MilsToCoord(60);
+        Pad.HoleSize := MilsToCoord(35); Pad.Plated := True;
+        Pad.Layer := eMultiLayer;
+        Probes.Add(Pad); Names.Add('th_pad');
+    except
+    end;
+    try
+        Fill := PCBServer.PCBObjectFactory(eFillObject, eNoDimension, eCreate_Default);
+        Fill.x1Location := 0; Fill.y1Location := 0;
+        Fill.x2Location := MilsToCoord(50); Fill.y2Location := MilsToCoord(50);
+        Fill.Layer := eTopLayer;
+        Probes.Add(Fill); Names.Add('fill');
+    except
+    end;
+    try
+        Region := PCBServer.PCBObjectFactory(eRegionObject, eNoDimension, eCreate_Default);
+        Contour := PCBServer.PCBContourFactory;
+        Contour.AddPoint(0, 0);
+        Contour.AddPoint(MilsToCoord(50), 0);
+        Contour.AddPoint(MilsToCoord(50), MilsToCoord(50));
+        Contour.AddPoint(0, MilsToCoord(50));
+        Region.SetOutlineContour(Contour);
+        Region.Layer := eTopLayer;
+        Probes.Add(Region); Names.Add('region');
+    except
+    end;
+    try
+        Text := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+        Text.XLocation := 0; Text.YLocation := 0;
+        Text.Size := MilsToCoord(50); Text.Width := MilsToCoord(5);
+        Text.Text := 'X';
+        Text.Layer := eTopLayer;
+        Probes.Add(Text); Names.Add('text');
+    except
+    end;
+end;
+
+procedure ClearanceProbesFree(Probes: TInterfaceList);
+var
+    i : Integer;
+begin
+    for i := 0 to Probes.Count - 1 do
+    begin
+        try
+            PCBServer.DestroyPCBObject(Probes.Items[i]);
+        except
+        end;
+    end;
+    Probes.Clear;
+end;
+
+// The clearance matrix of a clearance rule, which the script API does not
+// expose (no GenericClearance or matrix property): Rule.GetClearance on a
+// pair of free probe objects gives the value for that pair of kinds. Adds
+// each pair whose clearance is not Gap to Diffs as 'kinds=coord'
+// ('track-via=80000'); none when the matrix is uniform.
+procedure ClearanceMatrixDiffs(Rule: IPCB_Rule; Gap: Integer; Diffs: TStringList);
+var
+    Probes : TInterfaceList;
+    Names  : TStringList;
+    i, j   : Integer;
+    Value  : Integer;
+begin
+    Probes := TInterfaceList.Create;
+    Names := TStringList.Create;
+    try
+        try
+            ClearanceProbes(Probes, Names);
+            for i := 0 to Probes.Count - 1 do
+                for j := i to Probes.Count - 1 do
+                begin
+                    Value := Rule.GetClearance(Probes.Items[i], Probes.Items[j]);
+                    if Value <> Gap then
+                        Diffs.Add(Names[i] + '-' + Names[j] + '=' + IntToStr(Value));
+                end;
+        finally
+            ClearanceProbesFree(Probes);
+        end;
+    finally
+        Probes.Free;
+        Names.Free;
+    end;
+end;
+
+// A length as text in mils, with a dot whatever the locale
+function ClearanceMilsText(Value: Integer): String;
+begin
+    Result := StringReplace(FloatToStr(CoordToMils(Value)), ',', '.', REPLACEALL);
+end;
+
+// Diffs ('kinds=coord') as '"Key": {"track-via": 8, ...}' in mils
+function ClearanceDiffsJSON(Key: String; Diffs: TStringList): String;
+var
+    Item : TStringList;
+    i    : Integer;
+begin
+    Item := TStringList.Create;
+    try
+        for i := 0 to Diffs.Count - 1 do
+            AddJSONNumber(Item, Diffs.Names[i], CoordToMils(StrToInt(Diffs.Values[Diffs.Names[i]])));
+        Result := '"' + Key + '": ' + BuildJSONObject(Item, 1);
+    finally
+        Item.Free;
+    end;
+end;
+
+// Diffs as 'track-via 8 mil, ...' for a message
+function ClearanceDiffsText(Diffs: TStringList): String;
+var
+    i : Integer;
+begin
+    Result := '';
+    for i := 0 to Diffs.Count - 1 do
+    begin
+        if Result <> '' then Result := Result + ', ';
+        Result := Result + Diffs.Names[i] + ' ' + ClearanceMilsText(StrToInt(Diffs.Values[Diffs.Names[i]])) + ' mil';
+    end;
+end;
+
+// pcb_rule_info: a rule's kind, scopes, priority and the order of its kind;
+// for a clearance rule, object_clearances lists the pairs of object kinds
+// whose clearance (the rules editor's matrix) is not the gap
 function PcbRuleInfo(Name: String): String;
 var
     Board : IPCB_Board;
     Rule  : IPCB_Rule;
-    Props : TStringList;
+    Props, Diffs : TStringList;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
     Rule := FindRuleByName(Board, Name);
     if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
     Props := TStringList.Create;
+    Diffs := TStringList.Create;
     try
         AddJSONBoolean(Props, 'success', True);
         RuleStateJSON(Board, Rule, Props);
+        if Rule.RuleKind = eRule_Clearance then
+        begin
+            ClearanceMatrixDiffs(Rule, Rule.Gap, Diffs);
+            if Diffs.Count > 0 then Props.Add(ClearanceDiffsJSON('object_clearances', Diffs));
+        end;
         Result := BuildJSONObject(Props);
     finally
         Props.Free;
+        Diffs.Free;
     end;
 end;
 
@@ -6832,9 +7009,10 @@ function EditPCBRule(Name, NewName, Scope1, Scope2, Comment, Enabled, Fields: St
 var
     Board : IPCB_Board;
     Rule, Clash : IPCB_Rule;
-    Props, Ids, Design : TStringList;
+    Props, Ids, Design, Diffs : TStringList;
     Moves : TInterfaceList;
     Before, Moved : Integer;
+    GapEdit : Boolean;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
@@ -6858,11 +7036,31 @@ begin
                       'PCB Rules and Constraints Editor';
             Exit;
         end;
+    // A gap edit sets only Rule.Gap: a rule whose matrix holds other values
+    // for some kinds of object would keep them, and the DRC would not change
+    GapEdit := (Rule.RuleKind = eRule_Clearance) and RuleHasValue(Values, 'gap');
+    if GapEdit then
+    begin
+        Diffs := TStringList.Create;
+        try
+            ClearanceMatrixDiffs(Rule, Rule.Gap, Diffs);
+            if Diffs.Count > 0 then
+            begin
+                Result := 'ERROR: ' + Name + ' has per-object clearances (the matrix in the rules editor: ' +
+                          ClearanceDiffsText(Diffs) + '; the gap is ' + ClearanceMilsText(Rule.Gap) +
+                          ' mil); edit it in Altium''s PCB Rules and Constraints Editor';
+                Exit;
+            end;
+        finally
+            Diffs.Free;
+        end;
+    end;
     Before := Rule.Priority;
     Moves := TInterfaceList.Create;
     Ids := TStringList.Create;
     Design := TStringList.Create;
     Props := TStringList.Create;
+    Diffs := TStringList.Create;
     try
         RulesReadded(Board, Rule, Before, Moves, Ids, Design);
         PCBServer.PreProcess;
@@ -6889,12 +7087,19 @@ begin
         AddJSONInteger(Props, 'rules_moved', Moved);
         if Moved > 0 then RuleMoveJSON(Props, Moves, Ids, Design);
         RuleStateJSON(Board, Rule, Props);
+        // Every kind of object should now have the new gap
+        if GapEdit then
+        begin
+            ClearanceMatrixDiffs(Rule, Rule.Gap, Diffs);
+            if Diffs.Count > 0 then Props.Add(ClearanceDiffsJSON('object_clearances', Diffs));
+        end;
         Result := BuildJSONObject(Props);
     finally
         Moves.Free;
         Ids.Free;
         Design.Free;
         Props.Free;
+        Diffs.Free;
     end;
 end;
 

@@ -6650,8 +6650,11 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
     clearance rule); merged with the rule's other values they must pass
     create_pcb_rule's checks (min <= preferred <= max, via hole smaller
     than the via). A width rule with different widths per layer is
-    refused; a width changes on the layers that had the old one. An empty
-    scope is "All"; new_name may not be blank.
+    refused; a width changes on the layers that had the old one. A gap edit
+    of a clearance rule whose matrix (the rules editor's per-object-kind
+    clearances) holds other values than the gap is refused, listing them:
+    the edit sets only the gap. An empty scope is "All"; new_name may not
+    be blank.
 
     Altium moves a modified rule to priority 1, so the rule and those above
     it are taken off and added again to put it back (see set_rule_priority).
@@ -6679,7 +6682,8 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
         str: JSON with the rule as Altium now has it (descriptor, scopes,
              values, enabled, priority and priority_before), the order of
              its kind, the rules re-added to keep the order, and the scope
-             check.
+             check; after a gap edit, object_clearances and matrix_warning
+             if some pairs of object kinds still have another clearance.
     """
     import pcb_rules
 
@@ -6702,6 +6706,8 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
         encoded, error = pcb_rules.encode_values(info["kind"], values, partial=True)
         if not error:
             error = pcb_rules.check_merged(info["kind"], info.get("values"), values)
+        if not error:
+            error = pcb_rules.matrix_refusal(name, info, values)
         if error:
             return json.dumps({"success": False, "error": error})
     if scope1 is not None:
@@ -6733,6 +6739,9 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
         empty = [k for k, c in checks.items() if not c["matched"]]
         if empty:
             result["warning"] = f"{', '.join(empty)} matches no object on the board now."
+    matrix = pcb_rules.matrix_warning(result)
+    if matrix:
+        result["matrix_warning"] = matrix
     result.update(pcb_rules.move_notes(result, name))
     return json.dumps(result, indent=2)
 

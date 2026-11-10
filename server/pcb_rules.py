@@ -128,6 +128,36 @@ def move_notes(result: dict, name: str) -> dict:
     return notes
 
 
+def _clearance_pairs(pairs: dict) -> str:
+    return ", ".join(f"{kinds} {mils:g} mil" for kinds, mils in pairs.items())
+
+
+def matrix_refusal(name: str, info: dict, values: dict) -> str:
+    """Why a gap edit of a clearance rule is refused, or ''. A gap edit sets
+    only the rule's Gap; a rule whose clearance matrix (the rules editor's
+    per-object-kind values) holds other values would keep them, so the DRC
+    would not change. pcb_rule_info lists those pairs in object_clearances."""
+    pairs = info.get("object_clearances") or {}
+    if info.get("kind") != "clearance" or "gap_mils" not in (values or {}) or not pairs:
+        return ""
+    gap = (info.get("values") or {}).get("gap_mils")
+    return (f"{name} has per-object clearances (the matrix in the rules editor: {_clearance_pairs(pairs)}"
+            + (f"; the gap is {gap:g} mil" if isinstance(gap, (int, float)) else "")
+            + "). A gap edit would leave those as they are: edit the rule in Altium's PCB Rules "
+              "and Constraints Editor.")
+
+
+def matrix_warning(result: dict) -> str:
+    """A warning for edit_pcb_rule's reply when, after a gap edit, some
+    pairs of object kinds still have another clearance than the new gap."""
+    pairs = result.get("object_clearances") or {}
+    if not pairs:
+        return ""
+    return (f"After the gap edit these pairs of object kinds still have another clearance: "
+            f"{_clearance_pairs(pairs)}. Check the rule's matrix in Altium's PCB Rules and Constraints "
+            f"Editor.")
+
+
 def scope_or_all(scope) -> str:
     """A rule scope as sent to Altium: an empty or blank one is "All"."""
     return (scope or "").strip() or "All"
