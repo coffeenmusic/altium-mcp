@@ -2333,7 +2333,7 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
             try:
                 # In a thread: the DbLib's table and library folders may be on a slow share
                 op = await asyncio.to_thread(dblib.place_operation, dict(op, dblib=long_path(op["dblib"])))
-            except (dblib.DbLibError, OSError, KeyError, ValueError, configparser.Error,
+            except (dblib.DbLibError, OSError, KeyError, IndexError, ValueError, configparser.Error,
                     ElementTree.ParseError, zipfile.BadZipFile) as e:
                 return json.dumps({"success": False, "error": f"operation {i + 1}: {e}"})
         expanded.append(op)

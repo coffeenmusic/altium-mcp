@@ -23,7 +23,8 @@ Only Excel (.xlsx) tables are read, with the standard library: the file is
 a zip of XML. A cell is read as Altium's Excel driver gives it: a percent
 format as a percentage, and decimals with the Windows decimal separator
 (on a decimal-comma system, 0,5%). A table is a sheet name with '$', quoted
-when the name has a space: 'My Sheet$'.
+when the name has a space: 'My Sheet$'. Field maps are matched to their
+table by the sheet name, so the quoting of either does not matter.
 
 A symbol library named in a row is looked up next to the DbLib and on its
 search path, and below them only when the DbLib asks for sub-directories
@@ -197,10 +198,13 @@ def read_xlsx_sheet(path: str, sheet: str) -> List[Row]:
         raise DbLibError(f"cannot read {path}: {e}")
     try:
         return _read_sheet(z, path, sheet)
-    except (ElementTree.ParseError, KeyError, ValueError, AttributeError, TypeError, zipfile.BadZipFile) as e:
-        if isinstance(e, DbLibError):
-            raise
-        raise DbLibError(f"cannot read sheet '{sheet}' of {path}: {e}")
+    except DbLibError:
+        raise
+    except Exception as e:
+        # Whatever a damaged workbook raises (bad XML, a shared-string index
+        # past the end, a part that will not decompress), the tool answers
+        # with an error rather than a traceback
+        raise DbLibError(f"cannot read sheet '{sheet}' of {path}: {type(e).__name__}: {e}")
 
 
 def _read_sheet(z: zipfile.ZipFile, path: str, sheet: str) -> List[Row]:
@@ -247,9 +251,16 @@ def _letters(column: int) -> str:
     return out
 
 
+def field_maps(lib: dict, table: str) -> List[dict]:
+    """The field maps of a table, however the DbLib spells its name: 'My
+    Sheet$', My Sheet$ and My Sheet are the same table."""
+    want = sheet_name(table).lower()
+    return [m for t, maps in lib["fields"].items() if sheet_name(t).lower() == want for m in maps]
+
+
 def key_field(lib: dict, table: str, rows: List[Dict[str, str]]) -> str:
     """The table's key column: the field mapped as key, else the first."""
-    for f in lib["fields"].get(table, []):
+    for f in field_maps(lib, table):
         if f["key"]:
             return f["field"]
     return next(iter(rows[0])) if rows else ""
@@ -334,7 +345,7 @@ def place_operation(op: dict) -> dict:
     the SchLib placement plus the DbLib link (keys db_*)."""
     lib = read_dblib(op["dblib"])
     table, row = find_part(lib, str(op["part_number"]), op.get("table"))
-    maps = {f["field"]: f for f in lib["fields"].get(table, [])}
+    maps = {f["field"]: f for f in field_maps(lib, table)}
 
     def checked(field):
         # The spec to Altium is one line of '|'-separated fields

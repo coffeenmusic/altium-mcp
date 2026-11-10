@@ -155,6 +155,20 @@ class DbLibTest(unittest.TestCase):
         with self.assertRaisesRegex(dblib.DbLibError, "cannot read sheet"):
             dblib.read_xlsx_sheet(os.path.join(self.dir, "Bad.xlsx"), "Resistor")
 
+    def test_shared_string_index_past_the_end(self):
+        bad = os.path.join(self.dir, "Bad.xlsx")
+        with zipfile.ZipFile(bad, "w") as z:
+            z.writestr("xl/workbook.xml", f'<workbook {M} {R}><sheets><sheet name="Resistor" r:id="rId1"/>'
+                                          f'</sheets></workbook>')
+            z.writestr("xl/_rels/workbook.xml.rels",
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                       '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>')
+            z.writestr("xl/sharedStrings.xml", f'<sst {M}><si><t>PartNr</t></si></sst>')
+            z.writestr("xl/worksheets/sheet1.xml", f'<worksheet {M}><sheetData><row r="1">'
+                                                   f'<c r="A1" t="s"><v>7</v></c></row></sheetData></worksheet>')
+        with self.assertRaisesRegex(dblib.DbLibError, "cannot read sheet 'Resistor'.*IndexError"):
+            dblib.read_xlsx_sheet(bad, "Resistor")
+
     def test_sheet_names(self):
         self.assertEqual(dblib.sheet_name("Resistor$"), "Resistor")
         self.assertEqual(dblib.sheet_name("'My Sheet$'"), "My Sheet")
@@ -165,6 +179,18 @@ class DbLibTest(unittest.TestCase):
                                     "designator": "R9", "x": 0, "y": 0})
         self.assertEqual(op["db_table"], "'My Resistors$'")
         self.assertEqual(op["db_footprints"], ["R0603"])
+
+    def test_field_maps_match_the_table_however_it_is_quoted(self):
+        # The [Table] name and the field maps' TableNameOnly spelled differently
+        _xlsx(os.path.join(self.dir, "Lib.xlsx"), sheet="My Resistors")
+        for table, maps in (("'My Resistors$'", "My Resistors$"), ("My Resistors$", "'My Resistors$'"),
+                            ("'My Resistors$'", "My Resistors")):
+            with self.subTest(table=table, maps=maps):
+                self._write_lib(DBLIB.replace("TableName=Resistor$", f"TableName={table}")
+                                .replace("Resistor$", maps))
+                lib = dblib.read_dblib(self.lib)
+                self.assertEqual([m["field"] for m in dblib.field_maps(lib, table)][:2], ["PartNr", "Library Ref"])
+                self.assertEqual(self._params()["Value"], ("1k", True))   # VisibleOnAdd from the map
 
     def test_sub_directories_only_when_asked(self):
         os.makedirs(os.path.join(self.dir, "deep", "er"))

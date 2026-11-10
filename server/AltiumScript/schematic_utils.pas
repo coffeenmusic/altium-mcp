@@ -3103,33 +3103,33 @@ begin
     end;
 end;
 
-// Sets the parameter Name of Comp to Value (adding it if missing), shown
-// or hidden
-procedure SetSchParameter(Comp: ISch_Component; Name, Value: String; Visible: Boolean);
+// Sets the text Name of Comp (a parameter, or the Designator or Comment) to
+// Value. A missing parameter is added and registered, so undo and the
+// netlist see it. Visible: 1 shown, 0 hidden, -1 unchanged (a new
+// parameter is then hidden).
+procedure SetSchParameter(Comp: ISch_Component; Name, Value: String; Visible: Integer);
 var
-    Iter  : ISch_Iterator;
+    Obj   : ISch_GraphicalObject;
     Param : ISch_Parameter;
-    Found : ISch_Parameter;
 begin
-    Found := nil;
-    Iter := Comp.SchIterator_Create;
-    Iter.AddFilter_ObjectSet(MkSet(eParameter));
-    Param := Iter.FirstSchObject;
-    while Param <> nil do
+    Obj := FindSchText(Comp, Name);
+    if Obj = nil then
     begin
-        if SameText(Param.Name, Name) then Found := Param;
-        Param := Iter.NextSchObject;
-    end;
-    Comp.SchIterator_Destroy(Iter);
-    if Found = nil then
+        Param := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+        Param.Name := Name;
+        Param.Text := Value;
+        Param.IsHidden := Visible <> 1;
+        Param.Location := Comp.Location;
+        Comp.AddSchObject(Param);
+        SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
+    end
+    else
     begin
-        Found := SchServer.SchObjectFactory(eParameter, eCreate_Default);
-        Found.Name := Name;
-        Found.Location := Comp.Location;
-        Comp.AddSchObject(Found);
+        SchBeginModify(Obj);
+        Obj.Text := Value;
+        if Visible >= 0 then Obj.IsHidden := Visible = 0;
+        SchEndModify(Obj);
     end;
-    Found.Text := Value;
-    Found.IsHidden := not Visible;
 end;
 
 // Links a placed component to its DbLib row as Altium's own placement from a
@@ -3154,7 +3154,7 @@ begin
     for i := 0 to N - 1 do
         SetSchParameter(Comp, GetFieldFromPipeString(Rec, F + 1 + 3 * i),
                         GetFieldFromPipeString(Rec, F + 3 + 3 * i),
-                        GetFieldFromPipeString(Rec, F + 2 + 3 * i) = '1');
+                        StrToInt(GetFieldFromPipeString(Rec, F + 2 + 3 * i)));
     F := F + 1 + 3 * N;
     N := StrToIntDef(GetFieldFromPipeString(Rec, F), 0);
     if N = 0 then Exit;
@@ -3244,10 +3244,9 @@ end;
 // One edit record; Msg says why it failed
 function ApplySchEdit(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
-    Kind, Name : String;
+    Kind       : String;
     Comp       : ISch_Component;
     Obj        : ISch_GraphicalObject;
-    Param      : ISch_Parameter;
     Ambiguous  : Boolean;
     fld, vtx, n, Want : Integer;
 begin
@@ -3295,26 +3294,8 @@ begin
     end
     else if Kind = 'PARAM' then
     begin
-        Name := GetFieldFromPipeString(Rec, 3);
-        Obj := FindSchText(Comp, Name);
-        if Obj = nil then
-        begin
-            Param := SchServer.SchObjectFactory(eParameter, eCreate_Default);
-            Param.Name := Name;
-            Param.Text := GetFieldFromPipeString(Rec, 4);
-            Param.IsHidden := GetFieldFromPipeString(Rec, 5) <> '1';
-            Param.Location := Comp.Location;
-            Comp.AddSchObject(Param);
-            SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
-        end
-        else
-        begin
-            SchBeginModify(Obj);
-            Obj.Text := GetFieldFromPipeString(Rec, 4);
-            Want := StrToInt(GetFieldFromPipeString(Rec, 5));
-            if Want >= 0 then Obj.IsHidden := Want = 0;
-            SchEndModify(Obj);
-        end;
+        SetSchParameter(Comp, GetFieldFromPipeString(Rec, 3), GetFieldFromPipeString(Rec, 4),
+                        StrToInt(GetFieldFromPipeString(Rec, 5)));
         Result := True;
     end
     else if Kind = 'TEXT' then
