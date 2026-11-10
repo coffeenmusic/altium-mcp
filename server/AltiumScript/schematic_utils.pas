@@ -804,6 +804,44 @@ begin
     Result := (Pos('"success": true', R) > 0);
 end;
 
+// Redraw the library editor's current symbol. The editor draws it from a
+// picture built when the symbol became current, so objects added to it later
+// (new parameters, a shown comment) are not drawn. GraphicallyInvalidate,
+// Begin/EndModify on them, and making the same symbol current again all
+// leave them undrawn; making another symbol current and then this one again
+// rebuilds the picture. False when the library has no other symbol.
+function RedrawCurrentSymbol(Lib: ISch_Lib): Boolean;
+var
+    Current : ISch_Component;
+    Other   : ISch_Component;
+    C       : ISch_Component;
+    It      : ISch_Iterator;
+begin
+    Result := True;
+    if (Lib = nil) then Exit;
+    Current := Lib.CurrentSchComponent;
+    if (Current = nil) then Exit;
+    Other := nil;
+    It := Lib.SchLibIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eSchComponent));
+    C := It.FirstSchObject;
+    while (C <> nil) and (Other = nil) do
+    begin
+        if (C.I_ObjectAddress <> Current.I_ObjectAddress) then
+            Other := C;
+        C := It.NextSchObject;
+    end;
+    Lib.SchIterator_Destroy(It);
+    if (Other = nil) then
+    begin
+        Result := False;
+        Exit;
+    end;
+    Lib.CurrentSchComponent := Other;
+    Lib.CurrentSchComponent := Current;
+    Lib.GraphicallyInvalidate;
+end;
+
 // Finish the current symbol of a batch: create it (Mode 'SYMBOL') or find it
 // (Mode 'EDITSYMBOL' - never created when missing), then apply its edit
 // records. Returns 1 created, 2 edited, 0 nothing to do, -1 failed (the name
@@ -888,7 +926,10 @@ var
     EditedCount   : Integer;
     Outcome       : Integer;
     i             : Integer;
+    EditsApplied  : Boolean;
+    SymLib        : ISch_Lib;
 begin
+    EditsApplied := False;
     if not FileExists(SpecFilePath) then
     begin
         Result := 'ERROR: Spec file not found: ' + SpecFilePath;
@@ -946,6 +987,8 @@ begin
                 // Finish the previous symbol
                 Outcome := BatchFlushSymbol(Mode, CurrentName, CurrentDesc, PartCount,
                                             PinsList, GraphicsList, EditsList, FailedArray, ProblemsArray);
+                if (Outcome > 0) and (EditsList.Count > 0) then
+                    EditsApplied := True;
                 if (Outcome = 1) then
                     CreatedCount := CreatedCount + 1
                 else if (Outcome = 2) then
@@ -993,6 +1036,19 @@ begin
         // Created symbols mark the library already; edits alone do not
         if (EditedCount > 0) then
             MarkDocumentModified(LibPathOfFocusedSchLib(0));
+        // Edits to the symbol on screen are not drawn until it is made current
+        // again. Only the current symbol needs it: the others are drawn afresh
+        // when selected.
+        if EditsApplied then
+        begin
+            SymLib := SchServer.GetCurrentSchDocument;
+            if (SymLib <> nil) then
+                if (SymLib.ObjectID = eSchLib) then
+                    if not RedrawCurrentSymbol(SymLib) then
+                        ProblemsArray.Add('"' + JSONEscapeString(SymLib.CurrentSchComponent.LibReference +
+                            ': the library has no other symbol to switch to, so the editor may not draw its ' +
+                            'new parameters until the library is reopened') + '"');
+        end;
         AddJSONInteger(ResultProps, 'created', CreatedCount);
         AddJSONInteger(ResultProps, 'edited', EditedCount);
         if (FailedArray.Count > 0) then
@@ -3238,6 +3294,24 @@ begin
         SchRegister(Doc, Obj);
         Result := True;
     end
+    else if Kind = 'PORT' then
+    begin
+        // PORT|x|y|iotype|style|width|name: x, y is the port's left (or
+        // bottom) end; a width other than 0 turns auto size off, so the
+        // port keeps its length and the end a wire meets stays put
+        Obj := SchServer.SchObjectFactory(ePort, eCreate_GlobalCopy);
+        Obj.Location := Point(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)));
+        Obj.IOType := StrToInt(GetFieldFromPipeString(Rec, 3));
+        Obj.Style := StrToInt(GetFieldFromPipeString(Rec, 4));
+        Obj.Name := GetFieldFromPipeString(Rec, 6);
+        if StrToInt(GetFieldFromPipeString(Rec, 5)) > 0 then
+        begin
+            Obj.AutoSize := False;
+            Obj.Width := StrToInt(GetFieldFromPipeString(Rec, 5));
+        end;
+        SchRegister(Doc, Obj);
+        Result := True;
+    end
     else if (Kind = 'JUNCTION') or (Kind = 'NOERC') then
     begin
         if Kind = 'JUNCTION' then
@@ -3262,6 +3336,91 @@ begin
         Result := PlaceSchComponent(Doc, Rec, Msg)
     else
         Msg := 'unknown edit ' + Kind;
+end;
+
+// The placed pins of a sheet's components, live from Altium: designator,
+// part, pin number and name, its connection point (hot end) in internal
+// units, electrical type and whether it is hidden. Designators is
+// '|U1|R3|' or '' for every component. Only the pins of the part and display
+// mode each component shows are on the sheet.
+function GetSchematicPins(SheetPath: String; Designators: String): String;
+var
+    Doc       : ISch_Document;
+    ServerDoc : IServerDocument;
+    Iter, PinIter : ISch_Iterator;
+    Comp      : ISch_Component;
+    Pin       : ISch_Pin;
+    HotX, HotY, Count : Integer;
+    Items, Item, Props : TStringList;
+begin
+    Doc := SchServer.GetSchDocumentByPath(SheetPath);
+    if Doc = nil then
+    begin
+        if not FileExists(SheetPath) then
+        begin
+            Result := 'ERROR: Sheet not found: ' + SheetPath;
+            Exit;
+        end;
+        // Opened and shown the way EditSchematic opens a closed sheet
+        ServerDoc := Client.OpenDocument('SCH', SheetPath);
+        if ServerDoc <> nil then Client.ShowDocument(ServerDoc);
+        Doc := SchServer.GetSchDocumentByPath(SheetPath);
+    end;
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Altium could not open the sheet ' + SheetPath;
+        Exit;
+    end;
+    Designators := UpperCase(Designators);
+    Items := TStringList.Create;
+    Item := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Count := 0;
+        Iter := Doc.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := Iter.FirstSchObject;
+        while Comp <> nil do
+        begin
+            if (Designators = '') or (Pos('|' + UpperCase(Comp.Designator.Text) + '|', Designators) > 0) then
+            begin
+                PinIter := Comp.SchIterator_Create;
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                Pin := PinIter.FirstSchObject;
+                while Pin <> nil do
+                begin
+                    if ((Pin.OwnerPartId = 0) or (Pin.OwnerPartId = Comp.CurrentPartID)) and
+                       (Pin.OwnerPartDisplayMode = Comp.DisplayMode) then
+                    begin
+                        GetPinHotEnd(Pin, HotX, HotY);
+                        Item.Clear;
+                        AddJSONProperty(Item, 'designator', Comp.Designator.Text);
+                        AddJSONInteger(Item, 'part', Comp.CurrentPartID);
+                        AddJSONProperty(Item, 'pin', Pin.Designator);
+                        AddJSONProperty(Item, 'name', Pin.Name);
+                        AddJSONInteger(Item, 'x', HotX);
+                        AddJSONInteger(Item, 'y', HotY);
+                        AddJSONInteger(Item, 'electrical', Pin.Electrical);
+                        AddJSONBoolean(Item, 'hidden', Pin.IsHidden);
+                        Items.Add(BuildJSONObject(Item, 1));
+                        Count := Count + 1;
+                    end;
+                    Pin := PinIter.NextSchObject;
+                end;
+                Comp.SchIterator_Destroy(PinIter);
+            end;
+            Comp := Iter.NextSchObject;
+        end;
+        Doc.SchIterator_Destroy(Iter);
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'count', Count);
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'pins')) else Props.Add('"pins": []');
+        Result := BuildJSONObject(Props);
+    finally
+        Items.Free;
+        Item.Free;
+        Props.Free;
+    end;
 end;
 
 function EditSchematic(SheetPath: String; SpecPath: String; Save: Boolean): String;
