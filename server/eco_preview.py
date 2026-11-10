@@ -236,12 +236,13 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
     """The differences, grouped as the ECO dialog groups its actions.
 
     single_pin_nets is the project's "Netlist single pin nets" option: off
-    (the default), a net with one pin in the whole design is left out of the
-    netlist, so the ECO leaves that pin as it is on the board: it neither
-    connects nor disconnects it, and keeps a board net made of such pins.
-    Board components with no schematic link (logos, title blocks) are left
-    alone too; they are listed as board_only_components. Both checked against
-    Altium AD25's own Engineering Change Order.
+    (the default), a pin alone on its net in the whole design counts as on
+    no net: the ECO does not connect it, and takes it off a board net it is
+    on, as for a pin with no net. A named one-pin net is still added (with
+    no pins); an auto-named one (NetR1_1) is not. Board components with no
+    schematic link (logos, title blocks) are left alone; they are listed as
+    board_only_components. Both checked against Altium AD25's own
+    Engineering Change Order.
 
     options (from parse_project_options) leaves out what the project's
     comparator, ECO generation and class generation options keep the ECO
@@ -294,18 +295,19 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
     # Nets, over the pins of matched components, keyed by board designator
     linked = {d.lower() for d in sch_to_pcb.values()}
     all_pins = source["pins"]
-    untouched = set()                                 # board pins the ECO leaves as they are
+    solo_named = set()                                # named one-pin nets, added without pins
     if not single_pin_nets:
+        # A pin alone on its net counts as on no net: the ECO does not put
+        # it on that net, and takes it off a board net it is on. A named
+        # one-pin net is still added, with no pins; an auto-named one
+        # (Net<designator>_<pin>, as every unconnected pin gets) is not
         sizes = defaultdict(int)
         for n in all_pins.values():
             sizes[n] += 1
-        untouched = {(sch_to_pcb[d].lower(), p) for (d, p), n in all_pins.items()
-                     if d in sch_to_pcb and n and sizes[n] == 1}
-        # nor does it add such a net for a new part
+        solo_named = {n for (d, p), n in all_pins.items() if n and sizes[n] == 1 and n.lower() != f"net{d}_{p}"}
         all_pins = {k: (n if sizes[n] > 1 else "") for k, n in all_pins.items()}
-    sch_pins = {(sch_to_pcb[d].lower(), p): n for (d, p), n in all_pins.items()
-                if d in sch_to_pcb and (sch_to_pcb[d].lower(), p) not in untouched}
-    pcb_pins = {k: n for k, n in target["pads"].items() if k[0] in linked and k not in untouched}
+    sch_pins = {(sch_to_pcb[d].lower(), p): n for (d, p), n in all_pins.items() if d in sch_to_pcb}
+    pcb_pins = {k: n for k, n in target["pads"].items() if k[0] in linked}
     sn, pn = _nets(sch_pins), _nets(pcb_pins)
     by_members = {frozenset(m): name for name, m in pn.items()}
     renamed = {}                                      # board name -> schematic name
@@ -327,11 +329,10 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
     # Nets by name over every part, so a net on parts still to be added, or
     # only on parts that go, counts too
     new_names = set(renamed.values())
-    sch_names = {n for n in all_pins.values() if n}
+    sch_names = {n for n in all_pins.values() if n} | solo_named
     pcb_names = {n for n in target["pads"].values() if n}
     out["add_nets"] = sorted(n for n in sch_names if n not in pcb_names and n not in new_names)
-    kept = {n for k, n in target["pads"].items() if k in untouched and n}
-    out["remove_nets"] = sorted(n for n in pcb_names if n not in sch_names and n not in renamed and n not in kept)
+    out["remove_nets"] = sorted(n for n in pcb_names if n not in sch_names and n not in renamed)
 
     # Component classes and rooms, by name
     seen = defaultdict(list)

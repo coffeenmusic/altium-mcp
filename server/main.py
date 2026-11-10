@@ -6606,10 +6606,11 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
     out and counted in skipped_by_project_options. Duplicate component
     class names (Altium's "Class already exists" warning, usually from a
     sheet symbol that lists several files) are explained in
-    duplicate_component_classes. As Altium's ECO does, a pin
-    alone on its net (with "Netlist single pin nets" off) is left as it is,
-    and board parts with no schematic link are left alone; those are listed
-    in board_only_components, outside the summary.
+    duplicate_component_classes. As Altium's ECO does, with "Netlist single
+    pin nets" off a pin alone on its net counts as on no net (it is not
+    connected, and leaves a board net it is on) while a named one-pin net is
+    still added; board parts with no schematic link are left alone and
+    listed in board_only_components, outside the summary.
 
     Not compared, so an empty summary means "no differences of the kinds
     compared", not that an Update PCB would change nothing: net class

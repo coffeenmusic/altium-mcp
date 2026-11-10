@@ -127,22 +127,39 @@ class NetTest(unittest.TestCase):
         self.assertEqual(d["rename_nets"], [{"from": "N1", "to": "MID"}])
         # U2-2 joins SENSE, whose other pin (R5) is not on the board yet; the
         # mounting hole pad has no schematic pin and is left alone. LONELY
-        # has one pin, so with single-pin nets off the ECO leaves J1-1 and
-        # its board net as they are (checked against Altium AD25's ECO)
-        self.assertEqual(d["change_pin_nets"], [{"pin": "U3-2", "from": "", "to": "SENSE"}])
-        self.assertEqual(d["add_nets"], ["SENSE"])
+        # has one pin, so with single-pin nets off J1-1 counts as on no net
+        # and leaves it; the named net LONELY itself stays. OUT, on the new
+        # R5 alone, is added as a net with no pins
+        self.assertEqual(d["change_pin_nets"], [{"pin": "J1-1", "from": "LONELY", "to": ""},
+                                                {"pin": "U3-2", "from": "", "to": "SENSE"}])
+        self.assertEqual(d["add_nets"], ["OUT", "SENSE"])
         self.assertEqual(d["remove_nets"], ["X"])
         on = diff(True)
         self.assertEqual(on["change_pin_nets"], [{"pin": "U3-2", "from": "", "to": "SENSE"}])
         self.assertEqual(on["remove_nets"], ["X"])
 
     def test_single_pin_net_left_out_by_default(self):
+        # Checked live against AD25's ECO, single-pin nets off: a net label
+        # on a lone pin gives "Add Nets" for the net but no "Add Pins To Nets"
         target = dict(TARGET, pads=[p for p in TARGET["pads"] if not p.startswith("J1|1|")] + ["J1|1|"])
         d = eco_preview.compare(eco_preview.parse_source(SOURCE), eco_preview.parse_target(target))
-        self.assertNotIn({"pin": "J1-1", "from": "", "to": "LONELY"}, d["change_pin_nets"])
+        self.assertNotIn("J1-1", [c["pin"] for c in d["change_pin_nets"]])
+        self.assertIn("LONELY", d["add_nets"])
         d = eco_preview.compare(eco_preview.parse_source(SOURCE), eco_preview.parse_target(target), True)
         self.assertIn({"pin": "J1-1", "from": "", "to": "LONELY"}, d["change_pin_nets"])
         self.assertIn("LONELY", d["add_nets"])
+
+    def test_pin_moved_onto_a_net_of_its_own(self):
+        # J1-2 goes from GND onto a net of its own: it leaves GND, as a pin
+        # with no net would. An auto-named one-pin net (every unconnected
+        # pin gets one) is not added; a named one is
+        for net, added in (("NetJ1_2", ["OUT", "SENSE"]), ("SOLO", ["OUT", "SENSE", "SOLO"])):
+            source = dict(SOURCE, pins=[p for p in SOURCE["pins"] if p != "J1|2|GND"] + [f"J1|2|{net}"])
+            d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET))
+            self.assertIn({"pin": "J1-2", "from": "GND", "to": ""}, d["change_pin_nets"])
+            self.assertEqual(d["add_nets"], added)
+            d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET), True)
+            self.assertIn({"pin": "J1-2", "from": "GND", "to": net}, d["change_pin_nets"])
 
 
 class ClassAndRoomTest(unittest.TestCase):
@@ -216,7 +233,9 @@ class ProjectOptionsTest(unittest.TestCase):
         # Type17 = Add Node (a pin joining a net)
         text = PRJ.replace("Type15=1", "Type15=0").replace("Type8=1", "Type8=0").replace("Type17=1", "Type17=0")
         d = diff_with(text)
-        self.assertEqual((d["change_footprints"], d["remove_components"], d["change_pin_nets"]), ([], [], []))
+        self.assertEqual((d["change_footprints"], d["remove_components"]), ([], []))
+        # only the pin joining a net is left out; one leaving its net is a Remove Node
+        self.assertEqual(d["change_pin_nets"], [{"pin": "J1-1", "from": "LONELY", "to": ""}])
         reasons = {s["kind"]: s["reason"] for s in d["skipped_by_project_options"]}
         self.assertIn("Comparator", reasons["change_footprints"])
         self.assertIn("ECO Generation", reasons["remove_components"])
@@ -266,9 +285,10 @@ class ToolTest(unittest.TestCase):
             return json.loads(asyncio.run(main.preview_eco(None, **kwargs))), calls
 
     def test_same_sides_note_only_what_is_compared(self):
-        side = {"components": [r"\S1\A|R1|R0603|10k"], "pins": ["R1|1|A", "R1|2|B"]}
+        side = {"components": [r"\S1\A|R1|R0603|10k", r"\S1\B|R2|R0603|10k"],
+                "pins": ["R1|1|A", "R1|2|B", "R2|1|A", "R2|2|B"]}
         replies = {"get_eco_source": dict(side, project_path="", pcb_path="board.PcbDoc"),
-                   "get_eco_target": {"components": side["components"], "pads": ["R1|1|A", "R1|2|B"]}}
+                   "get_eco_target": {"components": side["components"], "pads": side["pins"]}}
         reply, calls = self.run_tool(replies)
         self.assertEqual(calls, ["get_eco_source", "get_eco_target"])
         self.assertEqual(reply["summary"], {})
