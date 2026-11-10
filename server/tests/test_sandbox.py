@@ -44,6 +44,24 @@ class VarBlockTest(unittest.TestCase):
         sp = sandbox.split_var_block("Variance := 1;")
         self.assertEqual(sp.decls, [])
 
+    def test_comments_before_and_inside_the_var_block(self):
+        script = ("// read the ports\n{ second note }\nvar\n    X : Integer;\n"
+                  "    // the document\n    Doc : IDispatch;\nX := 1;")
+        sp = sandbox.split_var_block(script)
+        self.assertEqual(sp.decls, ["X : Integer;", "Doc : IDispatch;"])
+        self.assertEqual(sp.decl_src, [4, 6])
+        self.assertEqual(sp.body, ["X := 1;"])
+        self.assertEqual(sp.body_offset, 6)
+        # and the declared name is no longer refused
+        b = build("// note\nvar\n    X : Integer;\nX := 1;\nResultText := IntToStr(X);")
+        self.assertIn("    X : Integer;", b.text)
+
+    def test_comment_without_var_block_stays_in_the_body(self):
+        sp = sandbox.split_var_block("// just a note\nI1 := 1;")
+        self.assertEqual(sp.decls, [])
+        self.assertEqual(sp.body, ["// just a note", "I1 := 1;"])
+        self.assertEqual(sp.body_offset, 0)
+
 
 class CheckTest(unittest.TestCase):
     def check(self, script):
@@ -246,6 +264,18 @@ class UndoGroupTest(unittest.TestCase):
         run = TEMPLATE[TEMPLATE.index("procedure Run;"):]
         self.assertLess(run.index("ExceptionMessage"), run.index("SbxCloseUndo;"))
         self.assertLess(run.index("SbxCloseUndo;"), run.index("SandboxLog('sandbox end');"))
+
+    def test_result_is_written_in_a_finally_block(self):
+        # Exit in the script ends Run; only a finally block still runs then,
+        # so cleanup and the result file must be inside one
+        run = TEMPLATE[TEMPLATE.index("procedure Run;"):]
+        body = run.index(sandbox.BODY_BEGIN)
+        except_at = run.index("\n    except", body)
+        finally_at = run.index("finally", except_at)
+        for step in ("List1.Free;", "SbxCloseUndo;", "OutLines.SaveToFile(OutPath);"):
+            self.assertLess(finally_at, run.index(step), step)
+        # the finally belongs to a try opened before the script body
+        self.assertRegex(run[:body], r"\btry\s+try\b")
 
     def test_close_leftover_undo_builds_cleanup_from_list(self):
         import tempfile
