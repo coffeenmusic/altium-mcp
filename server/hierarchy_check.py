@@ -25,9 +25,9 @@ IO_TYPES = {0: "Unspecified", 1: "Output", 2: "Input", 3: "Bidirectional"}
 SIDES = {0: "left", 1: "right", 2: "top", 3: "bottom"}
 SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 HIERARCHY_MODES = {0: "Automatic"}
-# PrjPcb HierarchyMode value of "Strict Hierarchical" (power ports local); not
-# confirmed, so power-port matches are always reported as info
-STRICT = None
+# Which PrjPcb HierarchyMode value is "Strict Hierarchical" (power ports
+# local) is not confirmed, so an entry named like a child's power port is
+# reported as info in every mode, never switched off by a guessed value.
 
 
 def _key(name):
@@ -118,7 +118,7 @@ def read_sheet(path):
 
 def sheet_from_records(recs, additional=(), path=""):
     """read_sheet on already parsed FileHeader and Additional records."""
-    symbols, ports, wires, attach, power = {}, [], [], [], set()
+    symbols, ports, wires, attach, power, no_erc = {}, [], [], [], set(), []
     for i, r in enumerate(recs):
         if not r:
             continue
@@ -127,7 +127,11 @@ def sheet_from_records(recs, additional=(), path=""):
             symbols[i] = {"designator": "", "file": "", "entries": [],
                           "at": (coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")),
                           "size": (coord(r, "XSIZE"), coord(r, "YSIZE")),
-                          "type": r.get("SYMBOLTYPE", "Normal")}
+                          "type": r.get("SYMBOLTYPE", "Normal"),
+                          # managed (device) sheets: Altium keeps the sheet in
+                          # Managed/Sheets/<revision GUID>/ of the project
+                          "revision": r.get("REVISIONGUID", ""),
+                          "item": r.get("DESIGNITEMID", "")}
         elif kind == "18":
             x, y = coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")
             w = coord(r, "WIDTH") or 500.0
@@ -145,6 +149,8 @@ def sheet_from_records(recs, additional=(), path=""):
         elif kind == "17":
             attach.append((coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")))
             power.add(_key(r.get("TEXT", "")))
+        elif kind == "22" and r.get("ISACTIVE", "T") != "F":
+            no_erc.append((coord(r, "LOCATION.X"), coord(r, "LOCATION.Y")))
     for r in recs:
         if not r or "OWNERINDEX" not in r:
             continue
@@ -190,7 +196,7 @@ def sheet_from_records(recs, additional=(), path=""):
         c["entries"] = [n for _, n in sorted(c["entries"])]
         hcs.append(c)
     return {"path": Path(path), "symbols": list(symbols.values()), "ports": ports, "connectors": hcs,
-            "wires": wires, "harnesses": harnesses, "attach": attach, "power": power}
+            "wires": wires, "harnesses": harnesses, "attach": attach, "power": power, "no_erc": no_erc}
 
 
 def harness_networks(sheet):
@@ -254,10 +260,12 @@ class HierarchyChecker:
                 self.sheets[p] = self.reader(p)
             except Exception as e:  # missing or locked file
                 self.unreadable.append({"sheet": p.name, "error": str(e)})
-        self.by_name = {}
+        # file name (and name without extension) -> every sheet of that name;
+        # two folders may each hold one, managed sheets in particular
+        self.by_name = defaultdict(list)
         for p in self.sheets:
-            self.by_name.setdefault(p.name.casefold(), p)
-            self.by_name.setdefault(p.stem.casefold(), p)
+            for k in {p.name.casefold(), p.stem.casefold()}:
+                self.by_name[k].append(p)
         self.links = []   # (parent sheet, symbol, child path or None)
 
     @staticmethod
@@ -275,19 +283,47 @@ class HierarchyChecker:
         self.issues.append({"severity": severity, "type": kind, "message": message, **extra})
 
     # -- hierarchy
-    def resolve_child(self, parent, file_text):
-        name = Path(file_text.strip()).name
-        p = self.by_name.get(name.casefold()) or self.by_name.get(Path(name).stem.casefold())
-        if p is not None:
-            return p, True
-        cand = parent.parent / (file_text if file_text.lower().endswith(".schdoc") else file_text + ".SchDoc")
-        if cand.exists():
+    def _load(self, path):
+        """A sheet outside the project, read once; None if unreadable."""
+        if path not in self.sheets:
             try:
-                self.sheets[cand] = self.reader(cand)
-                return cand, False
+                self.sheets[path] = self.reader(path)
             except Exception:
-                return None, False
-        return None, False
+                return None
+        return path
+
+    def resolve_child(self, parent, file_text, sym):
+        """(child path or None, in project, candidates when ambiguous)."""
+        text = file_text.strip()
+        if not text.lower().endswith(".schdoc"):
+            text += ".SchDoc"
+        name = Path(text).name
+        in_project = set(self.sheet_paths)
+        # a managed sheet: the copy of exactly this revision
+        if sym.get("revision"):
+            cand = Path(os.path.normpath(self.prj.parent / "Managed" / "Sheets" / sym["revision"] / name))
+            if cand in self.sheets or cand.exists():
+                got = self._load(cand)
+                return got, got in in_project, []
+        # a path given on the symbol, relative to the parent sheet
+        if Path(text).parent != Path("."):
+            cand = Path(os.path.normpath(parent.parent / text))
+            if cand in self.sheets or cand.exists():
+                got = self._load(cand)
+                return got, got in in_project, []
+        cands = self.by_name.get(name.casefold()) or self.by_name.get(Path(name).stem.casefold()) or []
+        if len(cands) == 1:
+            return cands[0], True, []
+        if len(cands) > 1:
+            here = [c for c in cands if c.parent == parent.parent]
+            if len(here) == 1:
+                return here[0], True, []
+            return None, True, sorted(cands)
+        cand = parent.parent / text
+        if cand.exists():
+            got = self._load(cand)
+            return got, False, []
+        return None, False, []
 
     def build_links(self):
         for path, sh in list(self.sheets.items()):
@@ -297,14 +333,31 @@ class HierarchyChecker:
                     self.add("error", "sheet_symbol_without_file",
                              f"sheet symbol {sym['designator']!r} on {path.name} names no child sheet",
                              sheet=path.name, sheet_symbol=sym["designator"], at=sym["at"])
+                design_item = sym.get("type", "Normal") != "Normal"
                 for f in files:
-                    child, in_project = self.resolve_child(path, f)
-                    if child is None:
+                    child, in_project, ambiguous = self.resolve_child(path, f, sym)
+                    if ambiguous:
+                        rel = [os.path.relpath(c, self.prj.parent) for c in ambiguous]
+                        self.add("warning", "child_sheet_ambiguous",
+                                 f"sheet symbol {sym['designator']!r} on {path.name} points to {f!r}, and the "
+                                 f"project has more than one sheet of that name ({', '.join(rel)}); its "
+                                 "entries are not checked",
+                                 sheet=path.name, sheet_symbol=sym["designator"], child=f, candidates=rel,
+                                 at=sym["at"])
+                    elif child is None and design_item:
+                        self.add("info", "device_sheet_not_local",
+                                 f"sheet symbol {sym['designator']!r} on {path.name} is a "
+                                 f"{sym.get('type')} ({sym.get('item') or f}) whose sheet is not on disk; "
+                                 "Altium fetches it from the workspace or a device sheet folder, so its "
+                                 "entries are not checked",
+                                 sheet=path.name, sheet_symbol=sym["designator"], child=f,
+                                 design_item=sym.get("item"), at=sym["at"])
+                    elif child is None:
                         self.add("error", "child_sheet_missing",
                                  f"sheet symbol {sym['designator']!r} on {path.name} points to {f!r}, "
                                  "which is neither in the project nor in its folder",
                                  sheet=path.name, sheet_symbol=sym["designator"], child=f, at=sym["at"])
-                    elif not in_project:
+                    elif not in_project and not design_item:
                         self.add("warning", "child_not_in_project",
                                  f"{child.name} (child of {sym['designator']!r} on {path.name}) is not in the project",
                                  sheet=path.name, sheet_symbol=sym["designator"], child=child.name)
@@ -375,7 +428,7 @@ class HierarchyChecker:
             for k, ps in port_by.items():
                 if k not in matched_ports:
                     unmatched_ports.append(ps[0])
-            power = self.sheets[child]["power"] if self.settings.get("HierarchyMode") != STRICT else set()
+            power = self.sheets[child]["power"]
             self.pair_up(unmatched_entries, unmatched_ports, port_by, uses[child] > 1, base, sym,
                          self.linked_elsewhere(child, sym), power)
 
@@ -435,7 +488,8 @@ class HierarchyChecker:
                 alt = {"op": "rename_entry", "sheet": base["sheet"], "symbol": base["sheet_symbol"],
                        "old": e["name"], "new": p["name"]}
                 note = "rename the port, the parent sheet's entry names are kept"
-            self.add("error", "probable_pair",
+            # a pair found by a similar name alone is a guess
+            self.add("warning" if why == "similar name" else "error", "probable_pair",
                      f"entry {e['name']!r} of {base['sheet_symbol']} and port {p['name']!r} on "
                      f"{base['child']} do not connect, but probably belong together ({why})",
                      entry=e["name"], port=p["name"], reason=why, note=note, **base,
@@ -480,7 +534,10 @@ class HierarchyChecker:
                                          for a in sh["attach"])
                     # two sheet symbols butted together, entry on entry
                     wired = wired or entry_points[(round(pt[0], 1), round(pt[1], 1))] > 1
-                    if not wired:
+                    # a No ERC marker on the entry: left open on purpose
+                    marked = any(abs(pt[0] - m[0]) <= 0.6 and abs(pt[1] - m[1]) <= 0.6
+                                 for m in sh.get("no_erc", ()))
+                    if not wired and not marked:
                         self.add("warning", "entry_unwired",
                                  f"entry {e['name']!r} of {sym['designator']} on {path.name} at "
                                  f"{pt[0]:g},{pt[1]:g} has no wire, bus or harness attached",

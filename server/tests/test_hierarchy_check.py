@@ -21,11 +21,12 @@ class SheetBuilder:
         self.recs = [{"HEADER": "Protel for Windows - Schematic Capture Binary File Version 5.0"}]
         self.add = [{"HEADER": "Protel for Windows - Schematic Capture Binary File Version 5.0"}]
 
-    def symbol(self, name, file, x, y, w=100, h=100, entries=()):
-        """entries: (name, side, distance in 100 mil, harness, iotype)"""
+    def symbol(self, name, file, x, y, w=100, h=100, entries=(), attrs=None):
+        """entries: (name, side, distance in 100 mil, harness, iotype);
+        attrs: more fields of the sheet symbol record (SYMBOLTYPE, ...)"""
         idx = len(self.recs)
         self.recs.append({"RECORD": "15", "LOCATION.X": str(x), "LOCATION.Y": str(y),
-                          "XSIZE": str(w), "YSIZE": str(h)})
+                          "XSIZE": str(w), "YSIZE": str(h), **(attrs or {})})
         owner = str(idx - 1)
         self.recs.append({"RECORD": "32", "OWNERINDEX": owner, "TEXT": name})
         self.recs.append({"RECORD": "33", "OWNERINDEX": owner, "TEXT": file})
@@ -36,6 +37,13 @@ class SheetBuilder:
             if io:
                 r["IOTYPE"] = str(io)
             self.recs.append(r)
+        return self
+
+    def no_erc(self, x, y, active=True):
+        r = {"RECORD": "22", "LOCATION.X": str(x), "LOCATION.Y": str(y), "SUPPRESSALL": "T"}
+        if not active:
+            r["ISACTIVE"] = "F"
+        self.recs.append(r)
         return self
 
     def port(self, name, x, y, width=50, harness="", io=0):
@@ -75,24 +83,38 @@ class SheetBuilder:
 class Project:
     """A .PrjPcb in a temp folder and a reader serving built sheets."""
 
-    def __init__(self, test, sheets, harness_files=None, encoding="utf-8-sig"):
+    def __init__(self, test, sheets, harness_files=None, encoding="utf-8-sig",
+                 settings=("HierarchyMode=0", "AllowSheetEntryNetNames=0"), on_disk=None):
+        """sheets: {path in the project: SheetBuilder}; a path may have
+        folders (written with backslashes, as Altium does). on_disk: sheets
+        that exist in the folder but are not in the project."""
         tmp = tempfile.TemporaryDirectory()
         test.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name)
         self.sheets = {}
-        lines = ["[Design]", "HierarchyMode=0", "AllowSheetEntryNetNames=0"]
+        lines = ["[Design]", *settings]
         for k, (name, b) in enumerate(sheets.items(), 1):
             lines += [f"[Document{k}]", f"DocumentPath={name}"]
-            self.sheets[(self.dir / name).name.casefold()] = b
-            (self.dir / name).write_bytes(b"")
+            self._put(name, b)
+        for name, b in (on_disk or {}).items():
+            self._put(name, b)
         for name, text in (harness_files or {}).items():
             (self.dir / name).write_text(text, encoding="utf-8")
             lines += [f"[Document{len(lines)}]", f"DocumentPath={name}"]
         self.prj = self.dir / "Test.PrjPcb"
         self.prj.write_text("\r\n".join(lines) + "\r\n", encoding=encoding)
 
+    def _key(self, path):
+        return os.path.normpath(os.path.relpath(path, self.dir)).casefold()
+
+    def _put(self, name, b):
+        f = Path(os.path.normpath(self.dir / name))
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"")
+        self.sheets[self._key(f)] = b
+
     def reader(self, path):
-        b = self.sheets[Path(path).name.casefold()]
+        b = self.sheets[self._key(path)]
         return hc.sheet_from_records(b.recs, b.add, path)
 
     def check(self, **kw):
@@ -195,6 +217,31 @@ class EntriesAndPorts(unittest.TestCase):
         self.assertEqual(issue["type"], "entry_unwired")
         self.assertEqual(issue["at"], [1000.0, 2900.0])
 
+    def test_no_erc_marker_on_an_entry(self):
+        top = SheetBuilder().symbol("U1", "Child", 100, 300, entries=[("A", 0, 1, "", 0), ("B", 0, 2, "", 0)])
+        top.no_erc(100, 290)                 # on entry A
+        top.no_erc(100, 280, active=False)   # on entry B, but switched off
+        child = SheetBuilder().port("A", 100, 100).port("B", 100, 200)
+        res = Project(self, {"Top.SchDoc": top, "Child.SchDoc": child}).check()
+        self.assertEqual([(i["type"], i["entry"]) for i in res["issues"]], [("entry_unwired", "B")])
+
+    def test_pair_by_similar_name_is_a_warning(self):
+        top = wired_top(("SPI_CLOCK", 0, 1, "", 0), ("I2C_SDA", 0, 2, "", 0))
+        child = SheetBuilder().port("SPI_CLK", 100, 100).port("i2c-sda", 100, 200)
+        res = Project(self, {"Top.SchDoc": top, "Child.SchDoc": child}).check()
+        found = {i["entry"]: (i["severity"], i["reason"]) for i in res["issues"]}
+        self.assertEqual(found, {"SPI_CLOCK": ("warning", "similar name"),
+                                 "I2C_SDA": ("error", "same name apart from case/separators")})
+
+    def test_power_port_match_without_a_hierarchy_mode_key(self):
+        top = wired_top(("VCC_CORE", 0, 1, "", 0))
+        child = SheetBuilder()
+        child.recs.append({"RECORD": "17", "TEXT": "VCC_CORE", "LOCATION.X": "100", "LOCATION.Y": "100"})
+        p = Project(self, {"Top.SchDoc": top, "Child.SchDoc": child}, settings=())
+        res = p.check(min_severity="info")
+        self.assertEqual(types(res), ["entry_matches_power_port"])
+        self.assertNotIn("HierarchyMode", res["settings"])
+
     def test_entry_named_like_a_power_port_is_info(self):
         top = wired_top(("VCC_CORE", 0, 1, "", 0))
         child = SheetBuilder()
@@ -214,6 +261,43 @@ class EntriesAndPorts(unittest.TestCase):
         top = SheetBuilder().symbol("U1", "Gone", 100, 300)
         res = Project(self, {"Top.SchDoc": top}).check()
         self.assertEqual(types(res), ["child_sheet_missing"])
+
+    def test_managed_sheets_are_found_by_revision(self):
+        # two revisions of one managed sheet, same file name, different ports
+        def managed(rev):
+            return {"SYMBOLTYPE": "Design Item", "DESIGNITEMID": "SCH-1-A." + rev, "REVISIONGUID": "GUID" + rev}
+        top = SheetBuilder().symbol("Q1", "Osc.SchDoc", 100, 300, entries=[("CLK", 0, 1, "", 0)],
+                                    attrs=managed("1"))
+        top.symbol("Q2", "Osc.SchDoc", 300, 300, entries=[("CLK_OUT", 0, 1, "", 0)], attrs=managed("2"))
+        top.wire((50, 290), (100, 290)).wire((250, 290), (300, 290))
+        rev1 = SheetBuilder().port("CLK", 100, 100)
+        rev2 = SheetBuilder().port("CLK_OUT", 100, 100)
+        res = Project(self, {"Top.SchDoc": top,
+                             r"Managed\Sheets\GUID1\Osc.SchDoc": rev1,
+                             r"Managed\Sheets\GUID2\Osc.SchDoc": rev2}).check(min_severity="info")
+        self.assertEqual(types(res), [])
+        self.assertEqual(res["sheet_symbols"], 2)
+
+    def test_managed_sheet_not_on_disk_is_info(self):
+        top = wired_top(("CLK", 0, 1, "", 0), file="Osc.SchDoc")
+        top.recs[1].update({"SYMBOLTYPE": "Design Item", "DESIGNITEMID": "SCH-1-A.1", "REVISIONGUID": "GONE"})
+        res = Project(self, {"Top.SchDoc": top}).check(min_severity="info")
+        (issue,) = res["issues"]
+        self.assertEqual((issue["type"], issue["severity"]), ("device_sheet_not_local", "info"))
+        self.assertEqual(issue["design_item"], "SCH-1-A.1")
+
+    def test_same_file_name_in_two_folders(self):
+        # A\Top uses A\Child (same folder); Top in the project folder cannot tell
+        a_top = wired_top(("X", 0, 1, "", 0))
+        root_top = wired_top(("X", 0, 1, "", 0))
+        a_child = SheetBuilder().port("X", 100, 100)
+        b_child = SheetBuilder().port("Y", 100, 100)
+        res = Project(self, {r"A\Top.SchDoc": a_top, r"A\Child.SchDoc": a_child,
+                             r"B\Child.SchDoc": b_child, "Root.SchDoc": root_top}).check(min_severity="info")
+        issues = [(i["type"], i["sheet"]) for i in res["issues"] if i["severity"] != "info"]
+        self.assertEqual(issues, [("child_sheet_ambiguous", "Root.SchDoc")])
+        amb = next(i for i in res["issues"] if i["type"] == "child_sheet_ambiguous")
+        self.assertEqual(amb["candidates"], [os.path.join("A", "Child.SchDoc"), os.path.join("B", "Child.SchDoc")])
 
     def test_non_ascii_names_in_a_utf8_project(self):
         top = wired_top(("A", 0, 1, "", 0), file="B3 µC")
