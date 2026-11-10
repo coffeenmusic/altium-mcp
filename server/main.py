@@ -6599,11 +6599,14 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
     Compiles the project in memory (nothing is saved) and reads the board
     without bringing it to the front. Components match by unique id, nets by
     their pins (a net whose pins stay together under a new name is a
-    rename), rooms and classes by name. The comparator's ignore settings are
-    not applied: every difference is listed, including kinds the ECO is set
-    to skip. Duplicate component class names (Altium's "Class already
-    exists" warning, usually from a sheet symbol that lists several files)
-    are explained in duplicate_component_classes. As Altium's ECO does, a pin
+    rename), rooms and classes by name. The project's options, as saved in
+    the .PrjPcb, are followed: kinds the comparator ignores (Project Options
+    > Comparator) or the ECO does not generate (ECO Generation), and classes
+    and rooms the project does not generate (Class Generation), are left
+    out and counted in skipped_by_project_options. Duplicate component
+    class names (Altium's "Class already exists" warning, usually from a
+    sheet symbol that lists several files) are explained in
+    duplicate_component_classes. As Altium's ECO does, a pin
     alone on its net (with "Netlist single pin nets" off) is left as it is,
     and board parts with no schematic link are left alone; those are listed
     in board_only_components, outside the summary.
@@ -6628,7 +6631,9 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
              rename_nets, change_pin_nets, add/remove_component_classes,
              change_component_class_members, add/remove_net_classes,
              add_rooms, remove_rooms, duplicate_component_classes,
-             board_only_components
+             board_only_components, skipped_by_project_options ({kind,
+             count, reason}); project_options_note if the .PrjPcb could not
+             be read (then nothing is left out)
     """
     import eco_preview
 
@@ -6645,17 +6650,20 @@ async def preview_eco(ctx: Context, project_path: str = "", pcb_path: str = "", 
     if error:
         return json.dumps({"success": False, "error": error})
     try:
-        prj_text = read_altium_text(Path(source["project_path"]))
+        options = eco_preview.parse_project_options(read_altium_text(Path(source["project_path"])))
     except (OSError, KeyError):
-        prj_text = ""
-    single_pin = re.search(r"^NetlistSinglePinNets=1\s*$", prj_text, re.MULTILINE) is not None
-    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target), single_pin)
+        options = None
+    diff = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target),
+                               bool(options and options["single_pin_nets"]), options)
     shown, cut = eco_preview.limit(diff, max(1, int(max_per_kind)))
     reply = {"project_path": source.get("project_path"), "pcb_path": target.get("board_path", board),
              "unsaved_in_altium": source.get("unsaved_in_altium", []),
              "summary": eco_preview.summary(diff)}
     if not reply["summary"]:
         reply["note"] = eco_preview.no_differences_note()
+    if options is None:
+        reply["project_options_note"] = ("The .PrjPcb could not be read, so its comparator, ECO and class "
+                                         "generation options were not applied: every difference is listed.")
     if cut:
         reply["truncated"] = cut
     reply.update(shown)

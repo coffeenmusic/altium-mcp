@@ -11,9 +11,12 @@ path plus the component's id), and a net matches by its pins, so a net whose
 pins all stay together under another name is a rename. Rooms and classes
 match by name.
 
-Not modelled: the comparator's ignore settings (Project Options > Comparator)
-and its partial net matching (MinPercent/MinMatch). Every difference is
-reported; an ignored kind is not applied by the ECO.
+The project's own options are followed (parse_project_options): a kind the
+comparator ignores (Project Options > Comparator) or the ECO does not
+generate (Project Options > ECO Generation) is left out, and so are classes
+and rooms the project does not generate (Project Options > Class
+Generation). What was left out is counted in skipped_by_project_options.
+Not modelled: the comparator's partial net matching (MinPercent/MinMatch).
 
 Not compared at all (NOT_COMPARED): net class members (net classes match by
 name only), component parameters, differential pairs, rules from parameter
@@ -22,8 +25,85 @@ here means none of the kinds compared, not that an Update PCB would change
 nothing.
 """
 
+import ntpath
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
+
+# Each kind of change: the comparator's difference kind and the ECO's
+# modification kinds that make it. The .PrjPcb keeps one switch per kind as
+# Type<n> under [Difference Levels] (0 = ignore the difference) and
+# [Modification Levels] (0 = do not generate the change order), n being the
+# kind's position in Altium's TDifferenceKind / TModificationKind plus one.
+# Later Altium versions add kinds at the end, so these stay put.
+KIND_OPTIONS = {
+    "add_components": (2, (14,)),                     # ExtraComponent; AddComponent
+    "remove_components": (2, (8,)),                   # ExtraComponent; RemoveComponent
+    "change_designators": (14, (11,)),                # ComponentDesignator; ChangeComponentDesignator
+    "change_footprints": (15, (9,)),                  # ComponentFootprint; ChangeComponentFootPrint
+    "change_comments": (16, (10,)),                   # ComponentComment; ChangeComponentComment
+    "add_nets": (3, (16,)),                           # ExtraNet; AddNet
+    "remove_nets": (3, (7,)),                         # ExtraNet; RemoveNet
+    "rename_nets": (18, (15,)),                       # NetName; ChangeNetName
+    "change_pin_nets": (4, (17, 2)),                  # ExtraNode; AddNode, RemoveNode
+    "add_component_classes": (5, (27,)),              # ExtraComponentClass; AddComponentClass
+    "remove_component_classes": (5, (18,)),           # ExtraComponentClass; RemoveComponentClass
+    "change_component_class_members": (8, (31, 3)),   # ExtraComponentClassMember; Add/RemoveComponentClassMember
+    "add_net_classes": (6, (28,)),                    # ExtraNetClass; AddNetClass
+    "remove_net_classes": (6, (19,)),                 # ExtraNetClass; RemoveNetClass
+    "add_rooms": (12, (36,)),                         # ExtraRoomDefinition; AddRoom
+    "remove_rooms": (12, (34,)),                      # ExtraRoomDefinition; RemoveRoom
+}
+ADD_NODE, REMOVE_NODE = 17, 2
+
+
+def _ini(text: str) -> Dict[str, Dict[str, str]]:
+    """The sections of a .PrjPcb, names and keys lower-cased."""
+    sections: Dict[str, Dict[str, str]] = {}
+    current = None
+    for line in text.splitlines():
+        line = line.strip().lstrip("\ufeff")
+        if line.startswith("[") and line.endswith("]"):
+            current = sections.setdefault(line[1:-1].strip().lower(), {})
+        elif current is not None and "=" in line:
+            key, value = line.split("=", 1)
+            current[key.strip().lower()] = value.strip()
+    return sections
+
+
+def parse_project_options(text: str) -> dict:
+    """The options of a .PrjPcb (its text) that decide what Update PCB changes.
+
+    A key that is missing counts as on, so a project file without these
+    sections leaves every difference in.
+    """
+    s = _ini(text)
+
+    def switched_off(section: str) -> Set[int]:
+        return {int(k[4:]) for k, v in s.get(section, {}).items()
+                if k.startswith("type") and k[4:].isdigit() and v == "0"}
+
+    def on(section: str, key: str) -> bool:
+        return s.get(section, {}).get(key, "1") != "0"
+
+    sheets = {}                                       # sheet file name -> what it generates
+    for name, sec in s.items():
+        path = sec.get("documentpath", "")
+        if name.startswith("document") and path.lower().endswith(".schdoc"):
+            sheets[ntpath.basename(path).lower()] = {
+                "component_classes": sec.get("classgenccautoenabled", "1") != "0",
+                "rooms": sec.get("classgenccautoroomenabled", "1") != "0",
+                "net_classes": sec.get("classgenncautoscope", "").lower() != "none"}
+    return {
+        "single_pin_nets": s.get("design", {}).get("netlistsinglepinnets", "0") == "1",
+        "ignored_differences": switched_off("difference levels"),
+        "skipped_modifications": switched_off("modification levels"),
+        "sheets": sheets,
+        "manual_component_classes": on("prjclassgen", "compclassmanualenabled"),
+        "manual_rooms": on("prjclassgen", "compclassmanualroomenabled"),
+        "other_net_classes": any(on("prjclassgen", k) for k in (
+            "netclassautobusenabled", "netclassautocompenabled", "netclassautonamedharnessenabled",
+            "netclassmanualenabled")),
+    }
 
 
 def _split(item: str, n: int) -> List[str]:
@@ -86,7 +166,73 @@ def _nets(pin_nets: Dict[Tuple[str, str], str]) -> Dict[str, Set[Tuple[str, str]
     return out
 
 
-def compare(source: dict, target: dict, single_pin_nets: bool = False) -> dict:
+def _apply_options(out: dict, source: dict, options: dict) -> List[dict]:
+    """Take out of out what the project's options keep the ECO from doing;
+    return what was taken out, per kind with the reason."""
+    skipped = []
+
+    def drop(kind: str, keep, reason: str):
+        before = len(out[kind])
+        out[kind] = [e for e in out[kind] if keep(e)]
+        if len(out[kind]) < before:
+            skipped.append({"kind": kind, "count": before - len(out[kind]), "reason": reason})
+
+    # Class Generation. A class (or room) from a sheet that generates none
+    # is not added and its members are not changed; when the project
+    # generates no component classes (rooms, net classes) at all, the ECO
+    # neither adds nor removes any
+    sheets = options["sheets"]
+
+    def sheet_on(sheet: str, what: str) -> bool:
+        return sheets.get(ntpath.basename(sheet).lower(), {}).get(what, True)
+
+    manual_cc = options["manual_component_classes"]
+    manual_rooms = manual_cc and options["manual_rooms"]
+    cc_on = manual_cc or not sheets or any(v["component_classes"] for v in sheets.values())
+    rooms_on = manual_rooms or not sheets or any(v["component_classes"] and v["rooms"] for v in sheets.values())
+    nc_on = options["other_net_classes"] or not sheets or any(v["net_classes"] for v in sheets.values())
+    class_sheet = {}                                  # class name -> sheet that makes it
+    for c in source["component_classes"]:
+        class_sheet.setdefault(c["name"].lower(), c["sheet"])
+
+    def class_on(name: str) -> bool:
+        sheet = class_sheet.get(name.lower())
+        return sheet is None or manual_cc or sheet_on(sheet, "component_classes")
+
+    def room_on(name: str) -> bool:
+        sheet = class_sheet.get(name.lower())
+        if sheet is None:
+            return True
+        return manual_rooms or (sheet_on(sheet, "component_classes") and sheet_on(sheet, "rooms"))
+
+    gen = "Project Options > Class Generation"
+    for kind in ("add_component_classes", "remove_component_classes", "change_component_class_members"):
+        if not cc_on:
+            drop(kind, lambda e: False, f"the project generates no component classes ({gen})")
+        elif kind != "remove_component_classes":
+            drop(kind, lambda e: class_on(e["name"]), f"the class's sheet generates no component class ({gen})")
+    for kind in ("add_rooms", "remove_rooms"):
+        if not rooms_on:
+            drop(kind, lambda e: False, f"the project generates no rooms ({gen})")
+    drop("add_rooms", room_on, f"the room's sheet generates no room ({gen})")
+    for kind in ("add_net_classes", "remove_net_classes"):
+        if not nc_on:
+            drop(kind, lambda e: False, f"the project generates no net classes ({gen})")
+
+    # Comparator and ECO Generation
+    ignored, not_made = options["ignored_differences"], options["skipped_modifications"]
+    for kind, (difference, modifications) in KIND_OPTIONS.items():
+        if difference in ignored:
+            drop(kind, lambda e: False, "the comparator ignores this kind (Project Options > Comparator)")
+        elif all(m in not_made for m in modifications):
+            drop(kind, lambda e: False, "no change order is generated for it (Project Options > ECO Generation)")
+    # A pin joining a net is an Add Node; a pin left on no net, a Remove Node
+    drop("change_pin_nets", lambda e: (REMOVE_NODE if e["to"] == "" else ADD_NODE) not in not_made,
+         "no change order is generated for it (Project Options > ECO Generation)")
+    return skipped
+
+
+def compare(source: dict, target: dict, single_pin_nets: bool = False, options: Optional[dict] = None) -> dict:
     """The differences, grouped as the ECO dialog groups its actions.
 
     single_pin_nets is the project's "Netlist single pin nets" option: off
@@ -96,6 +242,11 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False) -> dict:
     Board components with no schematic link (logos, title blocks) are left
     alone too; they are listed as board_only_components. Both checked against
     Altium AD25's own Engineering Change Order.
+
+    options (from parse_project_options) leaves out what the project's
+    comparator, ECO generation and class generation options keep the ECO
+    from doing; skipped_by_project_options counts it. Without options every
+    difference is listed.
     """
     sc, tc = source["components"], target["components"]
     out = {k: [] for k in ("add_components", "remove_components", "change_designators", "change_footprints",
@@ -232,11 +383,12 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False) -> dict:
     out["add_rooms"] = sorted(r["name"] for r in source["rooms"] if r["name"].lower() not in pcb_rooms)
     out["remove_rooms"] = [{"name": r["name"], "scope": r["scope"]}
                            for k, r in sorted(pcb_rooms.items()) if k not in sch_rooms]
+    out["skipped_by_project_options"] = _apply_options(out, source, options) if options else []
     return out
 
 
-# Listed for information: the ECO does not touch them
-INFO_KINDS = ("board_only_components",)
+# Listed for information: what the ECO leaves alone or the project's options keep it from doing
+INFO_KINDS = ("board_only_components", "skipped_by_project_options")
 
 # What an Update PCB can change that compare() does not look at
 NOT_COMPARED = ("net class members", "component parameters", "differential pairs",

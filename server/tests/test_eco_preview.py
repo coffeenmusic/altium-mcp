@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -34,8 +35,61 @@ TARGET = {
 }
 
 
+# A made-up .PrjPcb, cut down to the sections the options come from. Amp
+# makes its component class but no room; Power makes neither; nothing makes
+# rooms or net classes. Difference Levels and Modification Levels hold one
+# switch per kind (Type<n>, n = the kind's position in Altium's list + 1)
+PRJ = """\ufeff[Design]
+Version=1.0
+NetlistSinglePinNets=0
+
+[Document1]
+DocumentPath=Amp.SchDoc
+ClassGenCCAutoEnabled=1
+ClassGenCCAutoRoomEnabled=0
+ClassGenNCAutoScope=None
+
+[Document2]
+DocumentPath=Sheets\\Power.SchDoc
+ClassGenCCAutoEnabled=0
+ClassGenCCAutoRoomEnabled=0
+ClassGenNCAutoScope=None
+
+[Document3]
+DocumentPath=Board.PcbDoc
+
+[Difference Levels]
+Type1=1
+Type2=1
+Type15=1
+
+[Modification Levels]
+Type8=1
+Type17=1
+Type34=1
+
+[PrjClassGen]
+CompClassManualEnabled=0
+CompClassManualRoomEnabled=0
+NetClassAutoBusEnabled=0
+NetClassAutoCompEnabled=0
+NetClassAutoNamedHarnessEnabled=0
+NetClassManualEnabled=0
+"""
+
+
 def diff(single_pin=False):
     return eco_preview.compare(eco_preview.parse_source(SOURCE), eco_preview.parse_target(TARGET), single_pin)
+
+
+def diff_with(text):
+    options = eco_preview.parse_project_options(text)
+    return eco_preview.compare(eco_preview.parse_source(SOURCE), eco_preview.parse_target(TARGET),
+                               options["single_pin_nets"], options)
+
+
+def skipped(d):
+    return {s["kind"]: s["count"] for s in d["skipped_by_project_options"]}
 
 
 class ComponentTest(unittest.TestCase):
@@ -118,6 +172,64 @@ class ClassAndRoomTest(unittest.TestCase):
         self.assertNotIn("U_Conn", [c["name"] for c in d["change_component_class_members"]])
 
 
+class ProjectOptionsTest(unittest.TestCase):
+    def test_parse(self):
+        o = eco_preview.parse_project_options(PRJ)
+        self.assertFalse(o["single_pin_nets"])
+        self.assertEqual(o["sheets"]["amp.schdoc"], {"component_classes": True, "rooms": False,
+                                                     "net_classes": False})
+        self.assertFalse(o["sheets"]["power.schdoc"]["component_classes"])
+        self.assertNotIn("board.pcbdoc", o["sheets"])
+        self.assertEqual((o["ignored_differences"], o["skipped_modifications"]), (set(), set()))
+        self.assertFalse(o["manual_component_classes"])
+        self.assertFalse(o["other_net_classes"])
+        on = eco_preview.parse_project_options(PRJ.replace("NetlistSinglePinNets=0", "NetlistSinglePinNets=1"))
+        self.assertTrue(on["single_pin_nets"])
+
+    def test_class_generation(self):
+        d = diff_with(PRJ)
+        # Power makes no component class, so PWR is not added; the board's
+        # OLD class still goes, as Amp makes component classes
+        self.assertEqual(d["add_component_classes"], [])
+        self.assertEqual(d["remove_component_classes"], [{"name": "OLD", "members": 1}])
+        # nothing makes rooms or net classes: the ECO adds and removes none
+        self.assertEqual((d["remove_rooms"], d["remove_net_classes"]), ([], []))
+        self.assertEqual(skipped(d), {"add_component_classes": 1, "remove_rooms": 1, "remove_net_classes": 1})
+        self.assertNotIn("remove_rooms", eco_preview.summary(d))
+        self.assertNotIn("skipped_by_project_options", eco_preview.summary(d))
+        # other kinds are untouched
+        self.assertEqual(d["remove_components"], diff()["remove_components"])
+
+    def test_rooms_from_a_sheet_that_makes_them(self):
+        text = PRJ.replace("ClassGenCCAutoEnabled=1\nClassGenCCAutoRoomEnabled=0",
+                           "ClassGenCCAutoEnabled=1\nClassGenCCAutoRoomEnabled=1")
+        d = diff_with(text)
+        self.assertEqual(d["remove_rooms"], [{"name": "OLD", "scope": "InComponentClass('OLD')"}])
+        source = dict(SOURCE, rooms=SOURCE["rooms"] + ["PWR|Room PWR"])
+        options = eco_preview.parse_project_options(text)
+        d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET), False, options)
+        # PWR's sheet makes no class, so no room for it either
+        self.assertEqual(d["add_rooms"], [])
+
+    def test_comparator_and_eco_generation(self):
+        # Type15 = component footprint differences; Type8 = Remove Component;
+        # Type17 = Add Node (a pin joining a net)
+        text = PRJ.replace("Type15=1", "Type15=0").replace("Type8=1", "Type8=0").replace("Type17=1", "Type17=0")
+        d = diff_with(text)
+        self.assertEqual((d["change_footprints"], d["remove_components"], d["change_pin_nets"]), ([], [], []))
+        reasons = {s["kind"]: s["reason"] for s in d["skipped_by_project_options"]}
+        self.assertIn("Comparator", reasons["change_footprints"])
+        self.assertIn("ECO Generation", reasons["remove_components"])
+        self.assertIn("ECO Generation", reasons["change_pin_nets"])
+        self.assertEqual(d["add_components"], diff()["add_components"])
+
+    def test_without_options_nothing_is_left_out(self):
+        for d in (diff(), diff_with("")):
+            self.assertEqual(d["skipped_by_project_options"], [])
+            self.assertEqual(d["remove_rooms"], [{"name": "OLD", "scope": "InComponentClass('OLD')"}])
+            self.assertEqual(d["remove_net_classes"], ["SPARE"])
+
+
 class OutputTest(unittest.TestCase):
     def test_summary_and_limit(self):
         d = diff()
@@ -161,6 +273,21 @@ class ToolTest(unittest.TestCase):
         self.assertEqual(calls, ["get_eco_source", "get_eco_target"])
         self.assertEqual(reply["summary"], {})
         self.assertIn("of the kinds compared", reply["note"])
+        self.assertIn("could not be read", reply["project_options_note"])
+
+    def test_project_options_read_from_the_project_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prj = os.path.join(tmp, "Test.PrjPcb")
+            with open(prj, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(PRJ)
+            replies = {"get_eco_source": dict(SOURCE, project_path=prj, pcb_path="board.PcbDoc"),
+                       "get_eco_target": TARGET}
+            reply, _ = self.run_tool(replies)
+        self.assertNotIn("project_options_note", reply)
+        self.assertNotIn("remove_rooms", reply["summary"])
+        self.assertIn({"kind": "remove_rooms", "count": 1,
+                       "reason": "the project generates no rooms (Project Options > Class Generation)"},
+                      reply["skipped_by_project_options"])
 
     def test_bad_project_path_refused_before_altium(self):
         reply, calls = self.run_tool({}, project_path="C:/nowhere/x.txt")
