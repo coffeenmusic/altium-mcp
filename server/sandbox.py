@@ -41,7 +41,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 BODY_BEGIN = "// === BEGIN EXPERIMENT"
 BODY_END = "// === END EXPERIMENT"
@@ -635,6 +635,16 @@ class Sandbox:
     template: Path
     runs_dir: Path
     keep_runs: int = 20
+    # called right before Altium is started (the server watches the
+    # foreground then, see foreground_guard.py)
+    on_launch: Optional[Callable[[], object]] = None
+
+    def _launching(self) -> None:
+        if self.on_launch is not None:
+            try:
+                self.on_launch()
+            except Exception:
+                pass
 
     def new_run_files(self, tag: str = "Sbx") -> RunFiles:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -651,9 +661,11 @@ class Sandbox:
     def launch(self, files: RunFiles) -> None:
         cmd = (f'"{self.altium_exe}" -RScriptingSystem:RunScriptFile('
                f'FileName={files.script}^|ProcName=Run)')
+        self._launching()
         subprocess.Popen(cmd, shell=True)
 
     def stop_debugger(self) -> None:
+        self._launching()
         subprocess.Popen(f'"{self.altium_exe}" -REditScript:Stop', shell=True)
 
     def _run_until_done(self, files: RunFiles, script: str, timeout: float) -> bool:

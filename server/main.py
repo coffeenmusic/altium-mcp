@@ -35,6 +35,7 @@ from exchange_lock import ExchangeLock
 from altium_install import find_altium_exe
 import routing
 import pcb_layout
+import foreground_guard
 import sandbox
 import win_processes
 from outjob_parser import parse_outjob
@@ -468,6 +469,9 @@ class AltiumBridge:
         # using the same exchange folder by the file lock
         self._command_lock = asyncio.Lock()
         self._exchange_lock = ExchangeLock(EXCHANGE_DIR / "bridge.lock")
+        # Set for one command (under the command lock): let Altium keep the
+        # foreground it takes for it, for a capture that needs Altium in front
+        self._leave_altium_in_front = False
 
     async def ensure_paths(self, need_script: bool = True) -> Optional[str]:
         """None when Altium (and the bridge script project) can be found,
@@ -500,8 +504,13 @@ class AltiumBridge:
                     f"Altium_API.PrjScr, then retry.")
         return None
 
-    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
-        """Execute a command in Altium via the bridge script"""
+    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                              leave_altium_in_front: bool = False) -> Dict[str, Any]:
+        """Execute a command in Altium via the bridge script.
+
+        Altium takes the foreground for every command; it is given back to
+        whoever had it (foreground_guard.py) unless leave_altium_in_front.
+        """
         async with self._command_lock:
             problem = await self.ensure_paths()
             if problem:
@@ -519,8 +528,10 @@ class AltiumBridge:
                 # is no reason to give up.
                 if await asyncio.to_thread(sandbox.altium_hung):
                     return {"success": False, "error": ALTIUM_HUNG_ERROR}
+                self._leave_altium_in_front = leave_altium_in_front
                 response = await self._execute_command_locked(command, params, timeout)
             finally:
+                self._leave_altium_in_front = False
                 self._exchange_lock.release()
         return _lift_failed_result(response)
 
@@ -547,6 +558,7 @@ class AltiumBridge:
         await asyncio.sleep(1)
         logger.warning("Sending -REditScript:Stop to Altium to unblock the script executor")
         try:
+            _guard_foreground()
             subprocess.Popen(f'"{self.config.altium_exe_path}" -REditScript:Stop', shell=True)
         except Exception as e:
             logger.error(f"Could not send -REditScript:Stop: {e}")
@@ -792,7 +804,10 @@ class AltiumBridge:
             
             logger.info(f"Running command: {command}")
             
-            # Start the process
+            # Start the process. Altium will take the foreground for it;
+            # whoever was in front gets it back (foreground_guard.py)
+            if not self._leave_altium_in_front:
+                _guard_foreground()
             process = subprocess.Popen(command, shell=True)
             
             # Don't wait for completion - Altium will run the script and generate the response
@@ -1564,7 +1579,8 @@ def _dismiss_altium_dialogs(message_boxes_only: bool = False):
 
 def _sandbox() -> sandbox.Sandbox:
     return sandbox.Sandbox(altium_exe=altium_bridge.config.altium_exe_path,
-                           template=SANDBOX_PAS, runs_dir=SANDBOX_RUNS)
+                           template=SANDBOX_PAS, runs_dir=SANDBOX_RUNS,
+                           on_launch=_guard_foreground)
 
 
 @_tool()
@@ -5230,6 +5246,17 @@ async def fanout_pads(ctx: Context, designators: list, nets: list = None, pads: 
 MUTATING_COMMANDS.add("fanout_pads")
 
 
+def _guard_foreground():
+    """Watch the foreground while Altium starts on a command of ours and give
+    it back to whoever had it (see foreground_guard.py)."""
+    def pid_of(hwnd):
+        return win32process.GetWindowThreadProcessId(hwnd)[1] if hwnd else 0
+    return foreground_guard.Guard(
+        front=win32gui.GetForegroundWindow, pid_of=pid_of,
+        altium_pids=lambda: win_processes.pids_by_name("X2.EXE"),
+        give_back=_bring_to_front).start()
+
+
 def _bring_to_front(hwnd):
     """Give a window the foreground from this background process.
 
@@ -5317,9 +5344,12 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
         params = {"view_type": view_type.lower()}
         if zoom_to:
             params["designators"] = zoom_to
+        # The capture needs Altium in front: let it keep the foreground it
+        # takes for this command (given back after the capture, below)
         response = await altium_bridge.execute_command(
             "take_view_screenshot",
-            params
+            params,
+            leave_altium_in_front=True
         )
         
         # Check for success
@@ -5442,6 +5472,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
                     return bool(fg) and win32process.GetWindowThreadProcessId(fg)[1] == altium_pid
 
                 try:
+                    foreground_guard.altium_wanted()
                     _bring_to_front(hwnd)
                     deadline = time.time() + 1.5
                     while time.time() < deadline:
