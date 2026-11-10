@@ -3328,21 +3328,69 @@ begin
     Sym.SchIterator_Destroy(Iterator);
 end;
 
+// Puts Entry where its side and distance place it on Sym. Altium recomputes
+// an entry's location from them only when the sheet loads; until then it
+// stays drawn where it was. The symbol's location is its top left corner;
+// the distance runs down from the top on the left and right sides, right
+// from the left edge on the top and bottom.
+procedure PlaceSheetEntry(Sym: ISch_SheetSymbol; Entry: ISch_SheetEntry);
+begin
+    if Entry.Side = 0 then Entry.Location := Point(Sym.Location.X, Sym.Location.Y - Entry.DistanceFromTop)
+    else if Entry.Side = 1 then Entry.Location := Point(Sym.Location.X + Sym.XSize, Sym.Location.Y - Entry.DistanceFromTop)
+    else if Entry.Side = 2 then Entry.Location := Point(Sym.Location.X + Entry.DistanceFromTop, Sym.Location.Y)
+    else Entry.Location := Point(Sym.Location.X + Entry.DistanceFromTop, Sym.Location.Y - Sym.YSize);
+end;
+
+// Places every entry of Sym where its side and distance put it, after a
+// resize moved the right or bottom edge
+procedure PlaceSheetEntries(Sym: ISch_SheetSymbol);
+var
+    Iterator : ISch_Iterator;
+    Entry    : ISch_SheetEntry;
+    Entries  : TInterfaceList;
+    i        : Integer;
+begin
+    Entries := TInterfaceList.Create;
+    try
+        Iterator := Sym.SchIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eSheetEntry));
+        Entry := Iterator.FirstSchObject;
+        while Entry <> nil do
+        begin
+            Entries.Add(Entry);
+            Entry := Iterator.NextSchObject;
+        end;
+        Sym.SchIterator_Destroy(Iterator);
+        for i := 0 to Entries.Count - 1 do
+        begin
+            Entry := Entries.Items[i];
+            SchBeginModify(Entry);
+            PlaceSheetEntry(Sym, Entry);
+            SchEndModify(Entry);
+        end;
+    finally
+        Entries.Free;
+    end;
+end;
+
 // SHEETSYM|sheet|x|y|width|height|fill|border|line_width|name_x|name_y|file_x|file_y
 // (x, y: top left; '' keeps a value). A size that would leave an entry
-// outside the symbol is refused.
+// outside the symbol is refused; on a resize the entries on the right and
+// bottom sides move with their edge (wires to them are not dragged).
 function EditSheetSymbol(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
     Sym : ISch_SheetSymbol;
     X, Y, W, H : Integer;
     Outside : String;
+    Resized : Boolean;
 begin
     Result := False;
     Sym := FindSheetSymbol(Doc, GetFieldFromPipeString(Rec, 1), Msg);
     if Sym = nil then Exit;
     W := SchField(Rec, 4, Sym.XSize);
     H := SchField(Rec, 5, Sym.YSize);
-    if (W <> Sym.XSize) or (H <> Sym.YSize) then
+    Resized := (W <> Sym.XSize) or (H <> Sym.YSize);
+    if Resized then
     begin
         Outside := EntryOutside(Sym, W, H);
         if Outside <> '' then
@@ -3362,6 +3410,7 @@ begin
     Sym.Color := SchField(Rec, 7, Sym.Color);
     Sym.LineWidth := SchField(Rec, 8, Sym.LineWidth);
     SchEndModify(Sym);
+    if Resized then PlaceSheetEntries(Sym);
     if GetFieldFromPipeString(Rec, 9) <> '' then
     begin
         SchBeginModify(Sym.SheetName);
@@ -3410,15 +3459,7 @@ begin
     Entry.IOType := SchField(Rec, 5, Entry.IOType);
     Entry.Style := SchField(Rec, 6, Entry.Style);
     if GetFieldFromPipeString(Rec, 7) <> '' then Entry.Name := GetFieldFromPipeString(Rec, 7);
-    // Altium recomputes an entry's location from its side and distance only
-    // when the sheet loads; until then it stays drawn where it was. The
-    // symbol's location is its top left corner; the distance runs down from
-    // the top on the left and right sides, right from the left edge on the
-    // top and bottom.
-    if NewSide = 0 then Entry.Location := Point(Sym.Location.X, Sym.Location.Y - NewDistance)
-    else if NewSide = 1 then Entry.Location := Point(Sym.Location.X + Sym.XSize, Sym.Location.Y - NewDistance)
-    else if NewSide = 2 then Entry.Location := Point(Sym.Location.X + NewDistance, Sym.Location.Y)
-    else Entry.Location := Point(Sym.Location.X + NewDistance, Sym.Location.Y - Sym.YSize);
+    PlaceSheetEntry(Sym, Entry);
     SchEndModify(Entry);
     Result := True;
 end;
@@ -3442,17 +3483,33 @@ begin
     Result := Abs(Cross) / Len <= Tol;
 end;
 
+// Whether an end of Port (its location, or the other end Width along it)
+// is within Tol of (X, Y)
+function PortEndAt(Port: ISch_Port; X, Y, Tol: Integer): Boolean;
+var
+    EX, EY : Integer;
+begin
+    Result := (Abs(Port.Location.X - X) <= Tol) and (Abs(Port.Location.Y - Y) <= Tol);
+    EX := Port.Location.X;
+    EY := Port.Location.Y;
+    // Styles 4 and up (none_vertical, top, bottom, top_bottom) run upwards
+    if Port.Style >= 4 then EY := EY + Port.Width else EX := EX + Port.Width;
+    if (Abs(EX - X) <= Tol) and (Abs(EY - Y) <= Tol) then Result := True;
+end;
+
 // WIREVTX|x|y|to_x|to_y: moves the vertex at x, y of every wire with one
-// there, so wires that meet at it stay joined, and a junction placed there
-// along with them. Refused when a wire passes through the point between
-// its vertices: moving the vertex would break that T connection.
+// there, so wires that meet at it stay joined. Junctions, net labels and
+// power ports located there, and ports with an end there, move along by
+// the same offset, so they stay connected. Refused when a wire passes
+// through the point between its vertices: moving the vertex would break
+// that T connection.
 function MoveWireVertex(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
     Iterator : ISch_Iterator;
     Wire     : ISch_Wire;
-    Junc     : ISch_Junction;
+    Obj      : ISch_GraphicalObject;
     Hits, VertexNos : TList;
-    Juncs    : TInterfaceList;
+    Riders   : TInterfaceList;
     X, Y, TX, TY, Tol, k, i : Integer;
     Through  : Boolean;
     P        : TLocation;
@@ -3466,7 +3523,7 @@ begin
     Through := False;
     Hits := TList.Create;
     VertexNos := TList.Create;
-    Juncs := TInterfaceList.Create;
+    Riders := TInterfaceList.Create;
     try
         Iterator := Doc.SchIterator_Create;
         Iterator.AddFilter_ObjectSet(MkSet(eWire));
@@ -3499,12 +3556,17 @@ begin
             Exit;
         end;
         Iterator := Doc.SchIterator_Create;
-        Iterator.AddFilter_ObjectSet(MkSet(eJunction));
-        Junc := Iterator.FirstSchObject;
-        while Junc <> nil do
+        Iterator.AddFilter_ObjectSet(MkSet(eJunction, eNetLabel, ePowerObject, ePort));
+        Obj := Iterator.FirstSchObject;
+        while Obj <> nil do
         begin
-            if (Abs(Junc.Location.X - X) <= Tol) and (Abs(Junc.Location.Y - Y) <= Tol) then Juncs.Add(Junc);
-            Junc := Iterator.NextSchObject;
+            if Obj.ObjectId = ePort then
+            begin
+                if PortEndAt(Obj, X, Y, Tol) then Riders.Add(Obj);
+            end
+            else if (Abs(Obj.Location.X - X) <= Tol) and (Abs(Obj.Location.Y - Y) <= Tol) then
+                Riders.Add(Obj);
+            Obj := Iterator.NextSchObject;
         end;
         Doc.SchIterator_Destroy(Iterator);
         for i := 0 to Hits.Count - 1 do
@@ -3517,18 +3579,20 @@ begin
             Wire.Vertex[VertexNos[i]] := P;
             SchEndModify(Wire);
         end;
-        for i := 0 to Juncs.Count - 1 do
+        // By the offset, not to the point: a port may meet the vertex with
+        // its far end
+        for i := 0 to Riders.Count - 1 do
         begin
-            Junc := Juncs.Items[i];
-            SchBeginModify(Junc);
-            Junc.MoveToXY(TX, TY);
-            SchEndModify(Junc);
+            Obj := Riders.Items[i];
+            SchBeginModify(Obj);
+            Obj.MoveByXY(TX - X, TY - Y);
+            SchEndModify(Obj);
         end;
         Result := True;
     finally
         Hits.Free;
         VertexNos.Free;
-        Juncs.Free;
+        Riders.Free;
     end;
 end;
 
@@ -3572,7 +3636,7 @@ function MoveNetLabel(Doc: ISch_Document; Rec: String; var Msg: String): Boolean
 var
     Iterator : ISch_Iterator;
     Lbl, Found : ISch_NetLabel;
-    X, Y, Tol, TX, TY, Radius, n : Integer;
+    X, Y, Tol, TX, TY, WX, WY, Radius, n : Integer;
 begin
     Result := False;
     X := SchField(Rec, 1, 0);
@@ -3608,11 +3672,15 @@ begin
     TY := SchField(Rec, 5, Found.Location.Y);
     Radius := SchField(Rec, 8, 0);
     if Radius > 0 then
-        if not NearestWireEnd(Doc, TX, TY, Radius, TX, TY) then
+    begin
+        if not NearestWireEnd(Doc, TX, TY, Radius, WX, WY) then
         begin
             Msg := 'no wire end within ' + IntToStr(Round(CoordToMils(Radius))) + ' mil of the label''s target';
             Exit;
         end;
+        TX := WX;
+        TY := WY;
+    end;
     SchBeginModify(Found);
     Found.MoveToXY(TX, TY);
     Found.Orientation := SchField(Rec, 6, Found.Orientation);

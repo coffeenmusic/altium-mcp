@@ -189,6 +189,10 @@ class SheetAndWireTest(unittest.TestCase):
         self.assertEqual(lines, ["SHEETENTRY|F|IN|1|1000000|2||"])
         self.assertIn("side", encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN",
                                                   "side": "up"}])[1])
+        # The distance runs from the left edge on the top and bottom sides
+        error = encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN", "side": "top",
+                                    "distance": -1}])[1]
+        self.assertIn("left edge on the top and bottom", error)
 
     def test_sheet_entry_styles_follow_altium(self):
         # The same TPortArrowStyle order as ports: top_bottom is 7, none_vertical 4

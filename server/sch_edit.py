@@ -331,7 +331,8 @@ def encode_operations(operations: list, unit: str = "mil") -> Tuple[List[str], s
             elif kind == "edit_sheet_entry":
                 distance = op.get("distance")
                 if distance is not None and not (isinstance(distance, (int, float)) and distance >= 0):
-                    raise OpError("distance (from the top of the symbol) must be 0 or more")
+                    raise OpError("distance (from the symbol's top edge, or its left edge on the top and bottom "
+                                  "sides) must be 0 or more")
                 io = op.get("io_type")
                 lines.append("|".join(["SHEETENTRY", _text(op["sheet"], "sheet"), _text(op["name"], "name"),
                                        _choice(op.get("side"), SIDES, "side"),
