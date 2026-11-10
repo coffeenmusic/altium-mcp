@@ -2049,10 +2049,14 @@ end;
 // dialog is closed; the server drives that dialog meanwhile (eco_dialog.py).
 // The board must be one of the project's documents: Import Changes updates
 // the focused board from its own project, so a board of another project
-// would be updated from the wrong schematics.
+// would be updated from the wrong schematics. And it compares the focused
+// project: when another open project also lists the board, showing the
+// board can focus that one, so the run is refused unless the focused
+// project is the one named.
 function RunUpdatePCB(ProjectPath: String; PcbPath: String): String;
 var
     Project : IProject;
+    Focused : IProject;
     Doc     : IServerDocument;
     Board   : IPCB_Board;
     I       : Integer;
@@ -2105,6 +2109,21 @@ begin
     if not SameText(NormalizePath(Board.FileName), NormalizePath(Found)) then
     begin
         Result := 'ERROR: Could not bring the board ' + Found + ' to the front';
+        Exit;
+    end;
+    Focused := GetWorkspace.DM_FocusedProject;
+    if Focused = nil then
+    begin
+        Result := 'ERROR: No project is focused with the board ' + Found + ' in front; Import Changes would ' +
+                  'not know which project to compare. Not run';
+        Exit;
+    end;
+    if not SameText(NormalizePath(Focused.DM_ProjectFullPath), NormalizePath(Project.DM_ProjectFullPath)) then
+    begin
+        Result := 'ERROR: With the board ' + Found + ' in front, Altium focuses the project ' +
+                  Focused.DM_ProjectFullPath + ', not ' + Project.DM_ProjectFullPath + ': Import Changes ' +
+                  'would compare that project. Not run; close the other project (or focus this one in the ' +
+                  'Projects panel) and retry';
         Exit;
     end;
     ResetParameters;

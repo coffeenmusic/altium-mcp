@@ -501,8 +501,10 @@ class AltiumBridge:
                     f"Altium_API.PrjScr, then retry.")
         return None
 
-    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
-        """Execute a command in Altium via the bridge script"""
+    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                              picked_up: Optional[asyncio.Event] = None) -> Dict[str, Any]:
+        """Execute a command in Altium via the bridge script. picked_up, if
+        given, is set once the bridge script has picked the request up."""
         async with self._command_lock:
             problem = await self.ensure_paths()
             if problem:
@@ -520,7 +522,7 @@ class AltiumBridge:
                 # is no reason to give up.
                 if await asyncio.to_thread(sandbox.altium_hung):
                     return {"success": False, "error": ALTIUM_HUNG_ERROR}
-                response = await self._execute_command_locked(command, params, timeout)
+                response = await self._execute_command_locked(command, params, timeout, picked_up=picked_up)
             finally:
                 self._exchange_lock.release()
         return _lift_failed_result(response)
@@ -575,7 +577,10 @@ class AltiumBridge:
                 await asyncio.sleep(0.25)
         return text
 
-    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                                      picked_up: Optional[asyncio.Event] = None) -> Dict[str, Any]:
+        """Run one command with the locks held. picked_up, if given, is set
+        once the bridge script has picked the request up."""
         try:
             problem = altium_limit_problem()
             if problem:
@@ -647,6 +652,8 @@ class AltiumBridge:
                                  f"the Altium window for an open dialog or a running or paused "
                                  f"script, then retry."}
             _clear_script_stuck()
+            if picked_up is not None:
+                picked_up.set()
 
             logger.info("Bridge script started, waiting for response file...")
             # Wait as long as the command keeps reporting progress, up to
@@ -6441,14 +6448,16 @@ async def _simple_command(command: str, params: dict, what: str) -> str:
     return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
 
 
-async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None) -> Tuple[Optional[dict], str]:
+async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None,
+                       picked_up: Optional[asyncio.Event] = None) -> Tuple[Optional[dict], str]:
     """(result, "") of a bridge command that returns JSON, or (None, error).
     One helper for the tools that work with the reply instead of passing it
-    on; strict=False because Altium text can hold control characters."""
-    if timeout is None:
-        response = await altium_bridge.execute_command(command, params)
-    else:
-        response = await altium_bridge.execute_command(command, params, timeout=timeout)
+    on; strict=False because Altium text can hold control characters.
+    picked_up is set once the bridge script has picked the request up."""
+    extra = {} if timeout is None else {"timeout": timeout}
+    if picked_up is not None:
+        extra["picked_up"] = picked_up
+    response = await altium_bridge.execute_command(command, params, **extra)
     if not response.get("success", False):
         return None, response.get("error", "unknown error")
     result = response.get("result", {})
@@ -6618,6 +6627,20 @@ async def _eco_compare(project_path: str, pcb_path: str, board_in_project: bool 
     return source, target, diff, None
 
 
+# One update_pcb at a time: its dialog driver must not meet another run's dialog
+_update_pcb_lock = asyncio.Lock()
+
+# Seconds the bridge waits on run_update_pcb without a sign of progress. The
+# dialog driver gives one (_update_pcb_keep_alive) while Altium works on the
+# dialog, so this covers Altium compiling and comparing before it opens.
+UPDATE_PCB_TIMEOUT = 300
+
+
+def _update_pcb_keep_alive():
+    """Mark progress for the bridge's wait, as the bridge script does."""
+    PROGRESS_FILE.write_text(str(time.time()))
+
+
 @_tool()
 async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", execute: bool = False,
                      allow_errors: bool = False, allow_room_removal: bool = False,
@@ -6627,28 +6650,35 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
     Import the schematic's changes into the board (Design > Import Changes /
     Update PCB): validate them, and with execute=True apply them.
 
-    1. preview_eco's comparison is run first. Rooms or components the update
-       would delete stop an execute unless allow_room_removal /
-       allow_component_removal; validating alone lists them as a warning. The preview does not decide whether there is
-       anything to import (it does not compare everything the ECO does):
-       Altium does.
+    1. preview_eco's comparison is run first, for information (preview):
+       it does not decide anything. Altium's own change list does.
     2. Altium's Engineering Change Order dialog is opened on the board and
        driven from here: Validate Changes, then the list of changes is read
        with each failed one's message ('Class already exists: X', 'Footprint
        not found', ...). When Altium finds nothing to change it shows a
-       message instead, which is answered and returned as altium_messages.
+       message instead, which is answered and returned as altium_messages;
+       a message that reports an error makes success false.
     3. Only with execute=True, and when the list read checks out, Execute
        Changes is pressed: every change row names the board, each group's
        count matches the rows read, no change failed (or allow_errors,
-       which applies the rest), and no component is removed (or
-       allow_component_removal). Otherwise not_executed says why. The
-       dialog is always closed again, and any other dialog Altium opens
-       meanwhile is answered (Cancel first) or closed.
+       which applies the rest), no component or room is removed (or
+       allow_component_removal / allow_room_removal), and no message box
+       came up while validating. Otherwise not_executed says why; when
+       validating only, the removals are listed as a warning. The dialog is
+       always closed again, and any other dialog Altium opens meanwhile is
+       answered (Cancel first) or closed.
     4. After executing, executed_changes lists what was applied and the
        comparison is run again: what is still different (failed or skipped
        changes) is reported. Altium's validation does not check everything
        (a footprint missing from the libraries fails only on execute): such
        changes are reported in failed_on_execute, and success is false.
+       When Execute Changes was pressed but its outcome could not be read,
+       executed is "unknown": check the board.
+
+    Refused when an Engineering Change Order dialog is already open, when
+    another update_pcb is running, and (in Altium) when showing the board
+    focuses another open project that also lists it: Import Changes
+    compares the focused project.
 
     When parts on either side cannot be matched by unique id (a new part,
     and board parts with no schematic link such as a logo), Altium first
@@ -6686,55 +6716,79 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
     Returns:
         str: JSON with the preview summary, the changes by group, the
              failed ones with Altium's message, whether they were executed
-             and which, Altium's messages, and the differences left
-             afterwards.
+             (true, false or "unknown") and which, Altium's messages, and
+             the differences left afterwards.
     """
+    if _update_pcb_lock.locked():
+        return json.dumps({"success": False, "error": "Not run: another update_pcb is running; retry when it "
+                                                      "has finished."})
+    async with _update_pcb_lock:
+        return await _update_pcb(project_path, pcb_path, execute, allow_errors, allow_room_removal,
+                                 allow_component_removal, link_by_designator, max_changes)
+
+
+def _executed_state(outcome) -> dict:
+    """executed as true, false or "unknown" (Execute Changes was pressed but
+    Altium's result could not be read), with a note for "unknown"."""
+    if outcome.executed:
+        return {"executed": True}
+    if outcome.execute_pressed:
+        return {"executed": "unknown",
+                "executed_note": "Execute Changes was pressed, but whether Altium applied the changes could not "
+                                 "be read" + (f" ({outcome.problem})" if outcome.problem else "") +
+                                 ". The board may be partly or fully updated: check it (preview_eco) before "
+                                 "running update_pcb again."}
+    return {"executed": False}
+
+
+async def _update_pcb(project_path: str, pcb_path: str, execute: bool, allow_errors: bool,
+                      allow_room_removal: bool, allow_component_removal: bool, link_by_designator: bool,
+                      max_changes: int) -> str:
     import eco_dialog
     import eco_preview
 
     path, error = _project_path(project_path)
     if error:
         return json.dumps({"success": False, "error": error})
+    loop = asyncio.get_running_loop()
+    if await loop.run_in_executor(None, eco_dialog.open_eco_dialogs):
+        return json.dumps({"success": False, "error": "Not run: an Engineering Change Order dialog is already "
+                                                      "open in Altium. Close it, then retry."})
     source, target, diff, error = await _eco_compare(path, pcb_path, board_in_project=True)
     if error:
         return json.dumps({"success": False, "error": error})
     project, board = source.get("project_path"), target.get("board_path") or long_path(pcb_path)
+    # For information only: the gates below go by Altium's own change list
     reply = {"project_path": project, "pcb_path": board, "preview": eco_preview.summary(diff)}
     if source.get("unsaved_in_altium"):
         reply["unsaved_in_altium"] = source["unsaved_in_altium"]
-    # Removals stop an execute; validating alone only warns about them
-    rooms = diff.get("remove_rooms") or []
-    parts = diff.get("remove_components") or []
-    removals = []
-    if rooms and not allow_room_removal:
-        removals.append(f"the update would remove {len(rooms)} room(s); pass allow_room_removal=true "
-                        "if that is intended")
-        reply["remove_rooms"] = rooms[:50]
-    if parts and not allow_component_removal:
-        removals.append(f"the update would remove {len(parts)} component(s) from the board; pass "
-                        "allow_component_removal=true if that is intended")
-        reply["remove_components"] = parts[:50]
-    if removals and execute:
-        reply.update({"success": False, "error": "; ".join(removals)})
-        return json.dumps(reply, indent=1)
-    if removals:
-        reply["warning"] = "; ".join(removals)
 
-    before = await asyncio.get_running_loop().run_in_executor(None, eco_dialog.open_windows)
     outcome = eco_dialog.EcoOutcome()
-    stop = asyncio.Event()
-    # The driver answers Altium's dialogs for as long as the bridge call runs
-    driver = asyncio.create_task(eco_dialog.drive(outcome, Path(board).name, execute, allow_errors,
-                                                  link_by_designator, stop, before, allow_component_removal))
+    stop, picked_up = asyncio.Event(), asyncio.Event()
+
+    async def drive_once_picked_up():
+        # Only once the bridge has the request (and with it the exchange
+        # lock): what was open before then is not this run's to answer
+        await picked_up.wait()
+        before = await loop.run_in_executor(None, eco_dialog.open_windows)
+        await eco_dialog.drive(outcome, Path(board).name, execute, allow_errors, link_by_designator, stop,
+                               before, allow_component_removal, allow_room_removal=allow_room_removal,
+                               keep_alive=_update_pcb_keep_alive)
+
+    driver = asyncio.create_task(drive_once_picked_up())
     try:
-        # The bridge waits for the dialog to close: validating and executing
-        # a large update takes a while
+        # The bridge waits for the dialog to close; the driver marks
+        # progress while Altium validates or executes
         result, error = await _bridge_json("run_update_pcb", {"project_path": project, "pcb_path": board},
-                                           timeout=1800)
+                                           timeout=UPDATE_PCB_TIMEOUT, picked_up=picked_up)
     finally:
         stop.set()
+        if not picked_up.is_set():
+            driver.cancel()
         try:
             await asyncio.wait_for(driver, 120)
+        except asyncio.CancelledError:
+            pass
         except asyncio.TimeoutError:
             driver.cancel()
             outcome.problem = outcome.problem or "the dialog driver did not finish"
@@ -6742,16 +6796,20 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
         reply["altium_messages"] = outcome.messages
     if error:
         reply.update({"success": False, "error": f"Import Changes failed: {error}"})
+        if outcome.found or outcome.execute_pressed:
+            reply.update(_executed_state(outcome))
         if outcome.problem:
             reply["dialog_problem"] = outcome.problem
         return json.dumps(reply, indent=1)
     if not outcome.found:
-        reply.update({"success": not outcome.problem, "executed": False})
+        reply.update({"success": not outcome.problem and not outcome.error_messages, "executed": False})
         reply["note"] = ("Altium showed a message instead of the Engineering Change Order dialog "
                          "(altium_messages), such as that there is nothing to change."
                          if outcome.messages else "Altium did not open the Engineering Change Order dialog.")
         if outcome.problem:
             reply["error"] = outcome.problem
+        elif outcome.error_messages:
+            reply["error"] = "Altium reported an error: " + " | ".join(outcome.error_messages)[:400]
         return json.dumps(reply, indent=1)
     if link_by_designator and outcome.component_links.startswith("automatic") and not outcome.executed:
         # Checked on AD25: Altium writes the links into the board when the
@@ -6766,8 +6824,8 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
         groups[r["group"]] = groups.get(r["group"], 0) + 1
     reply.update({"success": not outcome.problem and (outcome.executed or not execute),
                   "validated": outcome.validated, "changes": len(outcome.rows), "by_group": groups,
-                  "failed": outcome.errors[:max_changes], "executed": outcome.executed,
-                  "dialog_closed": outcome.closed})
+                  "failed": outcome.errors[:max_changes], "dialog_closed": outcome.closed})
+    reply.update(_executed_state(outcome))
     if outcome.problem:
         reply["error"] = outcome.problem
     if outcome.validation_problems:
@@ -6775,6 +6833,9 @@ async def update_pcb(ctx: Context, project_path: str = "", pcb_path: str = "", e
     if not execute:
         reply["change_list"] = outcome.rows[:max_changes]
         reply["note"] = "Validated only; execute=true applies the changes."
+        warnings = eco_dialog.removals(outcome.rows, allow_component_removal, allow_room_removal)
+        if warnings:
+            reply["warning"] = "; ".join(warnings)
     elif outcome.not_executed:
         reply["not_executed"] = outcome.not_executed
         reply["change_list"] = outcome.rows[:max_changes]

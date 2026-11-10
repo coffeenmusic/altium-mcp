@@ -15,11 +15,12 @@ Validation and execution run on Altium's UI thread: a WM_NULL sent with
 SendMessageTimeout returns once the click has been handled, which is how
 the driver knows the work is done.
 
-The driver runs until the bridge call that opened the dialog returns, and
-answers or closes every dialog Altium opens meanwhile (the Component Links
-question, message boxes such as "no differences", anything else modal),
-with WM_CLOSE when a button does not close it, so Altium is never left
-waiting on a dialog. Windows that were open before it started are left
+The driver starts once the bridge has picked up the request and runs until
+the bridge call returns. It answers or closes every Altium dialog that opens
+meanwhile (the Component Links question, message boxes such as "no
+differences", anything else modal), with WM_CLOSE when a button does not
+close it, so Altium is never left waiting on a dialog. Only Altium's
+(X2.EXE) windows are looked at, and those open when it started are left
 alone. The window calls go through Win32, which tests replace.
 """
 import asyncio
@@ -30,7 +31,7 @@ import re
 import subprocess
 from ctypes import wintypes
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 FORM_CLASS = "TChangeManagementForm"
 LINKS_CAPTION = "Component Links"
@@ -42,6 +43,8 @@ BUTTON_CLASSES = ("TXPBitBtn", "TButton", "TBitBtn", "TVistaSpeedButton", "Butto
 DISMISS_ORDER = ("Cancel", "No", "Close", "OK")
 # Never closed as an unknown dialog: hints, tooltips, menus
 IGNORED_CLASSES = ("THintWindow", "tooltips_class32", "#32768")
+# A message box that reports a failure rather than informs
+_ERROR_TEXT = re.compile(r"error|failed|exception|access violation|could not|cannot|unable", re.IGNORECASE)
 WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON, WM_NULL = 0x0201, 0x0202, 0x0001, 0x0000
 WM_CLOSE, WM_GETTEXT, SMTO_ABORTIFHUNG = 0x0010, 0x000D, 0x0002
 _proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -67,11 +70,13 @@ class EcoOutcome:
     validated: bool = False
     validation_problems: List[str] = field(default_factory=list)  # the change list did not check out
     not_executed: List[str] = field(default_factory=list)          # why Execute Changes was not pressed
-    executed: bool = False
+    execute_pressed: bool = False   # Execute Changes was clicked (its outcome may still be unknown)
+    executed: bool = False          # ...and Altium finished it and the list was read again
     executed_changes: List[dict] = field(default_factory=list)
     execute_errors: List[dict] = field(default_factory=list)
     closed: bool = False
     messages: List[str] = field(default_factory=list)  # message boxes answered or closed
+    error_messages: List[str] = field(default_factory=list)  # those of them that report a failure
     component_links: str = ""  # how the Component Links question was answered
     problem: str = ""
 
@@ -151,6 +156,12 @@ def open_windows(win: Optional[Win32] = None) -> Set[int]:
     return (win or Win32()).windows()
 
 
+def open_eco_dialogs(win: Optional[Win32] = None) -> List[int]:
+    """Engineering Change Order dialogs open in Altium now."""
+    win = win or Win32()
+    return [h for h in win.windows() if win.cls(h) == FORM_CLASS]
+
+
 def project_boards(prj_text: str, project_path: str) -> List[str]:
     """The boards a .PrjPcb lists (DocumentPath=...PcbDoc), as full paths;
     relative paths are relative to the project's folder."""
@@ -175,7 +186,9 @@ def parse_list(rows: List[str], board_name: str) -> Tuple[List[dict], List[str]]
     text after the affected document's name), and what does not check out:
     a change row without the board's name (its message cannot be told from
     its text), a change outside a group, or a group whose count differs from
-    the rows read under it (a collapsed or unread group)."""
+    the rows read under it (a collapsed or unread group). A row that does
+    not start with True or False counts as enabled, so the removal checks
+    do not miss it."""
     out, problems = [], []
     group = None
     declared: Dict[str, int] = {}
@@ -190,7 +203,9 @@ def parse_list(rows: List[str], board_name: str) -> Tuple[List[dict], List[str]]
             declared[group] = declared.get(group, 0) + int(m.group(2))
             read.setdefault(group, 0)
             continue
-        enabled, _, rest = line.partition(" ")
+        flag, _, rest = line.partition(" ")
+        if flag not in ("True", "False"):
+            flag, rest = "", line
         change, message = rest, ""
         i = rest.lower().rfind(board_name.lower()) if board_name else -1
         if i >= 0:
@@ -201,7 +216,7 @@ def parse_list(rows: List[str], board_name: str) -> Tuple[List[dict], List[str]]
             problems.append(f"a change outside any group: {' '.join(line.split())[:200]}")
         else:
             read[group] += 1
-        out.append({"group": group or "", "enabled": enabled == "True", "change": " ".join(change.split()),
+        out.append({"group": group or "", "enabled": flag != "False", "change": " ".join(change.split()),
                     "message": " ".join(message.split())})
     for name, count in declared.items():
         if read.get(name, 0) != count:
@@ -218,22 +233,36 @@ def is_component_removal(row: dict) -> bool:
     return row["group"].strip().lower() == "remove components"
 
 
+def is_room_removal(row: dict) -> bool:
+    return row["group"].strip().lower() == "remove rooms"
+
+
+def removals(rows: List[dict], allow_component_removal: bool = False,
+             allow_room_removal: bool = False) -> List[str]:
+    """The removals in Altium's own change list that were not allowed."""
+    out = []
+    parts = [r for r in rows if r["enabled"] and is_component_removal(r)]
+    if parts and not allow_component_removal:
+        out.append(f"the update would remove {len(parts)} component(s) from the board "
+                   "(allow_component_removal=true if that is intended)")
+    rooms = [r for r in rows if r["enabled"] and is_room_removal(r)]
+    if rooms and not allow_room_removal:
+        out.append(f"the update would remove {len(rooms)} room(s) (allow_room_removal=true if that is intended)")
+    return out
+
+
 def execute_blockers(rows: List[dict], problems: List[str], allow_errors: bool,
-                     allow_component_removal: bool) -> List[str]:
+                     allow_component_removal: bool, allow_room_removal: bool = False) -> List[str]:
     """Why Execute Changes must not be pressed; empty when it may be: a
     clean read of the list, no failed change (or allow_errors), and no
-    component removal unless allowed."""
+    component or room removal in it unless allowed."""
     out = list(problems)
     if not rows:
         out.append("the dialog lists no changes")
     failed = [r for r in rows if r["message"]]
     if failed and not allow_errors:
         out.append(f"{len(failed)} change(s) failed validation (allow_errors=true applies the rest)")
-    removals = [r for r in rows if r["enabled"] and is_component_removal(r)]
-    if removals and not allow_component_removal:
-        out.append(f"the update would remove {len(removals)} component(s) from the board "
-                   "(allow_component_removal=true if that is intended)")
-    return out
+    return out + removals(rows, allow_component_removal, allow_room_removal)
 
 
 class Driver:
@@ -241,12 +270,16 @@ class Driver:
 
     def __init__(self, win, outcome: EcoOutcome, board_name: str, execute: bool, allow_errors: bool,
                  auto_links: bool, before: Set[int], allow_component_removal: bool = False,
-                 work_timeout: float = 600, grace: float = 10, poll: float = 0.3, answer_wait: float = 2):
+                 allow_room_removal: bool = False, keep_alive: Optional[Callable[[], None]] = None,
+                 work_timeout: float = 600, grace: float = 10, poll: float = 0.3, answer_wait: float = 2,
+                 idle_slice: float = 5):
         self.win, self.outcome, self.board_name = win, outcome, board_name
         self.execute, self.allow_errors, self.auto_links = execute, allow_errors, auto_links
-        self.allow_component_removal = allow_component_removal
+        self.allow_component_removal, self.allow_room_removal = allow_component_removal, allow_room_removal
+        self.keep_alive = keep_alive                     # called while Altium works on the dialog
         self.before = set(before)
         self.work_timeout, self.grace, self.poll = work_timeout, grace, poll
+        self.idle_slice = idle_slice                     # one wait for Altium's UI thread, at most
         self.answer_wait = answer_wait                   # a box's button gets this long to close it
         self.handled: Set[int] = set()
         self.first_seen: Dict[int, float] = {}
@@ -269,10 +302,20 @@ class Driver:
                 texts.append(self.win.text(c))
         return " ".join(" ".join(t.split()) for t in texts if t and t.strip())
 
+    def _alive_signal(self) -> None:
+        if self.keep_alive is not None:
+            try:
+                self.keep_alive()
+            except Exception:
+                pass
+
     def _dismiss(self, h: int) -> None:
         """Answer a message box with its most cautious button; WM_CLOSE
         follows when that does not close it."""
-        self.outcome.messages.append(self._message(h) or self.win.cls(h))
+        text = self._message(h) or self.win.cls(h)
+        self.outcome.messages.append(text)
+        if _ERROR_TEXT.search(text):
+            self.outcome.error_messages.append(text)
         for label in DISMISS_ORDER:
             button = self._control(h, BUTTON_CLASSES, label)
             if button:
@@ -344,7 +387,8 @@ class Driver:
                 self.handled.add(h)
                 self._dismiss(h)
                 answered = True
-            elif unknown and cls not in IGNORED_CLASSES and "progress" not in cls.lower()                     and self.win.enabled(h) and self._frame_disabled():
+            elif unknown and cls not in IGNORED_CLASSES and "progress" not in cls.lower() \
+                    and self.win.enabled(h) and self._frame_disabled():
                 # Something else modal: closed once it has stayed a while
                 first = self.first_seen.setdefault(h, self._now())
                 if self._now() - first >= self.grace:
@@ -372,14 +416,23 @@ class Driver:
 
     async def _settle(self, form: int, what: str) -> bool:
         """Wait until Altium has handled a click, answering boxes it shows
-        meanwhile."""
+        meanwhile. The wait goes in slices, each one a sign to the bridge
+        (keep_alive) that Altium is still working, up to work_timeout."""
         loop = asyncio.get_running_loop()
         deadline = self._now() + self.work_timeout
         while True:
+            self._alive_signal()
             left = deadline - self._now()
-            if left <= 0 or not await loop.run_in_executor(None, self.win.wait_idle, form, left):
+            if left <= 0:
                 self.outcome.problem = f"{what} did not finish in time"
                 return False
+            if not self.win.alive(form):
+                self.outcome.problem = f"the Engineering Change Order dialog went away during {what}"
+                return False
+            if not await loop.run_in_executor(None, self.win.wait_idle, form, min(left, self.idle_slice)):
+                # Busy, or taken for hung while it works: wait on
+                await asyncio.sleep(min(0.5, max(0.0, deadline - self._now())))
+                continue
             _, answered = self.sweep(unknown=False)
             if not answered and not self.closing:
                 return True
@@ -391,6 +444,7 @@ class Driver:
         o.found = True
         loop = asyncio.get_running_loop()
         close = None
+        answered_before = len(o.messages)        # boxes answered before the dialog came
         try:
             await asyncio.sleep(0.5)
             close = self._control(form, BUTTON_CLASSES, "Close")
@@ -413,11 +467,22 @@ class Driver:
             o.errors = [r for r in rows if r["message"]]
             if not self.execute:
                 return
-            o.not_executed = self.blocked + execute_blockers(rows, problems, self.allow_errors,
-                                                             self.allow_component_removal)
+            blockers = self.blocked + execute_blockers(rows, problems, self.allow_errors,
+                                                       self.allow_component_removal, self.allow_room_removal)
+            # A box answered while the dialog opened or validated (Cancel
+            # first) may have changed what the list means; a box that would
+            # not close leaves Altium in an unknown state
+            during = o.messages[answered_before:]
+            if during:
+                blockers.append(f"Altium showed {len(during)} message(s) while the changes were validated, "
+                                f"answered or closed from here: " + " | ".join(during)[:400])
+            if o.problem:
+                blockers.append(o.problem)
+            o.not_executed = blockers
             if o.not_executed:
                 return
             self.win.click(run)
+            o.execute_pressed = True
             await asyncio.sleep(0.2)
             if not await self._settle(form, "executing the changes"):
                 return
@@ -455,7 +520,8 @@ class Driver:
 
 async def drive(outcome: EcoOutcome, board_name: str, execute: bool, allow_errors: bool,
                 auto_links: bool, stop: asyncio.Event, before: Set[int],
-                allow_component_removal: bool = False, win=None, **timing) -> None:
+                allow_component_removal: bool = False, win=None, allow_room_removal: bool = False,
+                keep_alive: Optional[Callable[[], None]] = None, **timing) -> None:
     """Drive one Import Changes run until stop is set: find the dialog,
     validate and read the changes, execute them when asked and the list
     checked out (see execute_blockers), close it, and answer or close every
@@ -467,5 +533,5 @@ async def drive(outcome: EcoOutcome, board_name: str, execute: bool, allow_error
     answers Automatically Create Component Links instead, which pairs them
     by designator."""
     driver = Driver(win or Win32(), outcome, board_name, execute, allow_errors, auto_links, before,
-                    allow_component_removal, **timing)
+                    allow_component_removal, allow_room_removal, keep_alive, **timing)
     await driver.run(stop)
