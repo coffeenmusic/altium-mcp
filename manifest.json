@@ -293,7 +293,7 @@
     },
     {
       "name": "rollback_altium_script",
-      "description": "Undo a run_altium_script run by restoring the documents it copied before the run, refusing any changed or edited since"
+      "description": "Undo a run_altium_script run by restoring the documents it copied before the run, refusing files changed on disk since and documents with unsaved changes"
     },
     {
       "name": "ensure_altium_script_skill",

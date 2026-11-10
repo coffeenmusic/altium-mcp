@@ -105,7 +105,7 @@ TEMPLATE_GLOBALS = [
     "SandboxLog", "SandboxTick", "SbxSaveUndo", "SbxPreProcess", "SbxPostProcess", "SbxPcbPreProcess",
     "SbxPcbPostProcess", "SbxCloseUndo", "MM", "OpenSchDoc", "SaveDoc", "FmtNum", "FmtMM", "ParseNum",
     "ParseMM", "SbxSnapDocs", "SbxDocState", "SbxNoteDoc", "SbxNoteDocsAfter", "SbxCloseDoc",
-    "SbxProjectUnsaved", "SbxBody", "Run",
+    "SbxProjectUnsaved", "SbxNormPath", "SbxFindDoc", "SbxBody", "Run",
 ]
 
 # Pascal's reserved words, and the directives and type names that failed the
@@ -418,14 +418,16 @@ def routines(split: SplitScript) -> List[Routine]:
     return found
 
 
-def check_declarations(split: SplitScript) -> List[str]:
+def check_declarations(split: SplitScript, reserved_words: bool = True) -> List[str]:
     """Names the script declares that cannot compile: reserved words, and
-    var-block names the template already declares."""
+    var-block names the template already declares. reserved_words=False
+    (skip_lint) leaves out the reserved-word check, for a word it has wrong."""
     problems = []
     taken = {n.lower(): n for n in TEMPLATE_NAMES + TEMPLATE_GLOBALS}
+    reserved = RESERVED_WORDS if reserved_words else set()
     for decl, src in zip(split.decls, split.decl_src):
         for name in declared_names([decl]):
-            if name.lower() in RESERVED_WORDS:
+            if name.lower() in reserved:
                 problems.append(f"line {src}: '{name}' is a reserved word and cannot name a variable; "
                                 f"rename it (e.g. {name}_)")
             elif name.lower() in taken:
@@ -433,7 +435,7 @@ def check_declarations(split: SplitScript) -> List[str]:
                                 f"declaring it, or pick another name")
     for r in routines(split):
         for name in [r.name] + r.names:
-            if name.lower() in RESERVED_WORDS:
+            if name.lower() in reserved:
                 problems.append(f"line {r.first_line}: '{name}' is a reserved word and cannot be used as "
                                 f"a name in {r.name or 'a routine'}; rename it")
         if r.name.lower() in taken:
@@ -493,7 +495,7 @@ KNOWN_CRASHES = [
 
 
 _PREC_TOKEN_RE = re.compile(
-    r":=|<>|<=|>=|[=<>()\[\];]|\b(?:and|or|xor|then|do|of|else|begin|end|until|if|while|repeat|case)\b",
+    r":=|<>|<=|>=|[=<>()\[\];,]|\b(?:and|or|xor|then|do|of|else|begin|end|until|if|while|repeat|case)\b",
     re.IGNORECASE)
 _NOT_CMP_RE = re.compile(r"\bnot\s+(?!\()[A-Za-z_][\w.]*(?:\([^()]*\)|\[[^\]]*\])*\s*(?:<>|<=|>=|=|<|>)",
                          re.IGNORECASE)
@@ -532,6 +534,9 @@ def precedence_problems(code: str, line_offset: int = 0) -> List[str]:
         elif tok in ("and", "or", "xor"):
             if frames[-1][1] is None:
                 frames[-1][1] = line
+        elif tok == ",":              # ends an argument: 'Max(A = 1, B or C)' is fine
+            check(frames[-1])
+            frames[-1] = [False, None]
         else:                         # a statement or clause boundary
             for f in frames:
                 check(f)
@@ -800,8 +805,16 @@ def _is_project(path: str) -> bool:
     return DOC_KINDS.get(os.path.splitext(path)[1].lower()) == "PROJECT"
 
 
+def norm_path(path: str) -> str:
+    """As the template's SbxNormPath: lower case, backslashes, no repeated
+    separators (a UNC path keeps its leading two)."""
+    p = path.strip().replace("/", "\\").lower()
+    lead = "\\\\" if p.startswith("\\\\") else ""
+    return lead + re.sub(r"\\{2,}", r"\\", p[len(lead):])
+
+
 def _skip_list(paths: List[str]) -> str:
-    return "".join(f"|{p.upper()}|" for p in paths)
+    return "".join(f"|{norm_path(p).upper()}|" for p in paths)
 
 
 def state_script(paths: List[str]) -> str:

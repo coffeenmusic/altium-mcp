@@ -237,6 +237,47 @@ begin
     end;
 end;
 
+// A path in lower case with forward slashes turned back and repeated
+// separators dropped (a UNC path keeps its leading '\\'), for comparing paths
+function SbxNormPath(Path : String) : String;
+var
+    Lead : String;
+begin
+    Result := LowerCase(StringReplace(Trim(Path), '/', '\', REPLACEALL));
+    Lead := '';
+    if Copy(Result, 1, 2) = '\\' then
+    begin
+        Lead := '\\';
+        Result := Copy(Result, 3, Length(Result));
+    end;
+    while Pos('\\', Result) > 0 do
+        Result := StringReplace(Result, '\\', '\', REPLACEALL);
+    Result := Lead + Result;
+end;
+
+// The open document for a file, or nil. Client.IsDocumentOpen and
+// GetDocumentByPath miss a path spelled differently from Altium's.
+function SbxFindDoc(Path : String) : IServerDocument;
+var
+    I, J : Integer;
+    Module : IServerModule;
+    Want : String;
+begin
+    Result := nil;
+    Want := SbxNormPath(Path);
+    for I := 0 to Client.Count - 1 do
+    begin
+        Module := Client.ServerModule[I];
+        if Module <> nil then
+            for J := 0 to Module.DocumentCount - 1 do
+                if SbxNormPath(Module.Documents[J].FileName) = Want then
+                begin
+                    Result := Module.Documents[J];
+                    Exit;
+                end;
+    end;
+end;
+
 // 'closed', 'open' or 'unsaved' (open with changes not on disk). Modified is
 // read through BoolToStr: read directly in a condition it is always False.
 function SbxDocState(Path : String) : String;
@@ -244,12 +285,11 @@ var
     D : IServerDocument;
 begin
     Result := 'closed';
-    if Client.IsDocumentOpen(Path) then
+    D := SbxFindDoc(Path);
+    if D <> nil then
     begin
         Result := 'open';
-        D := Client.GetDocumentByPath(Path);
-        if D <> nil then
-            if BoolToStr(D.Modified, True) = 'True' then Result := 'unsaved';
+        if BoolToStr(D.Modified, True) = 'True' then Result := 'unsaved';
     end;
 end;
 
@@ -280,22 +320,19 @@ var
     D : IServerDocument;
 begin
     Result := 'closed';
-    if Client.IsDocumentOpen(Path) then
+    D := SbxFindDoc(Path);
+    if D <> nil then
     begin
         Result := 'open';
-        D := Client.GetDocumentByPath(Path);
-        if D <> nil then
-        begin
-            D.SetModified(False);
-            Client.CloseDocument(D);
-        end;
-        if Client.IsDocumentOpen(Path) then Result := 'stillopen';
+        D.SetModified(False);
+        Client.CloseDocument(D);
+        if SbxFindDoc(Path) <> nil then Result := 'stillopen';
     end;
 end;
 
 // The open documents of the project at ProjPath with unsaved changes, other
-// than those in Skip ('|' + upper-case path + '|' for each), each followed by
-// '*'. Closing the project would ask to save them.
+// than those in Skip ('|' + path through SbxNormPath, upper case, + '|' for
+// each), each followed by '*'. Closing the project would ask to save them.
 function SbxProjectUnsaved(ProjPath : String; Skip : String) : String;
 var
     P, K : Integer;
@@ -308,18 +345,17 @@ begin
     begin
         Prj := GetWorkspace.DM_Projects(P);
         if Prj <> nil then
-            if UpperCase(Prj.DM_ProjectFullPath) = UpperCase(ProjPath) then
+            if SbxNormPath(Prj.DM_ProjectFullPath) = SbxNormPath(ProjPath) then
                 for K := 0 to Prj.DM_LogicalDocumentCount - 1 do
                 begin
                     Doc := Prj.DM_LogicalDocuments(K);
-                    if Pos('|' + UpperCase(Doc.DM_FullPath) + '|', Skip) = 0 then
-                        if Client.IsDocumentOpen(Doc.DM_FullPath) then
-                        begin
-                            D := Client.GetDocumentByPath(Doc.DM_FullPath);
-                            if D <> nil then
-                                if BoolToStr(D.Modified, True) = 'True' then
-                                    Result := Result + Doc.DM_FullPath + '*';
-                        end;
+                    if Pos('|' + UpperCase(SbxNormPath(Doc.DM_FullPath)) + '|', Skip) = 0 then
+                    begin
+                        D := SbxFindDoc(Doc.DM_FullPath);
+                        if D <> nil then
+                            if BoolToStr(D.Modified, True) = 'True' then
+                                Result := Result + Doc.DM_FullPath + '*';
+                    end;
                 end;
     end;
 end;

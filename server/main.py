@@ -1624,7 +1624,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
       sandbox name declared again, and a comparison next to and/or without
       parentheses: 'if A = 1 and B = 2' is 'A = (1 and B) = 2' ("Then
       expected"); 'not A = B' is '(not A) = B' and silently gives the wrong
-      answer. Write '(A = 1) and (B = 2)' and 'not (A = B)'.
+      answer. Write '(A = 1) and (B = 2)' and 'not (A = B)'. skip_lint=True
+      skips the reserved-word and precedence checks; a sandbox name
+      declared again is always refused.
     - Calls known to crash Altium (GetState_DescriptionString, reading
       .Corner or .BoundingRectangle through an IDispatch variable, ...) and
       a PreProcess without PostProcess are refused before Altium is called:
@@ -1685,8 +1687,8 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         script (str): DelphiScript statements to execute (body only, optionally
             preceded by a var block and functions or procedures).
         timeout_seconds (int): How long to wait for completion (default 120).
-        skip_lint (bool): Run even though the known-crash check refused the
-            script. Only for a false positive.
+        skip_lint (bool): Run even though the known-crash, precedence or
+            reserved-word check refused the script. Only for a false positive.
         snapshot (list): Documents to copy before the run, for
             rollback_altium_script. Default: those named in the script's
             strings. [] takes none.
@@ -1707,12 +1709,15 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     split = sandbox.split_var_block(script)
     script_names = sandbox.declared_names(split.decls) + [r.name for r in sandbox.routines(split)]
-    problems = (sandbox.check_declarations(split) + sandbox.check_routines(split)
+    problems = (sandbox.check_declarations(split, reserved_words=not skip_lint) + sandbox.check_routines(split)
                 + sandbox.check_script(split.body, script_names, split.body_offset))
     if problems:
-        return json.dumps({"success": False,
-                           "error": "refused before execution: the script would not compile",
-                           "problems": problems, "executor_wedged": False}, indent=2)
+        refused = {"success": False, "error": "refused before execution: the script would not compile",
+                   "problems": problems, "executor_wedged": False}
+        if any("is a reserved word" in p for p in problems):
+            refused["note"] = ("Altium was not touched. Pass skip_lint=True only if a name is wrongly "
+                               "listed as a reserved word.")
+        return json.dumps(refused, indent=2)
     if not skip_lint:
         # The routines come straight before the statements, so one pass keeps
         # the line numbers and counts PreProcess/PostProcess across both
@@ -1950,6 +1955,18 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         "steps": steps, **report}, indent=2)
 
 
+def _restore_snapshot_files(snap_dir: Path, entries: List[dict]) -> Tuple[List[str], List[dict]]:
+    """Copy each entry's snapshot back over its file: (restored, failed)."""
+    restored, failed = [], []
+    for e in entries:
+        try:
+            shutil.copy2(snap_dir / e["copy"], e["path"])
+            restored.append(e["path"])
+        except OSError as err:
+            failed.append({"path": e["path"], "error": str(err)})
+    return restored, failed
+
+
 @_tool()
 async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: bool = False) -> str:
     """
@@ -1965,18 +1982,21 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
       snapshot copies are listed so they can be restored by hand.
     - a document that had unsaved changes in Altium before the run: those
       changes were never on disk, so closing it would lose them.
-    - a document with unsaved changes in Altium now that it did not have when
-      the run ended (edited after the run), or when the run's end state is
-      unknown (the script stopped early): those may not be the script's.
+    - a document with unsaved changes in Altium now, including one the
+      script itself left unsaved: the user may have kept editing it since,
+      and closing it would lose those edits with the script's.
     - a project with other open documents that have unsaved changes: closing
       the project would ask to save them. Save or close them first.
     Pass discard_unsaved=True to restore the documents with unsaved changes
     anyway; files changed on disk and projects are always refused.
 
+    When Altium is not running, nothing can be open or unsaved: the files are
+    restored straight after the on-disk check, without starting Altium.
+
     Args:
         run_id (str): The "snapshot" run_id from run_altium_script's result.
-        discard_unsaved (bool): Also restore documents whose unsaved changes
-            in Altium may not be the script's, losing those changes.
+        discard_unsaved (bool): Also restore documents with unsaved changes
+            in Altium, losing those changes.
 
     Returns:
         str: JSON with the restored documents and which were reopened.
@@ -1998,6 +2018,14 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
             "changed_since_run": changed,
             "snapshot_copies": {p: copies[p] for p in changed},
             "note": "Nothing was touched. Copy a snapshot back by hand if it is still wanted."}, indent=2)
+    if not altium_bridge._altium_running():
+        # Nothing is open, so nothing unsaved can be lost and nothing needs
+        # closing; starting Altium only to ask would take half a minute
+        restored, failed = _restore_snapshot_files(snap_dir, entries)
+        sb.prune()
+        return json.dumps({"success": not failed, "restored": restored, "failed": failed,
+                           "reopened": [], "note": "Altium was not running; the files were restored "
+                                                   "on disk without starting it."}, indent=2)
     unsaved = [e["path"] for e in entries if e.get("state_before") == "unsaved"]
     if unsaved and not discard_unsaved:
         return json.dumps({
@@ -2025,8 +2053,9 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
         return json.dumps({"success": False, "error": "Altium did not report the documents' state; "
                                                       "nothing was restored", "dialogs_closed": dialogs})
     now, children = sandbox.parse_states(text)
-    edited_later = [e["path"] for e in entries if now.get(e["path"].lower()) == "unsaved"
-                    and e.get("state_before") != "unsaved" and e.get("state_after") != "unsaved"]
+    # Any unsaved document, also one the run left unsaved: the user may have
+    # kept editing it, and the end-of-run state cannot tell those edits apart
+    unsaved_now = [e["path"] for e in entries if now.get(e["path"].lower()) == "unsaved"]
     busy_projects = {p: docs for p, docs in children.items() if docs}
     if busy_projects:
         return json.dumps({
@@ -2035,15 +2064,18 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
                      "theirs that have unsaved changes",
             "projects": busy_projects,
             "note": "Save or close those documents in Altium, then retry."}, indent=2)
-    if edited_later and not discard_unsaved:
-        return json.dumps({
+    if unsaved_now and not discard_unsaved:
+        left_by_run = [e["path"] for e in entries if e["path"] in unsaved_now
+                       and e.get("state_after") == "unsaved"]
+        refused = {
             "success": False,
-            "error": "not rolled back: these documents have unsaved changes in Altium that they did "
-                     "not have when the run ended (edited since), or the run ended before their "
-                     "state was logged; closing them would lose changes that may not be the script's",
-            "unsaved_now": edited_later,
-            "note": "Pass discard_unsaved=True to drop those changes and restore the files anyway."},
-            indent=2)
+            "error": "not rolled back: these documents have unsaved changes in Altium; closing them "
+                     "would lose those changes, which may include edits made after the run",
+            "unsaved_now": unsaved_now,
+            "note": "Pass discard_unsaved=True to drop those changes and restore the files anyway."}
+        if left_by_run:
+            refused["left_unsaved_by_run"] = left_by_run
+        return json.dumps(refused, indent=2)
 
     closed = await asyncio.to_thread(sb.run_quick, sandbox.close_script(paths), 30.0, dialogs)
     if closed is None:
@@ -2053,19 +2085,10 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
     for ln in closed.splitlines():
         kind, _, path = ln.partition("|")
         status[path.lower()] = kind
-    restored, failed, still_open = [], [], []
-    for e in entries:
-        kind = status.get(e["path"].lower())
-        if kind not in ("open", "closed"):
-            # Still open in Altium (a prompt was cancelled): restoring the file
-            # under it would leave Altium's copy out of step with the disk
-            still_open.append(e["path"])
-            continue
-        try:
-            shutil.copy2(snap_dir / e["copy"], e["path"])
-            restored.append(e["path"])
-        except OSError as err:
-            failed.append({"path": e["path"], "error": str(err)})
+    # Still open in Altium (a prompt was cancelled): restoring the file under
+    # it would leave Altium's copy out of step with the disk
+    still_open = [e["path"] for e in entries if status.get(e["path"].lower()) not in ("open", "closed")]
+    restored, failed = _restore_snapshot_files(snap_dir, [e for e in entries if e["path"] not in still_open])
     was_open = [e["path"] for e in entries if status.get(e["path"].lower()) == "open"]
     # Projects first: a sheet opened before its project lands in Free Documents
     reopen = sorted([p for p in was_open if p in restored], key=lambda p: not p.lower().endswith(".prjpcb"))

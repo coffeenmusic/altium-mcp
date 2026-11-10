@@ -214,8 +214,9 @@ class BuildTest(unittest.TestCase):
         b = build("Exit;")
         body = b.text.index("procedure SbxBody;")
         run = b.text.index("procedure Run;")
-        self.assertLess(body, b.text.index("        Exit;"))
-        self.assertLess(b.text.index("        Exit;"), run)
+        # (the template's own routines use Exit too, further indented)
+        self.assertLess(body, b.text.index("\n        Exit;"))
+        self.assertLess(b.text.index("\n        Exit;"), run)
         tail = b.text[run:]
         self.assertLess(tail.index("SbxBody;"), tail.index("OutLines.SaveToFile(OutPath);"))
 
@@ -301,6 +302,15 @@ class DeclarationTest(unittest.TestCase):
                                      "begin\n    Result := 1;\nend;\nI1 := F(1);")
         self.assertEqual(len(sandbox.check_declarations(sp)), 2)
 
+    def test_skip_lint_skips_reserved_words_only(self):
+        sp = sandbox.split_var_block("var\n    Label, S1 : Integer;\nprocedure Read(Unit : Integer);\n"
+                                     "begin\nend;\nRead(1);")
+        self.assertEqual(len(sandbox.check_declarations(sp)), 4)
+        # A sandbox name declared again never compiles, so it stays refused
+        problems = sandbox.check_declarations(sp, reserved_words=False)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("'S1' is already declared", problems[0])
+
     def test_names_the_template_declares(self):
         sp = sandbox.split_var_block("var\n    S1 : Integer;\nfunction MM(V : Double) : Integer;\nbegin\nend;\nI1 := 1;")
         problems = sandbox.check_declarations(sp)
@@ -331,6 +341,9 @@ class PrecedenceTest(unittest.TestCase):
         self.assertEqual(len(self.problems("while (I1 < 3) and\n  I2 > 0 do I1 := I1 + 1;")), 1)
         self.assertEqual(len(self.problems("B1 := X = 1 or Y;")), 1)
         self.assertEqual(len(self.problems("if F(A = 1 or B) then ;")), 1)
+        # Within one argument the comma does not hide it
+        self.assertEqual(len(self.problems("I1 := Max(I2, A = 1 or B);")), 1)
+        self.assertEqual(len(self.problems("I1 := Max(A = 1 or B, I2);")), 1)
 
     def test_parenthesized_and_plain_pass(self):
         for ok in ("if (I1 = 1) and (I2 = 2) then S1 := 'a';",
@@ -338,7 +351,10 @@ class PrecedenceTest(unittest.TestCase):
                    "S1 := 'a = 1 and b';\nI1 := I2 and 3;\nif I1 = 1 then I2 := 3 and I1;",
                    "repeat I1 := I1 + 1 until (I1 = 3) or (I2 > 4);",
                    "Ok := Pos('x', S1) > 0;\nX := A[I1 = 1];",
-                   "function F(A : Integer = 4; B : Boolean = False) : Integer;"):
+                   "function F(A : Integer = 4; B : Boolean = False) : Integer;",
+                   # Commas separate arguments: a comparison in one, or in another
+                   "I1 := Max(A = 1, B or C);",
+                   "S1 := Copy(S2, I1 = 1, I2 and 3);"):
             self.assertEqual(self.problems(ok), [], ok)
 
     def test_not_before_comparison(self):
@@ -427,6 +443,21 @@ class SnapshotTest(unittest.TestCase):
         self.assertLess(run.index("SbxBody;"), run.index("SbxNoteDocsAfter;"))
         self.assertLess(run.index("SbxNoteDocsAfter;"), run.index("SbxSnapDocs.Free;"))
 
+    def test_norm_path(self):
+        self.assertEqual(sandbox.norm_path(" C:/P//Sub\\A.SchDoc "), "c:\\p\\sub\\a.schdoc")
+        self.assertEqual(sandbox.norm_path("\\\\Srv\\Share\\\\A.SchDoc"), "\\\\srv\\share\\a.schdoc")
+
+    def test_template_finds_open_documents_by_any_spelling(self):
+        # Client.IsDocumentOpen and GetDocumentByPath miss a path spelled
+        # differently from Altium's; the template compares normalised paths
+        code = sandbox.strip_strings_and_comments(TEMPLATE)
+        self.assertNotIn("IsDocumentOpen", code)
+        for name in ("SbxDocState", "SbxCloseDoc", "SbxProjectUnsaved"):
+            start = code.index(f"function {name}(")
+            body = code[start:code.index("\nend;", start)]
+            self.assertIn("SbxFindDoc(", body, name)
+            self.assertNotIn("GetDocumentByPath", body, name)
+
     def test_template_reads_modified_through_booltostr(self):
         # Modified read directly in a condition is always False in a script
         code = sandbox.strip_strings_and_comments(TEMPLATE)
@@ -445,6 +476,9 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(state.count("SbxProjectUnsaved("), 1)
         self.assertIn("SbxProjectUnsaved('C:\\p\\P.PrjPcb', '|C:\\P\\A.SCHDOC||C:\\P\\P.PRJPCB||C:\\P\\B.PCBDOC|')",
                       state)
+        # The skip list is compared with SbxNormPath's form of each path
+        self.assertIn("'|C:\\P\\A.SCHDOC||\\\\SRV\\P\\B.PCBDOC||C:\\P\\P.PRJPCB|'",
+                      sandbox.state_script(["C:/p//A.SchDoc", "\\\\srv\\p\\\\B.PcbDoc", "C:\\p\\P.PrjPcb"]))
         self.assertEqual(sandbox.check_script(state.split("\n"), []), [])
         now, children = sandbox.parse_states(
             "unsaved|C:\\p\\A.SchDoc\nopen|C:\\p\\P.PrjPcb\nchildren|C:\\p\\P.PrjPcb|C:\\p\\C.SchDoc*C:\\p\\D.SchDoc*\n"
@@ -708,6 +742,82 @@ class OneLineVarBlockTest(unittest.TestCase):
         self.assertEqual(split.decls, ["D: IServerDocument;", "P, S: String;"])
         self.assertEqual(sandbox.declared_names(split.decls), ["D", "P", "S"])
         self.assertEqual(split.body, ["S := P;", "ResultText := S;"])
+
+
+class RollbackToolTest(unittest.TestCase):
+    """main.rollback_altium_script with Altium faked."""
+
+    def setUp(self):
+        import asyncio
+        import json
+        import tempfile
+        from unittest import mock
+        import main
+        self.main, self.json, self.mock, self.asyncio = main, json, mock, asyncio
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.doc = self.dir / "A.SchDoc"
+        self.doc.write_bytes(b"before")
+        patch = mock.patch.object(main, "SANDBOX_SNAPSHOTS", self.dir / "snaps")
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.sb = main._sandbox()
+        sandbox.take_snapshot(self.sb.snapshot_dir("Sbx_1"), [str(self.doc)])
+        # The script edits the document and leaves it unsaved
+        self.doc.write_bytes(b"script saved this")
+        sandbox.record_run_end(self.sb.snapshot_dir("Sbx_1"),
+                               [f"DOC STATE: open|{self.doc}", f"DOC AFTER: unsaved|{self.doc}"])
+
+    def rollback(self, running, replies=(), **kw):
+        mock, main = self.mock, self.main
+        calls = []
+
+        def run_quick(_self, script, timeout=30.0, closed_dialogs=None):
+            calls.append(script)
+            return replies[len(calls) - 1]
+
+        async def ensure_paths(need_script=True):
+            return None
+        with mock.patch.object(type(main.altium_bridge), "_altium_running", staticmethod(lambda: running)), \
+                mock.patch.object(main.altium_bridge, "ensure_paths", ensure_paths), \
+                mock.patch.object(main, "altium_limit_problem", lambda: None), \
+                mock.patch.object(sandbox, "altium_hung", lambda: False), \
+                mock.patch.object(sandbox, "altium_dialogs", lambda: []), \
+                mock.patch.object(sandbox.Sandbox, "run_quick", run_quick), \
+                mock.patch.object(sandbox.Sandbox, "prune", lambda _self: None):
+            result = self.asyncio.run(main.rollback_altium_script(None, "Sbx_1", **kw))
+        return self.json.loads(result), calls
+
+    def test_altium_not_running_restores_without_starting_it(self):
+        result, calls = self.rollback(running=False)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["restored"], [str(self.doc)])
+        self.assertEqual(calls, [])
+        self.assertEqual(self.doc.read_bytes(), b"before")
+
+    def test_altium_not_running_still_checks_the_disk(self):
+        self.doc.write_bytes(b"user saved this")
+        result, calls = self.rollback(running=False)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["changed_since_run"], [str(self.doc)])
+        self.assertEqual(self.doc.read_bytes(), b"user saved this")
+
+    def test_unsaved_at_rollback_refused_even_if_the_run_left_it_so(self):
+        result, calls = self.rollback(running=True, replies=[f"unsaved|{self.doc}\n"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["unsaved_now"], [str(self.doc)])
+        self.assertEqual(result["left_unsaved_by_run"], [str(self.doc)])
+        self.assertEqual(len(calls), 1)          # only asked for the state; nothing closed
+        self.assertEqual(self.doc.read_bytes(), b"script saved this")
+
+    def test_unsaved_restored_with_discard_unsaved(self):
+        result, calls = self.rollback(running=True, discard_unsaved=True,
+                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}\n", "reopened"])
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["reopened"], [str(self.doc)])
+        self.assertIn("SbxCloseDoc(", calls[1])
+        self.assertEqual(self.doc.read_bytes(), b"before")
 
 
 if __name__ == "__main__":
