@@ -158,6 +158,43 @@ class PickTest(unittest.TestCase):
         for t in (st.Target("dialog"), st.Target("panel", "Projects"), st.Target("region", region=(0, 0, 1, 1))):
             self.assertEqual(got(t, None, "", None), (None, None, None))
 
+    def test_region_in_window(self):
+        window = (0, 0, 3440, 1400)  # a "current" capture of a maximised window
+        self.assertEqual(st.region_in_window((10, 100, 520, 400), window), (10, 100, 520, 400))
+        # Relative to the window, also on a second monitor
+        self.assertEqual(st.region_in_window((0, 0, 100, 50), (3440, 0, 4976, 824)),
+                         (3440, 0, 3540, 50))
+        # The whole window is allowed
+        self.assertEqual(st.region_in_window((0, 0, 1536, 824), (3440, 0, 4976, 824)),
+                         (3440, 0, 4976, 824))
+
+    def test_region_outside_window_refused(self):
+        window = (3440, 0, 4976, 824)
+        for region in ((0, 0, 1537, 10),       # one pixel too wide
+                       (0, 800, 100, 825),     # below the window
+                       (-1, 0, 10, 10),        # left of it
+                       (1600, 0, 1700, 10),    # entirely outside
+                       (-3440, 0, -3000, 10)): # on the other monitor
+            with self.assertRaises(st.TargetError):
+                st.region_in_window(region, window)
+
+    def test_covering(self):
+        rect = (0, 0, 3440, 1400)
+        terminal = st.Win(1, "CASCADIA_HOSTING_WINDOW_CLASS", "Terminal", (0, 900, 1600, 1400))
+        other_monitor = st.Win(2, "Chrome_WidgetWin_1", "Browser", (3440, 0, 4976, 824))
+        touching = st.Win(3, "X", "Touching", (3440, 0, 3500, 10))  # shares only an edge
+        self.assertEqual(st.covering(rect, [terminal, other_monitor, touching]), [terminal])
+        self.assertEqual(st.covering(rect, [other_monitor, touching]), [])
+        self.assertEqual(st.covering(rect, []), [])
+
+    def test_covering_error_names_programs_only(self):
+        msg = st.covering_error(["chrome.exe", "chrome.exe", "WindowsTerminal.exe"])
+        self.assertIn("Nothing was captured", msg)
+        self.assertIn("chrome.exe, WindowsTerminal.exe lies", msg)
+        self.assertEqual(msg.count("chrome.exe"), 1)
+        self.assertIn("another program", st.covering_error([""]))
+        self.assertIn("and 2 more", st.covering_error([f"p{i}.exe" for i in range(5)]))
+
     def test_clip(self):
         self.assertEqual(st.clip((-2, 0, 1906, 1030), (0, 0, 1920, 1080)), (0, 0, 1906, 1030))
         self.assertIsNone(st.clip((2000, 0, 2100, 10), (0, 0, 1920, 1080)))

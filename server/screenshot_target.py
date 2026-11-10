@@ -11,7 +11,9 @@
                          opened is closed again (when it has no changes).
     dialog               the topmost Altium dialog or popup
     panel:<name>         one panel, e.g. panel:Projects or panel:Components
-    region:x,y,w,h       a rectangle of the screen, in physical pixels
+    region:x,y,w,h       a rectangle inside Altium's main window, in pixels of
+                         a 'current' capture (0,0 is its top left corner).
+                         Nothing outside Altium's main window is ever captured.
 
 The pure parts (parsing, choosing a window, clipping) are here so they can be
 tested without Altium; the window walking needs pywin32 and runs on Windows.
@@ -249,6 +251,48 @@ def clip(rect: Rect, bounds: Rect) -> Optional[Rect]:
     if r <= l or b <= t:
         return None
     return (l, t, r, b)
+
+
+def region_in_window(region: Rect, window: Rect) -> Rect:
+    """Screen rectangle of a region given relative to Altium's main window.
+
+    `window` is the window's rectangle on screen as a 'current' capture takes
+    it, so region coordinates are pixels of that capture. A region that does
+    not lie entirely inside the window is refused, never cut or moved:
+    get_screenshot captures nothing outside Altium.
+    """
+    l, t, r, b = region
+    wl, wt, wr, wb = window
+    width, height = wr - wl, wb - wt
+    if l < 0 or t < 0 or r > width or b > height:
+        raise TargetError(
+            f"region:{l},{t},{r - l},{b - t} is not inside Altium's main window "
+            f"({width}x{height}). Give x,y,w,h in pixels of a 'current' capture.")
+    return (wl + l, wt + t, wl + r, wt + b)
+
+
+def covering(rect: Rect, above: Sequence[Win]) -> List[Win]:
+    """Windows of other programs that lie over part of rect.
+
+    `above` are the windows above the captured one in z-order, without
+    Altium's own. A screen copy would show any of them, so a capture with
+    one in the way is refused: get_screenshot captures nothing but Altium.
+    """
+    return [w for w in above if clip(w.rect, rect) is not None]
+
+
+def covering_error(programs: Sequence[str]) -> str:
+    """Why a covered capture was refused. Names only the programs (e.g.
+    chrome.exe), never window titles: those can carry anything the user has
+    open, such as a mail subject or an address."""
+    names = []
+    for p in programs:
+        p = p or "another program"
+        if p not in names:
+            names.append(p)
+    shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+    return (f"Nothing was captured: Altium is not in front, a window of {shown} lies over "
+            f"the area. Bring Altium to the front, or move that window away, and try again.")
 
 
 def is_blank(img) -> bool:

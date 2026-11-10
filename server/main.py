@@ -5339,7 +5339,11 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
                              (only when it has no unsaved changes).
         "dialog"             the topmost Altium dialog or popup menu.
         "panel:<name>"       one panel, e.g. "panel:Projects", "panel:Components".
-        "region:x,y,w,h"     a rectangle of the screen in physical pixels.
+        "region:x,y,w,h"     a rectangle inside Altium's main window, in
+                             pixels of a "current" capture (0,0 = its top
+                             left corner). A region reaching outside the
+                             window is refused: nothing outside Altium is
+                             ever captured.
 
     Altium comes to the front for about a second, because it only paints what
     is on screen; the window that was in front then gets the foreground back.
@@ -5383,7 +5387,7 @@ def _altium_main_window():
                 and not win32gui.IsIconic(hwnd):
             found.append(screenshot_target.Win(
                 hwnd=hwnd, cls="", text=win32gui.GetWindowText(hwnd),
-                rect=tuple(win32gui.GetWindowRect(hwnd)),
+                rect=_visible_rect(hwnd),
                 pid=win32process.GetWindowThreadProcessId(hwnd)[1]))
         return True
     win32gui.EnumWindows(collect, 0)
@@ -5391,10 +5395,58 @@ def _altium_main_window():
     return (frame.hwnd, frame.text) if frame else (None, None)
 
 
+def _dwm_attribute(hwnd, attribute, value):
+    import ctypes
+    from ctypes import wintypes
+    try:
+        return ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(hwnd), attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0
+    except Exception:
+        return False
+
+
+def _visible_rect(hwnd):
+    """The part of a top-level window that is drawn. GetWindowRect also counts
+    the invisible resize border: 8 px around a maximised window, which then
+    reaches onto the next monitor and over the taskbar. Child windows have no
+    such border; for them DWM fails and GetWindowRect is right."""
+    from ctypes import wintypes
+    r = wintypes.RECT()
+    if _dwm_attribute(hwnd, 9, r) and r.right > r.left and r.bottom > r.top:  # DWMWA_EXTENDED_FRAME_BOUNDS
+        return (r.left, r.top, r.right, r.bottom)
+    return tuple(win32gui.GetWindowRect(hwnd))
+
+
+def _is_cloaked(hwnd):
+    """Visible to Windows but not drawn (e.g. apps on another virtual desktop)."""
+    from ctypes import wintypes
+    cloaked = wintypes.DWORD(0)
+    return _dwm_attribute(hwnd, 14, cloaked) and cloaked.value != 0  # DWMWA_CLOAKED
+
+
 def _win(hwnd, parent_cls=""):
     return screenshot_target.Win(hwnd=hwnd, cls=win32gui.GetClassName(hwnd),
                                  text=win32gui.GetWindowText(hwnd),
-                                 rect=tuple(win32gui.GetWindowRect(hwnd)), parent_cls=parent_cls)
+                                 rect=_visible_rect(hwnd), parent_cls=parent_cls)
+
+
+def _windows_above(hwnd, pid):
+    """Drawn top-level windows of other programs above hwnd, topmost last."""
+    out = []
+    h = win32gui.GetWindow(hwnd, win32con.GW_HWNDPREV)
+    for _ in range(10000):
+        if not h:
+            break
+        try:
+            if win32gui.IsWindowVisible(h) and not win32gui.IsIconic(h) and not _is_cloaked(h)                     and win32process.GetWindowThreadProcessId(h)[1] != pid:
+                w = _win(h)
+                w.pid = win32process.GetWindowThreadProcessId(h)[1]
+                if w.width > 0 and w.height > 0:
+                    out.append(w)
+        except Exception:
+            pass  # the window went away meanwhile
+        h = win32gui.GetWindow(h, win32con.GW_HWNDPREV)
+    return out
 
 
 def _altium_top_windows(pid):
@@ -5554,9 +5606,14 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
                             "error": f"No visible editing area for '{wanted or 'the active document'}'. "
                                      f"Visible documents: {', '.join(views) or 'none'}"}
             if t.kind == "region":
-                rect = screenshot_target.clip(t.region, _virtual_screen())
-                if rect is None:
-                    return {"success": False, "error": f"Region {t.describe()} is off the screen"}
+                # Relative to the main window exactly as "current" captures it
+                frame = screenshot_target.clip(_win(hwnd).rect, _virtual_screen())
+                if frame is None:
+                    return {"success": False, "error": "Altium's main window is off the screen"}
+                try:
+                    rect = screenshot_target.region_in_window(t.region, frame)
+                except screenshot_target.TargetError as e:
+                    return {"success": False, "error": str(e)}
                 info["window_class"] = None
                 info["window_title"] = None
             else:
@@ -5568,6 +5625,19 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
             if t.kind in ("current", "document"):
                 views = screenshot_target.document_views(_visible_children(hwnd))
                 info["active_document_view"] = views[0].text if views else None
+            # The capture is a copy of the screen: refuse it when a window of
+            # another program lies over the area, before and after the copy
+            top = window.hwnd if t.kind == "dialog" else hwnd
+
+            def covered():
+                return screenshot_target.covering(rect, _windows_above(top, pid))
+
+            def refuse(cover):
+                programs = [os.path.basename(win_processes.image_path(w.pid)) for w in cover]
+                return {"success": False, "error": screenshot_target.covering_error(programs)}
+            cover = covered()
+            if cover:
+                return refuse(cover)
             img = _grab_screen_rect(rect)
             # A view that was just opened or switched to can still be unpainted
             # (all one colour): give it up to about 5 s more
@@ -5576,6 +5646,9 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
                 time.sleep(0.5)
                 tries += 1
                 img = _grab_screen_rect(rect)
+            cover = covered()
+            if cover:
+                return refuse(cover)
             info["blank"] = screenshot_target.is_blank(img)
             info["paint_retries"] = tries
         finally:
