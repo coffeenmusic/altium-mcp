@@ -86,13 +86,17 @@ class SelectTest(unittest.TestCase):
         mid = geo.select(RECORDS, ORIGIN, "mil", layers=["Mid Layer 1"])
         self.assertEqual([o["kind"] for o in mid], ["via", "via", "pad"])
         sig = geo.select(RECORDS, ORIGIN, "mil", nets=["sig"])
-        # a region sent twice is one region; two identical tracks are a stack
+        # Altium drops an object its search returns twice, by its handle: two
+        # identical records here are two objects (regions or tracks stacked)
         region = [r for r in RECORDS if r.startswith("region|")]
-        self.assertEqual(len(geo.select(RECORDS + region, ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")))
+        self.assertEqual(len(geo.select(RECORDS + region, ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")) + 1)
         self.assertEqual(len(geo.select(RECORDS + RECORDS[:2], ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")) + 2)
         texts = [o for o in geo.select(RECORDS, ORIGIN, "mil", include_hidden=False) if o["kind"] == "text"]
         self.assertEqual([t["text"] for t in texts], ["U1|x"])
-        self.assertEqual(texts[0]["ref"], "text|Top Overlay|1010000|2010000")
+        # the text ends the ref, so two texts at one point have two refs
+        self.assertEqual(texts[0]["ref"], "text|Top Overlay|1010000|2010000|U1|x")
+        both = [o["ref"] for o in geo.select(RECORDS, ORIGIN, "mil") if o["kind"] == "text"]
+        self.assertEqual(len(set(both)), 2)
         self.assertEqual([o["kind"] for o in sig], ["arc", "via", "pad"])
 
     def test_through_copper_only_on_copper_layers(self):
@@ -145,8 +149,10 @@ class AreaReplyTest(unittest.TestCase):
                 "total": len(recs) if total is None else total}
 
     def test_limit_applies_after_the_filters(self):
-        self.assertEqual(geo.scan_limit(500), geo.SCAN_CAP)
-        self.assertEqual(geo.scan_limit(50000), 50000)
+        # without filters Altium is asked for one more than the limit
+        self.assertEqual(geo.scan_limit(10), 11)
+        self.assertEqual(geo.scan_limit(500, layers=["Top Layer"]), geo.SCAN_CAP)
+        self.assertEqual(geo.scan_limit(50000, nets=["GND"]), 50001)
         # many bottom-layer objects come first, yet the top-layer ones are found
         out = geo.area_reply(self.result(3, 600), "mil", 2, layers=["Top Layer"])
         self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 2, True))
@@ -155,23 +161,30 @@ class AreaReplyTest(unittest.TestCase):
         self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 3, False))
         self.assertNotIn("note", out)
 
-    def test_duplicates_and_hidden_not_counted(self):
-        # Altium counted 8, two pour pieces sent twice: total and limit see 6
-        out = geo.area_reply(self.result(3, 3, twice=2, kind="REGION"), "mil", 6)
-        self.assertEqual((out["total"], out["returned"], out["truncated"]), (6, 6, False))
-        # two identical tracks are a stack, and both count
-        out = geo.area_reply(self.result(3, 3, twice=2), "mil", 10)
-        self.assertEqual(out["total"], 8)
+    def test_identical_objects_and_hidden(self):
+        # two identical regions or tracks are a stack, and both count
+        for kind in ("REGION", "TRACK"):
+            out = geo.area_reply(self.result(3, 3, twice=2, kind=kind), "mil", 10)
+            self.assertEqual(out["total"], 8, kind)
         hidden = {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "total": 2, "objects": RECORDS[10:12]}
         self.assertEqual(geo.area_reply(hidden, "mil", 5, include_hidden=False)["total"], 1)
         self.assertEqual(geo.area_reply(hidden, "mil", 5)["total"], 2)
 
     def test_cut_by_altium_is_said(self):
-        for layers in (["Top Layer"], None):
-            out = geo.area_reply(self.result(1, 4, total=90000), "mil", 10, layers=layers)
-            self.assertIsNone(out["total"])
-            self.assertTrue(out["truncated"])
-            self.assertIn("90000", out["note"])
+        # with a filter: Altium stopped at the cap before the filter ran
+        result = dict(self.result(1, 4), complete=False)
+        out = geo.area_reply(result, "mil", 10, layers=["Top Layer"])
+        self.assertIsNone(out["total"])
+        self.assertTrue(out["truncated"])
+        self.assertIn("first 5", out["note"])
+        # without: Altium stopped at limit + 1, so there are more
+        result = dict(self.result(0, 11), complete=False)
+        out = geo.area_reply(result, "mil", 10)
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (None, 10, True))
+        self.assertIn("More than 10", out["note"])
+        # exactly the limit, all sent
+        out = geo.area_reply(dict(self.result(0, 10), complete=True), "mil", 10)
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (10, 10, False))
 
 
 class RefTest(unittest.TestCase):

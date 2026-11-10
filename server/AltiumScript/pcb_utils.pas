@@ -6024,6 +6024,18 @@ begin
     if B then Result := '1' else Result := '0';
 end;
 
+// A component's comment or designator switched off is still an object on
+// the board, just not shown
+function GeoHidden(Prim: IPCB_Primitive): Boolean;
+begin
+    Result := False;
+    if (Prim.ObjectId = eTextObject) and Prim.InComponent and (Prim.Component <> nil) then
+    begin
+        if Prim.IsComment and not Prim.Component.CommentOn then Result := True;
+        if Prim.IsDesignator and not Prim.Component.NameOn then Result := True;
+    end;
+end;
+
 // One object as kind|layer|net|owner|fields...
 function GeoRecord(Prim: IPCB_Primitive): String;
 var
@@ -6036,7 +6048,6 @@ var
     Comp  : IPCB_Component;
     R     : TCoordRect;
     Head  : String;
-    Hidden : Boolean;
 begin
     Result := '';
     Head := Layer2String(GeoLayer(Prim)) + '|' + GeoNet(Prim) + '|' + GeoOwner(Prim) + '|';
@@ -6083,16 +6094,8 @@ begin
         eTextObject:
         begin
             Txt := Prim;
-            // A component's comment or designator switched off is still an
-            // object on the board, just not shown
-            Hidden := False;
-            if Prim.InComponent and (Prim.Component <> nil) then
-            begin
-                if Txt.IsComment and not Prim.Component.CommentOn then Hidden := True;
-                if Txt.IsDesignator and not Prim.Component.NameOn then Hidden := True;
-            end;
             Result := 'text|' + Head + IntToStr(Txt.XLocation) + '|' + IntToStr(Txt.YLocation) + '|' + IntToStr(Txt.Size) +
-                      '|' + IntToStr(Round(Txt.Rotation * 1000)) + '|' + GeoFlag(Hidden) + '|' + Txt.Text;
+                      '|' + IntToStr(Round(Txt.Rotation * 1000)) + '|' + GeoFlag(GeoHidden(Prim)) + '|' + Txt.Text;
         end;
         eComponentObject:
         begin
@@ -6118,15 +6121,86 @@ begin
     if (Kinds = '') or (Pos('|component|', Kinds) > 0) then Result := SetUnion(Result, MkSet(eComponentObject));
 end;
 
-// Components and polygons whose bounds touch the box, of the kinds in Kinds:
-// the spatial iterator never returns these two kinds
+// Does a polygon's outline (its vertices; an arc edge counts as its chord)
+// touch the box: an edge crossing it, or the box inside?
+function GeoOutlineTouchesBox(Poly: IPCB_Polygon; X1, Y1, X2, Y2: Integer): Boolean;
+var
+    I, J, N : Integer;
+    CX, CY, AX, AY, BX, BY : Double;
+    Inside : Boolean;
+begin
+    Result := False;
+    N := Poly.PointCount;
+    CX := (X1 + X2) / 2;
+    CY := (Y1 + Y2) / 2;
+    Inside := False;
+    J := N - 1;
+    for I := 0 to N - 1 do
+    begin
+        AX := Poly.Segments[J].vx; AY := Poly.Segments[J].vy;
+        BX := Poly.Segments[I].vx; BY := Poly.Segments[I].vy;
+        if GeoSegmentHitsBox(AX, AY, BX, BY, X1, Y1, X2, Y2) then
+        begin
+            Result := True;
+            Exit;
+        end;
+        if (BY > CY) <> (AY > CY) then
+            if CX < (AX - BX) * (CY - BY) / (AY - BY) + BX then Inside := not Inside;
+        J := I;
+    end;
+    Result := Inside;
+end;
+
+// Does a polygon reach the box by its shape? Where it poured regions, one of
+// them must reach it (a board-sized pour's bounds touch every box); with no
+// regions (shelved, not poured or hatched) its outline must.
+function GeoPolygonTouchesBox(Poly: IPCB_Polygon; X1, Y1, X2, Y2: Integer): Boolean;
+var
+    GroupIt : IPCB_GroupIterator;
+    Region  : IPCB_Region;
+    HasRegions : Boolean;
+begin
+    Result := False;
+    HasRegions := False;
+    GroupIt := Poly.GroupIterator_Create;
+    GroupIt.AddFilter_ObjectSet(MkSet(eRegionObject));
+    Region := GroupIt.FirstPCBObject;
+    while (Region <> nil) and not Result do
+    begin
+        HasRegions := True;
+        if GeoRegionTouchesBox(Region, X1, Y1, X2, Y2) then Result := True;
+        Region := GroupIt.NextPCBObject;
+    end;
+    Poly.GroupIterator_Destroy(GroupIt);
+    if not HasRegions then Result := GeoOutlineTouchesBox(Poly, X1, Y1, X2, Y2);
+end;
+
+// Adds Prim's record Rec to Items unless Prim is listed already (by its
+// handle: the spatial iterator can return an object twice, while two
+// identical objects are two). Complete goes False once Items holds Limit
+// records, and the search stops there.
+procedure GeoCollect(Prim: IPCB_Primitive; Rec: String; Items, Seen: TStringList; Limit: Integer;
+                     var Total: Integer; var Complete: Boolean);
+var
+    Key : String;
+begin
+    if Rec = '' then Exit;
+    Key := IntToStr(Prim.I_ObjectAddress);
+    if Seen.IndexOf(Key) >= 0 then Exit;
+    Seen.Add(Key);
+    Total := Total + 1;
+    Items.Add('"' + JSONEscapeString(Rec) + '"');
+    if Items.Count >= Limit then Complete := False;
+end;
+
+// Components whose bounds touch the box and polygons whose shape does, of
+// the kinds in Kinds: the spatial iterator never returns these two kinds
 procedure GeoAddGroups(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Kinds: String; Limit: Integer;
-                       Items: TStringList; var Total: Integer);
+                       Items, Seen: TStringList; var Total: Integer; var Complete: Boolean);
 var
     It   : IPCB_BoardIterator;
     Prim : IPCB_Primitive;
     R    : TCoordRect;
-    Rec  : String;
     Wanted : TObjectSet;
 begin
     Wanted := MkSet();
@@ -6138,18 +6212,12 @@ begin
     It.AddFilter_LayerSet(AllLayers);
     It.AddFilter_Method(eProcessAll);
     Prim := It.FirstPCBObject;
-    while Prim <> nil do
+    while (Prim <> nil) and Complete do
     begin
         R := Prim.BoundingRectangle;
         if (R.Left <= X2) and (R.Right >= X1) and (R.Bottom <= Y2) and (R.Top >= Y1) then
-        begin
-            Rec := GeoRecord(Prim);
-            if Rec <> '' then
-            begin
-                Total := Total + 1;
-                if Items.Count < Limit then Items.Add('"' + JSONEscapeString(Rec) + '"');
-            end;
-        end;
+            if (Prim.ObjectId <> ePolyObject) or GeoPolygonTouchesBox(Prim, X1, Y1, X2, Y2) then
+                GeoCollect(Prim, GeoRecord(Prim), Items, Seen, Limit, Total, Complete);
         Prim := It.NextPCBObject;
     end;
     Board.BoardIterator_Destroy(It);
@@ -6209,51 +6277,55 @@ begin
 end;
 
 // Objects touching the box X1,Y1-X2,Y2 (internal units) of the kinds in
-// Kinds ('|track|via|', or '' for all), at most Limit. copper_layers names
-// the board's copper layers top to bottom, so the server knows which layers
-// a blind via spans.
+// Kinds ('|track|via|', or '' for all), at most Limit: the search stops
+// there and complete is false. Switched-off designators and comments only
+// with IncludeHidden. copper_layers names the board's copper layers top to
+// bottom, so the server knows which layers a blind via spans.
 function ObjectsInArea(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Kinds: String; Limit: Integer;
-                       Shapes: Boolean): String;
+                       Shapes, IncludeHidden: Boolean): String;
 var
     It    : IPCB_SpatialIterator;
     Prim  : IPCB_Primitive;
     LayerIt : IPCB_LayerObjectIterator;
-    Items, Props, Stack : TStringList;
+    Items, Props, Stack, Seen : TStringList;
     Rec   : String;
     Total : Integer;
+    Complete : Boolean;
 begin
     Items := TStringList.Create;
     Props := TStringList.Create;
     Stack := TStringList.Create;
+    Seen := TStringList.Create;
+    Seen.Sorted := True;
     try
         LayerIt := Board.ElectricalLayerIterator;
         while LayerIt.Next do
             Stack.Add('"' + JSONEscapeString(Layer2String(LayerIt.LayerObject.LayerID)) + '"');
         Total := 0;
+        Complete := Limit > 0;
         It := Board.SpatialIterator_Create;
         It.AddFilter_ObjectSet(GeoKindSet(Kinds));
         It.AddFilter_LayerSet(AllLayers);
         It.AddFilter_Area(X1, Y1, X2, Y2);
         Prim := It.FirstPCBObject;
-        while Prim <> nil do
+        while (Prim <> nil) and Complete do
         begin
-            if GeoTouchesBox(Prim, X1, Y1, X2, Y2) then Rec := GeoRecord(Prim) else Rec := '';
+            Rec := '';
+            if GeoTouchesBox(Prim, X1, Y1, X2, Y2) and (IncludeHidden or not GeoHidden(Prim)) then
+                Rec := GeoRecord(Prim);
             // For drawing: the outline of a region, not just its bounds
             if Shapes and (Rec <> '') and (Prim.ObjectId = eRegionObject) then
                 Rec := Rec + '|' + GeoContours(Prim);
-            if Rec <> '' then
-            begin
-                Total := Total + 1;
-                if Items.Count < Limit then Items.Add('"' + JSONEscapeString(Rec) + '"');
-            end;
+            GeoCollect(Prim, Rec, Items, Seen, Limit, Total, Complete);
             Prim := It.NextPCBObject;
         end;
         Board.SpatialIterator_Destroy(It);
-        GeoAddGroups(Board, X1, Y1, X2, Y2, Kinds, Limit, Items, Total);
+        if Complete then GeoAddGroups(Board, X1, Y1, X2, Y2, Kinds, Limit, Items, Seen, Total, Complete);
         AddJSONProperty(Props, 'board_path', Board.FileName);
         AddJSONInteger(Props, 'origin_x', Board.XOrigin);
         AddJSONInteger(Props, 'origin_y', Board.YOrigin);
         AddJSONInteger(Props, 'total', Total);
+        AddJSONBoolean(Props, 'complete', Complete);
         Props.Add(BuildJSONArray(Stack, 'copper_layers'));
         Props.Add(BuildJSONArray(Items, 'objects'));
         Result := BuildJSONObject(Props);
@@ -6261,6 +6333,7 @@ begin
         Items.Free;
         Props.Free;
         Stack.Free;
+        Seen.Free;
     end;
 end;
 
@@ -6285,6 +6358,25 @@ begin
     Comp.GroupIterator_Destroy(GI);
 end;
 
+// Everything in S from field Index on, '|' included
+function GeoFieldsFrom(S: String; Index: Integer): String;
+var
+    I, N : Integer;
+begin
+    Result := '';
+    N := 0;
+    for I := 1 to Length(S) do
+        if S[I] = '|' then
+        begin
+            N := N + 1;
+            if N = Index then
+            begin
+                Result := Copy(S, I + 1, Length(S) - I);
+                Exit;
+            end;
+        end;
+end;
+
 // The object a reference names (see the top of this section), or nil
 function GeoFind(Board: IPCB_Board; Ref: String): IPCB_Primitive;
 var
@@ -6299,6 +6391,7 @@ var
     R    : TCoordRect;
     A, B, C, D, M : Integer;
     ObjSet : TObjectSet;
+    TextWanted : String;
 begin
     Result := nil;
     Kind := GetFieldFromPipeString(Ref, 0);
@@ -6327,6 +6420,15 @@ begin
         B := StrToInt(GetFieldFromPipeString(Ref, 3));
         C := StrToIntDef(GetFieldFromPipeString(Ref, 4), A);
         D := StrToIntDef(GetFieldFromPipeString(Ref, 5), B);
+    end;
+    // A text ref ends in the text itself (which may hold '|'): two texts at
+    // one point are told apart by it
+    TextWanted := '';
+    if Kind = 'text' then
+    begin
+        C := A;
+        D := B;
+        TextWanted := GeoFieldsFrom(Ref, 4);
     end;
     if Kind = 'track' then ObjSet := MkSet(eTrackObject)
     else if Kind = 'arc' then ObjSet := MkSet(eArcObject)
@@ -6380,7 +6482,7 @@ begin
             end
             else if Kind = 'text' then
             begin
-                if (Prim.XLocation = A) and (Prim.YLocation = B) then Result := Prim;
+                if (Prim.XLocation = A) and (Prim.YLocation = B) and (Prim.Text = TextWanted) then Result := Prim;
             end;
         end;
         Prim := It.NextPCBObject;
@@ -6882,7 +6984,8 @@ begin
                                 Board.YOrigin + StrToInt(RequestText(RequestData, 'y2', '0')),
                                 RequestText(RequestData, 'kinds', ''),
                                 StrToInt(RequestText(RequestData, 'limit', '500')),
-                                RequestText(RequestData, 'shapes', 'false') = 'true')
+                                RequestText(RequestData, 'shapes', 'false') = 'true',
+                                RequestText(RequestData, 'include_hidden', 'false') = 'true')
     else if Cmd = 'outline' then
         Result := GeoOutline(Board)
     else if Cmd = 'clearance' then

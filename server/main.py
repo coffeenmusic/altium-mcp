@@ -5405,9 +5405,11 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
     again (opaque: pass it on as is). To read a group's copper in the form
     place_copper takes, to edit and place it again, use get_layout instead.
 
-    Regions and tracks are matched by their real shape, so a board-sized
-    pour is listed only where its copper reaches the box. A pour's copper
-    (a region with in_polygon) carries its polygon's name, net and layer.
+    Regions, tracks and polygons are matched by their real shape, so a
+    board-sized pour is listed only where its copper reaches the box: a
+    polygon when one of its poured regions does (or, with none, such as a
+    hatched or unpoured one, its outline). A pour's copper (a region with
+    in_polygon) carries its polygon's name, net and layer.
 
     Args:
         bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
@@ -5420,8 +5422,9 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
         nets (list): Only objects on these nets.
         unit (str): "mil" (default) or "mm", for bbox and the reply.
         limit (int): At most this many objects (default 500), counted after
-            the filters and without duplicates; total says how many match,
-            and truncated whether the list was cut.
+            the filters; total says how many match (null when there are more
+            than Altium was asked for), and truncated whether the list was
+            cut.
         include_hidden (bool): Also list component designators and comments
             that are switched off (hidden: true). Default False.
         board_path (str): Full path of the .PcbDoc; default the focused board.
@@ -5439,13 +5442,14 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
         bad = [k for k in (kinds or []) if k not in geo.KINDS]
         if bad:
             raise ValueError(f"unknown kinds {bad}; use {', '.join(geo.KINDS)}")
-        scan = geo.scan_limit(limit)
+        scan = geo.scan_limit(limit, layers, nets)
     except (TypeError, ValueError) as e:
         return json.dumps({"success": False, "error": str(e)})
     kind_filter = "|" + "|".join(kinds) + "|" if kinds else ""
     result, error = await _bridge_json("geometry", {
         "geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)), "x2": str(max(x1, x2)),
-        "y2": str(max(y1, y2)), "kinds": kind_filter, "limit": str(scan), "board_path": long_path(board_path)})
+        "y2": str(max(y1, y2)), "kinds": kind_filter, "limit": str(scan),
+        "include_hidden": "true" if include_hidden else "false", "board_path": long_path(board_path)})
     if error:
         return json.dumps({"success": False, "error": error})
     return json.dumps(geo.area_reply(result, unit, limit, layers, nets, include_hidden), indent=1)
