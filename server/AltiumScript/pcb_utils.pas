@@ -6984,38 +6984,17 @@ begin
     end;
 end;
 
-// The largest entry of a clearance rule's per-object table (track to pad,
-// pad to pour, ...), which can exceed its Gap. GetClearance is the call
-// the Board Outline Clearance rule answers (see the silkscreen code); the
-// object kinds are tried by number, since their names differ between
-// versions, and a kind the rule does not know is skipped.
-function GeoLargestTableGap(Rule: IPCB_Rule): Integer;
-var
-    I, J, V : Integer;
-begin
-    Result := 0;
-    for I := 0 to 31 do
-        for J := I to 31 do
-        begin
-            V := 0;
-            try V := Rule.GetClearance(I, J); except V := 0; end;
-            // a value no board uses would be a kind read wrongly
-            if (V > Result) and (V < MilsToCoord(1000)) then Result := V;
-        end;
-end;
-
-// How far to look for neighbours: the largest clearance of the board's
-// enabled clearance and hole-to-hole rules, their per-object tables
-// included, and never less than twice the largest Gap plus 10 mil, in
-// case the table cannot be read
+// How far to look for neighbours by default: twice the largest Gap of the
+// board's enabled clearance and hole-to-hole rules, plus 10 mil. A rule's
+// per-object table (track to pad, ...) can exceed its Gap and is not read
+// here; the caller's margin covers a larger entry.
 function GeoLargestGap(Board: IPCB_Board): Integer;
 var
     It   : IPCB_BoardIterator;
     Rule : IPCB_Rule;
-    Gap, TableGap, RuleTable : Integer;
+    Gap  : Integer;
 begin
     Gap := 0;
-    TableGap := 0;
     It := Board.BoardIterator_Create;
     It.AddFilter_ObjectSet(MkSet(eRuleObject));
     It.AddFilter_LayerSet(AllLayers);
@@ -7023,18 +7002,24 @@ begin
     Rule := It.FirstPCBObject;
     while Rule <> nil do
     begin
-        if Rule.Enabled and (Rule.RuleKind = eRule_Clearance) then
-        begin
-            if Rule.Gap > Gap then Gap := Rule.Gap;
-            RuleTable := GeoLargestTableGap(Rule);
-            if RuleTable > TableGap then TableGap := RuleTable;
-        end;
-        if Rule.Enabled and (Rule.RuleKind = eRule_HoleToHoleClearance) then
+        if Rule.Enabled and ((Rule.RuleKind = eRule_Clearance) or (Rule.RuleKind = eRule_HoleToHoleClearance)) then
             if Rule.Gap > Gap then Gap := Rule.Gap;
         Rule := It.NextPCBObject;
     end;
     Board.BoardIterator_Destroy(It);
-    Result := Max(TableGap, 2 * Gap + MilsToCoord(10));
+    Result := 2 * Gap + MilsToCoord(10);
+end;
+
+// Copper: a via, a Multi Layer pad, or an object on a signal layer or
+// internal plane (pour copper by its polygon's layer). Overlay, mask and
+// mechanical objects are not checked.
+function GeoOnCopper(Prim: IPCB_Primitive): Boolean;
+var
+    L : Integer;
+begin
+    L := GeoLayer(Prim);
+    Result := (Prim.ObjectId = eViaObject) or (L = eMultiLayer) or ((L >= eTopLayer) and (L <= eBottomLayer)) or
+              ((L >= eInternalPlane1) and (L <= eInternalPlane16));
 end;
 
 function GeoHasHole(Prim: IPCB_Primitive): Boolean;
@@ -7101,7 +7086,8 @@ begin
             for k := 0 to 1 do
             begin
                 Kind := -1;
-                if (k = 0) and ((A.ObjectId = eTrackObject) or (A.ObjectId = eArcObject)) then Kind := eRule_MaxMinWidth;
+                if (k = 0) and ((A.ObjectId = eTrackObject) or (A.ObjectId = eArcObject)) and GeoOnCopper(A) then
+                    Kind := eRule_MaxMinWidth;
                 if (k = 1) and GeoHasHole(A) then Kind := eRule_MaxMinHoleSize;
                 if Kind >= 0 then
                 begin
@@ -7119,7 +7105,7 @@ begin
             B := It.FirstPCBObject;
             while B <> nil do
             begin
-                if B.I_ObjectAddress <> A.I_ObjectAddress then
+                if (B.I_ObjectAddress <> A.I_ObjectAddress) and GeoOnCopper(B) then
                 begin
                     // each pair once, also when both objects were asked for
                     if A.I_ObjectAddress < B.I_ObjectAddress then
@@ -7153,16 +7139,18 @@ begin
     end;
 end;
 
-// check: Refs ('~'-separated refs) and/or the box X1..Y2 (all copper in it);
-// at most Limit objects
-function GeoCheck(Board: IPCB_Board; Refs: String; HasBox: Boolean; X1, Y1, X2, Y2, Limit: Integer): String;
+// check: Refs ('~'-separated refs) and/or the box X1..Y2 (all copper in it;
+// a ref also in the box counts once); at most Limit objects from the box.
+// Neighbours are looked for within Margin, or by default (Margin < 0)
+// GeoLargestGap.
+function GeoCheck(Board: IPCB_Board; Refs: String; HasBox: Boolean; X1, Y1, X2, Y2, Limit, Margin: Integer): String;
 var
     Objects : TInterfaceList;
     Items, Props, Missing, RefList : TStringList;
     Prim : IPCB_Primitive;
     It   : IPCB_SpatialIterator;
     Ref  : String;
-    i, Pairs, Total, Margin : Integer;
+    i, Pairs, Total, FromRefs : Integer;
 begin
     Objects := TInterfaceList.Create;
     Items := TStringList.Create;
@@ -7176,9 +7164,11 @@ begin
             Ref := Trim(RefList[i]);
             if Ref = '' then Continue;
             Prim := GeoFind(Board, Ref);
-            if Prim = nil then Missing.Add('"' + JSONEscapeString(Ref) + '"') else Objects.Add(Prim);
+            if Prim = nil then Missing.Add('"' + JSONEscapeString(Ref) + '"')
+            else if not GeoListHas(Objects, Prim) then Objects.Add(Prim);
         end;
         Total := Objects.Count;
+        FromRefs := Objects.Count;
         if HasBox then
         begin
             It := Board.SpatialIterator_Create;
@@ -7188,20 +7178,21 @@ begin
             Prim := It.FirstPCBObject;
             while Prim <> nil do
             begin
-                if GeoTouchesBox(Prim, X1, Y1, X2, Y2) then
+                // a ref in the box is checked once, with the refs
+                if GeoTouchesBox(Prim, X1, Y1, X2, Y2) and GeoOnCopper(Prim) and not GeoListHas(Objects, Prim) then
                 begin
                     Total := Total + 1;
-                    if Objects.Count < Limit then Objects.Add(Prim);
+                    if Objects.Count - FromRefs < Limit then Objects.Add(Prim);
                 end;
                 Prim := It.NextPCBObject;
             end;
             Board.SpatialIterator_Destroy(It);
         end;
         Pairs := 0;
-        Margin := 0;
-        if Objects.Count > 0 then
+        if Objects.Count = 0 then Margin := 0
+        else
         begin
-            Margin := GeoLargestGap(Board) + MilsToCoord(1);
+            if Margin < 0 then Margin := GeoLargestGap(Board) + MilsToCoord(1);
             GeoCheckObjects(Board, Objects, Items, Margin, Pairs);
         end;
         AddJSONProperty(Props, 'board_path', Board.FileName);
@@ -7257,7 +7248,8 @@ begin
                            Board.YOrigin + StrToIntDef(RequestText(RequestData, 'y1', '0'), 0),
                            Board.XOrigin + StrToIntDef(RequestText(RequestData, 'x2', '0'), 0),
                            Board.YOrigin + StrToIntDef(RequestText(RequestData, 'y2', '0'), 0),
-                           StrToInt(RequestText(RequestData, 'limit', '300')))
+                           StrToInt(RequestText(RequestData, 'limit', '300')),
+                           StrToIntDef(RequestText(RequestData, 'margin', '-1'), -1))
     else if Cmd = 'drag' then
         Result := DragCopper(Board, RequestText(RequestData, 'ref', ''),
                              StrToInt(RequestText(RequestData, 'dx', '0')),

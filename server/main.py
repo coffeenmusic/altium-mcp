@@ -5457,35 +5457,44 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
 
 @_tool(read_only=True)
 async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, unit: str = "mil",
-                            limit: int = 300, board_path: str = "") -> str:
+                            limit: int = 300, margin: float = None, board_path: str = "") -> str:
     """
     Run the board's design rules on chosen objects only, without a batch
     DRC: the vias just moved, the tracks just added.
 
-    Each object is checked against its own width or hole-size rule, and
-    against every copper object near it (tracks, arcs, vias, pads, fills,
-    pour copper) for the clearance, short-circuit and hole-to-hole rules.
+    Each copper object is checked against its own width or hole-size rule,
+    and against every copper object near it (tracks, arcs, vias, pads,
+    fills, pour copper) for the clearance, short-circuit and hole-to-hole
+    rules. Objects on overlay, mask and mechanical layers are not checked.
     The rule is the one Altium's DRC would pick for that object or pair,
     and Rule.ActualCheck, the DRC's own test, decides the violation.
 
     Pour copper is checked as it was last poured: a via moved into a pour
     shows a violation against it until the pour is repoured
-    (repour_polygons).
+    (repour_polygons). Those are listed apart, as pour_violations, and so
+    are hits on a hatched pour's tracks.
 
     Args:
         refs (list): Objects as "ref"s from objects_in_area (or pads as
-            "U1-3").
+            "U1-3"); not a component or polygon as a whole: give its pads or
+            the regions it poured.
         bbox (list): And/or [x1, y1, x2, y2] from the board origin: every
-            track, arc, via, pad and fill touching it.
+            copper track, arc, via, pad and fill touching it (a ref in the
+            box is checked once).
         unit (str): "mil" (default) or "mm".
         limit (int): At most this many objects from the box (default 300).
+        margin (float): How far to look for neighbours, in unit. Default
+            twice the board's largest clearance or hole-to-hole gap plus
+            10 mil; raise it when a rule's per-object table (track to pad,
+            ...) has a larger entry than its gap.
         board_path (str): Full path of the .PcbDoc; default the focused board.
 
     Returns:
         str: JSON with objects_checked, pairs_checked, search_margin (how
              far neighbours were looked for) and the violations: rule, kind,
-             both objects, their distance and the rule's gap. When nothing
-             was checked (no ref found, nothing in the box) success is false.
+             both objects, their distance and the rule's gap;
+             pour_violations those against pour copper. When nothing was
+             checked (no ref found, nothing in the box) success is false.
     """
     import pcb_geometry as geo
 
@@ -5493,7 +5502,11 @@ async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, 
         return json.dumps({"success": False, "error": "give refs, bbox or both"})
     try:
         params = {"geometry": "check", "limit": str(max(1, int(limit)))}
-        params["refs"] = "~".join(geo.normalize_ref(r) for r in (refs or []))
+        params["refs"] = "~".join(geo.clearance_ref(r) for r in (refs or []))
+        if margin is not None:
+            if float(margin) < 0:
+                raise ValueError("margin cannot be negative")
+            params["margin"] = str(geo.to_coord(margin, unit))
         if bbox:
             if not isinstance(bbox, list) or len(bbox) != 4:
                 raise ValueError("bbox must be [x1, y1, x2, y2]")

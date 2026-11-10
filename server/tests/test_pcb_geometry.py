@@ -102,8 +102,28 @@ class ViolationTest(unittest.TestCase):
             {"rule": "Clearance", "kind": "clearance", "a": RECORDS[3], "b": RECORDS[8], "distance": 0,
              "gap": 50000, "descriptor": "d", "same_net_pour": True}])
         out = geo.check_reply(flagged, "mil")
-        self.assertTrue(out["violations"][0]["same_net_pour"])
+        # a hit on pour copper is listed apart, still flagged
+        self.assertEqual(out["violations"], [])
+        self.assertTrue(out["pour_violations"][0]["same_net_pour"])
         self.assertIn("run_drc", out["same_net_pour_note"])
+        self.assertNotIn("note", out)
+
+    def test_component_refs_refused(self):
+        for bad in ("component|U1", "polygon|Top Layer|1|2|3|4"):
+            with self.assertRaises(ValueError):
+                geo.clearance_ref(bad)
+        self.assertEqual(geo.clearance_ref("U1-3"), "pad|U1|3")
+
+
+class PourSplitTest(unittest.TestCase):
+    def test_pour_hits_apart(self):
+        pour = {"kind": "region", "in_polygon": True}
+        hatch = {"kind": "track", "in_polygon": True}
+        hard = {"rule": "c", "a": {"kind": "track"}, "b": {"kind": "pad"}}
+        soft = {"rule": "c", "a": {"kind": "track"}, "b": pour}
+        hatched = {"rule": "c", "a": hatch, "b": {"kind": "via"}}
+        own = {"rule": "w", "a": {"kind": "track"}}
+        self.assertEqual(geo.split_pour_violations([hard, soft, hatched, own]), ([hard, own], [soft, hatched]))
 
 
 class SelectTest(unittest.TestCase):
