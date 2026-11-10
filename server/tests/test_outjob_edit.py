@@ -147,6 +147,35 @@ class OutJobEditTest(unittest.TestCase):
         self.assertEqual(len(errors), 3)
         self.assertEqual(j.container("ODB++")["index"], 3)
 
+    def test_a_failed_operation_leaves_no_half_done_edit(self):
+        j = job()
+        before = j.text()
+        done, errors = oe.apply(j, [
+            {"op": "copy_output", "output": "Gerber Files", "containers": ["CAM Dta"]},
+            {"op": "add_container", "name": "BOM", "type": "generated_files", "file_name": "bom"},
+            {"op": "set_container", "name": "ODB", "folder": "ODB", "file_name": "odb"}])
+        self.assertEqual(done, [])
+        self.assertEqual(len(errors), 3)
+        self.assertEqual(j.text(), before)
+
+    def test_set_output_takes_a_list_of_containers(self):
+        j = job()
+        j.set_output("ODB++ Files", containers=["CAM Data"])
+        self.assertEqual(placed(j, 3), {"Print Job": "0", "CAM Data": "3", "ODB": "1"})
+
+    def test_bad_arguments_are_errors_not_exceptions(self):
+        j = job()
+        before = j.text()
+        done, errors = oe.apply(j, [
+            {"op": "set_output", "output": "ODB++ Files", "containers": 5},
+            {"op": "set_output", "output": "ODB++ Files", "containers": [1]},
+            {"op": "set_output", "output": "ODB++ Files", "containers": {1: True}},
+            {"op": "copy_output", "output": "Gerber Files", "containers": [None]},
+            {"op": "add_container", "name": 5}])
+        self.assertEqual(done, [])
+        self.assertEqual(len(errors), 5)
+        self.assertEqual(j.text(), before)
+
     def test_the_parser_reads_the_result(self):
         j = job()
         j.add_container("BOM", "generated_files", folder="BOM")

@@ -12,9 +12,10 @@ Altium wrote it (configparser would lowercase keys and reorder lines). An
 output's configuration is board specific and long, so new outputs are copied
 from another OutJob rather than written from nothing.
 """
+import copy
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 GROUP, PUBLISH, GENERATED = "OutputGroup1", "PublishSettings", "GeneratedFilesSettings"
 
@@ -372,7 +373,7 @@ class OutJob:
             self.set(GROUP, f"OutputName{n}", new_name)
         for c in self.containers():
             self.set(GROUP, f"OutputEnabled{n}_OutputMedium{c['index']}", "0", after=rf"OutputEnabled{n}(_|$)")
-        for name in containers:
+        for name in _names(containers):
             self.place(n, self.container(name)["index"], True)
         return n
 
@@ -392,7 +393,15 @@ class OutJob:
         self.rename_where(GROUP, renumber)
 
     def set_output(self, output, new_name: str = "", enabled: Optional[bool] = None,
-                   document_path: Optional[str] = None, containers: Optional[Dict[str, bool]] = None) -> None:
+                   document_path: Optional[str] = None, containers=None) -> None:
+        """containers: {name: true/false} to put the output in or take it out
+        of each, or a list of names to put it in (as copy_output takes it)."""
+        if containers is None or isinstance(containers, dict):
+            placing = containers or {}
+            if not all(isinstance(k, str) for k in placing):
+                raise OutJobError("containers: the container names must be text")
+        else:
+            placing = {name: True for name in _names(containers)}
         o = self.output(output)
         n = o["index"]
         if new_name:
@@ -401,7 +410,7 @@ class OutJob:
             self.set(GROUP, f"OutputEnabled{n}", "1" if enabled else "0")
         if document_path is not None:
             self.set(GROUP, f"OutputDocumentPath{n}", document_path)
-        for name, inside in (containers or {}).items():
+        for name, inside in placing.items():
             self.place(n, self.container(name)["index"], bool(inside))
 
     def set_output_setting(self, output, key: str, value: str) -> str:
@@ -424,47 +433,68 @@ class OutJob:
         return old
 
 
+def _names(containers) -> List[str]:
+    """Container names given as a list (or one name as text)."""
+    if isinstance(containers, str):
+        return [containers]
+    if not isinstance(containers, (list, tuple)) or not all(isinstance(c, str) for c in containers):
+        raise OutJobError("containers is a list of container names")
+    return list(containers)
+
+
 def apply(job: OutJob, operations: list, load=None) -> Tuple[List[str], List[str]]:
     """Run operations in order; return what was done and the errors.
-    load(path) returns the OutJob an operation copies from."""
+    load(path) returns the OutJob an operation copies from.
+
+    Each operation runs on a copy of the job, taken over only when it
+    succeeds, so a failed one leaves no half-done edit behind. The caller
+    writes nothing when there are errors."""
     done, errors = [], []
     for i, op in enumerate(operations or [], 1):
+        trial = copy.deepcopy(job)
         try:
-            if not isinstance(op, dict) or "op" not in op:
-                raise OutJobError("each operation is a dict with an 'op'")
-            kind = op["op"]
-            if kind == "add_container":
-                m = job.add_container(op["name"], op.get("type", "generated_files"), op.get("folder", ""),
-                                      op.get("file_name", ""), op.get("open_outputs"))
-                done.append(f"added container {op['name']!r} ({m})")
-            elif kind == "set_container":
-                job.set_container(op["name"], op.get("new_name", ""), op.get("folder"), op.get("file_name"),
-                                  op.get("open_outputs"))
-                done.append(f"changed container {op['name']!r}")
-            elif kind == "remove_container":
-                job.remove_container(op["name"])
-                done.append(f"removed container {op['name']!r}")
-            elif kind == "copy_output":
-                source = job if not op.get("from_outjob") else load(op["from_outjob"])
-                n = job.copy_output(source, op["output"], op.get("new_name", ""), op.get("containers", []))
-                done.append(f"copied output {op['output']!r} as {job.outputs()[n - 1]['name']!r} ({n})")
-            elif kind == "remove_output":
-                job.remove_output(op["output"])
-                done.append(f"removed output {op['output']!r}")
-            elif kind == "set_output":
-                job.set_output(op["output"], op.get("new_name", ""), op.get("enabled"), op.get("document_path"),
-                               op.get("containers"))
-                done.append(f"changed output {op['output']!r}")
-            elif kind == "set_output_setting":
-                old = job.set_output_setting(op["output"], op["key"], str(op["value"]))
-                done.append(f"{op['output']!r}: {op['key']} {old!r} -> {op['value']!r}")
-            else:
-                raise OutJobError(f"unknown op {kind!r}")
+            done.append(_run(trial, op, load))
+            job.sections = trial.sections
         except KeyError as e:
             errors.append(f"operation {i}: missing {e.args[0]!r}")
         except (OutJobError, OSError) as e:
             errors.append(f"operation {i}: {e}")
+        except (TypeError, ValueError, AttributeError) as e:
+            errors.append(f"operation {i}: invalid argument ({e})")
     return done, errors
+
+
+def _run(job: OutJob, op, load) -> str:
+    """Run one operation on job; return what was done."""
+    if not isinstance(op, dict) or "op" not in op:
+        raise OutJobError("each operation is a dict with an 'op'")
+    kind = op["op"]
+    if kind == "add_container":
+        m = job.add_container(op["name"], op.get("type", "generated_files"), op.get("folder", ""),
+                              op.get("file_name", ""), op.get("open_outputs"))
+        return f"added container {op['name']!r} ({m})"
+    if kind == "set_container":
+        job.set_container(op["name"], op.get("new_name", ""), op.get("folder"), op.get("file_name"),
+                          op.get("open_outputs"))
+        return f"changed container {op['name']!r}"
+    if kind == "remove_container":
+        job.remove_container(op["name"])
+        return f"removed container {op['name']!r}"
+    if kind == "copy_output":
+        source = job if not op.get("from_outjob") else load(op["from_outjob"])
+        n = job.copy_output(source, op["output"], op.get("new_name", ""), op.get("containers", []))
+        return f"copied output {op['output']!r} as {job.outputs()[n - 1]['name']!r} ({n})"
+    if kind == "remove_output":
+        job.remove_output(op["output"])
+        return f"removed output {op['output']!r}"
+    if kind == "set_output":
+        job.set_output(op["output"], op.get("new_name", ""), op.get("enabled"), op.get("document_path"),
+                       op.get("containers"))
+        return f"changed output {op['output']!r}"
+    if kind == "set_output_setting":
+        old = job.set_output_setting(op["output"], op["key"], str(op["value"]))
+        return f"{op['output']!r}: {op['key']} {old!r} -> {op['value']!r}"
+    raise OutJobError(f"unknown op {kind!r}")
 
 
 def read(path) -> OutJob:

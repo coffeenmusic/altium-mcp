@@ -6477,7 +6477,10 @@ async def create_outjob(ctx: Context, outjob_path: str, template_path: str = "",
     for key in _VAULT_KEYS:
         if job.get("OutputJobFile", key) is not None:
             job.set("OutputJobFile", key, "")
-    outjob_edit.write(path, job)
+    try:
+        outjob_edit.write(path, job)
+    except OSError as e:
+        return json.dumps({"success": False, "error": f"Could not write the OutJob: {e}"})
     out = {"success": True, "outjob_path": str(path), **_outjob_summary(job)}
     if project_path:
         result, error = await _bridge_json(
@@ -6494,11 +6497,13 @@ async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run:
     """
     Change an .OutJob: its containers, which outputs it has and where they go.
 
-    Operations run in order; one that fails is reported in "errors" and the
-    rest still run. The file is edited in place, keeping everything not
-    changed as Altium wrote it. If the OutJob is open in Altium it is closed
-    first and opened again after, also when the write fails (refused when it
-    has unsaved changes there). Altium is not started when it is not running.
+    Operations run in order. One that fails is reported in "errors" and
+    the rest still run, but then nothing is written: the file changes only
+    when every operation succeeded. The file is edited in place, keeping
+    everything not changed as Altium wrote it. If the OutJob is open in
+    Altium it is closed first and opened again after, also when the write
+    fails (refused when it has unsaved changes there). Altium is not started
+    when it is not running.
 
     Operations, each a dict with "op":
       add_container       name, type ("generated_files" or "pdf"), [folder]
@@ -6515,7 +6520,8 @@ async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run:
                           [containers] (names to put it in)
       remove_output       output
       set_output          output, [new_name], [enabled], [document_path],
-                          [containers] ({container name: true/false})
+                          [containers] ({container name: true/false}, or
+                          a list of names to put it in)
       set_output_setting  output, key, value: one setting inside the output's
                           configuration, e.g. key "GerberUnit" value "Metric".
                           The key must already be there; get_outjob_settings
@@ -6544,7 +6550,12 @@ async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run:
     before = job.text()
     done, errors = outjob_edit.apply(job, operations, load=lambda p: outjob_edit.read(long_path(p)))
     out = {"success": not errors, "done": done, "errors": errors, "dry_run": dry_run, **_outjob_summary(job)}
-    if dry_run or job.text() == before:
+    if errors and not dry_run:
+        # all or nothing: a retry after fixing the failed operation must not
+        # repeat the ones that worked (a copied output would be copied twice)
+        out["note"] = ("Nothing was written because an operation failed; the containers and outputs "
+                       "show what the edit would have given.")
+    if dry_run or errors or job.text() == before:
         out["written"] = False
         return json.dumps(out, indent=2, ensure_ascii=False)
 

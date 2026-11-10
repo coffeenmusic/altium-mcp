@@ -29,7 +29,7 @@ class EditOutJobToolTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_tool(self, running, was_open=False):
+    def run_tool(self, running, was_open=False, operations=ADD_FAB):
         async def fake(command, params, timeout=None):
             self.commands.append(command)
             if command == "release_outjob":
@@ -37,7 +37,7 @@ class EditOutJobToolTest(unittest.TestCase):
             return {"success": True, "result": {"success": True}}
         with mock.patch.object(main.altium_bridge, "execute_command", fake), \
                 mock.patch.object(main.altium_bridge, "_altium_running", lambda: running):
-            return json.loads(asyncio.run(main.edit_outjob(None, self.path, ADD_FAB)))
+            return json.loads(asyncio.run(main.edit_outjob(None, self.path, operations)))
 
     def test_altium_not_running_is_not_started(self):
         out = self.run_tool(running=False)
@@ -59,6 +59,25 @@ class EditOutJobToolTest(unittest.TestCase):
         self.assertIn("disk full", out["error"])
         self.assertEqual(self.commands, ["release_outjob", "reopen_outjob"])
 
+
+    def test_nothing_is_written_when_an_operation_fails(self):
+        with open(self.path, "rb") as f:
+            before = f.read()
+        out = self.run_tool(running=True, was_open=True, operations=ADD_FAB + [
+            {"op": "copy_output", "output": "Nope", "containers": ["Fab"]}])
+        self.assertFalse(out["success"])
+        self.assertFalse(out["written"])
+        self.assertEqual(len(out["done"]), 1)
+        self.assertEqual(self.commands, [])
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_create_outjob_reports_a_failed_write(self):
+        path = os.path.join(self.tmp.name, "new.OutJob")
+        with mock.patch.object(outjob_edit, "write", side_effect=OSError("disk full")):
+            out = json.loads(asyncio.run(main.create_outjob(None, path)))
+        self.assertFalse(out["success"])
+        self.assertIn("disk full", out["error"])
 
 if __name__ == "__main__":
     unittest.main()

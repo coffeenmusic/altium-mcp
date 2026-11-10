@@ -1424,18 +1424,19 @@ function ReleaseOutJob(Path: String): String;
 var
     Doc : IServerDocument;
 begin
-    if not Client.IsDocumentOpen(Path) then
+    // FindOpenDocument also finds it under another spelling of the path
+    Doc := FindOpenDocument(Path);
+    if Doc = nil then
     begin
         Result := '{"success": true, "was_open": false}';
         Exit;
     end;
-    Doc := Client.GetDocumentByPath(Path);
     if DocumentModified(Doc) then
     begin
         Result := 'ERROR: The OutJob has unsaved changes in Altium; save or close it there first';
         Exit;
     end;
-    if Doc <> nil then Client.CloseDocument(Doc);
+    Client.CloseDocument(Doc);
     Result := '{"success": true, "was_open": true}';
 end;
 
