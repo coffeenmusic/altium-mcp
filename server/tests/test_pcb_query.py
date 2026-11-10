@@ -150,12 +150,22 @@ class WatchedCommandTest(unittest.TestCase):
             stops.append(bridge._exchange_lock.held)
 
         bridge.ensure_paths = ensure_paths
-        bridge._execute_command_locked = lambda command, params, timeout, started=None: script(started)
+        bridge._execute_command_locked = lambda command, params, timeout, picked_up=None: script(picked_up)
         bridge.stop_script_debugger = stop
         bridge.STOP_SETTLE = 0
         with mock.patch.object(main.sandbox, "altium_hung", lambda: False):
             response = asyncio.run(bridge.execute_command("query_objects", {}, watcher=watcher))
         return response, stops, bridge
+
+    def test_executor_keeps_its_event_apart_from_the_start_flag(self):
+        # _execute_command_locked also keeps a local "started" (did the bridge
+        # start); the event it sets must be another name, or every command
+        # without a watcher fails on bool.set()
+        import inspect
+        import main
+        source = inspect.getsource(main.AltiumBridge._execute_command_locked)
+        self.assertIn("picked_up: Optional[asyncio.Event] = None", source)
+        self.assertNotRegex(source, r"\bpicked_up\s*=[^=]")
 
     def test_abort_stops_the_script_with_the_lock_held(self):
         async def never(started):

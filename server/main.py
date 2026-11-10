@@ -552,7 +552,7 @@ class AltiumBridge:
             await started.wait()
             await watcher(abort)
 
-        run = asyncio.create_task(self._execute_command_locked(command, params, timeout, started=started))
+        run = asyncio.create_task(self._execute_command_locked(command, params, timeout, picked_up=started))
         watch = asyncio.create_task(watch_once_started())
         aborted = asyncio.create_task(abort.wait())
         try:
@@ -627,8 +627,8 @@ class AltiumBridge:
         return text
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
-                                      started: Optional[asyncio.Event] = None) -> Dict[str, Any]:
-        """Run one command with the locks held. started, if given, is set
+                                      picked_up: Optional[asyncio.Event] = None) -> Dict[str, Any]:
+        """Run one command with the locks held. picked_up, if given, is set
         once the bridge script has picked the request up."""
         try:
             problem = altium_limit_problem()
@@ -701,8 +701,8 @@ class AltiumBridge:
                                  f"the Altium window for an open dialog or a running or paused "
                                  f"script, then retry."}
             _clear_script_stuck()
-            if started is not None:
-                started.set()
+            if picked_up is not None:
+                picked_up.set()
 
             logger.info("Bridge script started, waiting for response file...")
             # Wait as long as the command keeps reporting progress, up to
