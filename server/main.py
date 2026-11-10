@@ -6674,7 +6674,9 @@ async def edit_variants(ctx: Context, operations: list, project_path: str = "", 
     - set_param {designator, channel?, name, value}: vary a parameter, e.g.
       Comment; a fitted part gets a parameter-only variation
     - remove_param {designator, channel?, name}: drop a parameter variation
-      (not on an alternate part)
+      (the variation goes when nothing is left in it). On an alternate part,
+      removing the Comment variation also clears the alternate part when
+      Altium saves (Altium's own behaviour)
     designator is a physical designator ("R1_CH2") or a logical one ("R1")
     with channel ("CH2", a wildcard such as "CH*", or "*" for every channel).
     The channel is what the channel naming adds to the logical designator.
@@ -6737,7 +6739,9 @@ async def edit_variants(ctx: Context, operations: list, project_path: str = "", 
             text = prj.read_bytes().decode("latin-1")
             fixed, report = vmod.normalize(text, vmod.edited_variants(lines))
             if fixed != text:
-                prj.write_bytes(fixed.encode("latin-1"))
+                # temp file and replace: a failed write must not leave a
+                # damaged project under the open one
+                vmod.replace_file(prj, fixed.encode("latin-1"))
             if report:
                 result["file_layout"] = report
         except OSError as e:

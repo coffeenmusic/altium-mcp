@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -127,26 +128,35 @@ class EncodeTest(unittest.TestCase):
         _, errors, _ = self.encode([{"op": "not_fitted", "designator": "C1"}])
         self.assertIn("give variant", errors[0])
 
-    def test_remove_param_rebuilds_the_variation(self):
+    def test_remove_param_removes_only_that_parameter(self):
         lines, errors, _ = self.encode([
             {"op": "set_param", "designator": "C1", "name": "Note", "value": "x"},
             {"op": "remove_param", "designator": "C1", "name": "Comment"},
         ], "Flight")
         self.assertEqual(errors, [])
-        self.assertEqual(lines[1:], ["DEL|Flight|\\COMPC", "KIND|Flight|\\COMPC|C1|0",
-                                     "PARAM|Flight|\\COMPC|C1|Note|x"])
+        self.assertEqual(lines[1:], ["UNPARAM|Flight|\\COMPC|Comment"])
         lines, _, _ = self.encode([{"op": "remove_param", "designator": "C1", "name": "Comment"}], "Flight")
         self.assertEqual(lines, ["DEL|Flight|\\COMPC"])        # nothing left: the variation goes
 
+    def test_remove_param_on_an_alternate_part(self):
+        lines, errors, plan = self.encode([{"op": "remove_param", "designator": "R1_CH1", "name": "Value"},
+                                           {"op": "remove_param", "designator": "R1_CH1", "name": "Comment"}],
+                                          "Original")
+        self.assertEqual(errors, [])
+        self.assertEqual(lines, ["UNPARAM|Original|\\SYMA\\COMPR|Value", "UNPARAM|Original|\\SYMA\\COMPR|Comment"])
+        self.assertNotIn("note", plan[0])
+        self.assertIn("alternate part", plan[1]["note"])
+
     def test_refusals(self):
-        _, errors, _ = self.encode([{"op": "remove_param", "designator": "R1_CH1", "name": "Value"}], "Original")
-        self.assertIn("alternate part", errors[0])
         _, errors, _ = self.encode([{"op": "set_param", "designator": "C1", "name": "A|B", "value": "1"}], "Flight")
         self.assertIn("'|'", errors[0])
         _, errors, _ = self.encode([{"op": "add_variant", "name": "flight"}])
         self.assertIn("taken", errors[0])
         _, errors, _ = self.encode([{"op": "swap"}])
         self.assertIn("unknown op", errors[0])
+        _, errors, _ = self.encode(["not_fitted", None])
+        self.assertEqual(len(errors), 2)
+        self.assertIn("dict", errors[0])
 
     def test_shared_designators(self):
         text = PRJ.replace("Variation2=Designator=C1|", "Variation2=Designator=R1_CH1|")
@@ -252,6 +262,23 @@ class NormalizeTest(unittest.TestCase):
         lines = ["KIND|Original|\\U|R1|1", "NEW|Proto", "RENAME|Proto|Proto 2", "PARAM|flight|\\U|R1|A|1",
                  "RENAME|Original|Base"]
         self.assertEqual(variants.edited_variants(lines), ["Base", "Proto 2", "flight"])
+
+
+class ReplaceFileTest(unittest.TestCase):
+    def test_written_and_old_file_kept_when_the_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "p.PrjPcb")
+            with open(path, "wb") as f:
+                f.write(b"old")
+            variants.replace_file(path, b"new")
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), b"new")
+            with mock.patch.object(variants.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    variants.replace_file(path, b"newer")
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), b"new")
+            self.assertEqual(os.listdir(tmp), ["p.PrjPcb"])
 
 
 class DescribeTest(unittest.TestCase):

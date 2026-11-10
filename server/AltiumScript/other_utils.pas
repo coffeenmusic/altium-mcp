@@ -1892,6 +1892,7 @@ end;
 //   KIND|variant|uid|physical|kind    set (or add) a variation's kind: 0 none, 1 not fitted
 //   DEL|variant|uid                   remove a variation: the part is fitted as designed
 //   PARAM|variant|uid|physical|name|value   vary a parameter (adds a kind 0 variation if needed)
+//   UNPARAM|variant|uid|name          remove a parameter variation
 function ApplyVariantEdit(Project: IProject; Rec: String; var Msg: String): Boolean;
 var
     Kind     : String;
@@ -1952,6 +1953,22 @@ begin
         end;
         PV.DM_SetVariedValue(GetFieldFromPipeString(Rec, 5));
     end
+    else if Kind = 'UNPARAM' then
+    begin
+        I := FindVariationIndex(ProjVariant, GetFieldFromPipeString(Rec, 2));
+        if I < 0 then
+        begin
+            Msg := 'no variation of ' + GetFieldFromPipeString(Rec, 2);
+            Exit;
+        end;
+        CV := ProjVariant.DM_Variations(I);
+        if CV.DM_FindParameterVariation(GetFieldFromPipeString(Rec, 3)) = nil then
+        begin
+            Msg := 'no variation of parameter ' + GetFieldFromPipeString(Rec, 3);
+            Exit;
+        end;
+        CV.DM_RemoveParameterVariationByName(GetFieldFromPipeString(Rec, 3));
+    end
     else
     begin
         Msg := 'unknown operation ' + Kind;
@@ -1963,9 +1980,8 @@ end;
 // Apply the variant spec in SpecPath to the project and save it through
 // Altium, so the open project and the file agree. Refused when the project
 // file already has unsaved changes in Altium: saving would write those too.
-// Stops at the first line that fails and saves nothing: a remove_param is a
-// removal and a re-add, and saving half of it would lose the part's other
-// parameter variations. What ran before the failure stays in Altium's copy,
+// Stops at the first line that fails and saves nothing, so the file gets
+// all of an edit or none of it. What ran before the failure stays in Altium's copy,
 // which is marked modified so the user can see it and discard it.
 function ApplyVariantEdits(ProjectPath, SpecPath: String): String;
 var

@@ -23,14 +23,16 @@ Why the edits go through Altium
 The project is usually open in Altium, which keeps its own copy and writes it
 back on the next save, so a change made to the file would be lost or would
 fight a reload. IProjectVariant.DM_AddComponentVariation and friends change
-Altium's copy, and saving the project writes it out (checked on AD25). The
-API cannot list a variation's parameter variations or remove one, so
-remove_param removes the variation and adds it again without that parameter,
-from what the saved file says it holds.
+Altium's copy, and saving the project writes it out (checked on AD25).
+remove_param uses IComponentVariation.DM_RemoveParameterVariationByName
+(checked on AD25). Removing the Comment variation of an alternate part also
+clears its AlternatePart when Altium saves: Altium's own behaviour.
 """
 
 import fnmatch
+import os
 import re
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 KINDS = {0: "none", 1: "not_fitted", 2: "alternate"}
@@ -172,6 +174,23 @@ def layout_problems(text: str) -> List[dict]:
             out.append({"section": name, "misplaced_rows": lay["misplaced"], "rows_past_counts": lay["stale"],
                         "duplicate_designators": lay["duplicates"]})
     return out
+
+
+def replace_file(path, data: bytes) -> None:
+    """Write data to path through a temporary file in the same folder and
+    os.replace, so a failed write leaves the old file whole."""
+    path = os.fspath(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".~", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def normalize(text: str, only: Optional[List[str]] = None) -> Tuple[str, List[dict]]:
@@ -331,7 +350,10 @@ def encode_operations(variants: List[dict], targets: List[dict], operations: Lis
     names = {v["name"].lower(): v for v in variants}
 
     for n, op in enumerate(operations or [], 1):
-        kind = (op or {}).get("op", "")
+        if not isinstance(op, dict):
+            errors.append(f"operation {n}: each operation is a dict with an 'op'")
+            continue
+        kind = op.get("op", "")
         try:
             if kind not in OPS:
                 raise ValueError(f"unknown op '{kind}'; use one of {', '.join(OPS)}")
@@ -405,19 +427,19 @@ def encode_operations(variants: List[dict], targets: List[dict], operations: Lis
                     if existing is None or pname not in existing["params"]:
                         plan.append({"op": n, "designator": phys, "note": f"no variation of {pname}"})
                         continue
-                    if existing["kind"] == "alternate":
-                        raise ValueError(f"{phys} is an alternate part: its parameters cannot be removed "
-                                         f"one by one here; use fitted to drop the alternate")
                     keep = {k: v for k, v in existing["params"].items() if k != pname}
-                    lines.append(f"DEL|{vname}|{uid}")
+                    step = {"op": n, "designator": phys, "remove_param": pname}
                     if keep or existing["kind"] != "none":
-                        lines.append(f"KIND|{vname}|{uid}|{phys}|{KIND_CODES[existing['kind']]}")
-                        lines += [f"PARAM|{vname}|{uid}|{phys}|{_clean(k, 'parameter name')}|{_clean(v, 'value')}"
-                                  for k, v in keep.items()]
+                        lines.append(f"UNPARAM|{vname}|{uid}|{_clean(pname, 'parameter name')}")
                         existing["params"] = keep
+                        if existing["kind"] == "alternate" and pname.lower() == "comment":
+                            existing["alternate_part"] = ""
+                            step["note"] = "Altium clears the alternate part when its Comment variation goes"
                     else:
+                        # nothing left to vary: the variation goes
+                        lines.append(f"DEL|{vname}|{uid}")
                         variant["variations"].remove(existing)
-                    plan.append({"op": n, "designator": phys, "remove_param": pname})
+                    plan.append(step)
         except ValueError as e:
             errors.append(f"operation {n}: {e}")
     return lines, errors, plan
