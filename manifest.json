@@ -96,6 +96,10 @@
       "description": "Change an existing schematic sheet as one undo step: move, place or delete parts, set parameters, move text, add wires, labels, power ports and junctions"
     },
     {
+      "name": "get_schematic_pins",
+      "description": "List a schematic sheet's pins live from Altium: connection point, number, name and electrical type"
+    },
+    {
       "name": "get_symbol_placement_rules",
       "description": "Get schematic symbol placement rules from a local configuration file"
     },
