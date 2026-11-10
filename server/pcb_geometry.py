@@ -10,6 +10,7 @@ opaque string in absolute internal units that clearance and drag_copper take
 to find that object again.
 """
 
+import re
 from typing import List, Optional
 
 COORD_PER = {"mil": 10000.0, "mm": 10000.0 / 0.0254}
@@ -104,27 +105,58 @@ def parse_object(record: str, origin=(0, 0), unit: str = "mil") -> Optional[dict
     return obj
 
 
+def layer_key(name: str) -> str:
+    """A layer name for comparing: case, spaces, hyphens and underscores do
+    not count, so "Multi Layer" (Altium's name) is "multi-layer" too."""
+    return re.sub(r"[\s_-]+", "", name or "").lower()
+
+
+MULTI_LAYER = layer_key("Multi Layer")
+# Copper layer names when the board's own list is not known
+_COPPER_NAME = re.compile(r"(toplayer|bottomlayer|midlayer\d+|internalplane\d+)$")
+
+
+def is_multi_layer(name: str) -> bool:
+    return layer_key(name) == MULTI_LAYER
+
+
+def is_copper_layer(name: str, stack: Optional[List[str]] = None) -> bool:
+    """Whether name is a copper layer: one of stack (the board's copper
+    layers, as Altium sends them) or, without it, by its name."""
+    key = layer_key(name)
+    if stack:
+        return key in {layer_key(n) for n in stack}
+    return bool(_COPPER_NAME.match(key))
+
+
 def via_layers(low: str, high: str, stack: Optional[List[str]] = None) -> List[str]:
     """The copper layers a via spans, lower-cased: every layer of the stack
     (copper layer names top to bottom, as Altium sends them) from one end to
     the other, so a blind via Top Layer:Mid Layer 2 is on Mid Layer 1 too.
     Without a stack, or with an end not in it, only its two end layers."""
-    low, high = low.lower(), high.lower()
     names = [n.lower() for n in (stack or [])]
-    if low in names and high in names:
-        i, j = sorted((names.index(low), names.index(high)))
+    keys = [layer_key(n) for n in names]
+    if layer_key(low) in keys and layer_key(high) in keys:
+        i, j = sorted((keys.index(layer_key(low)), keys.index(layer_key(high))))
         return names[i:j + 1]
-    return [low, high]
+    return [low.lower(), high.lower()]
 
 
 def _layer_match(obj: dict, layers: List[str], stack: Optional[List[str]] = None) -> bool:
-    wanted = {l.lower() for l in layers}
+    """Whether obj is on one of layers. A through via and a Multi Layer pad
+    are on every copper layer (and on Multi Layer), but not on overlay, mask
+    or mechanical layers; a blind via is on the layers it spans."""
+    wanted = {layer_key(l) for l in layers}
+    on_copper = any(is_copper_layer(l, stack) for l in layers)
     if obj["kind"] == "via":
-        ends = {obj["low_layer"].lower(), obj["high_layer"].lower()}
-        through = ends == {"top layer", "bottom layer"}
-        return through or bool(set(via_layers(obj["low_layer"], obj["high_layer"], stack)) & wanted)
-    layer = (obj.get("layer") or "").lower()
-    return layer in wanted or layer == "multi-layer"
+        ends = {layer_key(obj["low_layer"]), layer_key(obj["high_layer"])}
+        if ends == {layer_key("Top Layer"), layer_key("Bottom Layer")}:
+            return on_copper or MULTI_LAYER in wanted
+        return bool({layer_key(n) for n in via_layers(obj["low_layer"], obj["high_layer"], stack)} & wanted)
+    layer = layer_key(obj.get("layer") or "")
+    if layer == MULTI_LAYER:
+        return on_copper or MULTI_LAYER in wanted
+    return layer in wanted
 
 
 def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = None,

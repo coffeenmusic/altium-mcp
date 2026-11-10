@@ -40,6 +40,14 @@ class ToolDocsTest(unittest.TestCase):
             annotations = self.tools[name].annotations
             self.assertFalse(annotations and annotations.readOnlyHint, name)
 
+    def test_only_a_drag_is_a_geometry_change(self):
+        # a timed-out objects_in_area must not be reported as changing the design
+        self.assertTrue(main._is_mutating("geometry", {"geometry": "drag"}))
+        for op in ("area", "clearance"):
+            self.assertFalse(main._is_mutating("geometry", {"geometry": op}), op)
+        self.assertFalse(main._is_mutating("geometry", {}))
+        self.assertTrue(main._is_mutating("place_copper", {}))
+
 
 if __name__ == "__main__":
     unittest.main()

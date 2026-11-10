@@ -17,7 +17,7 @@ RECORDS = [
     "arc|Bottom Layer|SIG|U1|1100000|2100000|50000|0|90000|10000|0",
     "via|Top Layer:Bottom Layer|GND||1050000|2050000|236220|98425",
     "via|Top Layer:Mid Layer 1|SIG||1060000|2060000|236220|98425",
-    "pad|Multi-Layer|SIG|J1|1200000|2200000|600000|600000|1|350000|90000|1",
+    "pad|Multi Layer|SIG|J1|1200000|2200000|600000|600000|1|350000|90000|1",
     "pad|Top Layer|||1300000|2300000|100000|200000|2|0|0|MH|A",
     "fill|Top Layer|GND||1000000|2000000|1100000|2100000|45000",
     "region|Bottom Layer|GND||1000000|2000000|1500000|2500000|1",
@@ -70,6 +70,28 @@ class SelectTest(unittest.TestCase):
         self.assertEqual([o["kind"] for o in mid], ["via", "via", "pad"])
         sig = geo.select(RECORDS, ORIGIN, "mil", nets=["sig"])
         self.assertEqual([o["kind"] for o in sig], ["arc", "via", "pad"])
+
+    def test_through_copper_only_on_copper_layers(self):
+        # an overlay or mechanical layer holds no through via or Multi Layer pad
+        overlay = geo.select(RECORDS, ORIGIN, "mil", layers=["Top Overlay"])
+        self.assertEqual({o["kind"] for o in overlay}, {"text"})
+        self.assertEqual(geo.select(RECORDS, ORIGIN, "mil", layers=["Mechanical 1"]), [])
+        # Multi Layer itself, written either way
+        multi = geo.select(RECORDS, ORIGIN, "mil", layers=["multi-layer"])
+        self.assertEqual([o["kind"] for o in multi], ["via", "pad"])
+        # with the board's copper layers known, a layer it lacks holds nothing
+        stack = ["Top Layer", "Bottom Layer"]
+        self.assertEqual(geo.select(RECORDS[3:6], ORIGIN, "mil", layers=["Mid Layer 3"], stack=stack), [])
+        inner = geo.select(RECORDS[3:6], ORIGIN, "mil", layers=["Internal Plane 1"])
+        self.assertEqual([o["kind"] for o in inner], ["via", "pad"])
+
+    def test_layer_names_compare_loosely(self):
+        self.assertEqual(geo.layer_key("Multi Layer"), geo.layer_key("multi-layer"))
+        self.assertTrue(geo.is_multi_layer("MultiLayer"))
+        self.assertFalse(geo.is_multi_layer("Top Layer"))
+        self.assertTrue(geo.is_copper_layer("Mid-Layer 2"))
+        self.assertFalse(geo.is_copper_layer("Top Overlay"))
+        self.assertFalse(geo.is_copper_layer("Mid Layer 2", ["Top Layer", "Bottom Layer"]))
 
     def test_blind_via_on_its_middle_layers(self):
         stack = ["Top Layer", "Mid Layer 1", "Mid Layer 2", "Bottom Layer"]

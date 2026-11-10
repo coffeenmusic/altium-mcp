@@ -6199,11 +6199,81 @@ begin
     end;
 end;
 
-// What sits at X,Y (internal units), for a drag: track ends on a layer in
-// Layers ('|id|id|', or '' for every layer) go into Tracks with the end in
-// EndNos ('1' or '2'), vias into Vias; an arc ending there or a pad under it
-// is named in Blocker, since neither can follow. Skip is the dragged object.
-procedure GeoAttached(Board: IPCB_Board; X, Y: Integer; Layers: String; Skip: IPCB_Primitive;
+// The copper layers Via spans, as '|id|id|' for GeoAttached
+function GeoViaLayers(Board: IPCB_Board; Via: IPCB_Primitive): String;
+var
+    LayerIt : IPCB_LayerObjectIterator;
+begin
+    Result := '|';
+    LayerIt := Board.ElectricalLayerIterator;
+    while LayerIt.Next do
+        if Via.IntersectLayer(LayerIt.LayerObject.LayerID) then
+            Result := Result + IntToStr(LayerIt.LayerObject.LayerID) + '|';
+end;
+
+// True when Prim is on one of Layers ('|id|id|', or '' for every layer): a
+// via when it spans one of them, a Multi Layer pad always
+function GeoOnLayers(Board: IPCB_Board; Prim: IPCB_Primitive; Layers: String): Boolean;
+var
+    LayerIt : IPCB_LayerObjectIterator;
+begin
+    Result := (Layers = '') or (Prim.Layer = eMultiLayer);
+    if Result then Exit;
+    if Prim.ObjectId = eViaObject then
+    begin
+        LayerIt := Board.ElectricalLayerIterator;
+        while LayerIt.Next do
+            if (Pos('|' + IntToStr(LayerIt.LayerObject.LayerID) + '|', Layers) > 0) and
+               Prim.IntersectLayer(LayerIt.LayerObject.LayerID) then Result := True;
+    end
+    else
+        Result := Pos('|' + IntToStr(Prim.Layer) + '|', Layers) > 0;
+end;
+
+function GeoListHas(List: TInterfaceList; Prim: IPCB_Primitive): Boolean;
+var
+    I : Integer;
+    Other : IPCB_Primitive;
+begin
+    Result := False;
+    for I := 0 to List.Count - 1 do
+    begin
+        Other := List[I];
+        if Other.I_ObjectAddress = Prim.I_ObjectAddress then Result := True;
+    end;
+end;
+
+// Distance from PX,PY to the segment X1,Y1-X2,Y2
+function GeoSegmentDistance(X1, Y1, X2, Y2, PX, PY: Integer): Double;
+var
+    DX, DY, L2, T : Double;
+begin
+    DX := X2 - X1;
+    DY := Y2 - Y1;
+    L2 := DX * DX + DY * DY;
+    T := 0;
+    if L2 > 0 then T := ((PX - X1) * DX + (PY - Y1) * DY) / L2;
+    if T < 0 then T := 0;
+    if T > 1 then T := 1;
+    Result := Sqrt(Sqr(X1 + T * DX - PX) + Sqr(Y1 + T * DY - PY));
+end;
+
+// True when PX,PY lies on the copper of the track X1,Y1-X2,Y2 of Width but
+// at neither of its ends: a T-junction
+function GeoPartway(X1, Y1, X2, Y2, Width, PX, PY, Tol: Integer): Boolean;
+begin
+    Result := (GeoSegmentDistance(X1, Y1, X2, Y2, PX, PY) <= Width / 2) and
+              not ((Abs(X1 - PX) <= Tol) and (Abs(Y1 - PY) <= Tol)) and
+              not ((Abs(X2 - PX) <= Tol) and (Abs(Y2 - PY) <= Tol));
+end;
+
+// What sits at X,Y (internal units), for a drag by DX,DY: track ends on a
+// layer in Layers ('|id|id|', or '' for every layer) go into Tracks with the
+// end in EndNos ('1' or '2'), vias not yet in Vias into Vias; an arc ending
+// there, a pad under it or a track of the same net running through it (a
+// T-junction the moved point would leave) is named in Blocker, since none of
+// them can follow. Skip is the object being moved.
+procedure GeoAttached(Board: IPCB_Board; X, Y, DX, DY: Integer; Layers: String; Skip: IPCB_Primitive;
                       Tracks: TInterfaceList; EndNos: TStringList; Vias: TInterfaceList; var Blocker: String);
 var
     It    : IPCB_SpatialIterator;
@@ -6222,8 +6292,7 @@ begin
     while Prim <> nil do
     begin
         if (Prim.I_ObjectAddress <> Skip.I_ObjectAddress) and not Prim.InPolygon and
-           ((Layers = '') or (Prim.ObjectId = eViaObject) or (Prim.Layer = eMultiLayer) or
-            (Pos('|' + IntToStr(Prim.Layer) + '|', Layers) > 0)) then
+           GeoOnLayers(Board, Prim, Layers) then
         begin
             if Prim.ObjectId = eTrackObject then
             begin
@@ -6237,11 +6306,18 @@ begin
                 begin
                     Tracks.Add(Track);
                     EndNos.Add('2');
-                end;
+                end
+                // A point sliding along the track stays on it
+                else if (GeoNet(Track) = GeoNet(Skip)) and
+                        GeoPartway(Track.x1, Track.y1, Track.x2, Track.y2, Track.Width, X, Y, Tol) and
+                        (GeoSegmentDistance(Track.x1, Track.y1, Track.x2, Track.y2, X + DX, Y + DY) > Track.Width / 2) then
+                    Blocker := 'a track (' + Layer2String(Track.Layer) + ', ' + GeoNet(Track) +
+                               ') runs through a moved point and would be left behind';
             end
             else if Prim.ObjectId = eViaObject then
             begin
-                if (Abs(Prim.x - X) <= Tol) and (Abs(Prim.y - Y) <= Tol) then Vias.Add(Prim);
+                if (Abs(Prim.x - X) <= Tol) and (Abs(Prim.y - Y) <= Tol) and not GeoListHas(Vias, Prim) then
+                    Vias.Add(Prim);
             end
             else if Prim.ObjectId = eArcObject then
             begin
@@ -6274,6 +6350,72 @@ begin
     end;
 end;
 
+// True when PX,PY lies partway along Track and is off it once Track runs
+// NX1,NY1-NX2,NY2 (a point the move slides along the track stays on it)
+function GeoTeeBreaks(Track: IPCB_Track; NX1, NY1, NX2, NY2, PX, PY: Integer): Boolean;
+begin
+    Result := GeoPartway(Track.x1, Track.y1, Track.x2, Track.y2, Track.Width, PX, PY, 100) and
+              (GeoSegmentDistance(NX1, NY1, NX2, NY2, PX, PY) > Track.Width / 2);
+end;
+
+// Blocker names copper of Track's net whose end (or centre, for a via or a
+// pad) lies partway along Track and is off it once Track runs NX1,NY1-NX2,NY2:
+// a T-junction the drag would break. Copper in Tracks and Vias moves anyway.
+procedure GeoCheckTees(Board: IPCB_Board; Track: IPCB_Track; NX1, NY1, NX2, NY2: Integer;
+                       Tracks, Vias: TInterfaceList; var Blocker: String);
+var
+    It    : IPCB_SpatialIterator;
+    Prim  : IPCB_Primitive;
+    Other : IPCB_Track;
+    Arc   : IPCB_Arc;
+    R     : TCoordRect;
+    Kind  : String;
+begin
+    R := Track.BoundingRectangle;
+    It := Board.SpatialIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject));
+    It.AddFilter_LayerSet(AllLayers);
+    It.AddFilter_Area(R.Left, R.Bottom, R.Right, R.Top);
+    Prim := It.FirstPCBObject;
+    while Prim <> nil do
+    begin
+        Kind := '';
+        if (Prim.I_ObjectAddress <> Track.I_ObjectAddress) and not Prim.InPolygon and
+           (GeoNet(Prim) = GeoNet(Track)) and not GeoListHas(Tracks, Prim) and not GeoListHas(Vias, Prim) then
+        begin
+            if Prim.ObjectId = eTrackObject then
+            begin
+                Other := Prim;
+                if (Other.Layer = Track.Layer) and (GeoTeeBreaks(Track, NX1, NY1, NX2, NY2, Other.x1, Other.y1) or
+                                                GeoTeeBreaks(Track, NX1, NY1, NX2, NY2, Other.x2, Other.y2)) then
+                    Kind := 'a track (' + Layer2String(Other.Layer) + ', ' + GeoNet(Other) + ') ends';
+            end
+            else if Prim.ObjectId = eArcObject then
+            begin
+                Arc := Prim;
+                if (Arc.Layer = Track.Layer) and (GeoTeeBreaks(Track, NX1, NY1, NX2, NY2, Arc.StartX, Arc.StartY) or
+                                              GeoTeeBreaks(Track, NX1, NY1, NX2, NY2, Arc.EndX, Arc.EndY)) then
+                    Kind := 'an arc (' + Layer2String(Arc.Layer) + ', ' + GeoNet(Arc) + ') ends';
+            end
+            else if Prim.ObjectId = eViaObject then
+            begin
+                if Prim.IntersectLayer(Track.Layer) and GeoTeeBreaks(Track, NX1, NY1, NX2, NY2, Prim.x, Prim.y) then
+                    Kind := 'a via (' + GeoNet(Prim) + ') sits';
+            end
+            else if Prim.ObjectId = ePadObject then
+            begin
+                if ((Prim.Layer = Track.Layer) or (Prim.Layer = eMultiLayer)) and GeoTeeBreaks(Track, NX1, NY1, NX2, NY2, Prim.x, Prim.y) then
+                    Kind := 'pad ' + GeoOwner(Prim) + '-' + Prim.Name + ' sits';
+            end;
+        end;
+        if Kind <> '' then
+            Blocker := Kind + ' partway along a moved track (' + Layer2String(Track.Layer) + ', ' + GeoNet(Track) +
+                       ') and would be left behind';
+        Prim := It.NextPCBObject;
+    end;
+    Board.SpatialIterator_Destroy(It);
+end;
+
 procedure GeoBeginModify(Prim: IPCB_Primitive);
 begin
     PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
@@ -6287,9 +6429,10 @@ end;
 
 // Drag a via, or a track segment, by DX,DY and keep its copper connected:
 // track ends at a moved point follow, and a via at a moved end of a track
-// moves too, with the tracks on its other layers. Refused when an arc ends
-// at a moved point, a pad lies under one or any of that copper is locked.
-// With DryRun nothing changes.
+// moves too, with the tracks on the other layers it spans. Refused when an
+// arc ends at a moved point, a pad lies under one, copper of the same net
+// meets a moving track partway along it (a T-junction) or any of that copper
+// is locked. With DryRun nothing changes.
 function DragCopper(Board: IPCB_Board; Ref: String; DX, DY: Integer; DryRun: Boolean): String;
 var
     Obj    : IPCB_Primitive;
@@ -6299,6 +6442,7 @@ var
     EndNos, Moved, Stretched, Props : TStringList;
     Blocker : String;
     I, J, K, PX, PY : Integer;
+    NX1, NY1, NX2, NY2 : Integer;
 begin
     Obj := GeoFind(Board, Ref);
     if Obj = nil then begin Result := 'ERROR: object not found: ' + Ref; Exit; end;
@@ -6319,11 +6463,16 @@ begin
         Blocker := '';
         if Obj.ObjectId = eViaObject then
         begin
+            // A via stacked at the same point moves along, with the tracks
+            // on the layers each of them spans (a blind via only its own)
             Vias.Add(Obj);
-            GeoAttached(Board, Obj.x, Obj.y, '', Obj, Tracks, EndNos, PointVias, Blocker);
-            // A via stacked at the same point moves along
-            for I := 0 to PointVias.Count - 1 do
-                Vias.Add(PointVias[I]);
+            I := 0;
+            while I < Vias.Count do
+            begin
+                GeoAttached(Board, Obj.x, Obj.y, DX, DY, GeoViaLayers(Board, Vias[I]), Vias[I], Tracks, EndNos,
+                            Vias, Blocker);
+                I := I + 1;
+            end;
         end
         else
         begin
@@ -6332,13 +6481,18 @@ begin
             begin
                 if K = 1 then begin PX := Track.x1; PY := Track.y1; end
                 else begin PX := Track.x2; PY := Track.y2; end;
-                // A via at this end moves along, so its tracks on every layer follow
+                // A via at this end moves along, so its tracks on the layers
+                // it spans follow
                 PointVias.Clear;
-                GeoAttached(Board, PX, PY, '|' + IntToStr(Track.Layer) + '|', Obj, Tracks, EndNos, PointVias, Blocker);
-                for I := 0 to PointVias.Count - 1 do
+                GeoAttached(Board, PX, PY, DX, DY, '|' + IntToStr(Track.Layer) + '|', Obj, Tracks, EndNos, PointVias,
+                            Blocker);
+                I := 0;
+                while I < PointVias.Count do
                 begin
-                    Vias.Add(PointVias[I]);
-                    GeoAttached(Board, PX, PY, '', PointVias[I], Tracks, EndNos, Vias, Blocker);
+                    if not GeoListHas(Vias, PointVias[I]) then Vias.Add(PointVias[I]);
+                    GeoAttached(Board, PX, PY, DX, DY, GeoViaLayers(Board, PointVias[I]), PointVias[I], Tracks, EndNos,
+                                PointVias, Blocker);
+                    I := I + 1;
                 end;
             end;
         end;
@@ -6376,6 +6530,33 @@ begin
                     Break;
                 end;
             end;
+        end;
+        // Copper of the same net joined partway along a track that moves
+        // stays put: refuse rather than leave it unconnected
+        if Obj.ObjectId = eTrackObject then
+        begin
+            Track := Obj;
+            GeoCheckTees(Board, Track, Track.x1 + DX, Track.y1 + DY, Track.x2 + DX, Track.y2 + DY, Tracks, Vias,
+                         Blocker);
+        end;
+        for I := 0 to Tracks.Count - 1 do
+        begin
+            Track := Tracks[I];
+            NX1 := Track.x1;
+            NY1 := Track.y1;
+            NX2 := Track.x2;
+            NY2 := Track.y2;
+            // A track between two moved points moves whole
+            for J := 0 to Tracks.Count - 1 do
+            begin
+                OtherTrack := Tracks[J];
+                if OtherTrack.I_ObjectAddress = Track.I_ObjectAddress then
+                begin
+                    if EndNos[J] = '1' then begin NX1 := NX1 + DX; NY1 := NY1 + DY; end
+                    else begin NX2 := NX2 + DX; NY2 := NY2 + DY; end;
+                end;
+            end;
+            GeoCheckTees(Board, Track, NX1, NY1, NX2, NY2, Tracks, Vias, Blocker);
         end;
         // Locked copper stays put: refuse rather than move it
         GeoCheckLocked(Obj, Blocker);
@@ -6464,7 +6645,7 @@ var
     Board : IPCB_Board;
     Cmd   : String;
 begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if Board = nil then
     begin
         Result := 'ERROR: no PCB is focused';

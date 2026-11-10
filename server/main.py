@@ -147,6 +147,8 @@ LOCK_TIMEOUT = START_TIMEOUT_COLD + RESPONSE_TIMEOUT
 
 # Commands that change the design or write files. When one of them times out
 # it may have done some or all of its work, so it must not just be retried.
+# A command that carries its operation in a parameter of its own name (as
+# "geometry" does) is listed per operation as "command.operation".
 MUTATING_COMMANDS = {
     "create_net_class", "create_schematic_symbol", "set_component_position",
     "move_components", "place_components", "create_symbols_batch", "build_circuit",
@@ -159,6 +161,14 @@ MUTATING_COMMANDS = {
 # running or debugging is never stopped. Every server using this exchange
 # folder sees it, including after a restart.
 STUCK_MARKER = EXCHANGE_DIR / "mcp_script_stuck.txt"
+
+
+def _is_mutating(command: str, params: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether a timed-out command may have changed the design."""
+    if command in MUTATING_COMMANDS:
+        return True
+    operation = (params or {}).get(command)
+    return isinstance(operation, str) and f"{command}.{operation}" in MUTATING_COMMANDS
 
 
 def _mark_script_stuck(what: str):
@@ -694,7 +704,7 @@ class AltiumBridge:
                 # of its work; a plain retry would then do it twice
                 outcome = (f" '{command}' changes the design and may have done some or all of "
                            f"its work, so its outcome is unknown: check the design before "
-                           f"running it again." if command in MUTATING_COMMANDS else "")
+                           f"running it again." if _is_mutating(command, params) else "")
                 return {"success": False,
                         "error": f"No response from Altium after "
                                  f"{int(time.monotonic() - start_time)} s, the last "
@@ -4708,6 +4718,10 @@ async def get_layout(ctx: Context, designators: list = None, area: list = None, 
     (the pour itself is), keepouts, and objects on non-copper layers
     (counted in skipped).
 
+    To see everything in a box, on any layer and with refs that clearance
+    and drag_copper take, use objects_in_area instead; get_layout is for
+    reading copper to edit and place again.
+
     Returns:
         JSON: area; components (designator, x, y, rotation, layer, locked,
         footprint, designator_text and comment_text: {x, y, rotation,
@@ -5387,13 +5401,15 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
     geometry.
 
     Each object has a "ref" that clearance and drag_copper take to find it
-    again (opaque: pass it on as is).
+    again (opaque: pass it on as is). To read a group's copper in the form
+    place_copper takes, to edit and place it again, use get_layout instead.
 
     Args:
         bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
         layers (list): Only these layers, by Altium's name ("Top Layer",
-            "Mid Layer 1", "Mechanical 1"); through vias and multi-layer pads
-            are on every copper layer. Default all.
+            "Mid Layer 1", "Mechanical 1"); through vias and Multi Layer pads
+            are on every copper layer (not on overlay, mask or mechanical
+            layers), a blind via on the layers it spans. Default all.
         kinds (list): Only these: track, arc, via, pad, fill, region, polygon,
             text, component. Default all.
         nets (list): Only objects on these nets.
@@ -5475,8 +5491,12 @@ async def drag_copper(ctx: Context, object_ref: str, dx: float, dy: float, unit:
     moves with it, its tracks on the other layers following too.
 
     Refused when an arc ends at a moved point or a pad lies under one,
-    since those cannot follow, and when any of the copper to move or stretch
-    is locked; dry_run shows what would move first. Polygon
+    since those cannot follow; when copper of the same net meets moving copper
+    partway along a track (a T-junction: a branch ending partway along a moved
+    track, a moved end landing partway along another track, a track running
+    through a dragged via), since it would be left unconnected; and when any
+    of the copper to move or stretch is locked. The blocker names the copper.
+    dry_run shows what would move first. Polygon
     pours are not repoured: run repour_polygons afterwards if copper changed
     near one, and check_routing to confirm the connections.
 
@@ -5523,8 +5543,9 @@ async def drag_copper(ctx: Context, object_ref: str, dx: float, dy: float, unit:
         reply["note"] = "Coordinates are before the move. Nothing was changed."
     return json.dumps(reply, indent=1)
 
-# Moves copper: a timeout leaves its outcome unknown, so no blind retry
-MUTATING_COMMANDS.add("geometry")
+# A drag moves copper: a timeout leaves its outcome unknown, so no blind
+# retry. The other geometry operations only read.
+MUTATING_COMMANDS.add("geometry.drag")
 
 
 def _save_debug_screenshot(label: str, png_bytes: bytes):
