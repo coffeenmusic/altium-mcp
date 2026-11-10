@@ -36,6 +36,7 @@ from altium_install import find_altium_exe
 import routing
 import pcb_layout
 import sandbox
+import window_capture
 import win_processes
 from outjob_parser import parse_outjob
 
@@ -5259,6 +5260,46 @@ def _bring_to_front(hwnd):
             win32process.AttachThreadInput(this_thread, front_thread, False)
 
 
+def _window_surface_rect(hwnd):
+    """The window rectangle in the window's own DPI context: the size of the
+    surface GetWindowDC copies (see window_capture.py). None if unknown."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    try:
+        user32.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.GetWindowDpiAwarenessContext.argtypes = [wintypes.HWND]
+        user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        context = user32.GetWindowDpiAwarenessContext(hwnd)
+    except Exception:
+        return None
+    if not context:
+        return None
+    previous = user32.SetThreadDpiAwarenessContext(context)
+    if not previous:
+        return None
+    try:
+        return tuple(win32gui.GetWindowRect(hwnd))
+    finally:
+        user32.SetThreadDpiAwarenessContext(previous)
+
+
+def _window_frame(hwnd):
+    """The drawn frame of a top-level window in physical pixels
+    (DWMWA_EXTENDED_FRAME_BOUNDS), without the invisible resize border."""
+    import ctypes
+    from ctypes import wintypes
+    r = wintypes.RECT()
+    try:
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                wintypes.HWND(hwnd), 9, ctypes.byref(r), ctypes.sizeof(r)) == 0:
+            return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        pass
+    return None
+
+
 def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
     """Copy a window's pixels, frame included, into an RGB image.
 
@@ -5376,53 +5417,31 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
 
         def capture_screenshot():
             try:
-                # Find Altium windows
-                altium_windows = []
-                altium_fallback_windows = []
-                
-                def collect_altium_windows(hwnd, _):
+                # Find Altium's main frame: a window of an X2.EXE process,
+                # not just any window with "Altium" in its title (a browser
+                # tab can have that too). See window_capture.pick_main_frame.
+                top_windows = []
+
+                def collect_windows(hwnd, _):
                     if win32gui.IsWindowVisible(hwnd):
-                        title = win32gui.GetWindowText(hwnd)
-                        
-                        # First, look for windows with Altium and .PrjPcb in the title
-                        if "Altium" in title and ".PrjPcb" in title:
-                            altium_windows.append({
-                                "handle": hwnd,
-                                "title": title,
-                                "class_name": win32gui.GetClassName(hwnd),
-                                "rect": win32gui.GetWindowRect(hwnd)
-                            })
-                        # Collect any window with Altium in the title as fallback
-                        elif "Altium" in title:
-                            altium_fallback_windows.append({
-                                "handle": hwnd,
-                                "title": title,
-                                "class_name": win32gui.GetClassName(hwnd),
-                                "rect": win32gui.GetWindowRect(hwnd)
-                            })
+                        top_windows.append({
+                            "handle": hwnd,
+                            "title": win32gui.GetWindowText(hwnd),
+                            "class_name": win32gui.GetClassName(hwnd),
+                            "rect": win32gui.GetWindowRect(hwnd),
+                            "pid": win32process.GetWindowThreadProcessId(hwnd)[1],
+                            "iconic": bool(win32gui.IsIconic(hwnd)),
+                        })
                     return True
-                
-                win32gui.EnumWindows(collect_altium_windows, 0)
-                
-                # If no specific Altium .PrjPcb windows found, use the fallback
-                if not altium_windows and altium_fallback_windows:
-                    altium_windows = altium_fallback_windows
-                
-                if not altium_windows:
+
+                win32gui.EnumWindows(collect_windows, 0)
+                window = window_capture.pick_main_frame(
+                    top_windows, win_processes.pids_by_name("X2.EXE"))
+                if window is None:
                     return {
                         "success": False,
                         "error": f"No Altium windows found for {view_type} view"
                     }
-
-                # Altium owns several top-level windows with its name in the
-                # title, and while it switches documents a small transient one
-                # can come first. Take the largest window that is not
-                # minimized: that is the main frame.
-                def area(w):
-                    l, t, r, b = w["rect"]
-                    return max(0, r - l) * max(0, b - t)
-                candidates = [w for w in altium_windows if not win32gui.IsIconic(w["handle"])]
-                window = max(candidates or altium_windows, key=area)
                 hwnd = window["handle"]
                 
                 # Bring Altium to the front and let it paint. Altium only
@@ -5458,16 +5477,22 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb", zoom_to: list = N
 
                 # Measure AFTER activation: restoring or switching can change
                 # the frame's size.
-                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-                width = right - left
-                height = bottom - top
+                # The copy is of the window's own surface, whose size is the
+                # window rectangle in the window's DPI context; it is then cut
+                # to the drawn frame (window_capture.py)
+                physical = tuple(win32gui.GetWindowRect(hwnd))
+                surface = _window_surface_rect(hwnd) or physical
+                crop = window_capture.visible_crop(surface, physical, _window_frame(hwnd))
+                width = surface[2] - surface[0]
+                height = surface[3] - surface[1]
                 if width < 200 or height < 150:
                     return {"success": False, "error": f"Altium window is too small to capture ({width}x{height}); is it minimized?"}
 
                 # Take screenshot using GDI functions instead of ImageGrab
                 try:
                     try:
-                        img = _grab_window_image(hwnd, width, height)
+                        img = _grab_window_image(hwnd, width, height).crop(crop)
+                        width, height = img.size
                     finally:
                         # Not when the user has already moved on by themselves
                         if previous_pid not in (0, altium_pid) and altium_is_foreground():
