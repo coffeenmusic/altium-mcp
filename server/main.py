@@ -6600,7 +6600,9 @@ async def compare_netlist(ctx: Context, project_path: str = "", against: str = "
     project in another folder keeps its own) under a name. By default each
     call compares with the previous call ("last") and then saves itself as
     "last". Save a fixed baseline with save_as="before" and compare later
-    calls with against="before".
+    calls with against="before". The 20 most recently saved snapshots of a
+    project are kept; saving another removes the oldest (listed in
+    "pruned"). A snapshot that cannot be read as one is an error.
 
     An auto-named net (NetR1_1) whose pins stay together under a new name is
     a rename, not a removal and an addition. That matching is greedy: each
@@ -6618,8 +6620,8 @@ async def compare_netlist(ctx: Context, project_path: str = "", against: str = "
 
     Returns:
         str: JSON with summary (count per kind of change), the changes, the
-             snapshot compared with (and when it was saved), and the
-             unsaved sheets.
+             snapshot compared with (and when it was saved), the
+             unsaved sheets, and the snapshots pruned to make room.
     """
     import datetime
     import netlist_diff
@@ -6659,6 +6661,9 @@ async def compare_netlist(ctx: Context, project_path: str = "", against: str = "
         when = datetime.datetime.now().isoformat(timespec="seconds")
         netlist_diff.save(netlist_diff.snapshot_path(folder, project, save_as), project, current, when)
         reply["saved_as"] = save_as
+        pruned = netlist_diff.prune(folder, project)
+        if pruned:
+            reply["pruned"] = pruned
     return json.dumps(reply, indent=1)
 
 

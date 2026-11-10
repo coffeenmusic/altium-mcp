@@ -140,16 +140,50 @@ def save(path: Path, project_path: str, netlist: Netlist, when: str) -> None:
                     encoding="utf-8")
 
 
+# Snapshots kept per project; saving more removes the oldest
+KEEP_PER_PROJECT = 20
+
+
+def prune(folder: Path, project_path: str, keep: Optional[int] = None) -> List[str]:
+    """Remove all but the keep (default KEEP_PER_PROJECT) most recently
+    saved snapshots of a project; the names of those removed. Other
+    projects' snapshots are left alone."""
+    keep = KEEP_PER_PROJECT if keep is None else keep
+    marker = snapshot_path(folder, project_path, "x").name[:-len("x.json")]   # "<stem>_<hash>__"
+    try:
+        files = [p for p in folder.glob("*.json") if p.name.startswith(marker)]
+    except OSError:
+        return []
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    removed = []
+    for p in files[keep:]:
+        try:
+            p.unlink()
+            removed.append(p.name[len(marker):-len(".json")])
+        except OSError:
+            pass
+    return removed
+
+
 def load(path: Path, project_path: str = None) -> Optional[dict]:
     """A saved snapshot, or None when there is none. With project_path, a
     snapshot saved for another project raises ValueError instead of being
-    compared with."""
+    compared with; so does a snapshot that is not valid JSON or whose pins
+    are not a {pin: net} object of strings."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return None
-    if not isinstance(data, dict):
-        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise ValueError(f"the snapshot {path.name} is not valid JSON; delete it or save a new one")
+    pins = data.get("pins") if isinstance(data, dict) else None
+    if not isinstance(pins, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in pins.items()):
+        raise ValueError(f"the snapshot {path.name} is malformed (its pins are not a {{pin: net}} object); "
+                         f"delete it or save a new one")
+    if not isinstance(data.get("project_path", ""), str):
+        raise ValueError(f"the snapshot {path.name} is malformed (its project_path is not a string)")
     if project_path is not None and not same_project(data.get("project_path", ""), project_path):
         raise ValueError(f"the snapshot {path.name} was saved for {data.get('project_path') or 'another project'}, "
                          f"not {project_path}")

@@ -80,6 +80,30 @@ class CompareTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 nd.load(p, r"C:\work\copy\Board.PrjPcb")
 
+    def test_malformed_snapshot_is_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "s.json"
+            for text in ('{"pins": ["U1-1"]}', '{"pins": {"U1-1": 3}}', "[1, 2]", "not json",
+                         '{"project_path": 5, "pins": {}}'):
+                p.write_text(text, encoding="utf-8")
+                with self.assertRaises(ValueError, msg=text):
+                    nd.load(p)
+
+    def test_prune_keeps_the_newest_per_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            prj, other = r"C:\work\Board.PrjPcb", r"C:\work\copy\Board.PrjPcb"
+            for i in range(5):
+                p = nd.snapshot_path(folder, prj, f"s{i}")
+                nd.save(p, prj, {}, "now")
+                os.utime(p, (1000 + i, 1000 + i))
+            nd.save(nd.snapshot_path(folder, other, "s0"), other, {}, "now")
+            self.assertEqual(sorted(nd.prune(folder, prj, keep=3)), ["s0", "s1"])
+            left = sorted(p.name for p in folder.glob("*.json"))
+            self.assertEqual(len(left), 4)
+            self.assertTrue(nd.snapshot_path(folder, other, "s0").exists())
+            self.assertEqual(nd.prune(folder, prj, keep=3), [])
+
     def test_match_nets_is_greedy(self):
         # both vanished nets overlap NEW; the first one takes it
         before = {"A": {"p1", "p2"}, "B": {"p3", "p4", "p5"}}
@@ -118,6 +142,30 @@ class ToolTest(unittest.TestCase):
             self.assertIn("No snapshot", other["note"])
             again = self.call(d, os.path.join(d, "a"), ["U1|1|A"])
             self.assertEqual(again["summary"], {})
+
+    def test_malformed_snapshot_returns_an_error(self):
+        import main
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "Board.PrjPcb"), "w").close()
+            prj = os.path.join(d, "Board.PrjPcb")
+            snap = nd.snapshot_path(Path(d) / "netlists", prj, "last")
+            snap.parent.mkdir()
+            snap.write_text(json.dumps({"project_path": prj, "pins": ["U1-1"]}), encoding="utf-8")
+            reply = self.call(d, d, ["U1|1|A"])
+            self.assertFalse(reply["success"])
+            self.assertIn("malformed", reply["error"])
+
+    def test_old_snapshots_pruned(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "Board.PrjPcb"), "w").close()
+            prj = os.path.join(d, "Board.PrjPcb")
+            with mock.patch("netlist_diff.KEEP_PER_PROJECT", 2):
+                for i, name in enumerate(("a", "b")):
+                    self.call(d, d, ["U1|1|A"], against="", save_as=name)
+                    os.utime(nd.snapshot_path(Path(d) / "netlists", prj, name), (1000 + i, 1000 + i))
+                reply = self.call(d, d, ["U1|1|A"], against="", save_as="c")
+            self.assertEqual(len(list((Path(d) / "netlists").glob("*.json"))), 2)
+            self.assertEqual(reply["pruned"], ["a"])
 
     def test_not_a_project_refused(self):
         with tempfile.TemporaryDirectory() as d:
