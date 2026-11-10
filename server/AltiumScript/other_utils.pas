@@ -1807,24 +1807,30 @@ end;
 // whether it closed, its path as Altium spells it, and which of its
 // documents were open, so they can be opened again. The project document is
 // looked up by Altium's own path (DM_ProjectFullPath), not the caller's
-// spelling, which may differ in case or form.
+// spelling, which may differ in case or form. When no open project has that
+// path, the open projects' paths are listed (open_projects), so the caller
+// can find the same file under another name (a UNC path and a mapped drive).
 function CloseProjectForEdit(ProjectPath: String): String;
 var
     Project : IProject;
     PrjDoc  : IServerDocument;
     I       : Integer;
     Path, PrjPath : String;
-    OpenDocs, Unsaved, Props : TStringList;
+    OpenDocs, Unsaved, Props, Projects : TStringList;
 begin
     Project := OpenProjectByPath(ProjectPath);
     Props := TStringList.Create;
     OpenDocs := TStringList.Create;
     Unsaved := TStringList.Create;
+    Projects := TStringList.Create;
     try
         if Project = nil then
         begin
             AddJSONBoolean(Props, 'was_open', False);
             Props.Add(BuildJSONArray(OpenDocs, 'open_documents'));
+            for I := 0 to GetWorkspace.DM_ProjectCount - 1 do
+                Projects.Add('"' + JSONEscapeString(GetWorkspace.DM_Projects(I).DM_ProjectFullPath) + '"');
+            Props.Add(BuildJSONArray(Projects, 'open_projects'));
             Result := BuildJSONObject(Props);
             Exit;
         end;
@@ -1868,6 +1874,7 @@ begin
         Props.Free;
         OpenDocs.Free;
         Unsaved.Free;
+        Projects.Free;
     end;
 end;
 

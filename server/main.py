@@ -6614,6 +6614,23 @@ async def _reopen_project(path: str, docs: list, reply: dict) -> None:
         reply["not_reopened"] = missing
 
 
+def _replace_file(path: str, data: bytes) -> None:
+    """Write data to path through a temporary file in the same folder, so a
+    failed write leaves the old file whole."""
+    folder, name = os.path.split(path)
+    fd, tmp = tempfile.mkstemp(prefix=name + ".", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 @_tool(read_only=True)
 async def get_project_options(ctx: Context, project_path: str = "") -> str:
     """
@@ -6664,8 +6681,10 @@ async def set_project_options(ctx: Context, changes: dict, project_path: str = "
     back, so when the project is open it is closed (with its open documents),
     the file is read and written, and the project and those documents are
     opened again. Refused when any of them has unsaved changes; nothing is
-    written when Altium did not close the project. Run preview_eco after
-    changing class or room generation, before the next Update PCB.
+    written when Altium did not close the project. The project is found in
+    Altium by its file, so a UNC path matches the project opened through a
+    mapped drive, and the other way round. The file is written to a
+    temporary file and then replaced, in the encoding it was read in.
 
     The cross-reference flags ports, cross_sheet_connectors and
     sheet_entries are whole numbers as Altium stores them (not booleans);
@@ -6694,6 +6713,12 @@ async def set_project_options(ctx: Context, changes: dict, project_path: str = "
                            **({} if applied else {"note": "The options already have these values."})}, indent=1)
 
     closed, error = await _bridge_json("close_project_for_edit", {"project_path": path})
+    if not error and not closed.get("was_open"):
+        # Open under another name for the same file (a mapped drive for a
+        # UNC path, or the other way round): close it by Altium's name
+        same = project_options.match_open_project(path, closed.get("open_projects") or [])
+        if same:
+            closed, error = await _bridge_json("close_project_for_edit", {"project_path": same})
     if error:
         return json.dumps({"success": False, "error": error, "note": "Nothing was changed."})
     was_open = bool(closed.get("was_open"))
@@ -6707,7 +6732,7 @@ async def set_project_options(ctx: Context, changes: dict, project_path: str = "
         return json.dumps(reply, indent=1)
     reply = {"success": True, "project_path": path}
     # Read and change the file only now that Altium has let go of it: closing
-    # may have written it
+    # may have written it. The project is opened again whatever happens here.
     try:
         new, applied, errors = project_options.change_options(Path(path).read_bytes(), changes)
         if errors:
@@ -6715,15 +6740,18 @@ async def set_project_options(ctx: Context, changes: dict, project_path: str = "
         else:
             reply["applied"] = applied
             if applied:
-                Path(path).write_bytes(new)
+                _replace_file(path, new)
             else:
                 reply["note"] = "The options already have these values."
     except OSError as e:
-        reply = {"success": False, "project_path": path, "error": f"could not read or write the project file: {e}"}
-    if was_open:
-        reply["closed_and_reopened"] = True
-        await _reopen_project(altium_path, docs, reply)
+        reply = {"success": False, "project_path": path,
+                 "error": f"could not read or write the project file: {e}. The file was not changed."}
+    finally:
+        if was_open:
+            reply["closed_and_reopened"] = True
+            await _reopen_project(altium_path, docs, reply)
     return json.dumps(reply, indent=1)
+
 
 # Closes and reopens the project: a timeout leaves the state unknown
 MUTATING_COMMANDS.update({"close_project_for_edit", "reopen_project"})

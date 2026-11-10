@@ -134,6 +134,63 @@ class ChangeTest(unittest.TestCase):
         self.assertNotIn(b"\r\n", new)
         self.assertIn(b"NetlistSinglePinNets=1\n", new)
 
+    def test_only_cr_and_lf_end_a_line(self):
+        # str.splitlines would split these values; Altium does not
+        value = "a\u2028b\x85c\x0bd\x0ce\x1cf"
+        data = PRJ.replace(b"$Component_$RoomName", value.encode("utf-8"))
+        new, applied, errors = po.change_options(data, {"netlist": {"single_pin_nets": True}})
+        self.assertEqual(errors, [])
+        self.assertEqual(new, data.replace(b"NetlistSinglePinNets=0", b"NetlistSinglePinNets=1"))
+        self.assertEqual(po.read_options(data)["multichannel"]["designator_format"], value)
+
+    def test_each_line_keeps_its_ending(self):
+        data = b"[Design]\r\nA=1\nNetlistSinglePinNets=0\rB=2"
+        new, _, _ = po.change_options(data, {"netlist": {"single_pin_nets": True},
+                                             "raw": [{"section": "Design", "key": "C", "value": "3"}]})
+        self.assertEqual(new, b"[Design]\r\nA=1\nNetlistSinglePinNets=1\rB=2\r\nC=3\r\n")
+
+    def test_ansi_file_is_written_back_in_its_encoding(self):
+        # Altium writes a .PrjPcb without a byte-order mark in the ANSI code page
+        data = PRJ[3:].decode("utf-8").replace("$Component_$RoomName", "R\u00e9sum\u00e9").encode("cp1252")
+        self.assertEqual(po.read_options(data)["multichannel"]["designator_format"], "R\u00e9sum\u00e9")
+        new, _, errors = po.change_options(data, {"multichannel": {"room_level_separator": "\u00b5"}})
+        self.assertEqual(errors, [])
+        self.assertIn("R\u00e9sum\u00e9".encode("cp1252"), new)
+        self.assertIn("ChannelRoomLevelSeperator=\u00b5".encode("cp1252"), new)
+        # a value the code page cannot hold is refused, not written wrongly
+        new, applied, errors = po.change_options(data, {"multichannel": {"room_level_separator": "\u4e2d"}})
+        self.assertEqual((new, applied), (data, []))
+        self.assertIn("cannot be written in the file's encoding", errors[0])
+
+    def test_none_is_refused(self):
+        for changes in ({"raw": [{"section": "Design", "key": "A", "value": None}]},
+                        {"multichannel": {"designator_format": None}}):
+            new, applied, errors = po.change_options(PRJ, changes)
+            self.assertEqual((new, applied), (PRJ, []))
+            self.assertIn("expected text, got null", errors[0])
+
+
+class SameFileTest(unittest.TestCase):
+    def test_same_file_by_identity_and_spelling(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "Main.PrjPcb"
+            f.write_bytes(PRJ)
+            other = Path(d) / "Other.PrjPcb"
+            other.write_bytes(PRJ)
+            self.assertTrue(po.same_file(str(f), str(f).upper().replace("\\", "/")))
+            self.assertFalse(po.same_file(str(f), str(other)))
+            self.assertEqual(po.match_open_project(str(f), ["", str(other), str(f).upper()]), str(f).upper())
+            self.assertIsNone(po.match_open_project(str(f), [str(other), "Free Documents"]))
+            # The same file through a UNC path (the drive's admin share), when reachable
+            drive, rest = os.path.splitdrive(os.path.realpath(f))
+            unc = "\\\\localhost\\" + drive[0] + "$" + rest
+            if os.path.exists(unc):
+                self.assertEqual(po.match_open_project(str(f), [str(other), unc]), unc)
+
+    def test_missing_files_compare_as_text(self):
+        self.assertTrue(po.same_file(r"X:\Nowhere\A.PrjPcb", "x:/nowhere/sub/../a.prjpcb"))
+        self.assertFalse(po.same_file(r"X:\Nowhere\A.PrjPcb", r"X:\Nowhere\B.PrjPcb"))
+
 
 
 class SetToolTest(unittest.TestCase):
@@ -144,6 +201,7 @@ class SetToolTest(unittest.TestCase):
         self.prj = Path(self.dir.name) / "Main.PrjPcb"
         self.prj.write_bytes(PRJ)
         self.calls = []
+        self.close_paths = []
 
     def tearDown(self):
         self.dir.cleanup()
@@ -154,9 +212,10 @@ class SetToolTest(unittest.TestCase):
         async def fake(command, params, timeout=None):
             self.calls.append(command)
             if command == "close_project_for_edit":
+                self.close_paths.append(params["project_path"])
                 if on_close:
                     on_close()
-                reply = close_reply
+                reply = close_reply(params["project_path"]) if callable(close_reply) else close_reply
             else:
                 reply = {"project_open": True, "reopened": []}
             return {"success": True, "result": json.dumps(reply)}
@@ -183,6 +242,48 @@ class SetToolTest(unittest.TestCase):
         self.assertIn(b"HierarchyMode=1", text)
         self.assertIn(b"NetlistSinglePinNets=1", text)
         self.assertTrue(reply["closed_and_reopened"])
+
+    def test_failed_write_keeps_the_file_and_reopens(self):
+        import main
+        with mock.patch.object(main.os, "replace", side_effect=PermissionError("in use")):
+            reply = self.run_tool({"netlist": {"single_pin_nets": True}},
+                                  {"was_open": True, "closed": True, "open_documents": []})
+        self.assertFalse(reply["success"])
+        self.assertIn("in use", reply["error"])
+        self.assertEqual(self.prj.read_bytes(), PRJ)
+        self.assertEqual([f for f in os.listdir(self.dir.name) if f.endswith(".tmp")], [])   # no temp file left
+        self.assertEqual(self.calls, ["close_project_for_edit", "reopen_project"])
+
+    def test_unexpected_error_still_reopens(self):
+        real = po.change_options
+        calls = []
+
+        def second_call_fails(data, changes):
+            calls.append(1)
+            if len(calls) > 1:
+                raise RuntimeError("boom")
+            return real(data, changes)
+        with mock.patch.object(po, "change_options", second_call_fails), self.assertRaises(RuntimeError):
+            self.run_tool({"netlist": {"single_pin_nets": True}},
+                          {"was_open": True, "closed": True, "open_documents": []})
+        self.assertEqual(self.calls, ["close_project_for_edit", "reopen_project"])
+        self.assertEqual(self.prj.read_bytes(), PRJ)
+
+    def test_project_open_under_another_name(self):
+        # Altium has the same file open under another spelling (e.g. a mapped
+        # drive for a UNC path): it is closed by Altium's name
+        altium_name = str(self.prj).upper()
+
+        def close(path):
+            if path == altium_name:
+                return {"was_open": True, "closed": True, "project_path": altium_name, "open_documents": []}
+            return {"was_open": False, "open_documents": [], "open_projects": ["Free Documents", altium_name]}
+        reply = self.run_tool({"netlist": {"single_pin_nets": True}}, close)
+        self.assertTrue(reply["success"])
+        self.assertEqual(len(self.close_paths), 2)
+        self.assertEqual(self.close_paths[1], altium_name)
+        self.assertTrue(reply["closed_and_reopened"])
+        self.assertIn(b"NetlistSinglePinNets=1", self.prj.read_bytes())
 
     def test_bad_input_never_reaches_altium(self):
         reply = self.run_tool({"netlist": True}, {})

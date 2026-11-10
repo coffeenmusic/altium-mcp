@@ -9,6 +9,7 @@ Altium first and opens it again afterwards.
 
 import fnmatch
 import ntpath
+import os
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -62,21 +63,51 @@ SHEET_OPTIONS = {
 }
 
 _SECTION_RE = re.compile(r"^\[(.+)\]\s*$")
+# A line and its ending. Only CR and LF end a line, as in Altium's reader:
+# str.splitlines would also split a value at U+2028, U+0085, \x0b or \x0c.
+_LINE_RE = re.compile(r"([^\r\n]*)(\r\n|\r|\n|\Z)")
+# Altium writes a .PrjPcb without a byte-order mark in the ANSI code page
+# ("mbcs", Windows only); cp1252 stands in for it elsewhere, and latin-1
+# reads any bytes, so the lines not changed are written back as they were.
+_ENCODINGS = ("utf-8", "mbcs", "cp1252", "latin-1")
 
 
 class Ini:
-    """A .PrjPcb as lines, edited in place."""
+    """A .PrjPcb as lines, edited in place. Each line keeps its own ending
+    and the file is written back in the encoding it was read in."""
 
     def __init__(self, data: bytes):
         self.bom = data.startswith(b"\xef\xbb\xbf")
-        text = data[3:].decode("utf-8") if self.bom else data.decode("utf-8")
+        if self.bom:
+            self.encoding, text = "utf-8", data[3:].decode("utf-8", errors="surrogateescape")
+        else:
+            for self.encoding in _ENCODINGS:
+                try:
+                    text = data.decode(self.encoding)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
         self.nl = "\r\n" if "\r\n" in text else "\n"
-        self.trailing = text.endswith(("\n", "\r"))
-        self.lines = text.splitlines()
+        self.lines: List[str] = []
+        self.ends: List[str] = []
+        for m in _LINE_RE.finditer(text):
+            if m.start() == len(text) and m.end() == len(text):
+                break
+            self.lines.append(m.group(1))
+            self.ends.append(m.group(2))
+
+    def insert(self, index: int, line: str) -> None:
+        self.lines.insert(index, line)
+        self.ends.insert(index, self.nl)
 
     def to_bytes(self) -> bytes:
-        text = self.nl.join(self.lines) + (self.nl if self.trailing else "")
-        return (b"\xef\xbb\xbf" if self.bom else b"") + text.encode("utf-8")
+        """The file; raises UnicodeEncodeError when a new value cannot be
+        written in the file's encoding."""
+        last = len(self.lines) - 1
+        text = "".join(ln + (end or (self.nl if i < last else ""))
+                       for i, (ln, end) in enumerate(zip(self.lines, self.ends)))
+        errors = "surrogateescape" if self.bom else "strict"
+        return (b"\xef\xbb\xbf" if self.bom else b"") + text.encode(self.encoding, errors=errors)
 
     def sections(self) -> List[Tuple[str, int, int]]:
         """(name, first line after the header, end) of every section."""
@@ -113,11 +144,12 @@ class Ini:
             end = b
             while end > a and not self.lines[end - 1].strip():
                 end -= 1
-            self.lines.insert(end, f"{key}={value}")
+            self.insert(end, f"{key}={value}")
             return ""
         if self.lines and self.lines[-1].strip():
-            self.lines.append("")
-        self.lines += [f"[{section}]", f"{key}={value}", ""]
+            self.insert(len(self.lines), "")
+        for line in (f"[{section}]", f"{key}={value}", ""):
+            self.insert(len(self.lines), line)
         return ""
 
 
@@ -143,6 +175,8 @@ def _write(kind: str, value) -> str:
         if isinstance(value, bool) or not re.fullmatch(r"-?\d+", str(value)):
             raise ValueError(f"expected a whole number, got {value!r}")
         return str(int(value))
+    if value is None:
+        raise ValueError("expected text, got null")
     if isinstance(value, (dict, list)):
         raise ValueError(f"expected text, got {type(value).__name__}")
     text = str(value)
@@ -276,4 +310,25 @@ def change_options(data: bytes, changes: dict) -> Tuple[bytes, List[dict], List[
                                     "to": _read(kind, text)})
     if errors:
         return data, [], errors
-    return ini.to_bytes(), applied, []
+    try:
+        return ini.to_bytes(), applied, []
+    except UnicodeEncodeError as e:
+        return data, [], [f"'{e.object[e.start:e.end]}' cannot be written in the file's encoding ({ini.encoding})"]
+
+
+def same_file(a: str, b: str) -> bool:
+    """Whether two paths name the same file. A file's identity also matches
+    a UNC path with the same file through a mapped drive; when either path
+    cannot be checked, they are compared as normalised text."""
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return ntpath.normcase(ntpath.normpath(a)) == ntpath.normcase(ntpath.normpath(b))
+
+
+def match_open_project(path: str, open_projects: List[str]) -> Optional[str]:
+    """The path, as Altium spells it, of the open project whose file is path."""
+    for candidate in open_projects:
+        if candidate and same_file(path, candidate):
+            return candidate
+    return None
