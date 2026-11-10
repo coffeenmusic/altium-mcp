@@ -6539,11 +6539,16 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
     their priorities. Check the result's "descriptor": it is what Altium
     stored.
 
-    Scopes are first run through Altium's query engine (check_scope), as
-    query_objects runs them: one bridge call per scope that is not "All".
-    A scope Altium cannot evaluate is refused with its message; generic
-    layer names in OnLayer() are stored as the board names them. Set
-    check_scope=False to skip the check. An empty scope is "All".
+    Scopes are first run through Altium's query engine (check_scope, on by
+    default), as query_objects runs them: one extra bridge call per scope
+    that is not "All", so one or two per rule. A scope Altium cannot
+    evaluate is refused with its message, so a scope that was stored
+    before (and matched nothing) may now be refused; generic layer names in
+    OnLayer() are stored as the board names them. Like query_objects, the
+    check works through the selection: the user's selection is selected
+    again afterwards, and a filter applied in the PCB Filter panel is
+    cleared. Set check_scope=False to skip the check and store the scopes
+    as given. An empty scope is "All".
 
     Args:
         rule_type (str): One of the kinds above.
@@ -6655,7 +6660,9 @@ async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str
     will be: a scope Altium cannot evaluate is refused with Altium's
     message, and the number of objects it matches is reported (0 is a
     warning). Layers named generically ('Mid Layer 1') are stored as the
-    board names them.
+    board names them. As in create_pcb_rule, this costs a bridge call per
+    scope, and clears a filter applied in the PCB Filter panel (the user's
+    selection is selected again); check_scope=False skips it.
 
     Args:
         name (str): The rule's current name.
@@ -6749,7 +6756,8 @@ async def set_rule_priority(ctx: Context, name: str, priority: int, board_path: 
 
     Args:
         name (str): The rule.
-        priority (int): Its new priority; beyond the last moves it last.
+        priority (int): Its new priority, from 1; beyond the last moves it
+            last (values above 1,000,000 are taken as 1,000,000).
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
 
@@ -6760,9 +6768,9 @@ async def set_rule_priority(ctx: Context, name: str, priority: int, board_path: 
     """
     import pcb_rules
 
-    # bool is an int in Python: True would pass as priority 1
-    if isinstance(priority, bool) or not isinstance(priority, int) or priority < 1:
-        return json.dumps({"success": False, "error": "priority is a whole number from 1"})
+    priority, error = pcb_rules.priority_value(priority)
+    if error:
+        return json.dumps({"success": False, "error": error})
     result, error = await _bridge_json("set_rule_priority", {"rule_name": name, "priority": priority,
                                                               "board_path": long_path(board_path)})
     if result is None:

@@ -160,6 +160,18 @@ class PriorityToolTest(unittest.TestCase):
         self.assertIn("whole number", reply["error"])
         self.assertEqual(sent, [])
 
+    def test_priority_is_checked_and_clamped(self):
+        for bad in (0, -3, 2.0, "2", None):
+            reply, sent = call_tool("set_rule_priority", {}, name="R", priority=bad)
+            self.assertIn("whole number", reply["error"])
+            self.assertEqual(sent, [])
+        moved = {"success": True, "result": {"success": True, "name": "R", "rules_moved": 0}}
+        # past 2^31 the bridge's StrToInt would overflow; beyond the last rule means last anyway
+        _, sent = call_tool("set_rule_priority", {"set_rule_priority": moved}, name="R", priority=2 ** 40)
+        self.assertEqual(dict(sent)["set_rule_priority"]["priority"], 1_000_000)
+        _, sent = call_tool("set_rule_priority", {"set_rule_priority": moved}, name="R", priority=3)
+        self.assertEqual(dict(sent)["set_rule_priority"]["priority"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

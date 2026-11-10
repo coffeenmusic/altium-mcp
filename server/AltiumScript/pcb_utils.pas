@@ -6868,13 +6868,18 @@ begin
         PCBServer.PreProcess;
         try
             PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-            if Pos('|scope1|', Fields) > 0 then Rule.Scope1Expression := Scope1;
-            if Pos('|scope2|', Fields) > 0 then Rule.Scope2Expression := Scope2;
-            if Pos('|comment|', Fields) > 0 then Rule.Comment := Comment;
-            if Pos('|enabled|', Fields) > 0 then Rule.Enabled := Enabled = 'true';
-            if Pos('|name|', Fields) > 0 then Rule.Name := NewName;
-            ApplyRuleValues(Board, Rule, Values);
-            PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+            // EndModify is sent even when a change raises, so the rule is
+            // not left open for modification
+            try
+                if Pos('|scope1|', Fields) > 0 then Rule.Scope1Expression := Scope1;
+                if Pos('|scope2|', Fields) > 0 then Rule.Scope2Expression := Scope2;
+                if Pos('|comment|', Fields) > 0 then Rule.Comment := Comment;
+                if Pos('|enabled|', Fields) > 0 then Rule.Enabled := Enabled = 'true';
+                if Pos('|name|', Fields) > 0 then Rule.Name := NewName;
+                ApplyRuleValues(Board, Rule, Values);
+            finally
+                PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+            end;
             Moved := MoveRuleTo(Board, Rule, Before);
         finally
             PCBServer.PostProcess;

@@ -131,3 +131,17 @@ def move_notes(result: dict, name: str) -> dict:
 def scope_or_all(scope) -> str:
     """A rule scope as sent to Altium: an empty or blank one is "All"."""
     return (scope or "").strip() or "All"
+
+
+# No board has this many rules of a kind, so a priority past it means "last"
+# just as well; the bridge reads it with StrToInt, which overflows past 2^31
+PRIORITY_MAX = 1_000_000
+
+
+def priority_value(priority) -> Tuple[int, str]:
+    """set_rule_priority's priority as sent to the bridge, clamped to
+    PRIORITY_MAX (beyond the last rule moves it last anyway), or (0, error)."""
+    # bool is an int in Python: True would pass as priority 1
+    if isinstance(priority, bool) or not isinstance(priority, int) or priority < 1:
+        return 0, "priority is a whole number from 1"
+    return min(priority, PRIORITY_MAX), ""
