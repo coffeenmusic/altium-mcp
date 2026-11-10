@@ -173,7 +173,9 @@ def parse_contours(text: str, x, y) -> List[dict]:
 
 def parse_outline(text: str, origin=(0, 0), unit: str = "mil") -> List[dict]:
     """The board outline from the 'outline' geometry command: per segment its
-    start vertex, kind (0 line, 1 arc) and the arc's centre and radius."""
+    start vertex, kind (0 line, 1 arc) and the arc's centre and radius, and
+    for an arc its start and end angles (degrees; Altium's arc runs
+    counter-clockwise from start to end)."""
     k = unit_factor(unit)
     out = []
     for seg in (text or "").split(";"):
@@ -181,8 +183,11 @@ def parse_outline(text: str, origin=(0, 0), unit: str = "mil") -> List[dict]:
         if len(f) < 6:
             continue
         vx, vy, kind, cx, cy, r = (int(v) for v in f[:6])
-        out.append({"x": (vx - origin[0]) / k, "y": (vy - origin[1]) / k, "kind": kind,
-                    "cx": (cx - origin[0]) / k, "cy": (cy - origin[1]) / k, "radius": r / k})
+        item = {"x": (vx - origin[0]) / k, "y": (vy - origin[1]) / k, "kind": kind,
+                "cx": (cx - origin[0]) / k, "cy": (cy - origin[1]) / k, "radius": r / k}
+        if kind == 1 and len(f) >= 8:
+            item.update({"start_angle": int(f[6]) / 1000, "end_angle": int(f[7]) / 1000})
+        out.append(item)
     return out
 
 

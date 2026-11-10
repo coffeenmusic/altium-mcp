@@ -71,7 +71,8 @@ class ShapeTest(unittest.TestCase):
         self.assertNotIn("contours", geo.parse_object(RECORDS[8], ORIGIN))
         out = geo.parse_outline("1000000,2000000,0,0,0,0,0,0;1100000,2000000,1,1100000,2050000,50000,270000,90000;x", ORIGIN)
         self.assertEqual(out, [{"x": 0.0, "y": 0.0, "kind": 0, "cx": -100.0, "cy": -200.0, "radius": 0.0},
-                               {"x": 10.0, "y": 0.0, "kind": 1, "cx": 10.0, "cy": 5.0, "radius": 5.0}])
+                               {"x": 10.0, "y": 0.0, "kind": 1, "cx": 10.0, "cy": 5.0, "radius": 5.0,
+                                "start_angle": 270.0, "end_angle": 90.0}])
 
 
 class SelectTest(unittest.TestCase):

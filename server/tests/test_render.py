@@ -27,7 +27,7 @@ class PcbTest(unittest.TestCase):
             {"hole": True, "points": [(40, 20), (60, 20), (60, 40), (40, 40)]}]},
         {"kind": "via", "x": 300, "y": 150, "size": 30, "hole": 12, "low_layer": "Top Layer",
          "high_layer": "Bottom Layer"},
-        {"kind": "pad", "layer": "Multi-Layer", "x": 350, "y": 40, "x_size": 60, "y_size": 60, "shape": "round",
+        {"kind": "pad", "layer": "Multi Layer", "x": 350, "y": 40, "x_size": 60, "y_size": 60, "shape": "round",
          "hole": 30, "rotation": 0},
         {"kind": "text", "layer": "Top Overlay", "x": 10, "y": 180, "height": 20, "rotation": 0, "text": "U1",
          "hidden": True},
@@ -42,13 +42,77 @@ class PcbTest(unittest.TestCase):
         self.assertEqual(px(image, self.BOX, 50, 30, 1000), (0, 0, 0))        # the hole in it
         self.assertEqual(px(image, self.BOX, 300, 150, 1000), render.HOLE_COLOUR)
         self.assertEqual(px(image, self.BOX, 300, 163, 1000), render.VIA_COLOUR)
-        self.assertEqual(px(image, self.BOX, 370, 40, 1000), (192, 192, 192))  # multi-layer pad ring
+        self.assertEqual(px(image, self.BOX, 370, 40, 1000), (192, 192, 192))  # Multi Layer pad ring
+        self.assertEqual(info["drawn"]["multi layer"], 1)
         # mid layers are not drawn unless asked; hidden text and polygons never
         self.assertEqual(px(image, self.BOX, 200, 30, 1000), (0, 0, 0))
         self.assertEqual(info["drawn"]["texts"], 0)
         image, info = render.render_pcb(self.OBJECTS, self.BOX, layers=["Mid Layer 1"], dpi=1000)
         self.assertNotEqual(px(image, self.BOX, 200, 30, 1000), (0, 0, 0))
         self.assertIn("mid layer 1", info["drawn"])
+
+    def test_multi_layer_by_any_spelling(self):
+        pad = dict(self.OBJECTS[4])
+        for asked in (["Multi Layer"], ["multi-layer"], ["MultiLayer"], ["Bottom Layer"]):
+            image, info = render.render_pcb([pad], self.BOX, layers=asked, dpi=1000)
+            self.assertEqual(px(image, self.BOX, 370, 40, 1000), (192, 192, 192), asked)
+        # not with an overlay alone
+        image, info = render.render_pcb([pad], self.BOX, layers=["Top Overlay"], dpi=1000)
+        self.assertEqual(px(image, self.BOX, 370, 40, 1000), (0, 0, 0))
+        self.assertEqual(render.layer_colour("multi-layer"), render.layer_colour("Multi Layer"))
+
+    def test_vias_only_on_layers_they_span(self):
+        stack = ["Top Layer", "Mid Layer 1", "Mid Layer 2", "Bottom Layer"]
+        blind = {"kind": "via", "x": 100, "y": 100, "size": 30, "hole": 12, "low_layer": "Top Layer",
+                 "high_layer": "Mid Layer 1"}
+        through = dict(blind, x=300, low_layer="Top Layer", high_layer="Bottom Layer")
+        image, info = render.render_pcb([blind, through], self.BOX, layers=["Bottom Layer"], dpi=1000, stack=stack)
+        self.assertEqual(info["drawn"]["vias"], 1)
+        self.assertEqual(px(image, self.BOX, 100, 113, 1000), (0, 0, 0))
+        self.assertEqual(px(image, self.BOX, 300, 113, 1000), render.VIA_COLOUR)
+        _, info = render.render_pcb([blind, through], self.BOX, layers=["Mid Layer 1"], dpi=1000, stack=stack)
+        self.assertEqual(info["drawn"]["vias"], 2)
+        # without the stack the span is not known: drawn with any copper layer
+        _, info = render.render_pcb([blind], self.BOX, layers=["Bottom Layer"], dpi=1000)
+        self.assertEqual(info["drawn"]["vias"], 1)
+        _, info = render.render_pcb([blind, through], self.BOX, layers=["Top Overlay"], dpi=1000, stack=stack)
+        self.assertNotIn("vias", info["drawn"])
+
+    def test_arc_width_centred_on_its_radius(self):
+        arc = {"kind": "arc", "layer": "Top Layer", "cx": 200, "cy": 100, "radius": 50, "start_angle": 0,
+               "end_angle": 180, "width": 20}
+        image, _ = render.render_pcb([arc], self.BOX, dpi=1000)
+        self.assertEqual(px(image, self.BOX, 200, 157, 1000), (190, 0, 0))    # r + w/2 - 3
+        self.assertEqual(px(image, self.BOX, 200, 143, 1000), (190, 0, 0))    # r - w/2 + 3
+        self.assertEqual(px(image, self.BOX, 200, 165, 1000), (0, 0, 0))
+        self.assertEqual(px(image, self.BOX, 200, 135, 1000), (0, 0, 0))
+
+    def test_outline_arcs_box_and_direction(self):
+        # a round board of two semicircles: the box is the circle's, not 1 mil high
+        circle = [{"x": 0, "y": 0, "kind": 1, "cx": 500, "cy": 0, "radius": 500, "start_angle": 180,
+                   "end_angle": 0},
+                  {"x": 1000, "y": 0, "kind": 1, "cx": 500, "cy": 0, "radius": 500, "start_angle": 0,
+                   "end_angle": 180}]
+        box = render.outline_box(circle)
+        self.assertAlmostEqual(box[1], -500, delta=1)
+        self.assertAlmostEqual(box[3], 500, delta=1)
+        self.assertAlmostEqual(box[2] - box[0], 1000, delta=1)
+        # a 270 degree arc goes the long way round, as its angles say
+        notch = [{"x": 100, "y": 0, "kind": 1, "cx": 0, "cy": 0, "radius": 100, "start_angle": 0,
+                  "end_angle": 270},
+                 {"x": 0, "y": -100, "kind": 0, "cx": 0, "cy": 0, "radius": 0}]
+        box = render.outline_box(notch)
+        self.assertAlmostEqual(box[0], -100, delta=1)
+        self.assertAlmostEqual(box[3], 100, delta=1)
+        # walked from its end angle, the same arc turns clockwise
+        back = [{"x": 0, "y": -100, "kind": 1, "cx": 0, "cy": 0, "radius": 100, "start_angle": 0,
+                 "end_angle": 270},
+                {"x": 100, "y": 0, "kind": 0, "cx": 0, "cy": 0, "radius": 0}]
+        self.assertAlmostEqual(render.outline_box(back)[0], -100, delta=1)
+        # without angles, the short way
+        short = [dict(notch[0]), notch[1]]
+        del short[0]["start_angle"], short[0]["end_angle"]
+        self.assertGreater(render.outline_box(short)[0], -1)
 
     def test_copper_inside_a_pour_hole_shows(self):
         pour = {"kind": "region", "layer": "Top Layer", "bounds": [0, 0, 400, 200], "contours": [

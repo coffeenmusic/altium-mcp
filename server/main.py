@@ -5562,9 +5562,12 @@ async def render_pcb(ctx: Context, bbox: list = None, layers: list = None, dpi: 
     Args:
         bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
             Default the whole board outline.
-        layers (list): Layers to draw, by Altium's name. Default Top Layer,
-            Bottom Layer, Multi-Layer and Top Overlay; e.g. ["Bottom Layer",
-            "Bottom Overlay"] for the bottom side or ["Mid Layer 1"].
+        layers (list): Layers to draw, by Altium's name (case, spaces and
+            hyphens do not matter). Default Top Layer, Bottom Layer, Multi
+            Layer and Top Overlay; e.g. ["Bottom Layer", "Bottom Overlay"] for
+            the bottom side or ["Mid Layer 1"]. Through-hole pads and through
+            vias show with any copper layer, a blind via only with a layer it
+            spans.
         dpi (float): Pixels per inch of board (default 300); lowered so the
             longer side stays within 4000 pixels.
         unit (str): "mil" (default) or "mm", for bbox.
@@ -5586,18 +5589,21 @@ async def render_pcb(ctx: Context, bbox: list = None, layers: list = None, dpi: 
     if error:
         return json.dumps({"success": False, "error": error})
     origin = (outline_reply.get("origin_x", 0), outline_reply.get("origin_y", 0))
-    outline = geo.parse_outline(outline_reply.get("outline", ""), origin, "mil")
-    k = geo.unit_factor(unit) / geo.unit_factor("mil")
-    if bbox:
-        if not isinstance(bbox, list) or len(bbox) != 4:
-            return json.dumps({"success": False, "error": "bbox must be [x1, y1, x2, y2]"})
-        box = [float(v) * k for v in bbox]
-    elif outline:
-        xs, ys = [s["x"] for s in outline], [s["y"] for s in outline]
-        box = [min(xs), min(ys), max(xs), max(ys)]
-    else:
-        return json.dumps({"success": False, "error": "the board has no outline; give bbox"})
-    x1, y1, x2, y2 = (geo.to_coord(v, "mil") for v in box)
+    try:
+        outline = geo.parse_outline(outline_reply.get("outline", ""), origin, "mil")
+        k = geo.unit_factor(unit) / geo.unit_factor("mil")
+        if bbox:
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                raise ValueError("bbox must be [x1, y1, x2, y2]")
+            box = [float(v) * k for v in bbox]
+        else:
+            # Around the outline's arcs too, not only its vertices
+            box = render.outline_box(outline)
+            if not box:
+                raise ValueError("the board has no outline; give bbox")
+        x1, y1, x2, y2 = (geo.to_coord(v, "mil") for v in box)
+    except (TypeError, ValueError) as e:
+        return json.dumps({"success": False, "error": str(e)})
     reply, error = await _bridge_json("geometry", {
         "geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)), "x2": str(max(x1, x2)),
         "y2": str(max(y1, y2)), "kinds": "|track|arc|via|pad|fill|region|text|", "limit": "200000",
@@ -5608,7 +5614,7 @@ async def render_pcb(ctx: Context, bbox: list = None, layers: list = None, dpi: 
     def draw():
         # A large board takes seconds to draw: off the event loop, in a thread
         objects = geo.select(reply.get("objects", []), origin, "mil")
-        image, info = render.render_pcb(objects, box, layers, dpi, outline)
+        image, info = render.render_pcb(objects, box, layers, dpi, outline, stack=reply.get("copper_layers"))
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         return buf, info
@@ -5655,11 +5661,20 @@ async def render_sheet(ctx: Context, sheet_path: str, bbox: list = None, dpi: fl
             if not isinstance(bbox, list) or len(bbox) != 4:
                 raise ValueError("bbox must be [x1, y1, x2, y2]")
             box = [float(v) * k for v in bbox]
-        image, info = await asyncio.to_thread(lambda: render.render_sheet(read_schdoc(path), box, dpi))
+    except (TypeError, ValueError) as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    def draw():
+        # Reading, drawing and encoding all take time: off the event loop
+        image, info = render.render_sheet(read_schdoc(path), box, dpi)
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf, info
+
+    try:
+        buf, info = await asyncio.to_thread(draw)
     except (ValueError, OSError) as e:
         return json.dumps({"success": False, "error": str(e)})
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
     info["sheet_path"] = path
     return [json.dumps(info, indent=1), MCPImage(data=buf.getvalue(), format="png")]
 

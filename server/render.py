@@ -14,52 +14,57 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
+from pcb_geometry import MULTI_LAYER, is_copper_layer, layer_key, via_layers
+
 MAX_PIXELS = 4000          # longest side; dpi is lowered to stay under it
 
-# Colours close to Altium's defaults, on its black background
+# Colours close to Altium's defaults, on its black background. Layer names
+# go through layer_key, so "Multi Layer" and "multi-layer" are one layer.
 PCB_BACKGROUND = (0, 0, 0)
-PCB_COLOURS = {
-    "top layer": (255, 0, 0), "bottom layer": (0, 0, 255), "multi-layer": (192, 192, 192),
-    "top overlay": (255, 255, 0), "bottom overlay": (128, 128, 0), "keep-out layer": (255, 0, 255),
-    "top paste": (128, 128, 128), "bottom paste": (128, 0, 0), "top solder": (128, 0, 128),
-    "bottom solder": (255, 0, 255), "drill drawing": (255, 0, 42),
-}
+PCB_COLOURS = {layer_key(name): colour for name, colour in {
+    "Top Layer": (255, 0, 0), "Bottom Layer": (0, 0, 255), "Multi Layer": (192, 192, 192),
+    "Top Overlay": (255, 255, 0), "Bottom Overlay": (128, 128, 0), "Keep-Out Layer": (255, 0, 255),
+    "Top Paste": (128, 128, 128), "Bottom Paste": (128, 0, 0), "Top Solder": (128, 0, 128),
+    "Bottom Solder": (255, 0, 255), "Drill Drawing": (255, 0, 42),
+}.items()}
 MID_COLOURS = [(188, 142, 0), (112, 219, 250), (0, 204, 102), (153, 51, 255), (0, 255, 255), (128, 128, 255)]
 MECH_COLOUR = (196, 112, 230)
 VIA_COLOUR = (160, 160, 160)
 HOLE_COLOUR = (60, 60, 60)
 OUTLINE_COLOUR = (255, 255, 255)
-DEFAULT_PCB_LAYERS = ["Top Layer", "Bottom Layer", "Top Overlay", "Multi-Layer"]
+DEFAULT_PCB_LAYERS = ["Top Layer", "Bottom Layer", "Top Overlay", "Multi Layer"]
+
+
+def _layer_number(key: str, prefix: str) -> Optional[int]:
+    rest = key[len(prefix):]
+    return int(rest) if key.startswith(prefix) and rest.isdigit() else None
 
 
 def layer_colour(layer: str) -> Tuple[int, int, int]:
-    name = (layer or "").lower()
-    if name in PCB_COLOURS:
-        return PCB_COLOURS[name]
-    if name.startswith("mid layer"):
-        try:
-            return MID_COLOURS[(int(name.split()[-1]) - 1) % len(MID_COLOURS)]
-        except ValueError:
-            return MID_COLOURS[0]
-    if name.startswith("mechanical"):
+    key = layer_key(layer)
+    if key in PCB_COLOURS:
+        return PCB_COLOURS[key]
+    if key.startswith("midlayer"):
+        n = _layer_number(key, "midlayer")
+        return MID_COLOURS[(n - 1) % len(MID_COLOURS)] if n else MID_COLOURS[0]
+    if key.startswith("mechanical"):
         return MECH_COLOUR
     return (200, 200, 200)
 
 
 def layer_order(layer: str) -> int:
     """Drawing order: bottom side first, top side last."""
-    name = (layer or "").lower()
-    order = ["bottom overlay", "bottom solder", "bottom paste", "bottom layer"]
-    if name in order:
-        return order.index(name)
-    if name.startswith("mid layer"):
-        try:
-            return 100 - int(name.split()[-1])
-        except ValueError:
-            return 50
-    after = ["top layer", "multi-layer", "top paste", "top solder", "top overlay", "keep-out layer"]
-    if name in after:
-        return 200 + after.index(name)
+    key = layer_key(layer)
+    order = [layer_key(n) for n in ("Bottom Overlay", "Bottom Solder", "Bottom Paste", "Bottom Layer")]
+    if key in order:
+        return order.index(key)
+    if key.startswith("midlayer"):
+        n = _layer_number(key, "midlayer")
+        return 100 - n if n is not None else 50
+    after = [layer_key(n) for n in ("Top Layer", "Multi Layer", "Top Paste", "Top Solder", "Top Overlay",
+                                    "Keep-Out Layer")]
+    if key in after:
+        return 200 + after.index(key)
     return 300
 
 
@@ -139,11 +144,14 @@ def _pad(draw, cv: Canvas, o: dict, colour):
 
 
 def _arc(draw, cv: Canvas, o: dict, colour):
-    r = o["radius"]
+    w = max(1, int(round(cv.d(o["width"]))))
+    # PIL draws the width inward from the box: a box of radius r + w/2 puts
+    # the copper from r - w/2 to r + w/2, as Altium has it
+    r = o["radius"] + w / cv.k / 2
     a, b = cv.p(o["cx"] - r, o["cy"] + r), cv.p(o["cx"] + r, o["cy"] - r)
     start, end = o["start_angle"], o["end_angle"]
     # PIL measures clockwise on a y-down image; Altium counter-clockwise with y up
-    draw.arc([a, b], start=-end, end=-start, fill=colour, width=max(1, int(round(cv.d(o["width"])))))
+    draw.arc([a, b], start=-end, end=-start, fill=colour, width=w)
 
 
 def _region(sheet: Image.Image, cv: Canvas, contours: List[dict], colour):
@@ -167,56 +175,101 @@ def _region(sheet: Image.Image, cv: Canvas, contours: List[dict], colour):
     sheet.paste(tuple(colour) + (255,), (x0, y0, x1, y1), mask)
 
 
+def _angle_off(a: float, b: float) -> float:
+    return abs((a - b + 180) % 360 - 180)
+
+
+def _arc_sweep(s: dict, nxt: dict) -> Tuple[float, float]:
+    """Where an outline arc starts (degrees) and how far it turns (+ is
+    counter-clockwise) from its vertex s to the next vertex nxt."""
+    a0 = math.degrees(math.atan2(s["y"] - s["cy"], s["x"] - s["cx"]))
+    if "start_angle" not in s:
+        # Angles not known: the short way round
+        a1 = math.degrees(math.atan2(nxt["y"] - s["cy"], nxt["x"] - s["cx"]))
+        return a0, (a1 - a0 + 540) % 360 - 180
+    # Altium's arc runs counter-clockwise from its start angle to its end
+    # angle; the outline walks it from whichever end is this vertex
+    ccw = (s["end_angle"] - s["start_angle"]) % 360 or 360
+    forward = _angle_off(a0, s["start_angle"]) <= _angle_off(a0, s["end_angle"])
+    return a0, ccw if forward else -ccw
+
+
 def _outline_points(segments: List[dict]) -> List[Tuple[float, float]]:
+    """The outline as points, its arcs as short lines."""
     pts = []
     n = len(segments)
     for i, s in enumerate(segments):
         pts.append((s["x"], s["y"]))
         if s["kind"] == 1 and s["radius"] > 0:
-            nxt = segments[(i + 1) % n]
-            a0 = math.degrees(math.atan2(s["y"] - s["cy"], s["x"] - s["cx"]))
-            a1 = math.degrees(math.atan2(nxt["y"] - s["cy"], nxt["x"] - s["cx"]))
-            # The arc runs from this vertex to the next, the short way round
-            sweep = (a1 - a0 + 540) % 360 - 180
-            for k in range(1, 16):
-                a = math.radians(a0 + sweep * k / 16)
+            a0, sweep = _arc_sweep(s, segments[(i + 1) % n])
+            steps = max(16, int(abs(sweep) / 5))
+            for k in range(1, steps):
+                a = math.radians(a0 + sweep * k / steps)
                 pts.append((s["cx"] + s["radius"] * math.cos(a), s["cy"] + s["radius"] * math.sin(a)))
     return pts
 
 
+def outline_box(segments: List[dict]) -> Optional[List[float]]:
+    """[x1, y1, x2, y2] around the outline, its arcs included."""
+    pts = _outline_points(segments)
+    if not pts:
+        return None
+    xs, ys = [x for x, _ in pts], [y for _, y in pts]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _via_wanted(v: dict, wanted: set, copper_wanted: bool, stack: Optional[List[str]]) -> bool:
+    """Whether a via reaches one of the wanted layers: a through via any
+    copper layer; a blind via the layers it spans, when the board's layer
+    stack says which those are, else (span not known) any copper layer."""
+    ends = {layer_key(v.get("low_layer")), layer_key(v.get("high_layer"))}
+    through = ends == {layer_key("Top Layer"), layer_key("Bottom Layer")}
+    if not copper_wanted:
+        return through and MULTI_LAYER in wanted
+    keys = {layer_key(n) for n in (stack or [])}
+    if through or not ends <= keys:
+        return True
+    return bool({layer_key(n) for n in via_layers(v["low_layer"], v["high_layer"], stack)} & wanted)
+
+
 def render_pcb(objects: List[dict], bbox, layers: Optional[List[str]] = None, dpi: float = 300,
-               outline: Optional[List[dict]] = None, labels: bool = True) -> Tuple[Image.Image, dict]:
+               outline: Optional[List[dict]] = None, labels: bool = True,
+               stack: Optional[List[str]] = None) -> Tuple[Image.Image, dict]:
     """Draw board objects (objects_in_area dicts in mils, with region
-    contours) inside bbox [x1, y1, x2, y2] (mils), layer by layer."""
+    contours) inside bbox [x1, y1, x2, y2] (mils), layer by layer. stack is
+    the board's copper layers top to bottom, for the layers a blind via spans."""
     cv = Canvas(bbox, dpi, PCB_BACKGROUND)
-    wanted = {l.lower() for l in (layers or DEFAULT_PCB_LAYERS)}
-    copper_wanted = any(l in wanted for l in ("top layer", "bottom layer")) or any(
-        l.startswith("mid layer") for l in wanted)
+    wanted = {layer_key(l) for l in (layers or DEFAULT_PCB_LAYERS)}
+    copper_wanted = any(is_copper_layer(l, stack) for l in wanted)
+    if copper_wanted:
+        wanted.add(MULTI_LAYER)
     by_layer: Dict[str, List[dict]] = {}
+    names: Dict[str, str] = {}          # layer key -> Altium's name, for drawn
     vias = []
     texts = []
     for o in objects:
         if o["kind"] == "via":
-            vias.append(o)
+            if _via_wanted(o, wanted, copper_wanted, stack):
+                vias.append(o)
             continue
         if o["kind"] in ("polygon", "component") or o.get("hidden"):
             continue
-        layer = (o.get("layer") or "").lower()
-        if layer == "multi-layer" and copper_wanted:
-            wanted.add("multi-layer")
+        layer = layer_key(o.get("layer"))
         if layer not in wanted:
             continue
+        names.setdefault(layer, (o.get("layer") or "").lower())
         (texts if o["kind"] == "text" else by_layer.setdefault(layer, [])).append(o)
 
     drawn = {}
-    for layer in sorted(by_layer, key=layer_order):
+    for key in sorted(by_layer, key=layer_order):
+        layer = names[key]
         colour = layer_colour(layer)
         # Pours on an image of their own, each region with its holes cut, and
         # the other copper on top: copper in a pour's cut-out stays visible
         sheet = Image.new("RGBA", cv.size, (0, 0, 0, 0))
         copper = Image.new("RGBA", cv.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(copper)
-        for o in by_layer[layer]:
+        for o in by_layer[key]:
             k = o["kind"]
             if k == "track":
                 _segment(draw, cv, o["x1"], o["y1"], o["x2"], o["y2"], o["width"], colour)
@@ -235,12 +288,12 @@ def render_pcb(objects: List[dict], bbox, layers: Optional[List[str]] = None, dp
             drawn[layer] = drawn.get(layer, 0) + 1
         sheet.alpha_composite(copper)
         # Copper slightly see-through, so the layers below still show
-        alpha = 255 if layer in ("multi-layer", "top overlay", "bottom overlay") else 190
+        alpha = 255 if key in (MULTI_LAYER, layer_key("Top Overlay"), layer_key("Bottom Overlay")) else 190
         sheet.putalpha(sheet.getchannel("A").point(lambda v: alpha if v else 0))
         cv.image.paste(sheet, (0, 0), sheet)
 
     draw = ImageDraw.Draw(cv.image)
-    if copper_wanted:
+    if vias or copper_wanted:
         for v in vias:
             r = v["size"] / 2
             draw.ellipse([cv.p(v["x"] - r, v["y"] + r), cv.p(v["x"] + r, v["y"] - r)], fill=VIA_COLOUR)
