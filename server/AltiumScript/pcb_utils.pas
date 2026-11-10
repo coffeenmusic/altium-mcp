@@ -5320,14 +5320,16 @@ begin
 end;
 
 // The board's own name of a layer ('GND1' for Mid Layer 1 on a board that
-// renamed it), or '' when it has none of its own
+// renamed it), or '' when it has none of its own. Read from the V7 layer
+// stack: Prim.Layer holds V7 ids, and the V6 stack names Mechanical 17 and
+// up after other layers ('Mid-Layer 16' for Mechanical 17).
 function QueryBoardLayerName(Board: IPCB_Board; Layer: Integer): String;
 var
     Obj : IPCB_LayerObject;
 begin
     Result := '';
     try
-        Obj := Board.LayerStack.LayerObject(Layer);
+        Obj := Board.LayerStack_V7.LayerObject_V7[Layer];
         if Obj <> nil then Result := Obj.Name;
     except
         Result := '';
