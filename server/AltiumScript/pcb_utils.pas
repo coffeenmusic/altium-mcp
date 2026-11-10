@@ -7040,10 +7040,13 @@ begin
                 Result := SameText(GeoNet(Pour), GeoNet(Other));
 end;
 
+// Copper a polygon poured: its regions, or a hatched pour's tracks and arcs
 function GeoIsPourCopper(Prim: IPCB_Primitive): Boolean;
 begin
     Result := False;
-    if Prim <> nil then Result := (Prim.ObjectId = eRegionObject) and Prim.InPolygon;
+    if Prim <> nil then
+        Result := Prim.InPolygon and ((Prim.ObjectId = eRegionObject) or (Prim.ObjectId = eTrackObject) or
+                                      (Prim.ObjectId = eArcObject));
 end;
 
 procedure GeoAddViolation(Board: IPCB_Board; Items: TStringList; Rule: IPCB_Rule; A, B: IPCB_Primitive;
@@ -7229,9 +7232,11 @@ end;
 // tracks and vias in one undo step, sized by the rules when no size is
 // given, then checked with GeoCheckObjects.
 
-// locate: Refs ('~'-separated) as kind|x|y|layer|net each, in order ('' when
-// not found). Pads, vias and components only: they have one point, and the
-// other kinds have no x and y to read.
+// locate: Refs ('~'-separated) as kind|x|y|layer|through_hole|net each, in
+// order ('' when not found). through_hole is 1 for a pad or via on the Multi
+// Layer (reachable on any copper layer), told by its layer id, not its name.
+// Pads, vias and components only: they have one point, and the other kinds
+// have no x and y to read.
 function GeoLocate(Board: IPCB_Board; Refs: String): String;
 var
     List, Items, Props : TStringList;
@@ -7254,17 +7259,17 @@ begin
                 Prim := GeoFind(Board, Trim(List[i]));
             if Prim <> nil then
             begin
-                if Prim.ObjectId = eViaObject then
-                    Rec := 'via|' + IntToStr(Prim.x - Board.XOrigin) + '|' + IntToStr(Prim.y - Board.YOrigin) +
-                           '|Multi-Layer|' + GeoNet(Prim)
-                else if Prim.ObjectId = ePadObject then
-                    Rec := 'pad|' + IntToStr(Prim.x - Board.XOrigin) + '|' + IntToStr(Prim.y - Board.YOrigin) + '|' +
-                           Layer2String(Prim.Layer) + '|' + GeoNet(Prim)
+                if (Prim.ObjectId = eViaObject) or (Prim.ObjectId = ePadObject) then
+                begin
+                    if Prim.ObjectId = eViaObject then Kind := 'via|' else Kind := 'pad|';
+                    Rec := Kind + IntToStr(Prim.x - Board.XOrigin) + '|' + IntToStr(Prim.y - Board.YOrigin) + '|' +
+                           Layer2String(Prim.Layer) + '|' + GeoFlag(Prim.Layer = eMultiLayer) + '|' + GeoNet(Prim);
+                end
                 else if Prim.ObjectId = eComponentObject then
                 begin
                     Comp := Prim;
                     Rec := 'component|' + IntToStr(Comp.x - Board.XOrigin) + '|' + IntToStr(Comp.y - Board.YOrigin) +
-                           '||';
+                           '||0|';
                 end;
             end;
             Items.Add('"' + JSONEscapeString(Rec) + '"');
@@ -7435,6 +7440,9 @@ begin
         finally
             PCBServer.PostProcess;
         end;
+        // Bring the ratsnest up to date on the net, as place_copper does, or
+        // the lines the route now connects stay drawn
+        Board.AnalyzeNet(Net);
         Board.ViewManager_FullUpdate;
         AddJSONProperty(Props, 'board_path', Board.FileName);
         AddJSONInteger(Props, 'origin_x', Board.XOrigin);
@@ -7447,6 +7455,7 @@ begin
     finally
         TrackList.Free;
         ViaList.Free;
+        LayerList.Free;
         Items.Free;
         Made.Free;
         Props.Free;

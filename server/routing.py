@@ -174,7 +174,8 @@ def route(points: List[Tuple[int, int]], diagonal_first: bool = False, chamfer: 
 
 
 def plan_path(start: Tuple[int, int, str], waypoints: List[Tuple[int, int, Optional[str]]],
-              diagonal_first: bool = False, chamfer: int = 0, via_span: str = "through"):
+              diagonal_first: bool = False, chamfer: int = 0, via_span: str = "through",
+              end_in_pad: bool = False):
     """A route through waypoints that may change layer: ([(layer, x1, y1, x2,
     y2)], [(x, y, low layer, high layer)]).
 
@@ -184,6 +185,10 @@ def plan_path(start: Tuple[int, int, str], waypoints: List[Tuple[int, int, Optio
     segments only. via_span "through" gives Top Layer to Bottom Layer vias,
     "layers" vias between the two layers only. Layer names are compared
     without case: "top layer" is Top Layer and needs no via.
+
+    A layer change at the last waypoint is refused (the via would lead
+    nowhere) unless end_in_pad: the last waypoint is a pad on that layer,
+    reached with a via in the pad (allow_via_in_pad), and the route ends there.
     """
     tracks, vias = [], []
     layer = start[2]
@@ -193,7 +198,7 @@ def plan_path(start: Tuple[int, int, str], waypoints: List[Tuple[int, int, Optio
     for w in waypoints[:-1]:
         if w[2]:
             before = w[2]
-    if last and last.lower() != before.lower():
+    if last and last.lower() != before.lower() and not end_in_pad:
         raise ValueError(f"the last waypoint changes layer to {last}: a via there would lead nowhere; "
                          "add a waypoint on that layer after it")
     for x, y, wl in waypoints:
@@ -207,7 +212,8 @@ def plan_path(start: Tuple[int, int, str], waypoints: List[Tuple[int, int, Optio
             vias.append((x, y, low, high))
             layer = wl
             stretch = [(x, y)]
-    tracks += [(layer,) + s for s in route(stretch, diagonal_first, chamfer)]
+    if len(stretch) > 1:
+        tracks += [(layer,) + s for s in route(stretch, diagonal_first, chamfer)]
     return tracks, vias
 
 
@@ -217,11 +223,13 @@ def resolve_route_points(points: list, located: dict, net: str, layer: str = "",
     plan_path, the starting layer, and warnings.
 
     points holds ("xy", (x, y, layer)) or ("ref", ref); located maps each ref
-    to (kind, x, y, layer, net) as the 'locate' command found it. A
-    surface-mount pad has one layer: reaching it on another would put a via
-    in the pad, which is refused unless allow_via_in_pad. A pad or via on
-    another net is refused unless allow_other_net (then it is a warning).
-    Raises ValueError.
+    to (kind, x, y, layer, net, through_hole) as the 'locate' command found
+    it; through_hole (Altium's Multi Layer, told by layer id) marks a pad
+    reachable on any layer. A surface-mount pad has one layer: reaching it on
+    another would put a via in the pad, which is refused unless
+    allow_via_in_pad (then plan_path takes end_in_pad for the last one). A
+    pad or via on another net is refused unless allow_other_net (then it is a
+    warning). Raises ValueError.
     """
     warnings = []
     resolved = []
@@ -234,13 +242,13 @@ def resolve_route_points(points: list, located: dict, net: str, layer: str = "",
             if i == 0:
                 first = layer or point_layer or "Top Layer"
         else:
-            obj_kind, x, y, obj_layer, obj_net = located[p]
+            obj_kind, x, y, obj_layer, obj_net, through_hole = located[p]
             if obj_net and obj_kind in ("pad", "via") and obj_net.lower() != net.lower():
                 message = f"{what} {p} is on net {obj_net}, not {net}"
                 if not allow_other_net:
                     raise ValueError(message + "; set allow_other_net to route to it anyway")
                 warnings.append(message)
-            smd = obj_kind == "pad" and obj_layer.lower() != "multi-layer"
+            smd = obj_kind == "pad" and not through_hole
             point_layer = obj_layer if smd else None
             resolved.append((x, y, point_layer))
             if i == 0:

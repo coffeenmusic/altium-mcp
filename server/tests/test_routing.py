@@ -152,6 +152,10 @@ class PlanPathTest(unittest.TestCase):
     def test_layer_change_at_the_end_is_refused(self):
         with self.assertRaisesRegex(ValueError, "lead nowhere"):
             routing.plan_path((0, 0, "Top Layer"), [(10, 10, None), (10, 10, "Bottom Layer")])
+        # unless the last point is a pad the via leads into
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(10, 0, "Bottom Layer")], end_in_pad=True,
+                                         via_span="layers")
+        self.assertEqual((tracks, vias), ([("Top Layer", 0, 0, 10, 0)], [(10, 0, "Top Layer", "Bottom Layer")]))
 
     def test_layer_change_drops_a_via(self):
         tracks, vias = routing.plan_path((0, 0, "Top Layer"),
@@ -178,13 +182,15 @@ class PlanPathTest(unittest.TestCase):
 
 
 class ResolvePointsTest(unittest.TestCase):
+    # (kind, x, y, layer, net, through_hole) as main reads 'locate'; Altium
+    # calls the through-hole layer "Multi Layer", and the flag tells it
     LOCATED = {
-        "pad|U1|1": ("pad", 0, 0, "Top Layer", "SIG"),         # surface-mount, top
-        "pad|U2|1": ("pad", 1000, 0, "Bottom Layer", "SIG"),   # surface-mount, bottom
-        "pad|J1|1": ("pad", 2000, 0, "Multi-Layer", "SIG"),    # through-hole
-        "pad|U3|2": ("pad", 3000, 0, "Top Layer", "OTHER"),
-        "via|500|500": ("via", 500, 500, "Multi-Layer", "SIG"),
-        "component|U1": ("component", 10, 10, "", ""),
+        "pad|U1|1": ("pad", 0, 0, "Top Layer", "SIG", False),         # surface-mount, top
+        "pad|U2|1": ("pad", 1000, 0, "Bottom Layer", "SIG", False),   # surface-mount, bottom
+        "pad|J1|1": ("pad", 2000, 0, "Multi Layer", "SIG", True),     # through-hole
+        "pad|U3|2": ("pad", 3000, 0, "Top Layer", "OTHER", False),
+        "via|500|500": ("via", 500, 500, "Multi Layer", "SIG", True),
+        "component|U1": ("component", 10, 10, "", "", False),
     }
 
     def resolve(self, points, layer="", **kw):
@@ -206,11 +212,17 @@ class ResolvePointsTest(unittest.TestCase):
         resolved, _, _ = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, "Bottom Layer")), ("ref", "pad|U2|1")])
         tracks, vias = routing.plan_path((0, 0, "Top Layer"), resolved[1:])
         self.assertEqual(vias, [(500, 0, "Top Layer", "Bottom Layer")])
-        # or allowed explicitly
-        resolved, _, _ = self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U2|1")], allow_via_in_pad=True)
+        # or allowed explicitly: the route ends in a via in the last pad
+        resolved, first, _ = self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U2|1")], allow_via_in_pad=True)
         self.assertEqual(resolved[-1], (1000, 0, "Bottom Layer"))
-        # a through-hole pad takes any layer
-        self.resolve([("ref", "pad|U2|1"), ("ref", "pad|J1|1")])
+        tracks, vias = routing.plan_path((0, 0, first), resolved[1:], end_in_pad=True)
+        self.assertEqual(tracks, [("Top Layer", 0, 0, 1000, 0)])
+        self.assertEqual(vias, [(1000, 0, "Top Layer", "Bottom Layer")])
+        # a through-hole pad takes any layer, start or end
+        resolved, first, _ = self.resolve([("ref", "pad|U2|1"), ("ref", "pad|J1|1")])
+        self.assertEqual(resolved[-1], (2000, 0, None))
+        resolved, first, _ = self.resolve([("ref", "pad|J1|1"), ("xy", (2150, 0, None))])
+        self.assertEqual((first, resolved[0]), ("Top Layer", (2000, 0, None)))
 
     def test_start_layer_against_an_smd_pad(self):
         with self.assertRaises(ValueError):

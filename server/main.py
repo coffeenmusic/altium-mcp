@@ -5505,10 +5505,12 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
         unit (str): "mil" (default) or "mm".
         check (bool): Check the new copper (default True).
         undo_on_violation (bool): Remove the route again when the check
-            finds a violation (pour hits do not count).
+            finds a violation (pour hits, also on a hatched pour, do not
+            count); success is then false. Needs check.
         dry_run (bool): Only plan: the segments and vias, nothing added.
         allow_via_in_pad (bool): Allow reaching a surface-mount pad on
-            another layer, with a via in the pad.
+            another layer, with a via in the pad (also the last pad: the
+            route ends in that via).
         allow_other_net (bool): Allow a pad or via of another net as start
             or waypoint (listed under warnings).
         board_path (str): Full path of the .PcbDoc; default the focused board.
@@ -5534,6 +5536,8 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
         geo.unit_factor(unit)
         if via_span not in ("through", "layers"):
             raise ValueError("via_span is 'through' or 'layers'")
+        if undo_on_violation and not check:
+            raise ValueError("undo_on_violation needs check: without the check nothing would be taken off")
         pts = [point(start, "start")] + [point(w, f"waypoint {i + 1}") for i, w in enumerate(waypoints or [])]
         if len(pts) < 2:
             raise ValueError("give at least one waypoint")
@@ -5551,18 +5555,21 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
             return json.dumps({"success": False, "error": error})
         found = result.get("located", [])
         for i, ref in enumerate(refs):
-            parts = found[i].split("|", 4) if i < len(found) else []
-            if len(parts) < 5:
+            # kind|x|y|layer|through_hole|net
+            parts = found[i].split("|", 5) if i < len(found) else []
+            if len(parts) < 6:
                 return json.dumps({"success": False, "error": f"not found on the board: {ref}"})
-            located[ref] = (parts[0], int(parts[1]), int(parts[2]), parts[3], parts[4])
+            located[ref] = (parts[0], int(parts[1]), int(parts[2]), parts[3], parts[5], parts[4] == "1")
     try:
         resolved, first_layer, warnings = routing.resolve_route_points(pts, located, net, layer,
                                                                        allow_via_in_pad, allow_other_net)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
     try:
+        # A last pad reached on another layer was allowed above (allow_via_in_pad):
+        # its via leads into the pad
         tracks, vias = routing.plan_path((resolved[0][0], resolved[0][1], first_layer), resolved[1:],
-                                         diagonal_first, chamfer, via_span)
+                                         diagonal_first, chamfer, via_span, end_in_pad=pts[-1][0] == "ref")
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})
     # Every layer named is checked by Altium, not only those that get copper
@@ -5596,11 +5603,15 @@ async def route_path(ctx: Context, net: str, start, waypoints: list, layer: str 
         reply["pour_note"] = ("Against pour copper as last poured; repour_polygons, then "
                               "check_objects_drc on the new copper.")
     if result.get("removed_again"):
-        reply["removed_again"] = True
-        reply["note"] = "The route broke a rule and was taken off again (undo_on_violation)."
+        # Nothing was added: no refs to copper that is not there, only the plan
+        reply.update({"success": False, "removed_again": True, "tracks": [], "vias": [], "plan": plan,
+                      "note": "The route broke a rule and was taken off again (undo_on_violation)."})
     if warnings:
         reply["warnings"] = warnings
     return json.dumps(reply, indent=1)
+
+# A route adds copper: a timeout leaves its outcome unknown, so no blind retry
+MUTATING_COMMANDS.add("geometry.route")
 
 
 @_tool(read_only=True)
