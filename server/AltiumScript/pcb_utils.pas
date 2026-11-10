@@ -5586,13 +5586,19 @@ begin
             if Kind = eRule_Clearance then
                 AddJSONNumber(Props, 'gap_mils', CoordToMils(Rule.Gap));
             // ActualCheck is the DRC's own test of one object or pair, net
-            // scope and clearance matrix included: nil when they comply
+            // scope and clearance matrix included: nil when they comply. A
+            // pair is tested both ways round, as check_silkscreen does: a
+            // rule whose two scopes differ may only see it one way round.
             if RuleKindIsChecked(Kind) then
             begin
                 if Unary then
                     Violation := Rule.ActualCheck(A.Items[0], nil)
                 else
+                begin
                     Violation := Rule.ActualCheck(A.Items[0], B.Items[0]);
+                    if Violation = nil then
+                        Violation := Rule.ActualCheck(B.Items[0], A.Items[0]);
+                end;
                 AddJSONBoolean(Props, 'passes', Violation = nil);
             end;
         end;

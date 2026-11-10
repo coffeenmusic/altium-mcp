@@ -509,10 +509,13 @@ class AltiumBridge:
         """Execute a command in Altium via the bridge script.
 
         watcher, if given, runs beside the command while it holds the locks
-        (to answer dialogs the command raises, say). When it sets the event
-        it is passed, the command is given up: its script is stopped in
-        Altium before the locks are released, so the Stop cannot reach the
-        next command's script, and the response has "aborted": true.
+        (to answer dialogs the command raises, say), from the moment the
+        bridge script has picked the request up: a box Altium shows before
+        then (a refused launch, the recovery of a stuck script) is not the
+        command's. When it sets the event it is passed, the command is given
+        up: its script is stopped in Altium before the locks are released,
+        so the Stop cannot reach the next command's script, and the response
+        has "aborted": true.
         """
         async with self._command_lock:
             problem = await self.ensure_paths()
@@ -541,10 +544,16 @@ class AltiumBridge:
 
     async def _execute_watched(self, command: str, params: Dict[str, Any], timeout: float,
                                watcher: Callable[[asyncio.Event], Awaitable[None]]) -> Dict[str, Any]:
-        """_execute_command_locked with watcher beside it; called with the locks held."""
-        abort = asyncio.Event()
-        run = asyncio.create_task(self._execute_command_locked(command, params, timeout))
-        watch = asyncio.create_task(watcher(abort))
+        """_execute_command_locked with watcher beside it once the request is
+        picked up; called with the locks held."""
+        abort, started = asyncio.Event(), asyncio.Event()
+
+        async def watch_once_started():
+            await started.wait()
+            await watcher(abort)
+
+        run = asyncio.create_task(self._execute_command_locked(command, params, timeout, started=started))
+        watch = asyncio.create_task(watch_once_started())
         aborted = asyncio.create_task(abort.wait())
         try:
             await asyncio.wait({run, aborted}, return_when=asyncio.FIRST_COMPLETED)
@@ -617,7 +626,10 @@ class AltiumBridge:
                 await asyncio.sleep(0.25)
         return text
 
-    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                                      started: Optional[asyncio.Event] = None) -> Dict[str, Any]:
+        """Run one command with the locks held. started, if given, is set
+        once the bridge script has picked the request up."""
         try:
             problem = altium_limit_problem()
             if problem:
@@ -689,6 +701,8 @@ class AltiumBridge:
                                  f"the Altium window for an open dialog or a running or paused "
                                  f"script, then retry."}
             _clear_script_stuck()
+            if started is not None:
+                started.set()
 
             logger.info("Bridge script started, waiting for response file...")
             # Wait as long as the command keeps reporting progress, up to
@@ -3698,7 +3712,9 @@ async def query_objects(ctx: Context, expression: str, limit: int = 200, board_p
     "InNetClass('Power')". A component is found by Name ("IsComponent And
     (Name = 'U1')"; there is no Designator property) and a pad by its full
     name ("IsPad And (Name = 'U1-3')"). Text is quoted with ' and compared
-    as text: Name = 1 fails where Name = '1' works.
+    as text: Name = 1 fails where Name = '1' works. Put each comparison in
+    brackets: IsComponent And Footprint = 'X' is read as
+    (IsComponent And Footprint) = 'X' and fails.
 
     An expression Altium cannot read or evaluate comes back as an error with
     Altium's message; the dialog it raises is answered, so Altium is not
@@ -3708,7 +3724,8 @@ async def query_objects(ctx: Context, expression: str, limit: int = 200, board_p
     its own unit, which is not always the board's display unit, and a unit
     written inside the query is a syntax error; so each value with a unit is
     converted to the unit the engine uses on this board before the query
-    runs. Decimals take a dot.
+    runs. Decimals take a dot. Quoted text is sent as written, units and
+    commas included (InNet('D0,1'), Comment = '4.7uF 2.2mm').
 
     The engine works through the selection, so the user's selection is
     selected again afterwards, also after a query Altium could not
@@ -3719,7 +3736,8 @@ async def query_objects(ctx: Context, expression: str, limit: int = 200, board_p
 
     Args:
         expression (str): The query.
-        limit (int): How many objects to list in full; matched counts all.
+        limit (int): How many objects to list in full, 0 to 1,000,000
+            (0 lists none); matched counts all.
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
 
@@ -3731,12 +3749,12 @@ async def query_objects(ctx: Context, expression: str, limit: int = 200, board_p
     """
     import pcb_query
 
-    error = pcb_query.check(expression)
+    error = pcb_query.check(expression) or pcb_query.check_limit(limit)
     if error:
         return json.dumps({"success": False, "error": error})
     in_mm, in_mil, values = pcb_query.with_units(expression)
     result, error = await _run_query("query_objects", {
-        "expr_mm": in_mm, "expr_mil": in_mil, "limit": max(0, int(limit)), "board_path": long_path(board_path)})
+        "expr_mm": in_mm, "expr_mil": in_mil, "limit": int(limit), "board_path": long_path(board_path)})
     if result is None:
         return json.dumps({"success": False, "error": error})
     bare = pcb_query.bare_numbers(expression)
@@ -3753,8 +3771,9 @@ async def which_rule(ctx: Context, object_a: str, object_b: str = "", rule_kind:
     """
     Which design rule applies to a PCB object, or between two, and whether
     they pass it: the rule the DRC picks (FindDominantRuleForObject or
-    ...ForObjectPair) and the DRC's own test of it (Rule.ActualCheck), so
-    net scope and the clearance matrix count as they do in a DRC.
+    ...ForObjectPair) and the DRC's own test of it (Rule.ActualCheck, on
+    a pair both ways round), so net scope and the clearance matrix count as
+    they do in a DRC.
 
     Each object is a query expression (as for query_objects) that must match
     exactly one object, e.g. "IsPad And (Name = 'U1-3')" or

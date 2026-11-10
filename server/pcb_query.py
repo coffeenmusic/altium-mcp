@@ -28,9 +28,28 @@ def _number(v: float) -> str:
     return f"{v:.6f}".rstrip("0").rstrip(".") or "0"
 
 
+# Quoted text ('U1', 'CAP 4.7uF 2.2mm'); an unclosed quote runs to the end
+_QUOTED = re.compile(r"'[^']*(?:'|$)")
+
+
+def _outside_quotes(expression: str, change) -> str:
+    """The expression with change applied to the parts outside quoted text."""
+    parts, last = [], 0
+    for m in _QUOTED.finditer(expression):
+        parts += [change(expression[last:m.start()]), m.group(0)]
+        last = m.end()
+    return "".join(parts + [change(expression[last:])])
+
+
+def _blank_quotes(expression: str) -> str:
+    """The expression with each quoted text emptied, for checks."""
+    return _QUOTED.sub("''", expression)
+
+
 def with_units(expression: str) -> Tuple[str, str, List[str]]:
     """The expression with every value that has a unit written in mm and in
-    mil, and the values found (for the reply)."""
+    mil, and the values found (for the reply). Quoted text is left as it is:
+    a name or comment may hold a size ('CAP 0603 2.2mm')."""
     found = []
 
     def convert(scale):
@@ -38,10 +57,10 @@ def with_units(expression: str) -> Tuple[str, str, List[str]]:
             mm = float(m.group(1)) * _TO_MM[m.group(2).lower()]
             found.append(m.group(0))
             return _number(mm / scale)
-        return sub
+        return lambda text: _VALUE.sub(sub, text)
 
-    in_mm = _VALUE.sub(convert(1.0), expression)
-    in_mil = _VALUE.sub(convert(0.0254), expression)
+    in_mm = _outside_quotes(expression, convert(1.0))
+    in_mil = _outside_quotes(expression, convert(0.0254))
     return in_mm, in_mil, found[: len(found) // 2]
 
 
@@ -55,7 +74,7 @@ _SIZE_PROPERTY = re.compile(
 def bare_numbers(expression: str) -> List[str]:
     """Numbers without a unit compared with a length property (Width > 6),
     so the reply can warn that the engine reads them in its own unit."""
-    stripped = _VALUE.sub("", expression)
+    stripped = _VALUE.sub("", _blank_quotes(expression))
     return [number for prop, number in
             re.findall(r"(\w+)\s*(?:<=|>=|<>|<|>|=)\s*(\d+(?:\.\d+)?)(?![\w.])", stripped)
             if _SIZE_PROPERTY.match(prop)]
@@ -99,8 +118,23 @@ def check(expression: str) -> str:
         return "the expression is empty"
     if any(c in expression for c in '"\r\n'):
         return 'the expression cannot contain " or a line break; quote names with \' as Altium does'
-    if re.search(r"\d,\d", _VALUE.sub("", expression)):
+    # Commas inside quoted text are part of a name (InNet('D0,1'))
+    if re.search(r"\d,\d", _VALUE.sub("", _blank_quotes(expression))):
         return "write decimals with a dot (0.25mm), not a comma"
+    return ""
+
+
+QUERY_LIMIT_MAX = 1_000_000
+
+
+def check_limit(limit) -> str:
+    """'' when limit is a whole number from 0 (counts only) to
+    QUERY_LIMIT_MAX, else what is wrong. The bridge reads it with StrToInt,
+    which overflows past 2^31."""
+    if isinstance(limit, bool) or not isinstance(limit, (int, float)) or limit != int(limit):
+        return "limit must be a whole number"
+    if not 0 <= limit <= QUERY_LIMIT_MAX:
+        return f"limit must be from 0 to {QUERY_LIMIT_MAX:,}"
     return ""
 
 
@@ -184,7 +218,9 @@ async def watch_errors(errors: List[str], abort: asyncio.Event) -> None:
         # for one): its text is not readable, and closing it lets the query end
         for h in _message_boxes("Error"):
             errors.append("Altium reported an error while evaluating it (a property compared with a "
-                          "value of the wrong type, e.g. Name = 1 instead of Name = '1'?)")
+                          "value of the wrong type, e.g. Name = 1 instead of Name = '1'? Put each "
+                          "comparison in brackets: IsComponent And Footprint = 'X' is read as "
+                          "(IsComponent And Footprint) = 'X'; write IsComponent And (Footprint = 'X'))")
             _press_ok(h)
         for h, message, ok in _error_dialogs():
             errors.append(" ".join(message.split()).replace(" Continue execution?", ""))

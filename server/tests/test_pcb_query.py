@@ -12,7 +12,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import pcb_query  # noqa: E402
-from pcb_query import bare_numbers, check, check_rule_kind, rule_note, with_units  # noqa: E402
+from pcb_query import bare_numbers, check, check_limit, check_rule_kind, rule_note, with_units  # noqa: E402
 
 
 class UnitsTest(unittest.TestCase):
@@ -38,6 +38,16 @@ class UnitsTest(unittest.TestCase):
         self.assertEqual(with_units("(Width > 1in)")[0], "(Width > 25.4)")
         self.assertEqual(with_units("(Width > 100um)")[1], "(Width > 3.937008)")
 
+    def test_quoted_text_is_left_alone(self):
+        e = "IsComponent And (Comment = 'CAP 4.7uF 10V 0603 2.2mm') And (Height > 1mm)"
+        mm, mil, found = with_units(e)
+        self.assertEqual(mm, "IsComponent And (Comment = 'CAP 4.7uF 10V 0603 2.2mm') And (Height > 1)")
+        self.assertEqual(mil, "IsComponent And (Comment = 'CAP 4.7uF 10V 0603 2.2mm') And (Height > 39.370079)")
+        self.assertEqual(found, ["1mm"])
+        # an unclosed quote runs to the end
+        self.assertEqual(with_units("(Width > 6mil) Or (Name = '2mm")[1], "(Width > 6) Or (Name = '2mm")
+        self.assertEqual(bare_numbers("IsComponent And (Comment = 'Width > 6')"), [])
+
 
 class CheckTest(unittest.TestCase):
     def test_rejected(self):
@@ -45,6 +55,18 @@ class CheckTest(unittest.TestCase):
         self.assertIn("quote", check('InNet("GND")'))
         self.assertIn("dot", check("IsVia And (HoleSize > 0,3)"))
         self.assertEqual(check("IsVia And InNet('GND')"), "")
+
+    def test_commas_in_quoted_names(self):
+        self.assertEqual(check("IsPad And InNet('D0,1')"), "")
+        self.assertIn("dot", check("InNet('D0,1') And (Width > 0,2)"))
+
+    def test_limit(self):
+        for ok in (0, 1, 200, 1_000_000):
+            self.assertEqual(check_limit(ok), "")
+        for bad in (-1, 1_000_001, 2 ** 31):
+            self.assertIn("from 0 to 1,000,000", check_limit(bad))
+        for bad in (2.5, "10", True, None):
+            self.assertIn("whole number", check_limit(bad))
 
 
 class RuleKindTest(unittest.TestCase):
@@ -128,7 +150,7 @@ class WatchedCommandTest(unittest.TestCase):
             stops.append(bridge._exchange_lock.held)
 
         bridge.ensure_paths = ensure_paths
-        bridge._execute_command_locked = lambda command, params, timeout: script()
+        bridge._execute_command_locked = lambda command, params, timeout, started=None: script(started)
         bridge.stop_script_debugger = stop
         bridge.STOP_SETTLE = 0
         with mock.patch.object(main.sandbox, "altium_hung", lambda: False):
@@ -136,7 +158,8 @@ class WatchedCommandTest(unittest.TestCase):
         return response, stops, bridge
 
     def test_abort_stops_the_script_with_the_lock_held(self):
-        async def never():
+        async def never(started):
+            started.set()
             await asyncio.sleep(60)
 
         async def watcher(abort):
@@ -151,7 +174,8 @@ class WatchedCommandTest(unittest.TestCase):
         self.assertFalse(bridge._exchange_lock.held)
 
     def test_answer_wins_and_nothing_is_stopped(self):
-        async def answer():
+        async def answer(started):
+            started.set()
             return {"success": True, "result": {"matched": 0}}
 
         async def watcher(abort):
@@ -159,6 +183,24 @@ class WatchedCommandTest(unittest.TestCase):
 
         response, stops, _ = self.run_watched(answer, watcher)
         self.assertEqual(response, {"success": True, "result": {"matched": 0}})
+        self.assertEqual(stops, [])
+
+    def test_watcher_waits_until_the_request_is_picked_up(self):
+        # An Error box before the bridge picks the request up (a refused
+        # launch, say) is not the command's: the watcher is not running yet
+        watched = []
+
+        async def not_started(started):
+            await asyncio.sleep(0.05)
+            return {"success": False, "error": "Altium did not start the command (not executed)."}
+
+        async def watcher(abort):
+            watched.append(True)
+            abort.set()
+
+        response, stops, _ = self.run_watched(not_started, watcher)
+        self.assertEqual(watched, [])
+        self.assertNotIn("aborted", response)
         self.assertEqual(stops, [])
 
 
