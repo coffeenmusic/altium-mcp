@@ -743,6 +743,17 @@ class OneLineVarBlockTest(unittest.TestCase):
         self.assertEqual(sandbox.declared_names(split.decls), ["D", "P", "S"])
         self.assertEqual(split.body, ["S := P;", "ResultText := S;"])
 
+    def test_array_types(self):
+        decls = ["Ls : array[0..9] of Integer;", "Names: Array of String;", "M: array [1..N, 0..3] of Double;"]
+        tail = ["function F(X: Integer): Integer;", "begin", "    Result := X;", "end;", "ResultText := 'x';"]
+        split = sandbox.split_var_block("\n".join(["var", "    " + decls[0], "    " + " ".join(decls[1:])] + tail))
+        self.assertEqual(split.decls, decls)
+        self.assertEqual(sandbox.declared_names(split.decls), ["Ls", "Names", "M"])
+        self.assertEqual([r.name for r in sandbox.routines(split)], ["F"])
+        # still strict: no 'of' is not a declaration, and the var block ends there
+        split = sandbox.split_var_block("\n".join(["var", "    " + decls[0], "    Bad : array[0..9] Integer;"] + tail))
+        self.assertEqual(split.decls, decls[:1])
+
 
 class RollbackToolTest(unittest.TestCase):
     """main.rollback_altium_script with Altium faked."""

@@ -124,7 +124,12 @@ RESERVED_WORDS = {
     "absolute", "at", "default", "index", "message", "on", "read", "stored", "variant", "write",
 }
 
-_ONE_DECL = r"[A-Za-z_]\w*(\s*,\s*[A-Za-z_]\w*)*\s*:\s*[A-Za-z_][\w.]*\s*;"
+# A type: a name, or an array of one (`array[0..9] of Integer`,
+# `array of String`, `array[1..N, 0..3] of Double`)
+_BOUND = r"\s*-?\w+\s*\.\.\s*-?\w+\s*"
+_TYPE = (r"((?i:array)(\s*\[" + _BOUND + r"(," + _BOUND + r")*\]\s*|\s+)(?i:of)\s+)*"
+         r"[A-Za-z_][\w.]*")
+_ONE_DECL = r"[A-Za-z_]\w*(\s*,\s*[A-Za-z_]\w*)*\s*:\s*" + _TYPE + r"\s*;"
 # A declaration line: one or more `Name1, Name2 : Type;` (several may share
 # a line, as in `var D: IServerDocument; P, S: String;`)
 _DECL_RE = re.compile(r"^\s*(" + _ONE_DECL + r"\s*)+(//.*)?$")
