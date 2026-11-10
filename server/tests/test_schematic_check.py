@@ -375,6 +375,14 @@ class ElectricalTest(unittest.TestCase):
                               port_rec("B", 4000, 1000)])
         self.assertEqual([i["port"] for i in self.of(issues, "port_unconnected")], ["B"])
 
+    def test_port_end_on_a_power_port_or_another_port_is_connected(self):
+        issues = self.issues([port_rec("A", 2000, 1000),
+                              {"RECORD": 17, **at(2500, 1000), "STYLE": 4, "ORIENTATION": 3, "TEXT": "GND"},
+                              # C's right end meets D's left end, nothing else
+                              port_rec("C", 2000, 2000), port_rec("D", 2500, 2000),
+                              port_rec("E", 4000, 1000)])
+        self.assertEqual([i["port"] for i in self.of(issues, "port_unconnected")], ["E"])
+
     def test_single_pin_net(self):
         # R1 pin 1 wired to a corner and back to nothing; pin 2 goes to a power port
         issues = self.issues([wire((1000, 3100), (1300, 3100), (1300, 3400)),

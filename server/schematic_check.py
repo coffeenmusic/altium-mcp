@@ -717,10 +717,12 @@ class Checker:
                              f"a wire ends inside port {port['name']}, not at its end, so it does not connect",
                              port=port["name"], suggest={"move_end": self.exact(p), "to": self.exact(end)})
             bus_segs = [(b[k], b[k + 1]) for b in self.s.buses for k in range(len(b) - 1)]
-            others = [a for a in self.s.attach if not any(_near(a, e) for e in port["ends"])]
             touched = any(
                 any(_near(e, p) for p in ends_of_wires) or any(_on_segment(e, seg) for _, seg in segs)
-                or any(_on_segment(e, s) for s in bus_segs) or any(_near(e, a) for a in others)
+                or any(_on_segment(e, s) for s in bus_segs)
+                # the attach points hold this end itself: a second one there is
+                # something else (a power port, another port's end, a sheet entry)
+                or sum(_near(e, a) for a in self.s.attach) > 1
                 or any(_near(e, pin["hot"]) for pin in self.s.pins)
                 # a no-ERC marker on an end says it is meant to stay open
                 or any(_near(e, q) for q in self.s.no_erc)
