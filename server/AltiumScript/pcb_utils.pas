@@ -3072,6 +3072,65 @@ end;
 // Each entry in PlacementsList is 'Designator|X|Y|Rotation|Layer' where X/Y
 // are mils relative to the board origin, Rotation is degrees CCW (-1 = keep
 // current) and Layer is 'top', 'bottom' or '' (keep current side).
+// Set a component's designator (IsName) or comment text from a spec
+// 'x;y;rotation;height;stroke width;visible[;autoposition]' (mils, degrees,
+// 1/0, TTextAutoposition) as get_layout reports it: x and y are the text's
+// anchor, as Altium stores it. The text is placed manually positioned, or
+// Altium would move it while placing it; a non-zero autoposition is set
+// back afterwards. The text is added to Moved, whose stroke geometry is
+// rebuilt afterwards.
+procedure PlaceComponentText(Comp: IPCB_Component; IsName: Boolean; Spec: String; XO, YO: TCoord; Moved: TStringList);
+var
+    Txt    : IPCB_Text;
+    TX, TY : TCoord;
+    Parts  : TStringList;
+begin
+    if Trim(Spec) = '' then Exit;
+    Parts := TStringList.Create;
+    try
+        Parts.Text := StringReplace(Spec, ';', #13#10, REPLACEALL);
+        if Parts.Count < 6 then Exit;
+        if IsName then Txt := Comp.Name else Txt := Comp.Comment;
+        PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        if IsName then
+        begin
+            Comp.NameOn := Parts[5] = '1';
+            Comp.NameAutoPosition := eAutoPos_Manual;
+        end
+        else
+        begin
+            Comp.CommentOn := Parts[5] = '1';
+            Comp.CommentAutoPosition := eAutoPos_Manual;
+        end;
+        Txt.Size := MilsToCoord(SafeStrToFloat(Parts[3]));
+        Txt.Width := MilsToCoord(SafeStrToFloat(Parts[4]));
+        Txt.Rotation := SafeStrToFloat(Parts[2]);
+        PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        TX := MilsToCoord(SafeStrToFloat(Parts[0])) + XO;
+        TY := MilsToCoord(SafeStrToFloat(Parts[1])) + YO;
+        if (TX <> Txt.XLocation) or (TY <> Txt.YLocation) then
+        begin
+            PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            Txt.MoveByXY(TX - Txt.XLocation, TY - Txt.YLocation);
+            PCBServer.SendMessageToRobots(Txt.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        end;
+        if (Parts.Count > 6) and (Trim(Parts[6]) <> '') and (Trim(Parts[6]) <> '0') then
+        begin
+            PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            if IsName then
+                Comp.NameAutoPosition := StrToInt(Trim(Parts[6]))
+            else
+                Comp.CommentAutoPosition := StrToInt(Trim(Parts[6]));
+            PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        end;
+        Moved.AddObject(Comp.Name.Text, Txt);
+    finally
+        Parts.Free;
+    end;
+end;
+
 function PlaceComponentsFromList(PlacementsList: TStringList): String;
 var
     Board            : IPCB_Board;
@@ -3084,6 +3143,9 @@ var
     Designator       : String;
     FieldValue       : String;
     LayerStr         : String;
+    LockStr          : String;
+    MovedTexts       : TStringList;
+    Txt              : IPCB_Text;
     NewX, NewY       : Double;
     Rotation         : Double;
     xorigin, yorigin : TCoord;
@@ -3103,6 +3165,7 @@ begin
     ResultProps := TStringList.Create;
     MissingArray := TStringList.Create;
     PlacedArray := TStringList.Create;
+    MovedTexts := TStringList.Create;
     PlacedCount := 0;
 
     try
@@ -3126,6 +3189,8 @@ begin
                     Rotation := -1;
 
                 LayerStr := LowerCase(Trim(GetFieldFromPipeString(Entry, 4)));
+                // Locked: '1' locks, '0' unlocks, '' (or absent) leaves it
+                LockStr := Trim(GetFieldFromPipeString(Entry, 5));
 
                 Component := Board.GetPcbComponentByRefDes(Designator);
 
@@ -3146,7 +3211,16 @@ begin
                     if (Rotation >= 0) then
                         Component.Rotation := Rotation;
 
+                    if LockStr = '1' then
+                        Component.Moveable := False
+                    else if LockStr = '0' then
+                        Component.Moveable := True;
+
                     PCBServer.SendMessageToRobots(Component.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                    // Designator and comment text, when given (get_layout's form)
+                    PlaceComponentText(Component, True, GetFieldFromPipeString(Entry, 6), xorigin, yorigin, MovedTexts);
+                    PlaceComponentText(Component, False, GetFieldFromPipeString(Entry, 7), xorigin, yorigin, MovedTexts);
 
                     // Report the final state as Altium sees it
                     CompProps := TStringList.Create;
@@ -3156,6 +3230,7 @@ begin
                         AddJSONNumber(CompProps, 'y', CoordToMils(Component.y - yorigin));
                         AddJSONNumber(CompProps, 'rotation', Component.Rotation);
                         AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                        AddJSONBoolean(CompProps, 'locked', not Component.Moveable);
                         PlacedArray.Add(BuildJSONObject(CompProps, 2));
                     finally
                         CompProps.Free;
@@ -3171,6 +3246,17 @@ begin
         end;
 
         PCBServer.PostProcess;
+
+        // Rebuild the stroke geometry of every text placed: batch DRC checks a
+        // cached copy that scripted moves leave stale (see PlaceDesignatorsFromList)
+        for i := 0 to MovedTexts.Count - 1 do
+        begin
+            Txt := MovedTexts.Objects[i];
+            Txt.BeginModify;
+            Txt.SetState_XSizeYSize;
+            Txt.EndModify;
+            Txt.GraphicallyInvalidate;
+        end;
 
         // Update PCB document
         Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
@@ -3192,6 +3278,7 @@ begin
         ResultProps.Free;
         MissingArray.Free;
         PlacedArray.Free;
+        MovedTexts.Free;
     end;
 end;
 
@@ -4704,6 +4791,337 @@ begin
     end;
 end;
 
+// The kind of a free primitive delete_pcb_objects and modify_pcb_objects act
+// on, or '' for one they leave alone: pads, anything of a component, the
+// copper a polygon poured (it is the polygon's own and goes with it),
+// keepouts, and anything not on a copper layer (board outline, silkscreen,
+// mechanical layers). A region is copper ('region') or a polygon pour
+// cutout ('cutout'); board cutouts and named regions are left alone.
+function EditableKind(Prim: IPCB_Primitive): String;
+var
+    Copper : Boolean;
+begin
+    Result := '';
+    if Prim.InComponent or Prim.InPolygon then Exit;
+    if Prim.ObjectId = eViaObject then
+    begin
+        Result := 'via';
+        Exit;
+    end;
+    if Prim.IsKeepout then Exit;
+    Copper := (Prim.Layer >= eTopLayer) and (Prim.Layer <= eBottomLayer);
+    case Prim.ObjectId of
+        eTrackObject:  if Copper then Result := 'track';
+        eArcObject:    if Copper then Result := 'arc';
+        ePolyObject:   if Copper then Result := 'polygon';
+        eFillObject:   if Copper then Result := 'fill';
+        eRegionObject:
+            begin
+                if (Prim.Kind = 0) and Copper then Result := 'region'
+                else if (Prim.Kind = 1) and (Copper or (Prim.Layer = eMultiLayer)) then Result := 'cutout';
+            end;
+    end;
+end;
+
+// The primitives matching every filter: Kinds is '|track|via|...|', NetName
+// and LayerName '' for any, Area 'x1|y1|x2|y2' (internal units from the board
+// origin) or '' for anywhere; an object matches the area when it lies inside.
+// A via matches a layer it spans. With Designators (upper-case names), the
+// group's copper as get_layout lists it: inside Area (or the group's extent
+// grown by Margin) or on one of the group's own nets. Locked objects are
+// left out unless IncludeLocked, and listed in Locked.
+function MatchPCBObjects(Board: IPCB_Board; Kinds: String; NetName: String; Layer: Integer;
+                         Area: String; Designators: TStringList; Margin: Integer; IncludeLocked: Boolean;
+                         Found: TInterfaceList; Locked: TInterfaceList): Integer;
+var
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+    Comps    : TInterfaceList;
+    Local    : TStringList;
+    Kind, GroupArea : String;
+    R        : TCoordRect;
+    X1, Y1, X2, Y2 : Integer;
+    Ok, HasArea, InArea : Boolean;
+begin
+    HasArea := Area <> '';
+    if HasArea then
+    begin
+        X1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 0));
+        Y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 1));
+        X2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 2));
+        Y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 3));
+    end;
+    Local := TStringList.Create;
+    Local.Sorted := True;
+    Comps := TInterfaceList.Create;
+    if Designators.Count > 0 then
+    begin
+        LayoutFindComponents(Board, Designators, Comps);
+        LayoutLocalNets(Board, Designators, Local);
+        if (not HasArea) and (Comps.Count > 0) then
+        begin
+            GroupArea := LayoutGroupArea(Comps, Margin);
+            X1 := StrToInt(GetFieldFromPipeString(GroupArea, 0));
+            Y1 := StrToInt(GetFieldFromPipeString(GroupArea, 1));
+            X2 := StrToInt(GetFieldFromPipeString(GroupArea, 2));
+            Y2 := StrToInt(GetFieldFromPipeString(GroupArea, 3));
+            HasArea := True;
+        end;
+    end;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Prim := Iterator.FirstPCBObject;
+    while Prim <> nil do
+    begin
+        Kind := EditableKind(Prim);
+        Ok := (Kind <> '') and (Pos('|' + Kind + '|', Kinds) > 0);
+        if Ok and (NetName <> '') then
+            Ok := (Prim.Net <> nil) and (UpperCase(Prim.Net.Name) = UpperCase(NetName));
+        if Ok and (Layer <> eNoLayer) then
+        begin
+            // Layer IDs are not in stack order: ask the via whether it spans it
+            if Prim.ObjectId = eViaObject then
+                Ok := Prim.IntersectLayer(Layer)
+            else
+                Ok := Prim.Layer = Layer;
+        end;
+        if Ok and HasArea then
+        begin
+            R := Prim.BoundingRectangle;
+            InArea := (R.Left >= X1) and (R.Right <= X2) and (R.Bottom >= Y1) and (R.Top <= Y2);
+            if Designators.Count > 0 then
+                Ok := InArea or ((Prim.Net <> nil) and (Local.IndexOf(UpperCase(Prim.Net.Name)) >= 0))
+            else
+                Ok := InArea;
+        end
+        else if Ok and (Designators.Count > 0) then
+            Ok := (Prim.Net <> nil) and (Local.IndexOf(UpperCase(Prim.Net.Name)) >= 0);
+        if Ok then
+        begin
+            if (not IncludeLocked) and (not Prim.Moveable) then
+                Locked.Add(Prim)
+            else
+                Found.Add(Prim);
+        end;
+        Prim := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+    Comps.Free;
+    Local.Free;
+    Result := Found.Count;
+end;
+
+// One matched object for the result: kind, net, layer, position in mils
+function PCBObjectJSON(Board: IPCB_Board; Prim: IPCB_Primitive): String;
+var
+    Item : TStringList;
+    R    : TCoordRect;
+begin
+    Item := TStringList.Create;
+    try
+        AddJSONProperty(Item, 'kind', EditableKind(Prim));
+        if Prim.Net <> nil then AddJSONProperty(Item, 'net', Prim.Net.Name) else AddJSONProperty(Item, 'net', '');
+        if Prim.ObjectId = eViaObject then
+        begin
+            AddJSONProperty(Item, 'layer', Layer2String(Prim.LowLayer) + ' - ' + Layer2String(Prim.HighLayer));
+            AddJSONNumber(Item, 'x', CoordToMils(Prim.x - Board.XOrigin));
+            AddJSONNumber(Item, 'y', CoordToMils(Prim.y - Board.YOrigin));
+            AddJSONNumber(Item, 'diameter_mils', CoordToMils(Prim.Size));
+            AddJSONNumber(Item, 'hole_mils', CoordToMils(Prim.HoleSize));
+        end
+        else
+        begin
+            AddJSONProperty(Item, 'layer', Layer2String(Prim.Layer));
+            if Prim.ObjectId = eTrackObject then
+            begin
+                AddJSONNumber(Item, 'x1', CoordToMils(Prim.x1 - Board.XOrigin));
+                AddJSONNumber(Item, 'y1', CoordToMils(Prim.y1 - Board.YOrigin));
+                AddJSONNumber(Item, 'x2', CoordToMils(Prim.x2 - Board.XOrigin));
+                AddJSONNumber(Item, 'y2', CoordToMils(Prim.y2 - Board.YOrigin));
+                AddJSONNumber(Item, 'width_mils', CoordToMils(Prim.Width));
+            end
+            else
+            begin
+                R := Prim.BoundingRectangle;
+                AddJSONNumber(Item, 'left', CoordToMils(R.Left - Board.XOrigin));
+                AddJSONNumber(Item, 'bottom', CoordToMils(R.Bottom - Board.YOrigin));
+                AddJSONNumber(Item, 'right', CoordToMils(R.Right - Board.XOrigin));
+                AddJSONNumber(Item, 'top', CoordToMils(R.Top - Board.YOrigin));
+                if Prim.ObjectId = eArcObject then AddJSONNumber(Item, 'width_mils', CoordToMils(Prim.LineWidth));
+                if Prim.ObjectId = ePolyObject then AddJSONProperty(Item, 'name', Prim.Name);
+            end;
+        end;
+        Result := BuildJSONObject(Item, 1);
+    finally
+        Item.Free;
+    end;
+end;
+
+// delete_pcb_objects and modify_pcb_objects. Action is 'delete' or 'modify';
+// with DryRun nothing changes and the matches are listed. Modify sets what is
+// given: Width (tracks, arcs), ViaSize and ViaHole (vias), the net when SetNet
+// ('' removes it), NewLayerName (tracks, arcs, fills, regions); -1 or ''
+// leaves a value alone. All of it is one undo step.
+function EditPCBObjects(Action: String; Kinds: String; NetName: String; LayerName: String; Area: String;
+                        DesignatorText: String; Margin: Integer; IncludeLocked: Boolean;
+                        DryRun: Boolean; Width: Integer; ViaSize: Integer; ViaHole: Integer;
+                        SetNet: Boolean; NewNetName: String; NewLayerName: String): String;
+var
+    Board    : IPCB_Board;
+    Found, Polys, Locked : TInterfaceList;
+    Prim     : IPCB_Primitive;
+    Layer, NewLayer, i, Changed, Skipped, BadSize, NewSize, NewHole : Integer;
+    NewNet   : IPCB_Net;
+    Kind     : String;
+    Items, Props, LockedItems, Designators : TStringList;
+    Did      : Boolean;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    if (NetName <> '') and (FindBoardNet(Board, NetName) = nil) then
+    begin
+        Result := 'ERROR: Net not found on the board: ' + NetName;
+        Exit;
+    end;
+    Layer := eNoLayer;
+    if LayerName <> '' then
+    begin
+        Layer := ResolveBoardLayer(Board, LayerName);
+        if Layer = eNoLayer then
+        begin
+            Result := 'ERROR: ' + LayerName + ' is not a copper layer of this board';
+            Exit;
+        end;
+    end;
+    NewNet := nil;
+    if SetNet and (NewNetName <> '') then
+    begin
+        NewNet := FindBoardNet(Board, NewNetName);
+        if NewNet = nil then
+        begin
+            Result := 'ERROR: Net not found on the board: ' + NewNetName;
+            Exit;
+        end;
+    end;
+    NewLayer := eNoLayer;
+    if NewLayerName <> '' then
+    begin
+        NewLayer := ResolveBoardLayer(Board, NewLayerName);
+        if NewLayer = eNoLayer then
+        begin
+            Result := 'ERROR: ' + NewLayerName + ' is not a copper layer of this board';
+            Exit;
+        end;
+    end;
+
+    Found := TInterfaceList.Create;
+    Polys := TInterfaceList.Create;
+    Locked := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    LockedItems := TStringList.Create;
+    Designators := TStringList.Create;
+    try
+        Designators.Text := UpperCase(StringReplace(DesignatorText, ';', #13#10, REPLACEALL));
+        MatchPCBObjects(Board, Kinds, NetName, Layer, Area, Designators, Margin, IncludeLocked, Found, Locked);
+        for i := 0 to Found.Count - 1 do
+            if i < 50 then Items.Add(PCBObjectJSON(Board, Found.Items[i]));
+        for i := 0 to Locked.Count - 1 do
+            if i < 20 then LockedItems.Add(PCBObjectJSON(Board, Locked.Items[i]));
+
+        Changed := 0;
+        Skipped := 0;
+        BadSize := 0;
+        if (not DryRun) and (Found.Count > 0) then
+        begin
+            // PostProcess must run whatever happens, or Altium's undo stays broken
+            PCBServer.PreProcess;
+            try
+                for i := 0 to Found.Count - 1 do
+                begin
+                    Prim := Found.Items[i];
+                    if Action = 'delete' then
+                    begin
+                        Board.RemovePCBObject(Prim);
+                        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+                        Changed := Changed + 1;
+                    end
+                    else
+                    begin
+                        Kind := EditableKind(Prim);
+                        Did := False;
+                        PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                        if (Width >= 0) and (Kind = 'track') then begin Prim.Width := Width; Did := True; end;
+                        if (Width >= 0) and (Kind = 'arc') then begin Prim.LineWidth := Width; Did := True; end;
+                        if (Kind = 'via') and ((ViaSize >= 0) or (ViaHole >= 0)) then
+                        begin
+                            // A size given alone is checked against the via's other size
+                            NewSize := Prim.Size;
+                            NewHole := Prim.HoleSize;
+                            if ViaSize >= 0 then NewSize := ViaSize;
+                            if ViaHole >= 0 then NewHole := ViaHole;
+                            if NewHole < NewSize then
+                            begin
+                                Prim.Size := NewSize;
+                                Prim.HoleSize := NewHole;
+                                Did := True;
+                            end
+                            else
+                                BadSize := BadSize + 1;
+                        end;
+                        if SetNet then begin Prim.Net := NewNet; Did := True; end;
+                        if (NewLayer <> eNoLayer) and ((Kind = 'track') or (Kind = 'arc') or (Kind = 'fill') or (Kind = 'region')) then
+                        begin
+                            Prim.Layer := NewLayer;
+                            Did := True;
+                        end;
+                        PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                        if Did then Changed := Changed + 1 else Skipped := Skipped + 1;
+                        if Did and (Kind = 'polygon') then Polys.Add(Prim);
+                    end;
+                end;
+                // a polygon given another net pours again for it
+                for i := 0 to Polys.Count - 1 do
+                    Polys.Items[i].Rebuild;
+            finally
+                PCBServer.PostProcess;
+            end;
+            Board.ViewManager_FullUpdate;
+        end;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'action', Action);
+        AddJSONBoolean(Props, 'dry_run', DryRun);
+        AddJSONInteger(Props, 'matched', Found.Count);
+        if Action = 'delete' then AddJSONInteger(Props, 'deleted', Changed)
+        else
+        begin
+            AddJSONInteger(Props, 'changed', Changed);
+            AddJSONInteger(Props, 'unchanged', Skipped);
+            AddJSONInteger(Props, 'vias_left_as_hole_would_not_fit', BadSize);
+        end;
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'objects')) else Props.Add('"objects": []');
+        AddJSONInteger(Props, 'locked_skipped', Locked.Count);
+        if LockedItems.Count > 0 then Props.Add(BuildJSONArray(LockedItems, 'locked'));
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Found.Free;
+        Polys.Free;
+        Locked.Free;
+        Items.Free;
+        Props.Free;
+        LockedItems.Free;
+        Designators.Free;
+    end;
+end;
+
 // Add the vias of place_vias to the focused board. Each record is
 // 'x|y|diameter|hole|net|start layer|end layer', x and y in internal units
 // relative to the board origin, sizes in internal units, an empty net for a
@@ -5212,8 +5630,8 @@ var
     Iterator : IPCB_BoardIterator;
     Poly     : IPCB_Polygon;
     Net      : IPCB_Net;
-    Layer, Repoured : Integer;
-    Done, Shelved, Item, Props : TStringList;
+    Layer, Repoured, i : Integer;
+    Done, Shelved, Item, Props, Order : TStringList;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then
@@ -5247,6 +5665,11 @@ begin
     Shelved := TStringList.Create;
     Item := TStringList.Create;
     Props := TStringList.Create;
+    // The polygons to repour, sorted by pour index: where pours of different
+    // nets overlap, the order decides which gets the copper, and Altium's own
+    // Repour All goes by the Polygon Pour Order (the pour index)
+    Order := TStringList.Create;
+    Order.Sorted := True;
     try
         Repoured := 0;
         // PostProcess must run whatever happens, or Altium's undo stays broken
@@ -5267,21 +5690,25 @@ begin
                     if (not Poly.Poured) and (not IncludeShelved) then
                         Shelved.Add('"' + JSONEscapeString(Poly.Name + ' (' + Layer2String(Poly.Layer) + ')') + '"')
                     else
-                    begin
-                        Poly.Rebuild;
-                        Repoured := Repoured + 1;
-                        Item.Clear;
-                        AddJSONProperty(Item, 'name', Poly.Name);
-                        AddJSONProperty(Item, 'layer', Layer2String(Poly.Layer));
-                        if Poly.Net <> nil then AddJSONProperty(Item, 'net', Poly.Net.Name) else AddJSONProperty(Item, 'net', '');
-                        AddJSONInteger(Item, 'poured_regions', PolygonPourCount(Poly, True));
-                        AddJSONInteger(Item, 'hatch_tracks', PolygonPourCount(Poly, False));
-                        Done.Add(BuildJSONObject(Item, 1));
-                    end;
+                        Order.AddObject(IntToStr(1000000000 + Poly.PourIndex) + '|' + IntToStr(100000000 + Order.Count), Poly);
                 end;
                 Poly := Iterator.NextPCBObject;
             end;
             Board.BoardIterator_Destroy(Iterator);
+            for i := 0 to Order.Count - 1 do
+            begin
+                Poly := Order.Objects[i];
+                Poly.Rebuild;
+                Repoured := Repoured + 1;
+                Item.Clear;
+                AddJSONProperty(Item, 'name', Poly.Name);
+                AddJSONProperty(Item, 'layer', Layer2String(Poly.Layer));
+                if Poly.Net <> nil then AddJSONProperty(Item, 'net', Poly.Net.Name) else AddJSONProperty(Item, 'net', '');
+                AddJSONInteger(Item, 'pour_index', Poly.PourIndex);
+                AddJSONInteger(Item, 'poured_regions', PolygonPourCount(Poly, True));
+                AddJSONInteger(Item, 'hatch_tracks', PolygonPourCount(Poly, False));
+                Done.Add(BuildJSONObject(Item, 1));
+            end;
         finally
             PCBServer.PostProcess;
         end;
@@ -5298,6 +5725,7 @@ begin
         Shelved.Free;
         Item.Free;
         Props.Free;
+        Order.Free;
     end;
 end;
 

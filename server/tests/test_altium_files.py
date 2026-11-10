@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from altium_files import long_path, read_altium_text, write_altium_text  # noqa: E402
+from altium_files import long_path, read_altium_text, spec_with_long_library, write_altium_text  # noqa: E402
 
 RESPONSE = '{\r\n  "success": true,\r\n  "result": "10µF"\r\n}\r\n'
 
@@ -82,6 +82,31 @@ class LongPathTest(unittest.TestCase):
         missing = os.path.join(tempfile.gettempdir(), "NOSUCH~1", "x.PcbDoc")
         self.assertEqual(long_path(missing), missing)
         self.assertEqual(long_path(""), "")
+
+
+class SpecLibraryTest(unittest.TestCase):
+    def test_short_library_path_is_expanded(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib = os.path.join(d, "A long library name.SchLib")
+            open(lib, "w").close()
+            buf = ctypes.create_unicode_buffer(32768)
+            ctypes.windll.kernel32.GetShortPathNameW(lib, buf, len(buf))
+            if "~" not in os.path.basename(buf.value):
+                self.skipTest("8.3 names are off on this volume")
+            spec = f"library| {buf.value} \nSYMBOL|X|10µF|1\nSYMPARAM|LIBRARY|a/b|1\nEND\n"
+            got = spec_with_long_library(spec).split("\n")
+            self.assertEqual(os.path.normcase(got[0].split("|")[1]), os.path.normcase(os.path.realpath(lib)))
+            self.assertEqual(got[0].split("|")[0], "library")
+            self.assertEqual(got[1:], spec.split("\n")[1:])  # other records untouched
+
+    def test_forward_slashes(self):
+        got = spec_with_long_library("LIBRARY|C:/no such folder/x.SchLib\nEND\n")
+        self.assertEqual(got, "LIBRARY|C:\\no such folder\\x.SchLib\nEND\n")
+
+    def test_long_path_or_no_library_unchanged(self):
+        self.assertIsNone(spec_with_long_library("LIBRARY|C:\\no such folder\\x.SchLib\nEND\n"))
+        self.assertIsNone(spec_with_long_library("SYMBOL|X|desc|1\nEND\n"))
+        self.assertIsNone(spec_with_long_library("LIBRARY|\nEND\n"))
 
 
 if __name__ == "__main__":

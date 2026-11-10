@@ -22,6 +22,13 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 - Check my project is ready for fabrication: unsaved documents, ERC errors, and which layers my Gerber output job plots
 - Draw a schematic of an LED with a current-limiting resistor on a new sheet, using symbols from my library
 
+## Videos
+- [RP2354B Symbol & Footprint w/ Claude](https://youtu.be/m8W89txJ2wY): tell Claude to build a symbol and footprint, and it handles the rest
+- [Can Opus 5.5 make a 6,545 pin symbol in Altium?](https://youtu.be/H8aqGX4gpH8): a symbol for the XCVP1902, made in Claude Code
+- [Can Opus 5.5 make difficult Altium footprints?](https://youtu.be/DOWtJsfCKPw): examples of Claude making difficult footprints
+
+More on the [altium-mcp YouTube channel](https://www.youtube.com/@altium-mcp), including the install walkthrough and videos for individual tools below.
+
 ## Installing the MCP Server
 The easiest way to install is to use Claude Code, point it to this repo and ask it to install it for you. Or alternatively, see below.
 
@@ -39,7 +46,7 @@ You shouldn't need to restart Claude and you should now see altium-mcp in the to
 
 ### Bootstrap Venv (Recommended)
 
-This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is tiny (~60 KB) and works on Python 3.10 to 3.14.
+This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is small (about 300 KB) and works on Python 3.10 to 3.14.
 
 **Python versions:** 3.10 to 3.13 install the hash-locked `requirements.txt`. 3.14 has no wheel for the locked pillow, so it installs the fallback list in `start_server.py` instead. With `mcp` 1.30 that list no longer caps pydantic, so it also resolves on 3.15, but 3.15 has not been tested.
 
@@ -67,6 +74,7 @@ On a slow network the first build can exceed the client's 60-second startup time
 Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, requirements.txt, server -DestinationPath altium-mcp.zip
 Rename-Item altium-mcp.zip altium-mcp.dxt
 ```
+   Build from a clean checkout. Release packages leave out `server/tests/`, `__pycache__` folders, `*.pyc` and log files.
 
 **Do NOT include `server/lib/` or `server/.venv/` in the .dxt.** The whole point is that these are created on the user's machine.
 
@@ -116,7 +124,7 @@ This approach bundles all dependencies in `server/lib/` and sets `PYTHONPATH` to
 
 ## Configuration
 
-When launching claude for the first time, the server will automatically try to locate your Altium Designer installation. It will search for all directories that start with `C:\Program Files\Altium\AD*` and use the one with the largest revision number. If it cannot find any, you will be prompted to select the Altium executable (X2.EXE) manually when you first run the server. Altium's DelphiScript scripting is used to create an API between the mcp server and Altium. 
+The server finds your Altium Designer installation by itself, and uses the newest build when several are installed. It looks first at the builds Altium's installers record in the registry (`HKLM\SOFTWARE\Altium\Builds`), wherever Altium was installed, then at a running Altium, and last in `C:\Program Files\Altium`. If it finds none, it asks you to select the Altium executable (X2.EXE) the first time a tool runs; it never asks while the server is starting. The choice is kept in `config.json` in the data folder (see above). Altium's DelphiScript scripting is used to create an API between the mcp server and Altium.
 
 ## Available Tools
 
@@ -157,15 +165,16 @@ The server provides several tools to interact with Altium Designer:
 
   These records work after `SYMBOL` and `EDITSYMBOL` alike. An unknown pin number, edge, symbol or justification is listed under `problems`; the rest of the batch still runs.
 
-  The result lists `created`, `edited`, `failed` and `problems`. Created and edited symbols leave the library modified and unsaved, so the user reviews them and saves; the tool never saves a library. Objects a script adds through PreProcess/PostProcess do not reliably set Altium's modified flag (in a PCB library they never do), so the symbol and footprint tools set it themselves. A `LIBRARY|<path>` line focuses that library if it is already open (it never reloads it, which would discard unsaved symbols) and opens it otherwise. If that library cannot be focused, the batch stops before changing anything.
+  The result lists `created`, `edited`, `failed` and `problems`. Created and edited symbols leave the library modified and unsaved, so the user reviews them and saves; the tool never saves a library. Objects a script adds through PreProcess/PostProcess do not reliably set Altium's modified flag (in a PCB library they never do), so the symbol and footprint tools set it themselves. A `LIBRARY|<path>` line focuses that library if it is already open (it never reloads it, which would discard unsaved symbols) and opens it otherwise. If that library cannot be focused, the batch stops before changing anything. The library editor draws the symbol it shows from a picture made when that symbol was shown, so new parameters on it would not appear: a batch that edited symbols therefore ends by showing another symbol and then that one again. A library with a single symbol has nothing to switch to; `problems` then says the new parameters appear once the library is reopened.
 - `build_schematic`: Build a wired schematic on a new sheet from a circuit description: parts from a `.SchLib` (full path; `.IntLib` is not supported), wires, junctions, net labels, power ports and notes, in mils (fractions are kept, so metric positions are exact). Returns every placed pin's true connection point, so a second call can route wires from measured coordinates, and lists any part it could not place. The new sheet is kept out of your project.
 - `check_schematic`: Check saved sheets for drafting problems: two-pin parts tapping their net at the pin, net labels away from their wire's free end or hanging off it, text touching wires, pins or other text (with a clear layout suggested), dangling wires, wires slightly out of level, parts whose pins sit a few microns off the grid, and sheet symbol layout. Takes a `.SchDoc`, a `.PrjPcb` or a folder and reads the saved files, so it needs no running Altium. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #64](https://github.com/coffeenmusic/altium-mcp/pull/64), pins off the grid [PR #73](https://github.com/coffeenmusic/altium-mcp/pull/73)).
 - `edit_schematic`: Change an existing sheet: move, rotate, mirror, delete or place parts, set parameters, move designator and parameter text, add wires, net labels, power ports, junctions and no-ERC markers, and delete objects at a point. Coordinates are in mil or mm, so `check_schematic`'s suggestions apply directly. The whole edit is one undo step in Altium, and the sheet is saved only when asked. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #70](https://github.com/coffeenmusic/altium-mcp/pull/70)).
+- `get_schematic_pins`: The pins of a sheet's parts, live from Altium: connection point, number, name, electrical type. `edit_schematic` also takes pin references ("U20.VCC", "U20.3", "U1A.3" for part A of a multi-part part) wherever it takes a point, and `add_port` places a port with a fixed width (auto size off). Pins are read before the edit runs, so a part moved or placed in the same call is referred to in a second call. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #78](https://github.com/coffeenmusic/altium-mcp/pull/78)).
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `server\symbol_placement_rules.txt` in the extension's install folder to get pin placement rules for symbol creation. The file ships empty, so the tool returns neutral guidance (follow a comparable symbol in the user's library, keep pins on a 100 mil grid); put your own rules in it.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 - `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
 
-Library paths (`library_path`, `LIBRARY|`, `FPLIB|`) may contain commas and may be spelled in a different case or with forward slashes. An open library is matched to its path after normalizing case and separators, so the tools never open a second copy of it.
+Library paths (`library_path`, `LIBRARY|`, `FPLIB|`) may contain commas and may be spelled in a different case or with forward slashes; `LIBRARY|` and `FPLIB|` paths may also use short (8.3) folder names. An open library is matched to its path after normalizing case and separators, so the tools never open a second copy of it.
 
 ![Symbol Creator](assets/symbol_creator.gif)
 
@@ -181,7 +190,7 @@ Library paths (`library_path`, `LIBRARY|`, `FPLIB|`) may contain commas and may 
 - `get_selected_components_coordinates`: Get position, rotation, layer, and footprint information for currently selected components
 - `move_components`: Move specified components by X and Y offsets
 - `set_component_position`: Set one component's absolute position and rotation
-- `place_components`: Batch absolute placement - place any number of components (x, y, rotation, top/bottom layer) in a single transaction / one undo step. The workhorse for AI-driven placement.
+- `place_components`: Batch absolute placement - place any number of components (x, y, rotation, top/bottom layer, locked, and optionally the designator and comment text exactly as `get_layout` reports it) in a single transaction / one undo step, on the board named by `board_path`. The workhorse for AI-driven placement.
 - `check_placement`: Verify a placement - finds overlaps and clearance violations against every other component on the board using true primitive-to-primitive distances (designator text excluded). Run after placing; a screenshot is not verification.
 - `check_orientation`: Advisory check for 2-pad passives whose rotation could be improved (e.g. a decoupling cap with its GND pad facing away from the IC). Geometry only - review suggestions with judgement; parts like pull-ups don't care.
 - `get_net_connections`: For the nets touching a set of components, list every pad on each net board-wide with per-net airline (MST) lengths - the data behind connectivity-driven placement (shorten critical nets, see off-cluster loads and filter banks).
@@ -190,7 +199,17 @@ Library paths (`library_path`, `LIBRARY|`, `FPLIB|`) may contain commas and may 
 - `place_vias`: Add vias at positions in mils from the board origin, with a default size, net and layer span that each via can override (blind and buried vias too). Every net and layer is checked against the board first, by Altium's layer name or the stack's own ("Inner 1"), so a bad entry adds nothing, and all the vias are one undo step. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #68](https://github.com/coffeenmusic/altium-mcp/pull/68)).
 - `place_polygon_pour`: Add a polygon pour from an outline of corners in mils on a signal layer, solid or hatched, with an optional net, and pour it. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #69](https://github.com/coffeenmusic/altium-mcp/pull/69)).
 - `place_cutout`: Add a polygon pour cutout on one signal layer or all of them, or a board cutout, and repour the polygons it overlaps. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #69](https://github.com/coffeenmusic/altium-mcp/pull/69)).
-- `repour_polygons`, `get_pour_report`: Repour every polygon pour on a board, or those picked by name, net, layer or area, as one undo step; and report what each pour poured (pieces, islands, slivers, no net, no copper). Shelved polygons stay shelved unless `include_shelved` is set. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #71](https://github.com/coffeenmusic/altium-mcp/pull/71)).
+- `delete_pcb_objects`, `modify_pcb_objects`: Rip up copper, or change its width, via size, net or layer: tracks, arcs, vias, polygon pours, copper regions, fills and pour cutouts picked by kind, net, layer and area, or a group's copper by `designators` (exactly what `get_layout` lists for the group). Only copper is touched - never pads, component primitives, keepouts or objects on other layers - and locked objects are left alone and listed unless `include_locked`. A filter must narrow the match. A via whose hole would not fit its diameter is left as it is. `dry_run` lists the matches; each edit is one undo step. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #74](https://github.com/coffeenmusic/altium-mcp/pull/74)).
+- `repour_polygons`, `get_pour_report`: Repour every polygon pour on a board, or those picked by name, net, layer or area, in pour order (where pours of different nets overlap, the order decides which gets the copper), as one undo step; and report what each pour poured (pieces, islands, slivers, no net, no copper). Shelved polygons stay shelved unless `include_shelved` is set. Takes an optional `board_path`. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #71](https://github.com/coffeenmusic/altium-mcp/pull/71)).
+- `get_layout`: Read the layout of a group of components or of an area: each component's placement, lock and designator and comment text, and the copper around them - tracks, arcs, vias, fills, copper regions, pour cutouts and polygon pours with their full outline (arc edges included) and pour settings. For a group it lists the copper wholly inside its extent plus the copper of its own nets (nets with no pad on another part) wherever it runs. The result is exactly what `place_components` and `place_copper` take.
+- `place_copper`: Add copper in one undo step: tracks and arcs at any angle, vias, fills, copper regions, pour cutouts and polygon pours (arc edges, island and neck removal, pour order, pour over same net). Every net and layer is checked first, so a bad entry adds nothing; pours go in last and pour around the copper added with them. A `transform` (shift, rotate, mirror) and `rename_nets` place a layout read with `get_layout` somewhere else, e.g. to repeat a channel.
+- `fanout_pads`: Fan out pads - a short track from each pad to a via beside it, e.g. to take an IC's ground and power pads down to their planes. Each via goes outward from the component first, as close as the clearance allows; a pad big enough to hold the via (an exposed thermal pad) gets it in the middle. Widths come from the board's width rules (no wider than the pad), the gap from its clearance rules. Pads that already have copper on them are left alone.
+- `route_connections`: Route a group's unrouted connections automatically with a maze router: every segment 0, 45 or 90 degrees, keeping the clearance from other nets' copper on the layers allowed, and changing layer through a via where needed. Each net gets the preferred width of its width rule (its minimum where that finds no path) and the gap of its clearance rule. Wider nets go first, then shortest first; when a connection is walled in by earlier routes, the whole set is routed again with the failures first. Pours are not obstacles (repour afterwards). Everything goes in with one undo step, and the reply lists the routed and failed connections and what is still unrouted. Together with `delete_pcb_objects` (rip up a group's copper) this is the loop for routing a group from scratch: place, fan out, route, check, rip up and try again.
+
+  Tested on groups of the 6-layer board below, placed and with the board's planes in: eleven of twelve groups (5 to 50 parts) routed completely, in 5 to 90 seconds each, with no clearance, short-circuit or width violations (several needed both outer layers, one also Mid Layer 2); the twelfth, the densest, kept 3 of its 63 connections unrouted, reported as failed.
+- `get_unrouted_connections`: The connections still to be routed (the ratsnest) for some components, some nets or the whole board, naming the pad at each end and saying whether both ends lie in the group's area. No DRC run and no 500-violation limit. Altium does not update the ratsnest after copper a script adds, so the nets are analyzed first.
+
+  Tested by rebuilding a 6-layer board (390 parts, 2,122 tracks, 114 arcs, 463 vias, 123 pours) from a copy with its copper removed and its parts scattered: each of its 48 component groups was placed and routed in four calls (`get_layout` on the original, `place_components`, `place_copper`, `get_unrouted_connections`), about 7 minutes for all of them, and then the routing between groups. The result matched the original: every part, text, track, arc, via, cutout and pour, the same DRC result and no unrouted connections.
 - `layout_duplicator` ([YouTube](https://youtu.be/HD-A_8iVV70)): Starts layout duplication assuming you have already selected the source components on the PCB.
 - `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 
@@ -268,9 +287,17 @@ Files exchanged with the scripts are read and written the way Altium does: in th
 - Jeff Collins has an XIA_Release_Manager.pas script that taught me the art of the Output Job. See his post on the Altium Forums: https://forum.live.altium.com/#/posts/189423
 
 ## Contributors
+- [SiboVG](https://github.com/SiboVG) — the PCB editing and checking tools (`run_drc`, `create_pcb_rule`, `place_vias`, `place_polygon_pour`, `place_cutout`, `repour_polygons`, `get_pour_report`, `check_routing`, `route_track`), `check_schematic` and `edit_schematic`, and much of the server's reliability: sandbox runs that report Altium's errors and recover, commands kept in order across servers, finding Altium from the registry, log rotation, the `mcp` 1.30 upgrade and CI ([25 PRs](https://github.com/coffeenmusic/altium-mcp/pulls?q=is%3Apr+is%3Amerged+author%3ASiboVG))
 - [daescobarh](https://github.com/daescobarh) — project validation tools (`get_project_info`, `get_project_components`, `get_erc_violations`, `get_board_summary`, `get_component_primitives`, `get_outjob_settings`) and safer dialog dismissal ([PR #18](https://github.com/coffeenmusic/altium-mcp/pull/18))
+- [Glomma](https://github.com/Glomma) — `outjob_path` for the OutJob tools and PDF containers that really publish ([PR #28](https://github.com/coffeenmusic/altium-mcp/pull/28)), plus fixes to the bridge and the bootstrap venv ([PR #26](https://github.com/coffeenmusic/altium-mcp/pull/26), [PR #27](https://github.com/coffeenmusic/altium-mcp/pull/27))
+- [Dziersk](https://github.com/Dziersk) — automatic recovery from a stuck script ([PR #23](https://github.com/coffeenmusic/altium-mcp/pull/23)) and sandbox safeguards against calls that crash Altium ([PR #36](https://github.com/coffeenmusic/altium-mcp/pull/36))
 - [coffeedust](https://github.com/coffeedust) — `create_pcb_footprint` tool for PcbLib automation ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7))
-- [fwolter](https://github.com/fwolter) — Fix JSON parsing error when the decimal separator is a comma ([PR #3](https://github.com/coffeenmusic/altium-mcp/pull/3))
+- [Dcatfly](https://github.com/Dcatfly) — `get_screenshot` captures the whole window on scaled displays ([PR #24](https://github.com/coffeenmusic/altium-mcp/pull/24))
+- [SC5KSystems](https://github.com/SC5KSystems) — the server fails fast on a broken venv instead of hanging for 60 seconds ([PR #15](https://github.com/coffeenmusic/altium-mcp/pull/15))
+- [fwolter](https://github.com/fwolter) — Fix JSON parsing error when the decimal separator is a comma ([PR #3](https://github.com/coffeenmusic/altium-mcp/pull/3)), and a typo fix ([PR #1](https://github.com/coffeenmusic/altium-mcp/pull/1))
+- [dishishshawn](https://github.com/dishishshawn) — the supported Python versions in this README ([PR #63](https://github.com/coffeenmusic/altium-mcp/pull/63))
+
+Thanks also to everyone who has [reported issues](https://github.com/coffeenmusic/altium-mcp/issues?q=is%3Aissue), especially [RSO-KME](https://github.com/RSO-KME) for detailed testing reports.
 
 ## Disclaimer
 This is a third-party integration and not made by Altium. Made by [coffeenmusic](https://x.com/coffeenmusic)

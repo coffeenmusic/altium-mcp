@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "altium-mcp",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
   "author": {
     "name": "Stephen Thompson"
@@ -96,6 +96,10 @@
       "description": "Change an existing schematic sheet as one undo step: move, place or delete parts, set parameters, move text, add wires, labels, power ports and junctions"
     },
     {
+      "name": "get_schematic_pins",
+      "description": "List a schematic sheet's pins live from Altium: connection point, number, name and electrical type"
+    },
+    {
       "name": "get_symbol_placement_rules",
       "description": "Get schematic symbol placement rules from a local configuration file"
     },
@@ -153,7 +157,7 @@
     },
     {
       "name": "place_components",
-      "description": "Place any number of components at absolute positions (x, y, rotation, side) in one undo step"
+      "description": "Place any number of components at absolute positions (x, y, rotation, side, lock, designator and comment text) on a named board, in one undo step"
     },
     {
       "name": "check_placement",
@@ -180,6 +184,34 @@
       "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
     },
     {
+      "name": "get_layout",
+      "description": "Read the layout of a group of components or an area: placement, texts, tracks, arcs, vias, fills, regions, cutouts and pours with their full outlines and settings, in place_copper's form"
+    },
+    {
+      "name": "place_copper",
+      "description": "Add tracks and arcs at any angle, vias, fills, regions, cutouts and polygon pours in one undo step, all checked first; can move and rename nets to repeat a layout"
+    },
+    {
+      "name": "get_unrouted_connections",
+      "description": "List the connections still to be routed for some components, nets or the whole board, naming the pads at each end, with no DRC limit"
+    },
+    {
+      "name": "fanout_pads",
+      "description": "Fan out pads to vias beside them (e.g. ground and power pads to their planes), widths and gaps from the board's rules"
+    },
+    {
+      "name": "route_connections",
+      "description": "Route a group's unrouted connections with a maze router at 0/45/90 degrees, widths and clearance from the board's rules, vias between the layers allowed"
+    },
+    {
+      "name": "delete_pcb_objects",
+      "description": "Rip up copper: tracks, arcs, vias, pours, regions, fills or cutouts picked by kind, net, layer, area or a group's designators; locked objects kept"
+    },
+    {
+      "name": "modify_pcb_objects",
+      "description": "Change the width, via size, net or layer of copper picked as for delete_pcb_objects, in one undo step"
+    },
+    {
       "name": "place_polygon_pour",
       "description": "Add a polygon pour from an outline to a PCB and pour it"
     },
@@ -189,7 +221,7 @@
     },
     {
       "name": "repour_polygons",
-      "description": "Repour all polygon pours on a PCB, or those picked by name, net, layer or area, as one undo step"
+      "description": "Repour all polygon pours on a PCB, or those picked by name, net, layer or area, in pour order, as one undo step"
     },
     {
       "name": "get_pour_report",

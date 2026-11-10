@@ -43,3 +43,23 @@ def long_path(path):
     buf = ctypes.create_unicode_buffer(32768)
     n = ctypes.windll.kernel32.GetLongPathNameW(str(path), buf, len(buf))
     return buf.value if 0 < n < len(buf) else path
+
+
+def spec_with_long_library(text):
+    """A batch spec's text with each LIBRARY| path put through long_path, or
+    None when every one is already in that form. The script opens or focuses
+    the library by the path as written, so a short (8.3) name or forward
+    slashes there would open a second copy of a library that is open."""
+    lines = text.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        fields = line.split("|")
+        if len(fields) < 2 or fields[0].strip().upper() != "LIBRARY":
+            continue
+        path = fields[1].strip()
+        longer = long_path(path)
+        if path and longer != path:
+            fields[1] = longer
+            lines[i] = "|".join(fields)
+            changed = True
+    return "\n".join(lines) if changed else None
