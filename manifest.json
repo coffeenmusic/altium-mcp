@@ -92,6 +92,10 @@
       "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires, pins off the grid"
     },
     {
+      "name": "check_hierarchy",
+      "description": "Check that sheet entries match the ports of their child sheets, harness types and harness definitions agree, and every signal harness has a type"
+    },
+    {
       "name": "edit_schematic",
       "description": "Change an existing schematic sheet as one undo step: move, place or delete parts, set parameters, move text, add wires, labels, power ports and junctions"
     },
