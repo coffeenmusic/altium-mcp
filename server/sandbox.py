@@ -68,6 +68,8 @@ TEMPLATE_NAMES = (
 )
 
 _DECL_RE = re.compile(r"^\s*[A-Za-z_]\w*(\s*,\s*[A-Za-z_]\w*)*\s*:\s*[A-Za-z_][\w.]*\s*;\s*(//.*)?$")
+# A line holding only a comment: // ..., { ... } or (* ... *)
+_COMMENT_LINE_RE = re.compile(r"^\s*(//.*|\{[^}]*\}|\(\*.*?\*\))\s*$")
 _ASSIGN_RE = re.compile(r"(?<![\w.\]\)])([A-Za-z_]\w*)\s*:=")
 _LINE_RE = re.compile(r"at Line:\s*(\d+),\s*Char:\s*(\d+)", re.IGNORECASE)
 
@@ -85,11 +87,17 @@ def split_var_block(script: str) -> SplitScript:
 
     The block is the word `var` on a line of its own (or followed by the first
     declaration), then declaration lines of the form `Name1, Name2 : Type;`.
-    It ends at the first line that is not a declaration.
+    It ends at the first line that is not a declaration. Blank lines and
+    lines holding only a comment may come before `var` and between the
+    declarations.
     """
     lines = script.split("\n")
+
+    def skippable(line):
+        return not line.strip() or _COMMENT_LINE_RE.match(line)
+
     i = 0
-    while i < len(lines) and not lines[i].strip():
+    while i < len(lines) and skippable(lines[i]):
         i += 1
     if i == len(lines) or not re.match(r"^\s*var\b", lines[i], re.IGNORECASE):
         return SplitScript([], [], lines, 0)
@@ -99,8 +107,8 @@ def split_var_block(script: str) -> SplitScript:
         decls.append(first)
         src.append(i + 1)
     i += 1
-    while i < len(lines) and (_DECL_RE.match(lines[i]) or not lines[i].strip()):
-        if lines[i].strip():
+    while i < len(lines) and (_DECL_RE.match(lines[i]) or skippable(lines[i])):
+        if not skippable(lines[i]):
             decls.append(lines[i].strip())
             src.append(i + 1)
         i += 1

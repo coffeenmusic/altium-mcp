@@ -207,6 +207,11 @@ begin
     ResultText := '{"sandbox": "no result set"}';
     SandboxLog('sandbox start');
 
+    // Everything after the script runs in a finally block, so the lists are
+    // freed, undo groups closed and the result written also when the script
+    // leaves with Exit: Exit ends Run, and DelphiScript still runs finally
+    // blocks on the way out (tested on Altium 26.11)
+    try
     try
         // === BEGIN EXPERIMENT (filled in by the run_altium_script tool) ===
         SandboxLog('no script loaded');
@@ -218,18 +223,20 @@ begin
         SandboxLog('EXCEPTION: ' + ExceptionMessage);
         ResultText := '{"error": "script raised an exception - see steps"}';
     end;
-    List1.Free;
-    List2.Free;
-    List3.Free;
-
-    SbxCloseUndo;
-    SandboxLog('sandbox end');
-
-    OutLines := TStringList.Create;
-    try
-        OutLines.Text := ResultText;
-        OutLines.SaveToFile(OutPath);
     finally
-        OutLines.Free;
+        List1.Free;
+        List2.Free;
+        List3.Free;
+
+        SbxCloseUndo;
+        SandboxLog('sandbox end');
+
+        OutLines := TStringList.Create;
+        try
+            OutLines.Text := ResultText;
+            OutLines.SaveToFile(OutPath);
+        finally
+            OutLines.Free;
+        end;
     end;
 end;
