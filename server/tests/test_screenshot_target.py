@@ -200,5 +200,59 @@ class PickTest(unittest.TestCase):
         self.assertIsNone(st.clip((2000, 0, 2100, 10), (0, 0, 1920, 1080)))
 
 
+class AltiumWindowsTest(unittest.TestCase):
+    # Altium's top-level windows after run_drc and with Project Options open,
+    # topmost first, as the board edit session saw them
+    FRAME = win("TDocumentForm", "Main - Altium Designer", (0, 0, 1900, 1000), hwnd=1)
+    OPTIONS = win("TProjectPropertiesDialog", "Options for PCB Project Adapter.PrjPcb",
+                  (400, 200, 1300, 900), hwnd=2)
+    MESSAGES = win("TClientBarControl", "Messages", (900, 500, 1800, 950), hwnd=3)
+    HINT = win("THintWindow", "", (10, 10, 120, 30), hwnd=4)
+    VIEW = (300, 100, 1800, 950)    # a document view
+
+    def windows(self, *tops, enabled=True):
+        return st.altium_windows([*tops, win("TApplication", ""), self.FRAME], 1, enabled)
+
+    def test_classification(self):
+        ws = self.windows(self.OPTIONS, self.MESSAGES, self.HINT, enabled=False)
+        self.assertEqual([(w["hwnd"], w["kind"], w["modal"]) for w in ws],
+                         [(2, "dialog", True), (3, "panel", False)])
+        self.assertEqual(ws[0]["title"], "Options for PCB Project Adapter.PrjPcb")
+        self.assertFalse(self.windows(self.OPTIONS)[0]["modal"])   # the main frame takes input
+        self.assertEqual(self.windows(), [])
+
+    def test_dialog_over_the_view_refuses(self):
+        error, panels = st.altium_windows_over(self.VIEW, self.windows(self.OPTIONS, self.MESSAGES, enabled=False))
+        self.assertIn("Nothing was captured", error)
+        self.assertIn("TProjectPropertiesDialog", error)
+        self.assertIn('target="dialog"', error)
+        self.assertEqual(panels, [])
+
+    def test_floating_panel_over_the_view_warns(self):
+        error, panels = st.altium_windows_over(self.VIEW, self.windows(self.MESSAGES))
+        self.assertIsNone(error)
+        self.assertEqual([p["hwnd"] for p in panels], [3])
+        self.assertEqual(panels[0]["covers_percent"], 32)   # 900x450 of 1500x850
+        self.assertIn("hide_floating_panels", st.panel_warning(panels[0]))
+
+    def test_windows_beside_the_capture_are_ignored(self):
+        beside = (0, 0, 300, 1000)   # only touches the dialog's and the panel's edges, or misses them
+        self.assertEqual(st.altium_windows_over(beside, self.windows(self.MESSAGES)), (None, []))
+        aside = win("TProjectPropertiesDialog", "Options", (1850, 0, 2400, 400), hwnd=5)
+        self.assertEqual(st.altium_windows_over(self.VIEW, self.windows(aside, enabled=False)), (None, []))
+
+    def test_dismissable_only_dialogs(self):
+        ws = self.windows(self.OPTIONS, self.MESSAGES, enabled=False)
+        self.assertEqual(st.dismissable(ws, 2)[0]["hwnd"], 2)
+        self.assertEqual(st.dismissable(ws, "2")[0]["hwnd"], 2)
+        self.assertEqual(st.dismissable(ws, "options for pcb project  adapter.prjpcb")[0]["hwnd"], 2)
+        for never in (1, 3, "Messages", "Main - Altium Designer", 99):   # frame, panel, unknown
+            target, why = st.dismissable(ws, never)
+            self.assertIsNone(target)
+            self.assertIn("Open dialogs: 2 'Options for PCB Project Adapter.PrjPcb'", why)
+        twins = [dict(ws[0]), dict(ws[0], hwnd=7)]
+        self.assertIn("give the hwnd", st.dismissable(twins, "Options for PCB Project Adapter.PrjPcb")[1])
+
+
 if __name__ == "__main__":
     unittest.main()
