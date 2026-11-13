@@ -381,6 +381,122 @@ begin
     end;
 end;
 
+// list_open_documents: every document open in Altium, by the path Altium
+// gives it, with its kind, whether it has unsaved changes, and whether it is
+// the one in front. Client.ServerDocuments is not available to scripts; the
+// server modules' document lists are (as FindOpenDocument walks them).
+function ListOpenDocuments(Dummy: Integer): String;
+var
+    i, j   : Integer;
+    Module : IServerModule;
+    Doc    : IServerDocument;
+    Active : String;
+    Items, Props, ResultProps : TStringList;
+begin
+    Active := '';
+    if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+        Active := NormalizedPath(Client.CurrentView.OwnerDocument.FileName);
+    Items := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        for i := 0 to Client.Count - 1 do
+        begin
+            Module := Client.ServerModule[i];
+            if Module <> nil then
+                for j := 0 to Module.DocumentCount - 1 do
+                begin
+                    Doc := Module.Documents[j];
+                    if Doc.FileName <> '' then
+                    begin
+                        Props := TStringList.Create;
+                        try
+                            AddJSONProperty(Props, 'path', Doc.FileName);
+                            AddJSONProperty(Props, 'kind', Doc.Kind);
+                            AddJSONBoolean(Props, 'modified', DocumentModified(Doc));
+                            AddJSONBoolean(Props, 'active', NormalizedPath(Doc.FileName) = Active);
+                            Items.Add(BuildJSONObject(Props, 1));
+                        finally
+                            Props.Free;
+                        end;
+                    end;
+                end;
+        end;
+        AddJSONBoolean(ResultProps, 'success', True);
+        ResultProps.Add(BuildJSONArray(Items, 'documents'));
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Items.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// reload_document: close the open document at "path" and open it again from
+// disk, e.g. after the file was replaced. Refused while it has unsaved
+// changes unless "discard_changes" is true: it is then marked unmodified
+// first, so closing it asks nothing.
+function ExecuteReloadDocument(RequestData: TStringList): String;
+var
+    i       : Integer;
+    Path    : String;
+    Discard : Boolean;
+    Doc     : IServerDocument;
+    Kind    : String;
+    Props   : TStringList;
+begin
+    Path := '';
+    Discard := False;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos('"path"', RequestData[i]) > 0 then
+            Path := Trim(JSONLineValue(RequestData[i]));
+        if Pos('"discard_changes"', RequestData[i]) > 0 then
+            Discard := LowerCase(Trim(JSONLineValue(RequestData[i]))) = 'true';
+    end;
+    if Path = '' then
+    begin
+        Result := 'ERROR: reload_document needs the path of an open document';
+        Exit;
+    end;
+    Doc := FindOpenDocument(Path);
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Not open in Altium: ' + Path;
+        Exit;
+    end;
+    // Checked before closing: a document that cannot be opened again stays open
+    Kind := DocumentKindForPath(Doc.FileName);
+    if Kind = '' then
+    begin
+        Result := 'ERROR: reload_document reopens .PcbDoc, .SchDoc, .PcbLib, .SchLib and .OutJob files only';
+        Exit;
+    end;
+    if DocumentModified(Doc) and (not Discard) then
+    begin
+        Result := 'ERROR: ' + ExtractFileName(Doc.FileName) + ' has unsaved changes. Save it first, ' +
+                  'or pass discard_changes=true to drop them.';
+        Exit;
+    end;
+    Path := Doc.FileName;
+    if DocumentModified(Doc) then Doc.SetModified(False);
+    Client.CloseDocument(Doc);
+    Doc := Client.OpenDocument(Kind, Path);
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Closed ' + Path + ' but could not open it again';
+        Exit;
+    end;
+    Client.ShowDocument(Doc);
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'path', Doc.FileName);
+        AddJSONProperty(Props, 'kind', Kind);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Extract the create schematic symbol logic
 function ExecuteCreateSchematicSymbol(RequestData: TStringList): String;
 var
@@ -1661,6 +1777,10 @@ begin
             Result := ExecuteTakeViewScreenshot(RequestData);            
         'focus_document':
             Result := ExecuteFocusDocument(RequestData);
+        'list_open_documents':
+            Result := ListOpenDocuments(0);
+        'reload_document':
+            Result := ExecuteReloadDocument(RequestData);
         'get_library_symbol_reference':
             Result := GetLibrarySymbolReference(ROOT_DIR);            
         'create_schematic_symbol':

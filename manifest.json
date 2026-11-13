@@ -28,6 +28,14 @@
       "description": "Read an .OutJob file from disk and return containers, outputs and decoded fabrication settings (Gerber layers, NC Drill, IPC-D-356, pick and place)"
     },
     {
+      "name": "list_open_documents",
+      "description": "List the documents open in Altium: path, kind, unsaved changes, and which one is in front"
+    },
+    {
+      "name": "reload_document",
+      "description": "Close an open document and open it again from disk; refused with unsaved changes unless discard_changes"
+    },
+    {
       "name": "get_project_info",
       "description": "Get the focused project's parameters, documents with unsaved-changes state, sheet count and variants"
     },
