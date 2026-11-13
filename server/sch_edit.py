@@ -25,6 +25,8 @@ PORT_IO = {"unspecified": 0, "output": 1, "input": 2, "bidirectional": 3}
 # Altium's TPortArrowStyle order; ports and sheet entries share it
 PORT_STYLES = {"none": 0, "left": 1, "right": 2, "left_right": 3,
                "none_vertical": 4, "top": 5, "bottom": 6, "top_bottom": 7}
+SIDES = {"left": 0, "right": 1, "top": 2, "bottom": 3}
+LINE_WIDTHS = {"smallest": 0, "small": 1, "medium": 2, "large": 3}
 # Operations whose x, y may be given as "at": a pin reference
 AT_OPS = ("add_net_label", "add_power_port", "add_junction", "add_no_erc", "add_port")
 # Operations that move a part's pins, so a later reference to them is stale
@@ -43,7 +45,15 @@ OPS = {
     "add_port": (("x", "y", "name"), ("io_type", "style", "width")),
     "add_no_erc": (("x", "y"), ()),
     "delete_at": (("kind", "x", "y"), ("text",)),
-    "place_component": (("library", "symbol", "designator", "x", "y"), ("rotation", "mirror", "comment")),
+    "edit_sheet_symbol": (("sheet",), ("x", "y", "width", "height", "fill_color", "border_color", "line_width",
+                                       "name_x", "name_y", "file_x", "file_y")),
+    "edit_sheet_entry": (("sheet", "name"), ("side", "distance", "io_type", "style", "new_name")),
+    "move_wire_vertex": (("x", "y", "to_x", "to_y"), ()),
+    "move_net_label": (("x", "y"), ("text", "to_x", "to_y", "orientation", "justification", "snap_to_wire_end")),
+    "place_component": (("library", "symbol", "designator", "x", "y"),
+                        ("rotation", "mirror", "comment",
+                         # filled in from a DbLib row by dblib.place_operation
+                         "db_library", "db_table", "db_key", "db_description", "db_parameters", "db_footprints")),
 }
 
 
@@ -80,6 +90,30 @@ def _rotation(v) -> str:
         return str(ROTATIONS[int(v) % 360])
     except (TypeError, ValueError, KeyError):
         raise OpError("rotation is 0, 90, 180 or 270 degrees")
+
+
+def _colour(v, what) -> str:
+    """'#RRGGBB' as Altium stores a colour (0x00BBGGRR); '' keeps it."""
+    if v is None:
+        return ""
+    if isinstance(v, str) and len(v) == 7 and v.startswith("#"):
+        try:
+            r, g, b = int(v[1:3], 16), int(v[3:5], 16), int(v[5:7], 16)
+        except ValueError:
+            raise OpError(f"{what} is '#RRGGBB'")
+        return str(r + (g << 8) + (b << 16))
+    raise OpError(f"{what} is '#RRGGBB'")
+
+
+def _choice(v, table, what) -> str:
+    """A name from table (or its number); '' keeps the value."""
+    if v is None:
+        return ""
+    if isinstance(v, str) and v in table:
+        return str(table[v])
+    if isinstance(v, int) and v in table.values():
+        return str(v)
+    raise OpError(f"{what} is one of {', '.join(table)}")
 
 
 def _is_ref(v) -> bool:
@@ -279,6 +313,49 @@ def encode_operations(operations: list, unit: str = "mil") -> Tuple[List[str], s
                                        c(width), _text(op["name"], "name")]))
             elif kind in ("add_junction", "add_no_erc"):
                 lines.append("|".join(["JUNCTION" if kind == "add_junction" else "NOERC", c(op["x"]), c(op["y"])]))
+            elif kind == "edit_sheet_symbol":
+                def opt(k, what="coordinate"):
+                    return "" if op.get(k) is None else c(op[k], what)
+                for a, b in (("name_x", "name_y"), ("file_x", "file_y"), ("x", "y")):
+                    if (op.get(a) is None) != (op.get(b) is None):
+                        raise OpError(f"give {a} and {b} together")
+                for k in ("width", "height"):
+                    if op.get(k) is not None and not (isinstance(op[k], (int, float)) and op[k] > 0):
+                        raise OpError(f"{k} must be a positive number")
+                lines.append("|".join(["SHEETSYM", _text(op["sheet"], "sheet"), opt("x"), opt("y"),
+                                       opt("width", "width"), opt("height", "height"),
+                                       _colour(op.get("fill_color"), "fill_color"),
+                                       _colour(op.get("border_color"), "border_color"),
+                                       _choice(op.get("line_width"), LINE_WIDTHS, "line_width"),
+                                       opt("name_x"), opt("name_y"), opt("file_x"), opt("file_y")]))
+            elif kind == "edit_sheet_entry":
+                distance = op.get("distance")
+                if distance is not None and not (isinstance(distance, (int, float)) and distance >= 0):
+                    raise OpError("distance (from the symbol's top edge, or its left edge on the top and bottom "
+                                  "sides) must be 0 or more")
+                io = op.get("io_type")
+                lines.append("|".join(["SHEETENTRY", _text(op["sheet"], "sheet"), _text(op["name"], "name"),
+                                       _choice(op.get("side"), SIDES, "side"),
+                                       "" if distance is None else c(distance, "distance"),
+                                       _choice(io, PORT_IO, "io_type"),
+                                       _choice(op.get("style"), PORT_STYLES, "style"),
+                                       _text(op.get("new_name") or "", "new_name")]))
+            elif kind == "move_wire_vertex":
+                lines.append("|".join(["WIREVTX", c(op["x"]), c(op["y"]), c(op["to_x"]), c(op["to_y"])]))
+            elif kind == "move_net_label":
+                if (op.get("to_x") is None) != (op.get("to_y") is None):
+                    raise OpError("give to_x and to_y together")
+                snap = op.get("snap_to_wire_end")
+                if snap is True:
+                    snap = 100 if unit == "mil" else 2.54
+                if snap not in (None, False) and not (isinstance(snap, (int, float)) and snap > 0):
+                    raise OpError("snap_to_wire_end is true or a search radius")
+                lines.append("|".join([
+                    "LABELMOVE", c(op["x"]), c(op["y"]), _text(op.get("text") or "", "text"),
+                    "" if op.get("to_x") is None else c(op["to_x"]), "" if op.get("to_y") is None else c(op["to_y"]),
+                    "" if op.get("orientation") is None else str(_int_in(op["orientation"], 0, 3, "orientation")),
+                    "" if op.get("justification") is None else str(_int_in(op["justification"], 0, 8, "justification")),
+                    c(snap, "snap_to_wire_end") if snap else ""]))
             elif kind == "delete_at":
                 if op["kind"] not in DELETE_KINDS:
                     raise OpError(f"kind is one of {', '.join(DELETE_KINDS)}")
@@ -288,10 +365,22 @@ def encode_operations(operations: list, unit: str = "mil") -> Tuple[List[str], s
                 lib = _text(op["library"], "library")
                 if not lib.lower().endswith(".schlib"):
                     raise OpError("library must be the full path of a .SchLib file")
-                lines.append("|".join(["PLACE", _text(op["designator"], "designator"), lib,
-                                       _text(op["symbol"], "symbol"), c(op["x"]), c(op["y"]),
-                                       _rotation(op.get("rotation", 0)), "1" if op.get("mirror") else "0",
-                                       _text(op.get("comment", ""), "comment")]))
+                fields = ["PLACE", _text(op["designator"], "designator"), lib,
+                          _text(op["symbol"], "symbol"), c(op["x"]), c(op["y"]),
+                          _rotation(op.get("rotation", 0)), "1" if op.get("mirror") else "0",
+                          _text(op.get("comment", ""), "comment")]
+                if op.get("db_library"):
+                    # DB|library|table|key|description|n|name|visible|value...|m|footprint...
+                    params = op.get("db_parameters") or []
+                    fields += ["DB", _text(op["db_library"], "db_library"), _text(op["db_table"], "db_table"),
+                               _text(op["db_key"], "db_key"), _text(op.get("db_description", ""), "description"),
+                               str(len(params))]
+                    for name, value, visible in params:
+                        fields += [_text(name, "parameter name"), "1" if visible else "0",
+                                   _text(value, f"value of {name}")]
+                    footprints = op.get("db_footprints") or []
+                    fields += [str(len(footprints))] + [_text(f, "footprint") for f in footprints]
+                lines.append("|".join(fields))
         except OpError as e:
             return [], f"operation {i + 1}: {e}"
     if not lines:
