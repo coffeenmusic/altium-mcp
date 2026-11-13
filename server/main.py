@@ -5510,7 +5510,7 @@ async def check_objects_drc(ctx: Context, refs: list = None, bbox: list = None, 
         if bbox:
             if not isinstance(bbox, list) or len(bbox) != 4:
                 raise ValueError("bbox must be [x1, y1, x2, y2]")
-            x1, y1, x2, y2 = (geo.to_coord(v, unit) for v in bbox)
+            x1, y1, x2, y2 = (geo.area_to_coord(v, unit) for v in bbox)
             params.update({"x1": str(min(x1, x2)), "y1": str(min(y1, y2)),
                            "x2": str(max(x1, x2)), "y2": str(max(y1, y2))})
     except (TypeError, ValueError) as e:
