@@ -6193,7 +6193,12 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     board_path = long_path(board_path)
     logger.info(f"Running DRC on {board_path or 'the focused board'}")
     started = time.time()
-    panels_before = await asyncio.to_thread(drc.floating_panels) if restore_workspace else set()
+    panels_before = None
+    if restore_workspace:
+        try:
+            panels_before = await asyncio.to_thread(drc.floating_panels)
+        except Exception as e:
+            logger.warning(f"run_drc: could not list Altium's floating panels: {e}")
     outcome = drc.DialogOutcome()
     driver = asyncio.create_task(drc.drive_dialog(outcome, PROGRESS_FILE))
     try:
@@ -6209,8 +6214,11 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
             await driver
         except asyncio.CancelledError:
             pass
-        if restore_workspace:
-            await asyncio.to_thread(drc.close_new_panels, panels_before)
+        if panels_before is not None:
+            try:
+                await asyncio.to_thread(drc.close_new_panels, panels_before)
+            except Exception as e:
+                logger.warning(f"run_drc: could not close the panels the check opened: {e}")
 
     if not response.get("success", False):
         return json.dumps({"success": False, "ran": outcome.pressed,

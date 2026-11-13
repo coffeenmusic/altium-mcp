@@ -270,12 +270,8 @@ def _norm(text: str) -> str:
     return " ".join((text or "").split()).lower()
 
 
-def _same_kind_and_scopes(rule: dict, block: str) -> bool:
-    """A report block for this rule although its text is not the rule's
-    descriptor word for word: the same rule kind, and both scopes in it."""
-    if rule_key(_kind(rule.get("descriptor", ""))) != rule_key(_kind(block)):
-        return False
-    return all(_norm(f) in block for f in (rule.get("filter1"), rule.get("filter2")) if f and f.strip())
+def _rule_kind(rule: dict) -> str:
+    return rule_key(_kind(rule.get("descriptor", "")) or rule.get("kind_name", ""))
 
 
 def rules_not_checked(enabled: List[dict], processed: List[str]) -> List[dict]:
@@ -285,25 +281,15 @@ def rules_not_checked(enabled: List[dict], processed: List[str]) -> List[dict]:
     each rule it processed; a rule of another kind has none, and no
     violations either, exactly like a rule that passes.
 
-    enabled: {"descriptor", "filter1", "filter2", ...} for each enabled rule;
+    enabled: {"descriptor", "kind_name", ...} for each enabled rule;
     processed: the descriptors of the report's blocks (parse_report's rules).
-    A block counts for one rule only."""
-    blocks = [_norm(b) for b in processed]
-    unmatched = []
-    for rule in enabled:
-        d = _norm(rule.get("descriptor", ""))
-        if d and d in blocks:
-            blocks.remove(d)
-        else:
-            unmatched.append(rule)
-    skipped = []
-    for rule in unmatched:
-        i = next((i for i, b in enumerate(blocks) if _same_kind_and_scopes(rule, b)), None)
-        if i is None:
-            skipped.append(rule)
-        else:
-            blocks.pop(i)
-    return skipped
+    A rule counts as checked when a block has its descriptor, or failing
+    that (the text written differently) any block is of its kind: Batch is
+    ticked per kind, so one block of a kind means the kind was checked."""
+    blocks = {_norm(b) for b in processed}
+    kinds = {rule_key(_kind(b)) for b in blocks}
+    return [r for r in enabled
+            if _norm(r.get("descriptor", "")) not in blocks and _rule_kind(r) not in kinds]
 
 
 def not_checked_warning(skipped: List[dict]) -> str:

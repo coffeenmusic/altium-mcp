@@ -202,18 +202,15 @@ class RulesNotCheckedTest(unittest.TestCase):
                                                self.processed(REPORT_51)), [])
 
     def test_block_text_differing_from_the_descriptor(self):
-        # Same kind and scopes, values written differently: still that rule
+        # Batch is ticked per kind: a rule of a kind that has a block was checked
         rule = dict(CLEARANCE, descriptor="Clearance Constraint (Gap=0.150mm) (All),(All)")
         self.assertEqual(drc.rules_not_checked([rule], self.processed(REPORT)), [])
-        # Same kind, another scope: not that rule
-        rule = dict(CLEARANCE, descriptor="Clearance Constraint (Gap=0.3mm) (InNet('GND')),(All)",
-                    filter1="InNet('GND')")
-        self.assertEqual(drc.rules_not_checked([rule], self.processed(REPORT)), [rule])
-
-    def test_a_block_counts_for_one_rule(self):
-        twin = dict(CLEARANCE, name="Clearance_2")
-        self.assertEqual(drc.rules_not_checked([CLEARANCE, twin], self.processed(REPORT)), [twin])
-
+        gnd = dict(CLEARANCE, name="Clearance_GND", descriptor="Clearance Constraint (Gap=0.3mm) (InNet('GND')),(All)")
+        self.assertEqual(drc.rules_not_checked([gnd, CLEARANCE], self.processed(REPORT)), [])
+        # No descriptor: its kind_name stands in
+        self.assertEqual(drc.rules_not_checked([dict(CLEARANCE, descriptor="")], self.processed(REPORT)), [])
+        self.assertEqual(drc.rules_not_checked([dict(DIFF_PAIR, descriptor="")], self.processed(REPORT)),
+                         [dict(DIFF_PAIR, descriptor="")])
 
 class PanelsTest(unittest.TestCase):
     def test_only_panels_the_check_opened_are_closed(self):
