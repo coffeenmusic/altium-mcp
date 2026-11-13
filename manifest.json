@@ -40,6 +40,10 @@
       "description": "Compile a project (the focused one, or one by path) in memory and list ERC/compiler violations by level"
     },
     {
+      "name": "preview_eco",
+      "description": "Show what Update PCB would change (components, nets, classes, rooms) between the compiled project and its board, without running it"
+    },
+    {
       "name": "get_board_summary",
       "description": "Summarise the focused PCB: outline, origin, dimensions, vias by hole size, components per side, primitives per layer and overlay texts"
     },
