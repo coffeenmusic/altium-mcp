@@ -2266,7 +2266,12 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         [mirror true/false]. x, y is the part's origin.
       delete_component  designator, [part]
       place_component   library (.SchLib path), symbol, designator, x, y,
-                        [rotation], [mirror], [comment]
+                        [rotation], [mirror], [comment]. For a part from a
+                        database library, dblib (.DbLib path) and
+                        part_number (its key), [table], in place of library
+                        and symbol: the row gives the symbol, footprints,
+                        description and parameters, and the part is linked
+                        to the DbLib as when Altium places it (Excel tables)
       set_parameter     designator, name, value, [part], [visible]
                         (creates the parameter when missing)
       move_text         designator, name ("Designator", "Comment" or a
@@ -2288,6 +2293,31 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         top_bottom, none_vertical], [width]:
                         a width turns auto size off, so the port keeps its
                         length and stays on its wire when renamed
+      edit_sheet_symbol sheet (its sheet name, or file name if unique),
+                        [x, y] (top left; entries and texts move along),
+                        [width, height], [fill_color, border_color]
+                        ("#RRGGBB"), [line_width smallest/small/medium/
+                        large], [name_x, name_y], [file_x, file_y] (where
+                        the sheet name and file name texts sit). A size
+                        that would leave an entry outside is refused; on a
+                        resize the right and bottom entries move with their
+                        edge (wires to them are not dragged)
+      edit_sheet_entry  sheet, name, [side left/right/top/bottom],
+                        [distance] (from the symbol's top edge on the left
+                        and right sides, from its left edge on the top and
+                        bottom), [io_type], [style, as add_port], [new_name]
+      move_wire_vertex  x, y, to_x, to_y: moves the vertex at x, y of every
+                        wire with one there (an end or a corner), so wires
+                        that meet there stay joined; junctions, net labels
+                        and power ports at x, y, and ports with an end
+                        there, move with it; also to trim a wire. Refused
+                        when a wire passes through x, y mid-segment (a T
+                        connection)
+      move_net_label    x, y (the label's location), [text], [to_x, to_y],
+                        [orientation], [justification],
+                        [snap_to_wire_end] (true, or a search radius in
+                        unit: puts the label on the nearest wire end to its
+                        target, 100 mil by default)
       delete_at         kind (wire, net_label, power_port, junction, no_erc,
                         port, note), x, y, [text]: removes a wire passing
                         through the point, or the object located there
@@ -2312,8 +2342,27 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     Returns:
         str: JSON with how many operations were applied and the errors.
     """
+    import configparser
+    import zipfile
+    from xml.etree import ElementTree
+    import dblib
     import sch_edit
 
+    # A part from a database library: its row gives the symbol and the link
+    expanded = []
+    for i, op in enumerate(operations or []):
+        if isinstance(op, dict) and op.get("op") == "place_component" and (op.get("dblib") or op.get("part_number")):
+            if not (op.get("dblib") and op.get("part_number")) or op.get("library") or op.get("symbol"):
+                return json.dumps({"success": False, "error": f"operation {i + 1}: a DbLib part takes dblib and "
+                                                              f"part_number (and table), not library or symbol"})
+            try:
+                # In a thread: the DbLib's table and library folders may be on a slow share
+                op = await asyncio.to_thread(dblib.place_operation, dict(op, dblib=long_path(op["dblib"])))
+            except (dblib.DbLibError, OSError, KeyError, IndexError, ValueError, configparser.Error,
+                    ElementTree.ParseError, zipfile.BadZipFile) as e:
+                return json.dumps({"success": False, "error": f"operation {i + 1}: {e}"})
+        expanded.append(op)
+    operations = expanded
     # Long paths, or Altium opens a second copy of a sheet or library that
     # is already open
     sheet_path = long_path(sheet_path)
