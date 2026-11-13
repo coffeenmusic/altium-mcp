@@ -6586,6 +6586,177 @@ async def get_erc_violations(ctx: Context, compile: bool = True, project_path: s
                                  "ERC violations")
 
 
+async def _project_file(project_path: str):
+    """(path of the .PrjPcb, error): project_path, or the focused project's."""
+    if project_path:
+        path, error = _project_path(project_path)
+        return (None, error) if error else (path, "")
+    info, error = await _bridge_json("get_project_info", {})
+    if error:
+        return None, error
+    path = info.get("project_path", "")
+    if not path.lower().endswith(".prjpcb") or not os.path.isfile(path):
+        return None, f"not a .PrjPcb file: {path or '(no project focused)'}"
+    return path, ""
+
+
+async def _reopen_project(path: str, docs: list, reply: dict) -> None:
+    """Open a project closed by close_project_for_edit again, with the
+    documents that were open; the outcome goes into reply."""
+    write_altium_text(EXCHANGE_DIR / "reopen_documents.txt", "\n".join(docs) + "\n")
+    reopened, error = await _bridge_json("reopen_project", {"project_path": path})
+    if error:
+        reply["reopen_error"] = f"{error}; open the project again by hand"
+        return
+    reply["reopened"] = reopened.get("reopened", [])
+    missing = [d for d in docs if d not in reply["reopened"]]
+    if missing:
+        reply["not_reopened"] = missing
+
+
+def _replace_file(path: str, data: bytes) -> None:
+    """Write data to path through a temporary file in the same folder, so a
+    failed write leaves the old file whole."""
+    folder, name = os.path.split(path)
+    fd, tmp = tempfile.mkstemp(prefix=name + ".", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@_tool(read_only=True)
+async def get_project_options(ctx: Context, project_path: str = "") -> str:
+    """
+    Read a project's options from its .PrjPcb, by readable name.
+
+    Groups: cross_references (auto cross references and their styles),
+    netlist (net naming, single-pin nets, hierarchy mode), multichannel
+    (room naming, designator format), class_generation (classes and rooms
+    from directives, net classes for buses and components), sheets (per
+    sheet: component_class, room, net_classes, class_cluster: what the
+    sheet generates for the PCB) and comparison (the comparator's matching
+    options). Numeric styles are given as stored: their meaning is the order
+    of the choices in Project Options. The cross-reference flags ports,
+    cross_sheet_connectors and sheet_entries are not booleans; they are
+    given as the stored number, whose meaning is not mapped here.
+
+    Reads the file: options changed in Altium and not yet saved are not seen.
+
+    Args:
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+
+    Returns:
+        str: JSON with project_path and the groups above
+    """
+    import project_options
+
+    path, error = await _project_file(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    return json.dumps({"project_path": path, **project_options.read_options(Path(path).read_bytes())}, indent=1)
+
+
+@_tool()
+async def set_project_options(ctx: Context, changes: dict, project_path: str = "", dry_run: bool = False) -> str:
+    """
+    Change a project's options in its .PrjPcb, e.g. turn off cross
+    references, or stop a sheet from generating a room.
+
+    changes uses get_project_options' names:
+        {"cross_references": {"auto_cross_references": false},
+         "netlist": {"single_pin_nets": true},
+         "sheets": {"Power.SchDoc": {"room": false}, "SCH_Heater\\*": {"component_class": true}},
+         "raw": [{"section": "Design", "key": "SomeKey", "value": "1"}]}
+    Sheets are matched by file name or path; wildcards work. "raw" sets any
+    key of any section, for options without a readable name.
+
+    Altium keeps an open project's options in memory and would write them
+    back, so when the project is open it is closed (with its open documents),
+    the file is read and written, and the project and those documents are
+    opened again. Refused when any of them has unsaved changes; nothing is
+    written when Altium did not close the project. The project is found in
+    Altium by its file, so a UNC path matches the project opened through a
+    mapped drive, and the other way round. The file is written to a
+    temporary file and then replaced, in the encoding it was read in.
+
+    The cross-reference flags ports, cross_sheet_connectors and
+    sheet_entries are whole numbers as Altium stores them (not booleans);
+    read the current value with get_project_options first.
+
+    Args:
+        changes (dict): The changes, as above.
+        project_path (str): Full path of the .PrjPcb; default the focused project.
+        dry_run (bool): Report what would change and touch nothing.
+
+    Returns:
+        str: JSON with success, applied [{option, from, to}], and when the
+             project was open, closed_and_reopened and reopened documents
+    """
+    import project_options
+
+    path, error = await _project_file(project_path)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    # Checked on the file as it is now, so bad input never closes the project
+    _, applied, errors = project_options.change_options(Path(path).read_bytes(), changes)
+    if errors:
+        return json.dumps({"success": False, "errors": errors, "note": "Nothing was changed."}, indent=1)
+    if not applied or dry_run:
+        return json.dumps({"success": True, "dry_run": dry_run, "applied": applied,
+                           **({} if applied else {"note": "The options already have these values."})}, indent=1)
+
+    closed, error = await _bridge_json("close_project_for_edit", {"project_path": path})
+    if not error and not closed.get("was_open"):
+        # Open under another name for the same file (a mapped drive for a
+        # UNC path, or the other way round): close it by Altium's name
+        same = project_options.match_open_project(path, closed.get("open_projects") or [])
+        if same:
+            closed, error = await _bridge_json("close_project_for_edit", {"project_path": same})
+    if error:
+        return json.dumps({"success": False, "error": error, "note": "Nothing was changed."})
+    was_open = bool(closed.get("was_open"))
+    altium_path = closed.get("project_path") or path
+    docs = closed.get("open_documents", [])
+    if was_open and not closed.get("closed"):
+        # Writing now would be overwritten by Altium's copy
+        reply = {"success": False, "project_path": path,
+                 "error": "Altium did not close the project, so the file was not written. Nothing was changed."}
+        await _reopen_project(altium_path, docs, reply)
+        return json.dumps(reply, indent=1)
+    reply = {"success": True, "project_path": path}
+    # Read and change the file only now that Altium has let go of it: closing
+    # may have written it. The project is opened again whatever happens here.
+    try:
+        new, applied, errors = project_options.change_options(Path(path).read_bytes(), changes)
+        if errors:
+            reply = {"success": False, "project_path": path, "errors": errors, "note": "Nothing was changed."}
+        else:
+            reply["applied"] = applied
+            if applied:
+                _replace_file(path, new)
+            else:
+                reply["note"] = "The options already have these values."
+    except OSError as e:
+        reply = {"success": False, "project_path": path,
+                 "error": f"could not read or write the project file: {e}. The file was not changed."}
+    finally:
+        if was_open:
+            reply["closed_and_reopened"] = True
+            await _reopen_project(altium_path, docs, reply)
+    return json.dumps(reply, indent=1)
+
+
+# Closes and reopens the project: a timeout leaves the state unknown
+MUTATING_COMMANDS.update({"close_project_for_edit", "reopen_project"})
+
+
 @_tool(read_only=True)
 async def get_board_summary(ctx: Context) -> str:
     """

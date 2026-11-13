@@ -1735,6 +1735,11 @@ begin
             Result := ExecuteGetProjectComponents(RequestData);
         'get_erc_violations':
             Result := ExecuteGetERCViolations(RequestData);
+        'close_project_for_edit':
+            Result := CloseProjectForEdit(RequestText(RequestData, 'project_path', ''));
+        'reopen_project':
+            Result := ReopenProject(RequestText(RequestData, 'project_path', ''),
+                                    ROOT_DIR + 'reopen_documents.txt');
         'get_board_summary':
             Result := GetBoardSummary(ROOT_DIR);
         'create_polygon_pour':

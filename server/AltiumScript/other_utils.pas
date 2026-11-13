@@ -457,7 +457,9 @@ begin
        (CommandName = 'get_project_info') or
        (CommandName = 'get_project_components') or
        (CommandName = 'get_erc_violations') or
-       (CommandName = 'focus_document') then
+       (CommandName = 'focus_document') or
+       (CommandName = 'close_project_for_edit') or
+       (CommandName = 'reopen_project') then
     begin
         Result := True;
         Exit;
@@ -1776,5 +1778,146 @@ begin
     finally
         CompArray.Free;
         ResultProps.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- project file edits
+//
+// Altium keeps an open project's options in memory and writes them back on
+// save, so a change made to the .PrjPcb while the project is open is lost or
+// fights a reload. A tool that edits the file closes the project first
+// (CloseProjectForEdit), writes, and opens it again (ReopenProject).
+
+// The open project whose file is ProjectPath, or nil (never opens it)
+function OpenProjectByPath(ProjectPath: String): IProject;
+var
+    I : Integer;
+begin
+    Result := nil;
+    for I := 0 to GetWorkspace.DM_ProjectCount - 1 do
+        if SameText(NormalizePath(GetWorkspace.DM_Projects(I).DM_ProjectFullPath), NormalizePath(ProjectPath)) then
+        begin
+            Result := GetWorkspace.DM_Projects(I);
+            Exit;
+        end;
+end;
+
+// Close the project and its open documents, without saving: refused when
+// any of them has unsaved changes. Reports whether the project was open,
+// whether it closed, its path as Altium spells it, and which of its
+// documents were open, so they can be opened again. The project document is
+// looked up by Altium's own path (DM_ProjectFullPath), not the caller's
+// spelling, which may differ in case or form. When no open project has that
+// path, the open projects' paths are listed (open_projects), so the caller
+// can find the same file under another name (a UNC path and a mapped drive).
+function CloseProjectForEdit(ProjectPath: String): String;
+var
+    Project : IProject;
+    PrjDoc  : IServerDocument;
+    I       : Integer;
+    Path, PrjPath : String;
+    OpenDocs, Unsaved, Props, Projects : TStringList;
+begin
+    Project := OpenProjectByPath(ProjectPath);
+    Props := TStringList.Create;
+    OpenDocs := TStringList.Create;
+    Unsaved := TStringList.Create;
+    Projects := TStringList.Create;
+    try
+        if Project = nil then
+        begin
+            AddJSONBoolean(Props, 'was_open', False);
+            Props.Add(BuildJSONArray(OpenDocs, 'open_documents'));
+            for I := 0 to GetWorkspace.DM_ProjectCount - 1 do
+                Projects.Add('"' + JSONEscapeString(GetWorkspace.DM_Projects(I).DM_ProjectFullPath) + '"');
+            Props.Add(BuildJSONArray(Projects, 'open_projects'));
+            Result := BuildJSONObject(Props);
+            Exit;
+        end;
+        PrjPath := Project.DM_ProjectFullPath;
+        PrjDoc := Client.GetDocumentByPath(PrjPath);
+        if PrjDoc = nil then
+            PrjDoc := FindOpenDocument(PrjPath);
+        if PrjDoc <> nil then
+            if DocumentModified(PrjDoc) then
+                Unsaved.Add(PrjPath);
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            if not Client.IsDocumentOpen(Path) then Continue;
+            OpenDocs.Add('"' + JSONEscapeString(Path) + '"');
+            if DocumentModified(Client.GetDocumentByPath(Path)) then
+                Unsaved.Add(Path);
+        end;
+        if Unsaved.Count > 0 then
+        begin
+            Result := 'ERROR: these have unsaved changes in Altium; save or discard them first: ' +
+                      StringReplace(Trim(Unsaved.Text), #13#10, '; ', REPLACEALL);
+            Exit;
+        end;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            if Client.IsDocumentOpen(Path) then
+                Client.CloseDocument(Client.GetDocumentByPath(Path));
+        end;
+        // Project is not used past this point: closing it frees it
+        Project := nil;
+        if PrjDoc <> nil then
+            Client.CloseDocument(PrjDoc);
+        AddJSONBoolean(Props, 'was_open', True);
+        AddJSONProperty(Props, 'project_path', PrjPath);
+        AddJSONBoolean(Props, 'closed', OpenProjectByPath(PrjPath) = nil);
+        Props.Add(BuildJSONArray(OpenDocs, 'open_documents'));
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+        OpenDocs.Free;
+        Unsaved.Free;
+        Projects.Free;
+    end;
+end;
+
+// Open the project again, then the documents listed in DocsPath (one path
+// per line) that were open before
+function ReopenProject(ProjectPath, DocsPath: String): String;
+var
+    Docs, Props, Reopened : TStringList;
+    I    : Integer;
+    Kind, Ext : String;
+    Doc  : IServerDocument;
+begin
+    Docs := TStringList.Create;
+    Props := TStringList.Create;
+    Reopened := TStringList.Create;
+    try
+        GetWorkspace.DM_OpenProject(ProjectPath, True);
+        if FileExists(DocsPath) then Docs.LoadFromFile(DocsPath);
+        for I := 0 to Docs.Count - 1 do
+        begin
+            if Trim(Docs[I]) = '' then Continue;
+            Ext := UpperCase(ExtractFileExt(Docs[I]));
+            Kind := '';
+            if Ext = '.SCHDOC' then Kind := 'SCH'
+            else if Ext = '.PCBDOC' then Kind := 'PCB'
+            else if Ext = '.OUTJOB' then Kind := 'OUTPUTJOB'
+            else if Ext = '.SCHLIB' then Kind := 'SCHLIB'
+            else if Ext = '.PCBLIB' then Kind := 'PCBLIB'
+            else if Ext = '.DBLIB' then Kind := 'DATABASELIB';
+            if Kind = '' then Continue;
+            Doc := Client.OpenDocument(Kind, Docs[I]);
+            if Doc <> nil then
+            begin
+                Client.ShowDocument(Doc);
+                Reopened.Add('"' + JSONEscapeString(Docs[I]) + '"');
+            end;
+        end;
+        AddJSONBoolean(Props, 'project_open', OpenProjectByPath(ProjectPath) <> nil);
+        Props.Add(BuildJSONArray(Reopened, 'reopened'));
+        Result := BuildJSONObject(Props);
+    finally
+        Docs.Free;
+        Props.Free;
+        Reopened.Free;
     end;
 end;
