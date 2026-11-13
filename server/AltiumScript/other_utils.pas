@@ -457,7 +457,9 @@ begin
        (CommandName = 'get_project_info') or
        (CommandName = 'get_project_components') or
        (CommandName = 'get_erc_violations') or
-       (CommandName = 'focus_document') then
+       (CommandName = 'focus_document') or
+       (CommandName = 'get_variant_targets') or
+       (CommandName = 'apply_variant_edits') then
     begin
         Result := True;
         Exit;
@@ -1776,5 +1778,279 @@ begin
     finally
         CompArray.Free;
         ResultProps.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- variants
+//
+// A variation in a .PrjPcb names its component by physical designator
+// (R1_CH2 in a channel) and by UniqueId, the path of sheet-symbol ids down to
+// the component (\SYMBOL\SYMBOL\COMPONENT). IComponent.DM_UniqueId of the
+// compiled project gives that same path. An alternate part also appears in
+// the flattened document as its original, with '@<variant>' on its id; those
+// are skipped.
+
+// The project's components with what a variation needs, one string each:
+// physical|logical|unique id|sheet. Also says whether the project file has
+// unsaved changes in Altium (its variants on disk may then be stale).
+function GetVariantTargets(ProjectPath: String): String;
+var
+    Project : IProject;
+    Flat    : IDocument;
+    Comp    : IComponent;
+    I       : Integer;
+    Id, Err : String;
+    Items, Props, Names : TStringList;
+begin
+    Project := TargetProject(ProjectPath, Err);
+    if Project = nil then
+    begin
+        Result := 'ERROR: ' + Err;
+        Exit;
+    end;
+    Project.DM_Compile;
+    Flat := Project.DM_DocumentFlattened;
+    if Flat = nil then
+    begin
+        Result := 'ERROR: the project did not compile';
+        Exit;
+    end;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    Names := TStringList.Create;
+    try
+        for I := 0 to Flat.DM_ComponentCount - 1 do
+        begin
+            Comp := Flat.DM_Components(I);
+            Id := Comp.DM_UniqueId;
+            if Pos('@', Id) > 0 then Continue;
+            Items.Add('"' + JSONEscapeString(Comp.DM_PhysicalDesignator + '|' + Comp.DM_LogicalDesignator + '|' +
+                      Id + '|' + ExtractFileName(Comp.DM_OwnerDocumentFullPath)) + '"');
+        end;
+        for I := 0 to Project.DM_ProjectVariantCount - 1 do
+            Names.Add('"' + JSONEscapeString(Project.DM_ProjectVariants(I).DM_Description) + '"');
+        AddJSONProperty(Props, 'project_path', Project.DM_ProjectFullPath);
+        AddJSONBoolean(Props, 'project_unsaved',
+                       DocumentModified(Client.GetDocumentByPath(Project.DM_ProjectFullPath)));
+        Props.Add(BuildJSONArray(Names, 'variants'));
+        Props.Add(BuildJSONArray(Items, 'components'));
+        Result := BuildJSONObject(Props);
+    finally
+        Items.Free;
+        Props.Free;
+        Names.Free;
+    end;
+end;
+
+function FindProjectVariant(Project: IProject; Name: String): IProjectVariant;
+var
+    I : Integer;
+begin
+    Result := nil;
+    for I := 0 to Project.DM_ProjectVariantCount - 1 do
+        if SameText(Project.DM_ProjectVariants(I).DM_Description, Name) then
+        begin
+            Result := Project.DM_ProjectVariants(I);
+            Exit;
+        end;
+end;
+
+// Index of the variation of UniqueId in ProjVariant, or -1
+function FindVariationIndex(ProjVariant: IProjectVariant; UniqueId: String): Integer;
+var
+    I : Integer;
+begin
+    Result := -1;
+    for I := 0 to ProjVariant.DM_VariationCount - 1 do
+        if SameText(ProjVariant.DM_Variations(I).DM_UniqueId, UniqueId) then
+        begin
+            Result := I;
+            Exit;
+        end;
+end;
+
+// The variation of UniqueId, made (with Kind) when there is none
+function EnsureVariation(ProjVariant: IProjectVariant; UniqueId, Physical: String; Kind: Integer): IComponentVariation;
+var
+    I : Integer;
+begin
+    I := FindVariationIndex(ProjVariant, UniqueId);
+    if I >= 0 then
+    begin
+        Result := ProjVariant.DM_Variations(I);
+        Exit;
+    end;
+    Result := ProjVariant.DM_AddComponentVariation;
+    Result.DM_SetPhysicalDesignator(Physical);
+    Result.DM_SetUniqueId(UniqueId);
+    Result.DM_SetVariationKind(Kind);
+end;
+
+// One operation of the spec (fields split by '|'):
+//   NEW|name                          add a variant
+//   RENAME|variant|name               rename a variant
+//   KIND|variant|uid|physical|kind    set (or add) a variation's kind: 0 none, 1 not fitted
+//   DEL|variant|uid                   remove a variation: the part is fitted as designed
+//   PARAM|variant|uid|physical|name|value   vary a parameter (adds a kind 0 variation if needed)
+//   UNPARAM|variant|uid|name          remove a parameter variation
+function ApplyVariantEdit(Project: IProject; Rec: String; var Msg: String): Boolean;
+var
+    Kind     : String;
+    ProjVariant : IProjectVariant;
+    CV       : IComponentVariation;
+    PV       : IParameterVariation;
+    I        : Integer;
+begin
+    Result := False;
+    Msg := '';
+    Kind := GetFieldFromPipeString(Rec, 0);
+    if Kind = 'NEW' then
+    begin
+        if FindProjectVariant(Project, GetFieldFromPipeString(Rec, 1)) <> nil then
+        begin
+            Msg := 'a variant named ' + GetFieldFromPipeString(Rec, 1) + ' exists';
+            Exit;
+        end;
+        Project.DM_AddProjectVariant;
+        Project.DM_ProjectVariants(Project.DM_ProjectVariantCount - 1).DM_SetDescription(GetFieldFromPipeString(Rec, 1));
+        Result := True;
+        Exit;
+    end;
+    ProjVariant := FindProjectVariant(Project, GetFieldFromPipeString(Rec, 1));
+    if ProjVariant = nil then
+    begin
+        Msg := 'no variant named ' + GetFieldFromPipeString(Rec, 1);
+        Exit;
+    end;
+    if Kind = 'RENAME' then
+        ProjVariant.DM_SetDescription(GetFieldFromPipeString(Rec, 2))
+    else if Kind = 'KIND' then
+    begin
+        CV := EnsureVariation(ProjVariant, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3),
+                              StrToInt(GetFieldFromPipeString(Rec, 4)));
+        CV.DM_SetVariationKind(StrToInt(GetFieldFromPipeString(Rec, 4)));
+    end
+    else if Kind = 'DEL' then
+    begin
+        I := FindVariationIndex(ProjVariant, GetFieldFromPipeString(Rec, 2));
+        if I < 0 then
+        begin
+            Msg := 'no variation of ' + GetFieldFromPipeString(Rec, 2);
+            Exit;
+        end;
+        ProjVariant.DM_RemoveComponentVariation(I);
+    end
+    else if Kind = 'PARAM' then
+    begin
+        CV := EnsureVariation(ProjVariant, GetFieldFromPipeString(Rec, 2), GetFieldFromPipeString(Rec, 3), 0);
+        PV := CV.DM_FindParameterVariation(GetFieldFromPipeString(Rec, 4));
+        if PV = nil then
+        begin
+            // A parameter variation must get its name: one without is saved
+            // as an empty row
+            PV := CV.DM_AddParameterVariation;
+            PV.DM_SetParameterName(GetFieldFromPipeString(Rec, 4));
+        end;
+        PV.DM_SetVariedValue(GetFieldFromPipeString(Rec, 5));
+    end
+    else if Kind = 'UNPARAM' then
+    begin
+        I := FindVariationIndex(ProjVariant, GetFieldFromPipeString(Rec, 2));
+        if I < 0 then
+        begin
+            Msg := 'no variation of ' + GetFieldFromPipeString(Rec, 2);
+            Exit;
+        end;
+        CV := ProjVariant.DM_Variations(I);
+        if CV.DM_FindParameterVariation(GetFieldFromPipeString(Rec, 3)) = nil then
+        begin
+            Msg := 'no variation of parameter ' + GetFieldFromPipeString(Rec, 3);
+            Exit;
+        end;
+        CV.DM_RemoveParameterVariationByName(GetFieldFromPipeString(Rec, 3));
+    end
+    else
+    begin
+        Msg := 'unknown operation ' + Kind;
+        Exit;
+    end;
+    Result := True;
+end;
+
+// Apply the variant spec in SpecPath to the project and save it through
+// Altium, so the open project and the file agree. Refused when the project
+// file already has unsaved changes in Altium: saving would write those too.
+// Stops at the first line that fails and saves nothing, so the file gets
+// all of an edit or none of it. What ran before the failure stays in Altium's copy,
+// which is marked modified so the user can see it and discard it.
+function ApplyVariantEdits(ProjectPath, SpecPath: String): String;
+var
+    Project   : IProject;
+    ServerDoc : IServerDocument;
+    Spec, Errors, Props : TStringList;
+    I, Applied : Integer;
+    Ok, Saved : Boolean;
+    Msg, Err  : String;
+begin
+    Project := TargetProject(ProjectPath, Err);
+    if Project = nil then
+    begin
+        Result := 'ERROR: ' + Err;
+        Exit;
+    end;
+    ServerDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
+    if ServerDoc = nil then
+    begin
+        Result := 'ERROR: the project file is not open in Altium: ' + Project.DM_ProjectFullPath;
+        Exit;
+    end;
+    if DocumentModified(ServerDoc) then
+    begin
+        Result := 'ERROR: the project has unsaved changes in Altium; save or discard them first, '
+                  + 'since saving the variants would write them too';
+        Exit;
+    end;
+    Spec := TStringList.Create;
+    Errors := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Spec.LoadFromFile(SpecPath);
+        Applied := 0;
+        for I := 0 to Spec.Count - 1 do
+        begin
+            if Trim(Spec[I]) = '' then Continue;
+            Ok := False;
+            try
+                Ok := ApplyVariantEdit(Project, Spec[I], Msg);
+            except
+                Msg := 'failed: ' + ExceptionMessage;
+            end;
+            if not Ok then
+            begin
+                Errors.Add('"' + JSONEscapeString('line ' + IntToStr(I + 1) + ': ' + Msg) + '"');
+                Break;
+            end;
+            Applied := Applied + 1;
+        end;
+        Saved := False;
+        if Applied > 0 then
+        begin
+            ServerDoc.SetModified(True);
+            if Errors.Count = 0 then
+            begin
+                ServerDoc.DoFileSave('');
+                Saved := not DocumentModified(ServerDoc);
+            end;
+        end;
+        AddJSONBoolean(Props, 'success', Errors.Count = 0);
+        AddJSONProperty(Props, 'project_path', Project.DM_ProjectFullPath);
+        AddJSONInteger(Props, 'applied', Applied);
+        AddJSONBoolean(Props, 'saved', Saved);
+        Props.Add(BuildJSONArray(Errors, 'errors'));
+        Result := BuildJSONObject(Props);
+    finally
+        Spec.Free;
+        Errors.Free;
+        Props.Free;
     end;
 end;

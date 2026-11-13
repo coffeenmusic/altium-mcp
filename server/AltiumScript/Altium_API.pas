@@ -1735,6 +1735,11 @@ begin
             Result := ExecuteGetProjectComponents(RequestData);
         'get_erc_violations':
             Result := ExecuteGetERCViolations(RequestData);
+        'get_variant_targets':
+            Result := GetVariantTargets(RequestText(RequestData, 'project_path', ''));
+        'apply_variant_edits':
+            Result := ApplyVariantEdits(RequestText(RequestData, 'project_path', ''),
+                                        ROOT_DIR + 'variant_edit_spec.txt');
         'get_board_summary':
             Result := GetBoardSummary(ROOT_DIR);
         'create_polygon_pour':
