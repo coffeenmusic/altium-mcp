@@ -457,6 +457,8 @@ begin
        (CommandName = 'get_project_info') or
        (CommandName = 'get_project_components') or
        (CommandName = 'get_erc_violations') or
+       (CommandName = 'list_open_documents') or
+       (CommandName = 'reload_document') or
        (CommandName = 'focus_document') then
     begin
         Result := True;

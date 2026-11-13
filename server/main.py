@@ -6463,6 +6463,53 @@ async def _bridge_json(command: str, params: dict, timeout: Optional[float] = No
 
 
 @_tool(read_only=True)
+async def list_open_documents(ctx: Context) -> str:
+    """
+    List the documents open in Altium.
+
+    Returns:
+        str: JSON with documents [{path, kind, modified, active}]: kind as
+             Altium names it (PCB, SCH, PCBLIB, ...), modified when it has
+             unsaved changes, active for the one in front
+    """
+    result, error = await _bridge_json("list_open_documents", {})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    return json.dumps(result, indent=2)
+
+
+@_tool()
+async def reload_document(ctx: Context, path: str, discard_changes: bool = False) -> str:
+    """
+    Close an open document and open it again from disk, e.g. after the file
+    was replaced or edited outside Altium. Altium saves its own copy over the
+    file otherwise, so never change a file on disk while it is open without
+    reloading it here.
+
+    Args:
+        path (str): Full path of the open document
+        discard_changes (bool): Reload even when the document has unsaved
+            changes, dropping them. Default false: such a document is refused.
+
+    Returns:
+        str: JSON with path, kind, and the file's size (file_size) and
+             modification time (file_mtime, ISO 8601) as it was loaded
+    """
+    path = long_path(path)
+    result, error = await _bridge_json("reload_document", {
+        "path": path, "discard_changes": "true" if discard_changes else "false"})
+    if error:
+        return json.dumps({"success": False, "error": error})
+    try:
+        stat = os.stat(result.get("path") or path)
+        result["file_size"] = stat.st_size
+        result["file_mtime"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stat.st_mtime))
+    except OSError:
+        pass
+    return json.dumps(result, indent=2)
+
+
+@_tool(read_only=True)
 async def get_project_info(ctx: Context) -> str:
     """
     Get the focused Altium project: parameters, documents and variants.
