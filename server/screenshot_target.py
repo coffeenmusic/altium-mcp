@@ -30,6 +30,8 @@ KINDS = ("current", "document", "dialog", "panel", "region")
 FRAME_CLASSES = {"TDocumentForm", "TApplication"}
 # Smaller than this, a top-level window is a tooltip or a hint, not a dialog
 MIN_DIALOG_SIZE = 60
+# A panel undocked from Altium's main window is a top-level window of this class
+FLOATING_PANEL_CLASSES = {"TClientBarControl"}
 # Altium's document kinds by file extension
 DOCUMENT_KINDS = {".schdoc": "SCH", ".pcbdoc": "PCB", ".schlib": "SCHLIB",
                   ".pcblib": "PCBLIB", ".outjob": "OUTPUTJOB"}
@@ -293,6 +295,76 @@ def covering_error(programs: Sequence[str]) -> str:
     shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
     return (f"Nothing was captured: Altium is not in front, a window of {shown} lies over "
             f"the area. Bring Altium to the front, or move that window away, and try again.")
+
+
+def altium_windows(top_windows: Sequence[Win], frame_hwnd: int, frame_enabled: bool) -> List[Dict]:
+    """Altium's own windows besides its main frame, topmost first, as
+    {hwnd, class, title, rect, kind, modal}: kind "panel" for a floating
+    panel, "dialog" for anything else. A dialog is modal when the main frame
+    is disabled, which is what a modal dialog does to the window it belongs
+    to. Tooltips, hints and Altium's hidden helper windows are left out.
+    The titles are Altium's own, so they may be reported."""
+    out = []
+    for w in top_windows:
+        if w.hwnd == frame_hwnd or w.cls in FRAME_CLASSES \
+                or w.width < MIN_DIALOG_SIZE or w.height < MIN_DIALOG_SIZE:
+            continue
+        panel = w.cls in FLOATING_PANEL_CLASSES
+        out.append({"hwnd": w.hwnd, "class": w.cls, "title": w.text, "rect": list(w.rect),
+                    "kind": "panel" if panel else "dialog", "modal": not panel and not frame_enabled})
+    return out
+
+
+def _area(r: Rect) -> int:
+    return max(0, r[2] - r[0]) * max(0, r[3] - r[1])
+
+
+def altium_windows_over(rect: Rect, windows: Sequence[Dict]) -> Tuple[Optional[str], List[Dict]]:
+    """(why a capture of rect is refused, or None; the floating panels over it).
+
+    Altium's own windows are above its main frame, so a screen copy shows
+    any of them that lies over the area. A dialog there refuses the capture:
+    it is what Altium is showing, not the view asked for. A floating panel
+    only gets a warning, with the share of the capture it covers in
+    covers_percent: get_screenshot can hide it for the capture instead.
+    """
+    over = []
+    for w in windows:
+        part = clip(tuple(w["rect"]), rect)
+        if part is not None:
+            over.append(dict(w, covers_percent=round(100 * _area(part) / max(1, _area(rect)))))
+    dialogs = [w for w in over if w["kind"] != "panel"]
+    if dialogs:
+        d = dialogs[0]
+        return (f"Nothing was captured: Altium's {'modal ' if d['modal'] else ''}dialog "
+                f"'{d['title']}' ({d['class']}) lies over the area. Capture it with target=\"dialog\", "
+                f"or close it with dismiss_dialog, and try again.", [])
+    return None, over
+
+
+def panel_warning(panel: Dict) -> str:
+    return (f"Altium's floating panel '{panel['title'] or panel['class']}' covers about "
+            f"{panel['covers_percent']}% of the capture. Pass hide_floating_panels=true to hide it "
+            f"for the capture, or dock it in Altium.")
+
+
+def dismissable(windows: Sequence[Dict], hwnd_or_title) -> Tuple[Optional[Dict], str]:
+    """(the Altium dialog to dismiss, "") or (None, why not). Only a dialog
+    from altium_windows: never the main frame, a panel or another program."""
+    dialogs = [w for w in windows if w["kind"] == "dialog"]
+    try:
+        found = [w for w in dialogs if w["hwnd"] == int(str(hwnd_or_title).strip())]
+    except ValueError:
+        found = []
+    if not found:   # a title, which may also be all digits
+        want = _norm(str(hwnd_or_title))
+        found = [w for w in dialogs if _norm(w["title"]) == want]
+    if len(found) == 1:
+        return found[0], ""
+    open_ = ", ".join(f"{w['hwnd']} '{w['title']}'" for w in dialogs) or "none"
+    if not found:
+        return None, f"No open Altium dialog is {hwnd_or_title!r}. Open dialogs: {open_}"
+    return None, f"Several Altium dialogs are titled {hwnd_or_title!r}; give the hwnd. Open dialogs: {open_}"
 
 
 def is_blank(img) -> bool:
