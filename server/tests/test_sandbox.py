@@ -363,5 +363,31 @@ class DialogTest(unittest.TestCase):
         self.assertFalse(sandbox.Dialog(6, "#32770", "Save As", "File name:").is_error_box)
 
 
+class BoardHintTest(unittest.TestCase):
+    def hints(self, script):
+        sp = sandbox.split_var_block(script)
+        return sandbox.board_hints(sp.body, sp.body_offset)
+
+    def test_board_used_without_nil_check(self):
+        script = ("var\n  Board : IPCB_Board;\n  It : IPCB_BoardIterator;\n"
+                  "Board := PCBServer.GetCurrentPCBBoard;\nIt := Board.BoardIterator_Create;")
+        hints = self.hints(script)
+        self.assertEqual(len(hints), 1)
+        self.assertIn("line 4", hints[0])
+        self.assertIn("CurrentBoard(0)", hints[0])
+        self.assertEqual(len(self.hints("I1 := PCBServer.GetCurrentPCBBoard.XOrigin;")), 1)
+
+    def test_nil_checked_or_helper_passes(self):
+        for check in ("if Board = nil then Exit;", "if nil <> Board then I1 := 1;",
+                      "if not Assigned(Board) then Exit;", "if board <> NIL then I1 := 1;"):
+            self.assertEqual(self.hints("Board := PCBServer.GetCurrentPCBBoard;\n" + check), [], check)
+        self.assertEqual(self.hints("Board := CurrentBoard(0);\nI1 := Board.XOrigin;"), [])
+        self.assertEqual(self.hints("S1 := 'PCBServer.GetCurrentPCBBoard.X';\n// GetCurrentPCBBoard.X"), [])
+
+    def test_template_defines_board_helpers(self):
+        for name in ("CurrentBoard", "BoardByPath", "BX", "BY"):
+            self.assertRegex(TEMPLATE, r"(?m)^function " + name + r"\(")
+
+
 if __name__ == "__main__":
     unittest.main()

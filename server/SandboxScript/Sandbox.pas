@@ -184,6 +184,99 @@ begin
     end;
 end;
 
+// The focused board, or nil with a log line naming the document that is
+// focused instead. PCBServer.GetCurrentPCBBoard is nil when no PCB view is
+// active (run_drc leaves Altium's report in front), and a call on nil then
+// fails far from the cause, as "Undeclared identifier: <method>".
+// The argument is unused: CurrentBoard(0).
+function CurrentBoard(Dummy : Integer) : IPCB_Board;
+begin
+    Result := nil;
+    if PCBServer <> nil then Result := PCBServer.GetCurrentPCBBoard;
+    if Result <> nil then Exit;
+    if Client.CurrentView = nil then
+        SandboxLog('CurrentBoard: no PCB view is active, and no document is focused')
+    else if Client.CurrentView.OwnerDocument = nil then
+        SandboxLog('CurrentBoard: no PCB view is active, and no document is focused')
+    else
+        SandboxLog('CurrentBoard: no PCB view is active: the focused document is ''' +
+                   ExtractFileName(Client.CurrentView.OwnerDocument.FileName) + '''');
+end;
+
+// A path as compared with an open document's: lower case, backslashes, no
+// doubled separators (as NormalizedPath in the production units)
+function SbxNormalPath(Path : String) : String;
+var
+    Lead : String;
+begin
+    Result := LowerCase(StringReplace(Trim(Path), '/', '\', REPLACEALL));
+    Lead := '';
+    if Copy(Result, 1, 2) = '\\' then
+    begin
+        Lead := '\\';
+        Result := Copy(Result, 3, Length(Result));
+    end;
+    while Pos('\\', Result) > 0 do
+        Result := StringReplace(Result, '\\', '\', REPLACEALL);
+    Result := Lead + Result;
+end;
+
+// The board of the .PcbDoc at Path, brought to the front and opened first if
+// it is not open; nil with a log line when there is none. An open document
+// is found whatever the path's spelling: opening it again would reload it
+// from disk and drop its unsaved changes.
+function BoardByPath(Path : String) : IPCB_Board;
+var
+    I, J : Integer;
+    Want : String;
+    D    : IServerDocument;
+begin
+    Result := nil;
+    D := nil;
+    Want := SbxNormalPath(Path);
+    for I := 0 to Client.Count - 1 do
+        if (D = nil) and (Client.ServerModule[I] <> nil) then
+            for J := 0 to Client.ServerModule[I].DocumentCount - 1 do
+                if (D = nil) and (SbxNormalPath(Client.ServerModule[I].Documents[J].FileName) = Want) then
+                    D := Client.ServerModule[I].Documents[J];
+    if D = nil then
+    begin
+        if not FileExists(Path) then
+        begin
+            SandboxLog('BoardByPath: no such file ' + Path);
+            Exit;
+        end;
+        D := Client.OpenDocument('PCB', Path);
+    end;
+    if D <> nil then
+    begin
+        Client.ShowDocument(D);
+        if PCBServer <> nil then Result := PCBServer.GetPCBBoardByPath(D.FileName);
+    end;
+    if Result = nil then SandboxLog('BoardByPath: no board at ' + Path);
+end;
+
+// Mils from the focused board's origin, in internal units: BX(100) is 100 mil
+// right of the origin, BY(50) 50 mil above it. They need a focused board:
+// without one CurrentBoard logs it and the origin is taken as 0
+function BX(Mils : Double) : Integer;
+var
+    Board : IPCB_Board;
+begin
+    Result := Round(Mils * 10000);
+    Board := CurrentBoard(0);
+    if Board <> nil then Result := Result + Board.XOrigin;
+end;
+
+function BY(Mils : Double) : Integer;
+var
+    Board : IPCB_Board;
+begin
+    Result := Round(Mils * 10000);
+    Board := CurrentBoard(0);
+    if Board <> nil then Result := Result + Board.YOrigin;
+end;
+
 procedure Run;
 var
     ResultText : String;
