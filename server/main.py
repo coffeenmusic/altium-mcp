@@ -1249,7 +1249,9 @@ async def get_pcb_layers(ctx: Context) -> str:
     return json.dumps(layers_data, indent=2)
 
 @_tool()
-async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: bool, exclusive: bool = True) -> str:
+async def set_pcb_layer_visibility(ctx: Context, layer_names: list = None, visible: bool = True,
+                                   exclusive: bool = True, strict: bool = True,
+                                   restore_state: dict = None) -> str:
     """
     Set visibility for specified PCB layers
 
@@ -1258,37 +1260,50 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: boo
     layers. Pass exclusive=False to show the listed layers and leave the rest
     as they are. Hiding only ever hides the listed layers.
 
+    Names are matched the way Altium shows them, in any case and with or
+    without spaces and hyphens: "Multi-Layer" (the layer tab), "Top Solder"
+    (the Layer Stack Manager) and "Top Solder Mask" are all found, and "Mid
+    Layer 1" finds a copper layer renamed e.g. "Inner 1". With a name no
+    layer has, nothing is changed and the reply lists the board's layers.
+
+    Every reply has previous_state, the visibility before the call; pass it
+    back as restore_state to put the view back as it was.
+
     Args:
-        layer_names (list): List of layer names to modify (e.g., ["Top Layer", "Bottom Layer", "Mechanical 1"])
+        layer_names (list): Layers to change (e.g. ["Top Layer", "Multi Layer", "Mechanical 1"]),
+            or ["*"] for every layer
         visible (bool): Whether to show (True) or hide (False) the specified layers
         exclusive (bool): With visible=True, hide every layer not listed (default True)
-        
+        strict (bool): Change nothing when a name is unknown (default True).
+            False applies the known names and reports the others in
+            not_found_layers, as this tool used to.
+        restore_state (dict): previous_state of an earlier reply: show and hide
+            the layers it names as it says. layer_names, visible and exclusive
+            are then ignored.
+
     Returns:
-        str: JSON object with the result of the operation
+        str: JSON with success, updated_count, previous_state, and
+             resolved_names / unresolved / valid_names when names needed it
     """
-    logger.info(f"Setting layers visibility: {layer_names} to {visible}")
-    
-    # Execute the command in Altium to set layer visibility
-    response = await altium_bridge.execute_command(
-        "set_pcb_layer_visibility",
-        {
-            "layer_names": layer_names,
-            "visible": visible,
-            "exclusive": exclusive
-        }
-    )
-    
-    # Check for success
-    if not response.get("success", False):
-        error_msg = response.get("error", "Unknown error")
-        logger.error(f"Error setting layer visibility: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to set layer visibility: {error_msg}"})
-    
-    # Get the result data
-    result = response.get("result", {})
-    
-    logger.info(f"Layer visibility set successfully")
-    return json.dumps(result, indent=2)
+    import pcb_layers
+
+    layers, error = await _bridge_json("get_pcb_layers", {})
+    if error:
+        return json.dumps({"success": False, "error": f"Could not read the board's layers: {error}"})
+    calls, out = pcb_layers.plan(layers, layer_names, visible, exclusive, strict, restore_state)
+    if out.get("success") is False:
+        return json.dumps(out, indent=2)
+    logger.info(f"Setting layer visibility: {calls}")
+    out.update(success=True, updated_count=0, not_found_layers=[])
+    for params in calls:
+        result, error = await _bridge_json("set_pcb_layer_visibility", params)
+        if error:
+            logger.error(f"Error setting layer visibility: {error}")
+            out.update(success=False, error=f"Failed to set layer visibility: {error}")
+            return json.dumps(out, indent=2)
+        out["updated_count"] += int(result.get("updated_count") or 0)
+        out["not_found_layers"] += result.get("not_found_layers") or []
+    return json.dumps(out, indent=2)
 
 @_tool(read_only=True)
 async def get_component_data(ctx: Context, cmp_designators: list) -> str:
