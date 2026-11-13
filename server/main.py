@@ -6561,13 +6561,15 @@ async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run:
 
     # Close the OutJob in Altium first, so Altium does not keep (and later
     # save) the old one. Not running: nothing to close, and no reason to start it.
-    was_open = False
+    was_open, open_name = False, path
     if altium_bridge._altium_running():
         result, error = await _bridge_json("release_outjob", {"outjob_path": path})
         if result is None:
             return json.dumps({"success": False, "error": error, "written": False,
                                "done": done, "errors": errors})
         was_open = bool(result.get("was_open"))
+        # reopened under the name Altium had for it, not the caller's spelling
+        open_name = result.get("name") or path
     try:
         outjob_edit.write(path, job)
         out["written"] = True
@@ -6576,7 +6578,7 @@ async def edit_outjob(ctx: Context, outjob_path: str, operations: list, dry_run:
     finally:
         # open again what was closed, whether the write worked or not
         if was_open:
-            reopened = await altium_bridge.execute_command("reopen_outjob", {"outjob_path": path})
+            reopened = await altium_bridge.execute_command("reopen_outjob", {"outjob_path": open_name})
             out["reopened_in_altium"] = bool(reopened.get("success"))
     return json.dumps(out, indent=2, ensure_ascii=False)
 

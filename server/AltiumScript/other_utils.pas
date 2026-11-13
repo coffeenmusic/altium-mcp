@@ -1436,8 +1436,9 @@ begin
         Result := 'ERROR: The OutJob has unsaved changes in Altium; save or close it there first';
         Exit;
     end;
+    // Altium's own spelling of the path, to open it again under that name
+    Result := '{"success": true, "was_open": true, "name": "' + JSONEscapeString(Doc.FileName) + '"}';
     Client.CloseDocument(Doc);
-    Result := '{"success": true, "was_open": true}';
 end;
 
 // After the edit: open the OutJob again if it was open before, with its tab

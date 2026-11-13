@@ -29,11 +29,17 @@ class EditOutJobToolTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_tool(self, running, was_open=False, operations=ADD_FAB):
+    def run_tool(self, running, was_open=False, operations=ADD_FAB, name=None):
+        self.params = {}
+
         async def fake(command, params, timeout=None):
             self.commands.append(command)
+            self.params[command] = params
             if command == "release_outjob":
-                return {"success": True, "result": {"success": True, "was_open": was_open}}
+                result = {"success": True, "was_open": was_open}
+                if name:
+                    result["name"] = name
+                return {"success": True, "result": result}
             return {"success": True, "result": {"success": True}}
         with mock.patch.object(main.altium_bridge, "execute_command", fake), \
                 mock.patch.object(main.altium_bridge, "_altium_running", lambda: running):
@@ -50,6 +56,11 @@ class EditOutJobToolTest(unittest.TestCase):
         self.assertTrue(out["written"])
         self.assertEqual(self.commands, ["release_outjob", "reopen_outjob"])
         self.assertTrue(out["reopened_in_altium"])
+
+    def test_reopened_under_altiums_own_name(self):
+        shown = self.path.upper()
+        self.run_tool(running=True, was_open=True, name=shown)
+        self.assertEqual(self.params["reopen_outjob"]["outjob_path"], shown)
 
     def test_reopened_when_the_write_fails(self):
         with mock.patch.object(outjob_edit, "write", side_effect=OSError("disk full")):
