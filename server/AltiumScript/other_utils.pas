@@ -465,6 +465,7 @@ begin
 
     // For PCB-related commands, ensure PCB is available first
     if (CommandName = 'create_net_class')                    or
+       (CommandName = 'geometry')                            or
        (CommandName = 'get_all_component_data')              or
        (CommandName = 'get_all_components')                  or
        (CommandName = 'get_all_nets')                        or
