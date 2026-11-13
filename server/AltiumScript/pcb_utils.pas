@@ -6248,8 +6248,12 @@ function GeoSegmentDistance(X1, Y1, X2, Y2, PX, PY: Integer): Double;
 var
     DX, DY, L2, T : Double;
 begin
-    DX := X2 - X1;
-    DY := Y2 - Y1;
+    // + 0.0: DelphiScript keeps integer arithmetic otherwise (the declared
+    // types are not enforced), and the squares of board coordinates
+    // overflow 32 bits: every track longer than about 4.6 mil came out as
+    // a point
+    DX := X2 - X1 + 0.0;
+    DY := Y2 - Y1 + 0.0;
     L2 := DX * DX + DY * DY;
     T := 0;
     if L2 > 0 then T := ((PX - X1) * DX + (PY - Y1) * DY) / L2;
