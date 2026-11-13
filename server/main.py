@@ -5395,7 +5395,7 @@ def _save_debug_screenshot(label: str, png_bytes: bytes):
         return None
 
 
-@_tool(read_only=True)
+@_tool()  # save_path writes a file
 async def get_screenshot(ctx: Context, target: str = None, view_type: str = None,
                          zoom_to: list | str = None, open_if_closed: bool = False,
                          hide_floating_panels: bool = False, save_path: str = None,
@@ -5466,6 +5466,8 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
     if isinstance(zoom_to, str) and zoom_to.strip().lower() == "board":
         zoom_to = "board"
         target = target if target and target.strip() else "document"
+    elif isinstance(zoom_to, str):
+        zoom_to = [zoom_to]   # one designator
     view_type = screenshot_target.implied_view_type(target, view_type, zoom_to)
     try:
         resolved = screenshot_target.resolve(target, view_type)
@@ -5842,6 +5844,14 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
             if t.kind in ("current", "document"):
                 views = screenshot_target.document_views(_visible_children(hwnd))
                 info["active_document_view"] = views[0].text if views else None
+            if hide_hud:
+                pointer = win32api.GetCursorPos()
+                view_rects = [v.rect for v in screenshot_target.document_views(_visible_children(hwnd))]
+                spot = screenshot_target.park_point(view_rects, _virtual_screen(), pointer)
+                if spot:
+                    win32api.SetCursorPos(spot)
+                    parked_from = pointer
+                    time.sleep(0.3)  # let Altium take the display (and any hover tip) away
             # Altium's own dialogs and floating panels are above its frame:
             # a screen copy would show them over the view
             if t.kind in ("current", "document", "region"):
@@ -5869,14 +5879,6 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
             cover = covered()
             if cover:
                 return refuse(cover)
-            if hide_hud:
-                pointer = win32api.GetCursorPos()
-                views = [v.rect for v in screenshot_target.document_views(_visible_children(hwnd))]
-                spot = screenshot_target.park_point(views, _virtual_screen(), pointer)
-                if spot:
-                    win32api.SetCursorPos(spot)
-                    parked_from = pointer
-                    time.sleep(0.3)  # let Altium take the display away
             img = _grab_screen_rect(rect)
             # A view that was just opened or switched to can still be unpainted
             # (all one colour): give it up to about 5 s more
