@@ -82,9 +82,9 @@ def diff(single_pin=False):
     return eco_preview.compare(eco_preview.parse_source(SOURCE), eco_preview.parse_target(TARGET), single_pin)
 
 
-def diff_with(text):
+def diff_with(text, source=SOURCE):
     options = eco_preview.parse_project_options(text)
-    return eco_preview.compare(eco_preview.parse_source(SOURCE), eco_preview.parse_target(TARGET),
+    return eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET),
                                options["single_pin_nets"], options)
 
 
@@ -156,12 +156,10 @@ class NetTest(unittest.TestCase):
         d = diff()
         self.assertEqual(d["rename_nets"], [{"from": "N1", "to": "MID"}])
         # U2-2 joins SENSE, whose other pin (R5) is not on the board yet; the
-        # mounting hole pad has no schematic pin and is left alone. LONELY
-        # has one pin, so with single-pin nets off J1-1 counts as on no net
-        # and leaves it; the named net LONELY itself stays. OUT, on the new
-        # R5 alone, is added as a net with no pins
-        self.assertEqual(d["change_pin_nets"], [{"pin": "J1-1", "from": "LONELY", "to": ""},
-                                                {"pin": "U3-2", "from": "", "to": "SENSE"}])
+        # mounting hole pad has no schematic pin and is left alone. LONELY,
+        # a named net with J1-1 alone on it, is a net all the same: J1-1
+        # stays on it. OUT, on the new R5 alone, is added
+        self.assertEqual(d["change_pin_nets"], [{"pin": "U3-2", "from": "", "to": "SENSE"}])
         self.assertEqual(d["add_nets"], ["OUT", "SENSE"])
         self.assertEqual(d["remove_nets"], ["X"])
         on = diff(True)
@@ -170,7 +168,8 @@ class NetTest(unittest.TestCase):
 
     def test_single_pin_net_left_out_by_default(self):
         # Checked live against AD25's ECO, single-pin nets off: a net label
-        # on a lone pin gives "Add Nets" for the net but no "Add Pins To Nets"
+        # on a lone pin gives "Add Nets" for the net but no "Add Pins To
+        # Nets", and executing it puts the pad on the net
         target = dict(TARGET, pads=[p for p in TARGET["pads"] if not p.startswith("J1|1|")] + ["J1|1|"])
         d = eco_preview.compare(eco_preview.parse_source(SOURCE), eco_preview.parse_target(target))
         self.assertNotIn("J1-1", [c["pin"] for c in d["change_pin_nets"]])
@@ -179,14 +178,23 @@ class NetTest(unittest.TestCase):
         self.assertIn({"pin": "J1-1", "from": "", "to": "LONELY"}, d["change_pin_nets"])
         self.assertIn("LONELY", d["add_nets"])
 
+    def test_pad_already_on_its_named_one_pin_net(self):
+        # After that ECO ran, the pad is on the net: nothing left to change
+        # (Altium's own Update PCB then lists nothing for it)
+        source = dict(SOURCE, pins=SOURCE["pins"] + ["J1|3|SOLO"])
+        target = dict(TARGET, pads=TARGET["pads"] + ["J1|3|SOLO"])
+        d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target))
+        self.assertNotIn("J1-3", [c["pin"] for c in d["change_pin_nets"]])
+        self.assertNotIn("SOLO", d["add_nets"] + d["remove_nets"])
+
     def test_pin_moved_onto_a_net_of_its_own(self):
-        # J1-2 goes from GND onto a net of its own: it leaves GND, as a pin
-        # with no net would. An auto-named one-pin net (every unconnected
-        # pin gets one) is not added; a named one is
-        for net, added in (("NetJ1_2", ["OUT", "SENSE"]), ("SOLO", ["OUT", "SENSE", "SOLO"])):
+        # J1-2 goes from GND onto a net of its own. An auto-named one-pin net
+        # (every unconnected pin gets one) is not made, so J1-2 leaves GND
+        # for no net; a named one is made, and J1-2 moves onto it
+        for net, to, added in (("NetJ1_2", "", ["OUT", "SENSE"]), ("SOLO", "SOLO", ["OUT", "SENSE", "SOLO"])):
             source = dict(SOURCE, pins=[p for p in SOURCE["pins"] if p != "J1|2|GND"] + [f"J1|2|{net}"])
             d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET))
-            self.assertIn({"pin": "J1-2", "from": "GND", "to": ""}, d["change_pin_nets"])
+            self.assertIn({"pin": "J1-2", "from": "GND", "to": to}, d["change_pin_nets"])
             self.assertEqual(d["add_nets"], added)
             d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET), True)
             self.assertIn({"pin": "J1-2", "from": "GND", "to": net}, d["change_pin_nets"])
@@ -262,10 +270,12 @@ class ProjectOptionsTest(unittest.TestCase):
         # Type15 = component footprint differences; Type8 = Remove Component;
         # Type17 = Add Node (a pin joining a net)
         text = PRJ.replace("Type15=1", "Type15=0").replace("Type8=1", "Type8=0").replace("Type17=1", "Type17=0")
-        d = diff_with(text)
+        # J1-2 leaves GND for an auto-named net of its own, that is for no net
+        source = dict(SOURCE, pins=[p for p in SOURCE["pins"] if p != "J1|2|GND"] + ["J1|2|NetJ1_2"])
+        d = diff_with(text, source)
         self.assertEqual((d["change_footprints"], d["remove_components"]), ([], []))
         # only the pin joining a net is left out; one leaving its net is a Remove Node
-        self.assertEqual(d["change_pin_nets"], [{"pin": "J1-1", "from": "LONELY", "to": ""}])
+        self.assertEqual(d["change_pin_nets"], [{"pin": "J1-2", "from": "GND", "to": ""}])
         reasons = {s["kind"]: s["reason"] for s in d["skipped_by_project_options"]}
         self.assertIn("Comparator", reasons["change_footprints"])
         self.assertIn("ECO Generation", reasons["remove_components"])

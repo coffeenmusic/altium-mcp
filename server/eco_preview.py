@@ -256,10 +256,12 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
     """The differences, grouped as the ECO dialog groups its actions.
 
     single_pin_nets is the project's "Netlist single pin nets" option: off
-    (the default), a pin alone on its net in the whole design counts as on
-    no net: the ECO does not connect it, and takes it off a board net it is
-    on, as for a pin with no net. A named one-pin net is still added (with
-    no pins); an auto-named one (NetR1_1) is not. Board components with no
+    (the default), a pin alone on an auto-named net (NetR1_1, as every
+    unconnected pin gets) counts as on no net: the ECO does not make that
+    net, and takes the pin off a board net it is on. A named one-pin net (a
+    net label on a lone pin) is made, with its pin; Altium lists that as
+    Add Nets only, so a pin that joins such a new net from no net is not
+    listed again in change_pin_nets. Board components with no
     schematic link (logos, title blocks) are left alone; they are listed as
     board_only_components. Both checked against Altium AD25's own
     Engineering Change Order.
@@ -328,17 +330,19 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
     # Nets, over the pins of matched components, keyed by board designator
     linked = {d.lower() for d in sch_to_pcb.values()}
     all_pins = source["pins"]
-    solo_named = set()                                # named one-pin nets, added without pins
+    solo_named = set()                                # named one-pin nets
     if not single_pin_nets:
-        # A pin alone on its net counts as on no net: the ECO does not put
-        # it on that net, and takes it off a board net it is on. A named
-        # one-pin net is still added, with no pins; an auto-named one
-        # (Net<designator>_<pin>, as every unconnected pin gets) is not
+        # A pin alone on an auto-named net (Net<designator>_<pin>, as every
+        # unconnected pin gets) counts as on no net: the ECO does not make
+        # the net, and takes the pin off a board net it is on. A named
+        # one-pin net is made, with its pin (checked live: the pad ends up
+        # on it)
         sizes = defaultdict(int)
         for n in all_pins.values():
             sizes[n] += 1
         solo_named = {n for (d, p), n in all_pins.items() if n and sizes[n] == 1 and not _auto_net(n, d, p)}
-        all_pins = {k: (n if sizes[n] > 1 else "") for k, n in all_pins.items()}
+        all_pins = {k: (n if sizes[n] > 1 or n in solo_named else "") for k, n in all_pins.items()}
+    pcb_names = {n for n in target["pads"].values() if n}
     sch_pins = {(sch_to_pcb[d].lower(), p): n for (d, p), n in all_pins.items() if d in sch_to_pcb}
     pcb_pins = {k: n for k, n in target["pads"].items() if k[0] in linked}
     sn, pn = _nets(sch_pins), _nets(pcb_pins)
@@ -356,14 +360,15 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
         s_net, p_net = sch_pins.get(key, ""), mapped.get(key, "")
         if key not in sch_pins and key in pcb_pins:
             continue                                  # a pad with no schematic pin (mechanical, shield)
+        if s_net in solo_named and s_net not in pcb_names and not p_net:
+            continue                                  # Altium lists it as Add Nets only
         if s_net != p_net:
             out["change_pin_nets"].append({"pin": f"{key[0].upper()}-{key[1].upper()}",
                                            "from": pcb_pins.get(key, ""), "to": s_net})
     # Nets by name over every part, so a net on parts still to be added, or
     # only on parts that go, counts too
     new_names = set(renamed.values())
-    sch_names = {n for n in all_pins.values() if n} | solo_named
-    pcb_names = {n for n in target["pads"].values() if n}
+    sch_names = {n for n in all_pins.values() if n}
     out["add_nets"] = sorted(n for n in sch_names if n not in pcb_names and n not in new_names)
     out["remove_nets"] = sorted(n for n in pcb_names if n not in sch_names and n not in renamed)
 
