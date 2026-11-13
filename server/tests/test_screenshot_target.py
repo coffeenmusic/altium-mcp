@@ -5,6 +5,7 @@ or from server/:          python -m unittest tests.test_screenshot_target -v
 """
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -132,6 +133,9 @@ class PickTest(unittest.TestCase):
         self.assertEqual(st.focus_params(t, ("C46",), True),
                          {"path": "PD_Mon.SchDoc", "open_if_closed": "true", "designators": ["C46"]})
         self.assertEqual(st.focus_params(st.parse_target("document"), ["C46"], False)["path"], "")
+        board = st.focus_params(st.parse_target("document"), "board", False)
+        self.assertEqual(board["zoom_board"], "true")
+        self.assertNotIn("designators", board)
 
     def test_view_document(self):
         self.assertEqual(st.view_document("[24] PD_Mon.SchDoc"), "PD_Mon.SchDoc")
@@ -198,6 +202,87 @@ class PickTest(unittest.TestCase):
     def test_clip(self):
         self.assertEqual(st.clip((-2, 0, 1906, 1030), (0, 0, 1920, 1080)), (0, 0, 1906, 1030))
         self.assertIsNone(st.clip((2000, 0, 2100, 10), (0, 0, 1920, 1080)))
+
+
+class AltiumWindowsTest(unittest.TestCase):
+    # Altium's top-level windows after run_drc and with Project Options open,
+    # topmost first, as the board edit session saw them
+    FRAME = win("TDocumentForm", "Main - Altium Designer", (0, 0, 1900, 1000), hwnd=1)
+    OPTIONS = win("TProjectPropertiesDialog", "Options for PCB Project Adapter.PrjPcb",
+                  (400, 200, 1300, 900), hwnd=2)
+    MESSAGES = win("TClientBarControl", "Messages", (900, 500, 1800, 950), hwnd=3)
+    HINT = win("THintWindow", "", (10, 10, 120, 30), hwnd=4)
+    VIEW = (300, 100, 1800, 950)    # a document view
+
+    def windows(self, *tops, enabled=True):
+        return st.altium_windows([*tops, win("TApplication", ""), self.FRAME], 1, enabled)
+
+    def test_classification(self):
+        ws = self.windows(self.OPTIONS, self.MESSAGES, self.HINT, enabled=False)
+        self.assertEqual([(w["hwnd"], w["kind"], w["modal"]) for w in ws],
+                         [(2, "dialog", True), (3, "panel", False)])
+        self.assertEqual(ws[0]["title"], "Options for PCB Project Adapter.PrjPcb")
+        self.assertFalse(self.windows(self.OPTIONS)[0]["modal"])   # the main frame takes input
+        self.assertEqual(self.windows(), [])
+
+    def test_dialog_over_the_view_refuses(self):
+        error, panels = st.altium_windows_over(self.VIEW, self.windows(self.OPTIONS, self.MESSAGES, enabled=False))
+        self.assertIn("Nothing was captured", error)
+        self.assertIn("TProjectPropertiesDialog", error)
+        self.assertIn('target="dialog"', error)
+        self.assertEqual(panels, [])
+
+    def test_floating_panel_over_the_view_warns(self):
+        error, panels = st.altium_windows_over(self.VIEW, self.windows(self.MESSAGES))
+        self.assertIsNone(error)
+        self.assertEqual([p["hwnd"] for p in panels], [3])
+        self.assertEqual(panels[0]["covers_percent"], 32)   # 900x450 of 1500x850
+        self.assertIn("hide_floating_panels", st.panel_warning(panels[0]))
+
+    def test_windows_beside_the_capture_are_ignored(self):
+        beside = (0, 0, 300, 1000)   # only touches the dialog's and the panel's edges, or misses them
+        self.assertEqual(st.altium_windows_over(beside, self.windows(self.MESSAGES)), (None, []))
+        aside = win("TProjectPropertiesDialog", "Options", (1850, 0, 2400, 400), hwnd=5)
+        self.assertEqual(st.altium_windows_over(self.VIEW, self.windows(aside, enabled=False)), (None, []))
+
+    def test_dismissable_only_dialogs(self):
+        ws = self.windows(self.OPTIONS, self.MESSAGES, enabled=False)
+        self.assertEqual(st.dismissable(ws, 2)[0]["hwnd"], 2)
+        self.assertEqual(st.dismissable(ws, "2")[0]["hwnd"], 2)
+        self.assertEqual(st.dismissable(ws, "options for pcb project  adapter.prjpcb")[0]["hwnd"], 2)
+        for never in (1, 3, "Messages", "Main - Altium Designer", 99):   # frame, panel, unknown
+            target, why = st.dismissable(ws, never)
+            self.assertIsNone(target)
+            self.assertIn("Open dialogs: 2 'Options for PCB Project Adapter.PrjPcb'", why)
+        self.assertIsNone(st.dismissable(ws, "\u00b2")[0])   # isdigit() but no int: no crash
+        numbered = [dict(ws[0], title="2", hwnd=8)]
+        self.assertEqual(st.dismissable(numbered, "2")[0]["hwnd"], 8)   # an all-digit title
+        twins = [dict(ws[0]), dict(ws[0], hwnd=7)]
+        self.assertIn("give the hwnd", st.dismissable(twins, "Options for PCB Project Adapter.PrjPcb")[1])
+class SaveAndPointerTest(unittest.TestCase):
+    def test_save_target_inside_the_profile_only(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as elsewhere:
+            os.mkdir(os.path.join(home, "evidence"))
+            ok, why = st.save_target(os.path.join(home, "evidence", "top.png"), [home])
+            self.assertEqual((ok, why), (os.path.realpath(os.path.join(home, "evidence", "top.png")), ""))
+            for bad in (os.path.join(elsewhere, "top.png"),                    # outside the profile
+                        os.path.join(home, "evidence", "..", "..", "x.png"),   # climbs out of it
+                        os.path.join(home, "missing", "top.png"),              # no such folder
+                        os.path.join(home, "top.jpg"), "top.png", "", None):
+                self.assertIsNone(st.save_target(bad, [home])[0], bad)
+            self.assertIn("user profile", st.save_target(os.path.join(elsewhere, "a.png"), [home])[1])
+
+    def test_park_point(self):
+        screen = (0, 0, 3840, 1080)
+        view = (300, 100, 1800, 950)
+        self.assertIsNone(st.park_point([view], screen, (100, 100)))     # not over a view: left alone
+        self.assertEqual(st.park_point([view], screen, (900, 500)), (299, 100))
+        split = [view, (1800, 100, 3000, 950)]                           # two views side by side
+        self.assertEqual(st.park_point(split, screen, (2000, 500)), (299, 100))
+        full = (0, 0, 1920, 1080)                                         # filling the left monitor
+        self.assertEqual(st.park_point([full], screen, (5, 5)), (1920, 0))
+        self.assertIsNone(st.park_point([screen], screen, (5, 5)))       # nowhere off the views
+        self.assertIsNone(st.park_point([], screen, (5, 5)))
 
 
 if __name__ == "__main__":

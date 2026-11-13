@@ -288,6 +288,14 @@
       "description": "Take a screenshot of one named thing in Altium: the window, a document, a dialog, a panel or a screen region"
     },
     {
+      "name": "get_altium_windows",
+      "description": "List Altium's own dialogs and floating panels, which can lie over a board in a screenshot or keep Altium waiting"
+    },
+    {
+      "name": "dismiss_dialog",
+      "description": "Close an open Altium dialog by its hwnd or title: cancel it, or press a named button"
+    },
+    {
       "name": "run_altium_script",
       "description": "Run a DelphiScript snippet in an isolated sandbox and get a step-by-step log, its result, and the statement that failed"
     },

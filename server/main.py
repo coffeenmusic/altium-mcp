@@ -5395,9 +5395,11 @@ def _save_debug_screenshot(label: str, png_bytes: bytes):
         return None
 
 
-@_tool(read_only=True)
+@_tool()  # save_path writes a file
 async def get_screenshot(ctx: Context, target: str = None, view_type: str = None,
-                         zoom_to: list = None, open_if_closed: bool = False):
+                         zoom_to: list | str = None, open_if_closed: bool = False,
+                         hide_floating_panels: bool = False, save_path: str = None,
+                         hide_hud: bool = True):
     """
     Take a screenshot of exactly one thing in Altium, returned as viewable image content.
 
@@ -5422,6 +5424,12 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
     Altium comes to the front for about a second, because it only paints what
     is on screen; the window that was in front then gets the foreground back.
 
+    Altium's own windows over a "current", "document" or "region" capture
+    are checked too: with one of its dialogs over the area nothing is
+    captured and the error names the dialog (see get_altium_windows and
+    dismiss_dialog). A floating panel there (Messages, after run_drc) gives
+    a warning, or is hidden for the capture with hide_floating_panels.
+
     Args:
         target (str): What to capture, see above. Default "current".
         view_type (str): Old form, kept for compatibility: 'pcb' or 'sch' brings
@@ -5430,26 +5438,153 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
         zoom_to (list, optional): Component designators (e.g. ["U12", "R42"]).
             PCB only: Altium zooms to them before the capture. Works with
             "document" / "document:<board>" and view_type 'pcb'; given on its
-            own it means view_type 'pcb'.
+            own it means view_type 'pcb'. "board" instead fits the whole
+            board outline in the view (with "document" / "document:<board>";
+            on its own it means target "document").
         open_if_closed (bool): Let "document:<name>" open a document of the
             open projects that is not open yet. Default false.
+        hide_floating_panels (bool): Hide Altium's floating panels that lie
+            over the capture while it is taken, and show them again after.
+            Default false: they stay, and "warnings" says how much they cover.
+        save_path (str, optional): Also write the PNG to this file: a full
+            path ending in .png, in an existing folder inside your user
+            profile. The reply gives it as saved_path.
+        hide_hud (bool): Move the mouse pointer off the document view for
+            the capture, and back after, when it is over it: Altium draws its
+            heads-up coordinate display by the pointer. Default true.
 
     Returns:
         JSON metadata (what was captured: target, rectangle, captured_kind,
         captured_document, view_type, whether anything was switched, opened or
-        closed) plus the PNG image.
+        closed, and warnings) plus the PNG image.
     """
+    save_to = None
+    if save_path:
+        save_to, why = screenshot_target.save_target(save_path, [str(Path.home())])
+        if save_to is None:
+            return json.dumps({"success": False, "error": why})
+    if isinstance(zoom_to, str) and zoom_to.strip().lower() == "board":
+        zoom_to = "board"
+        target = target if target and target.strip() else "document"
+    elif isinstance(zoom_to, str):
+        zoom_to = [zoom_to]   # one designator
     view_type = screenshot_target.implied_view_type(target, view_type, zoom_to)
     try:
         resolved = screenshot_target.resolve(target, view_type)
     except screenshot_target.TargetError as e:
         return json.dumps({"success": False, "error": str(e)})
     if resolved is None:
-        return await _view_type_screenshot(view_type, zoom_to)
-    if zoom_to and resolved.kind != "document":
+        result = await _view_type_screenshot(view_type, zoom_to)
+    elif zoom_to and resolved.kind != "document":
         return json.dumps({"success": False,
                            "error": "zoom_to works with target 'document' or 'document:<board>' only"})
-    return await _target_screenshot(resolved, zoom_to, open_if_closed)
+    else:
+        result = await _target_screenshot(resolved, zoom_to, open_if_closed,
+                                          hide_floating_panels, hide_hud)
+    if save_to and isinstance(result, list):
+        info = json.loads(result[0])
+        try:
+            Path(save_to).write_bytes(result[1].data)
+            info["saved_path"] = save_to
+        except OSError as e:
+            info["save_error"] = f"Could not write save_path: {e.strerror}"
+        result[0] = json.dumps(info)
+    return result
+
+
+@_tool(read_only=True)
+async def get_altium_windows(ctx: Context) -> str:
+    """
+    List Altium's own dialogs and floating panels: the windows that can lie
+    over a board and end up in a screenshot, or keep Altium waiting.
+
+    Returns:
+        str: JSON with windows [{hwnd, class, title, rect, kind, modal}],
+             topmost first. kind is "dialog" or "panel" (a floating panel);
+             modal says the dialog blocks Altium until it is closed (see
+             dismiss_dialog).
+    """
+    def collect():
+        hwnd, _ = _altium_main_window()
+        if not hwnd:
+            return {"success": False, "error": "No Altium window found"}
+        pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+        return {"success": True, "windows": _altium_window_list(hwnd, pid)}
+    return json.dumps(await asyncio.to_thread(_run_dpi_aware, collect), indent=2)
+
+
+def _press_button(dialog, caption):
+    """Press the button of a dialog captioned caption (any case, without its
+    & accelerator). Altium's buttons ignore BM_CLICK; posted mouse messages
+    work (see drc.py). The captions found when there is no such button."""
+    buttons = []
+
+    def collect(child, _):
+        if win32gui.IsWindowVisible(child) and win32gui.IsWindowEnabled(child):
+            text = win32gui.GetWindowText(child).replace("&", "").strip()
+            cls = win32gui.GetClassName(child).lower()  # TXPBitBtn, TButton, Button
+            if text and ("btn" in cls or "button" in cls):
+                buttons.append((child, text))
+        return True
+    try:
+        win32gui.EnumChildWindows(dialog, collect, 0)
+    except Exception:
+        pass  # raised when the dialog has no children
+    for child, text in buttons:
+        if text.lower() == caption.strip().lower():
+            win32gui.PostMessage(child, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, 0)
+            win32gui.PostMessage(child, win32con.WM_LBUTTONUP, 0, 0)
+            return True, []
+    return False, [text for _, text in buttons]
+
+
+@_tool()
+async def dismiss_dialog(ctx: Context, dialog: str | int, action: str = "cancel") -> str:
+    """
+    Close an open Altium dialog, such as one left over a board that keeps
+    get_screenshot from capturing it. Only Altium's own dialogs, as
+    get_altium_windows lists them: never its main window, a panel or a
+    window of another program.
+
+    Args:
+        dialog (str | int): The dialog's hwnd (from get_altium_windows) or its title
+        action (str): "cancel" (default) closes it as its close box does,
+            which leaves any change in it unapplied. Anything else presses
+            the button with that caption, e.g. "OK", "Yes" or "No".
+
+    Returns:
+        str: JSON with closed (the dialog went away), its class and title,
+             and the action taken
+    """
+    def dismiss():
+        hwnd, _ = _altium_main_window()
+        if not hwnd:
+            return {"success": False, "error": "No Altium window found"}
+        pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+        target, why = screenshot_target.dismissable(_altium_window_list(hwnd, pid), dialog)
+        if target is None:
+            return {"success": False, "error": why}
+        h = target["hwnd"]
+        if action.strip().lower() == "cancel":
+            win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
+        else:
+            pressed, captions = _press_button(h, action)
+            if not pressed:
+                return {"success": False, "class": target["class"], "title": target["title"],
+                        "error": f"The dialog has no button '{action}'. Its buttons: "
+                                 f"{', '.join(captions) or 'none found'}"}
+        closed = False
+        for _ in range(30):
+            time.sleep(0.1)
+            if not (win32gui.IsWindow(h) and win32gui.IsWindowVisible(h)):
+                closed = True
+                break
+        out = {"success": closed, "closed": closed, "class": target["class"], "title": target["title"],
+               "action": action}
+        if not closed:
+            out["error"] = "The dialog is still open after 3 s"
+        return out
+    return json.dumps(await asyncio.to_thread(_run_dpi_aware, dismiss), indent=2)
 
 
 def _altium_main_window():
@@ -5535,6 +5670,12 @@ def _altium_top_windows(pid):
     return out
 
 
+def _altium_window_list(hwnd, pid):
+    """Altium's dialogs and floating panels besides its main frame hwnd."""
+    tops = [w for w in _altium_top_windows(pid) if not win32gui.IsIconic(w.hwnd)]
+    return screenshot_target.altium_windows(tops, hwnd, bool(win32gui.IsWindowEnabled(hwnd)))
+
+
 def _visible_children(hwnd):
     out = []
 
@@ -5598,7 +5739,7 @@ def _run_dpi_aware(fn):
             set_dpi_context(previous)
 
 
-async def _target_screenshot(t, zoom_to, open_if_closed):
+async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=False, hide_hud=True):
     logger.info(f"Screenshot of {t.describe()} (zoom_to={zoom_to}, open_if_closed={open_if_closed})")
     previous_window = win32gui.GetForegroundWindow()
     info = {"success": True, "target": t.describe(), "switched_document": False,
@@ -5625,6 +5766,8 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
         info["opened_document"] = bool(focus.get("opened"))
         if "zoomed_component_count" in focus:
             info["zoomed_component_count"] = focus["zoomed_component_count"]
+        if "zoomed_board" in focus:
+            info["zoomed_board"] = focus["zoomed_board"]
         if info["switched_document"]:
             restore_path = before
         if info["opened_document"]:
@@ -5655,6 +5798,8 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
         # Let a switched or freshly shown view paint
         time.sleep(1.0 if info["switched_document"] or info["opened_document"] else 0.4)
 
+        hidden = []
+        parked_from = None
         try:
             window = None
             if t.kind == "current":
@@ -5699,6 +5844,28 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
             if t.kind in ("current", "document"):
                 views = screenshot_target.document_views(_visible_children(hwnd))
                 info["active_document_view"] = views[0].text if views else None
+            if hide_hud:
+                pointer = win32api.GetCursorPos()
+                view_rects = [v.rect for v in screenshot_target.document_views(_visible_children(hwnd))]
+                spot = screenshot_target.park_point(view_rects, _virtual_screen(), pointer)
+                if spot:
+                    win32api.SetCursorPos(spot)
+                    parked_from = pointer
+                    time.sleep(0.3)  # let Altium take the display (and any hover tip) away
+            # Altium's own dialogs and floating panels are above its frame:
+            # a screen copy would show them over the view
+            if t.kind in ("current", "document", "region"):
+                refusal, panels = screenshot_target.altium_windows_over(rect, _altium_window_list(hwnd, pid))
+                if refusal:
+                    return {"success": False, "error": refusal}
+                if panels and hide_floating_panels:
+                    for panel in panels:
+                        win32gui.ShowWindow(panel["hwnd"], win32con.SW_HIDE)
+                        hidden.append(panel["hwnd"])
+                    info["hidden_panels"] = [panel["title"] or panel["class"] for panel in panels]
+                    time.sleep(0.4)  # let Altium paint what they covered
+                elif panels:
+                    info["warnings"] = [screenshot_target.panel_warning(panel) for panel in panels]
             # The capture is a copy of the screen: refuse it when a window of
             # another program lies over the area, before and after the copy
             top = window.hwnd if t.kind == "dialog" else hwnd
@@ -5723,9 +5890,24 @@ async def _target_screenshot(t, zoom_to, open_if_closed):
             cover = covered()
             if cover:
                 return refuse(cover)
+            if t.kind in ("current", "document", "region"):
+                # a dialog Altium opened while the capture was being taken
+                refusal, _ = screenshot_target.altium_windows_over(rect, _altium_window_list(hwnd, pid))
+                if refusal:
+                    return {"success": False, "error": refusal}
             info["blank"] = screenshot_target.is_blank(img)
             info["paint_retries"] = tries
         finally:
+            for h in hidden:
+                try:
+                    win32gui.ShowWindow(h, win32con.SW_SHOWNOACTIVATE)
+                except Exception:
+                    pass  # the panel was closed meanwhile
+            if parked_from:
+                try:
+                    win32api.SetCursorPos(parked_from)
+                except Exception:
+                    pass  # e.g. the desktop is locked
             _return_foreground(previous_window)
         buffer = io.BytesIO()
         img.save(buffer, format='PNG')
