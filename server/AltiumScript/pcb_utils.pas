@@ -5965,7 +5965,8 @@ begin
         // Nested: DelphiScript may not short-circuit 'and', and the division
         // is only safe once the edge is known not to be horizontal
         if (BY > CY) <> (AY > CY) then
-            if CX < (AX - BX) * (CY - BY) / (AY - BY) + BX then Inside := not Inside;
+            // 1.0 *: in integers the product of two coordinate spans overflows
+            if CX < 1.0 * (AX - BX) * (CY - BY) / (AY - BY) + BX then Inside := not Inside;
         J := I;
     end;
     if Inside then Result := 1 else Result := 0;
@@ -6145,7 +6146,8 @@ begin
             Exit;
         end;
         if (BY > CY) <> (AY > CY) then
-            if CX < (AX - BX) * (CY - BY) / (AY - BY) + BX then Inside := not Inside;
+            // 1.0 *: in integers the product of two coordinate spans overflows
+            if CX < 1.0 * (AX - BX) * (CY - BY) / (AY - BY) + BX then Inside := not Inside;
         J := I;
     end;
     Result := Inside;
