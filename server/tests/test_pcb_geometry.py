@@ -152,6 +152,13 @@ class RefTest(unittest.TestCase):
         self.assertEqual(geo.to_coord(0.0254, "mm"), 10000)
         with self.assertRaises(ValueError):
             geo.to_coord(1, "inch")
+        # an area corner past Altium's design space is clamped (a larger
+        # number stops the bridge script)
+        self.assertEqual(geo.area_to_coord(1e6, "mil"), 100000 * 10000)
+        self.assertEqual(geo.area_to_coord(-1e6, "mm"), -100000 * 10000)
+        self.assertEqual(geo.area_to_coord(12.5, "mil"), 125000)
+        # sent as text, so an int: Altium cannot read "1000000000.0"
+        self.assertIsInstance(geo.area_to_coord(-1e6, "mil"), int)
         out = geo.describe_clearance({"distance": 78740, "rule": "Clearance", "rule_gap": 49213,
                                       "rule_violated": False}, "mm")
         self.assertEqual(out, {"distance": 0.2, "unit": "mm", "rule": "Clearance", "rule_gap": 0.125,

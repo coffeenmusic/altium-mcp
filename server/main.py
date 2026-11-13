@@ -5428,7 +5428,7 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
     try:
         if not isinstance(bbox, list) or len(bbox) != 4:
             raise ValueError("bbox must be [x1, y1, x2, y2]")
-        x1, y1, x2, y2 = (geo.to_coord(v, unit) for v in bbox)
+        x1, y1, x2, y2 = (geo.area_to_coord(v, unit) for v in bbox)
         bad = [k for k in (kinds or []) if k not in geo.KINDS]
         if bad:
             raise ValueError(f"unknown kinds {bad}; use {', '.join(geo.KINDS)}")

@@ -13,6 +13,8 @@ to find that object again.
 import re
 from typing import List, Optional
 
+from pcb_shapes import AREA_LIMIT_MILS
+
 COORD_PER = {"mil": 10000.0, "mm": 10000.0 / 0.0254}
 KINDS = ("track", "arc", "via", "pad", "fill", "region", "polygon", "text", "component")
 # Pad shapes as Altium numbers them (TShape)
@@ -28,6 +30,14 @@ def unit_factor(unit: str) -> float:
 
 def to_coord(value: float, unit: str) -> int:
     return int(round(float(value) * unit_factor(unit)))
+
+
+def area_to_coord(value: float, unit: str) -> int:
+    """An area corner in coords, clamped to Altium's design space as
+    pcb_shapes does for query areas: a larger number does not fit Altium's
+    32-bit coordinates and stops the bridge script."""
+    limit = int(AREA_LIMIT_MILS * unit_factor("mil"))
+    return max(-limit, min(limit, to_coord(value, unit)))
 
 
 def _ints(fields: List[str], n: int) -> List[int]:
