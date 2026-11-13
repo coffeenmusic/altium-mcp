@@ -91,9 +91,15 @@ class PlanTest(unittest.TestCase):
                                     "visible": True, "exclusive": False})
         self.assertEqual(calls[1], {"layer_names": ["Board Outline", "Drill Guide", "Drill Drawing"],
                                     "visible": False, "exclusive": False})
-        calls, out = pcb_layers.plan(LAYERS, restore_state={"Nope": True})
-        self.assertEqual(calls, [])
-        self.assertFalse(out["success"])
+        # A layer gone since the snapshot is skipped; the rest is restored
+        calls, out = pcb_layers.plan(LAYERS, restore_state={"Nope": True, "Top Layer": False})
+        self.assertEqual(calls, [{"layer_names": ["Top Layer"], "visible": False, "exclusive": False}])
+        self.assertEqual([u["name"] for u in out["unresolved"]], ["Nope"])
+        self.assertNotIn("success", out)
+
+    def test_exact_name_wins(self):
+        layers = {"mechanical_layers": [layer("Mechanical 1", 16908289), layer("Mechanical1", 16908290)]}
+        self.assertEqual(pcb_layers.resolve(["Mechanical1"], layers)[0], ["Mechanical1"])
 
     def test_bad_input(self):
         self.assertFalse(pcb_layers.plan(LAYERS, [])[1]["success"])

@@ -53,10 +53,11 @@ def resolve(names: List[str], layers) -> Tuple[List[str], Dict[str, str], List[d
     for l in board:
         by_key.setdefault(key(l["name"]), l["name"])
     by_id = {str(l.get("layer_id")): l["name"] for l in board}
+    exact = {l["name"] for l in board}
     found, renamed, unknown = [], {}, []
     for name in names:
         k = key(name)
-        real = by_key.get(k) or (by_id.get(str(_IDS[k])) if k in _IDS else None)
+        real = name if name in exact else by_key.get(k) or (by_id.get(str(_IDS[k])) if k in _IDS else None)
         if real is None:
             close = difflib.get_close_matches(k, list(by_key), n=3, cutoff=0.6)
             unknown.append({"name": name, "suggestions": [by_key[c] for c in close]})
@@ -77,7 +78,8 @@ def plan(layers, layer_names=None, visible=True, exclusive=True, strict=True,
 
     layer_names ["*"] means every layer. restore_state is a previous_state
     reply: each layer it names is shown or hidden as it says, the others
-    are left alone; its names are always checked strictly."""
+    are left alone; a layer it names that the board no longer has is
+    skipped and listed in unresolved, the others are still restored."""
     state = displayed(layers)
     out = {"previous_state": state}
     if not state:
@@ -88,7 +90,6 @@ def plan(layers, layer_names=None, visible=True, exclusive=True, strict=True,
                         "error": "restore_state is the previous_state object of an earlier reply"}
         groups = [(True, [n for n, v in restore_state.items() if v], False),
                   (False, [n for n, v in restore_state.items() if not v], False)]
-        strict = True
     else:
         if isinstance(layer_names, str):
             layer_names = [layer_names]
@@ -102,7 +103,7 @@ def plan(layers, layer_names=None, visible=True, exclusive=True, strict=True,
         found, ren, unk = resolve(names, layers)
         renamed.update(ren)
         unknown += unk
-        if not strict:
+        if not strict and restore_state is None:
             found += [u["name"] for u in unk]
         if found:
             calls.append({"layer_names": found, "visible": shown, "exclusive": excl})
@@ -110,7 +111,7 @@ def plan(layers, layer_names=None, visible=True, exclusive=True, strict=True,
         out["resolved_names"] = renamed
     if unknown:
         out["unresolved"] = unknown
-        if strict:
+        if strict and restore_state is None:
             out.update(success=False, valid_names=list(state),
                        error=f"No layer is called {', '.join(repr(u['name']) for u in unknown)}; "
                              f"nothing was changed. valid_names lists the board's layers.")

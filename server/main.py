@@ -1288,9 +1288,15 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list = None, visib
     import pcb_layers
 
     layers, error = await _bridge_json("get_pcb_layers", {})
+    if error and (strict or restore_state is not None):
+        return json.dumps({"success": False,
+                           "error": f"Could not read the board's layers (is a PCB document open?): {error}"})
     if error:
-        return json.dumps({"success": False, "error": f"Could not read the board's layers: {error}"})
+        # strict=False: send the names as they are, as this tool always did
+        layers = {"copper_layers": [{"name": n} for n in layer_names or []]}
     calls, out = pcb_layers.plan(layers, layer_names, visible, exclusive, strict, restore_state)
+    if error:
+        out.pop("previous_state", None)  # not read: it would claim every layer was hidden
     if out.get("success") is False:
         return json.dumps(out, indent=2)
     logger.info(f"Setting layer visibility: {calls}")
