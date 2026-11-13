@@ -452,10 +452,22 @@ begin
         if Pos('"discard_changes"', RequestData[i]) > 0 then
             Discard := LowerCase(Trim(JSONLineValue(RequestData[i]))) = 'true';
     end;
+    if Path = '' then
+    begin
+        Result := 'ERROR: reload_document needs the path of an open document';
+        Exit;
+    end;
     Doc := FindOpenDocument(Path);
     if Doc = nil then
     begin
         Result := 'ERROR: Not open in Altium: ' + Path;
+        Exit;
+    end;
+    // Checked before closing: a document that cannot be opened again stays open
+    Kind := DocumentKindForPath(Doc.FileName);
+    if Kind = '' then
+    begin
+        Result := 'ERROR: reload_document reopens .PcbDoc, .SchDoc, .PcbLib, .SchLib and .OutJob files only';
         Exit;
     end;
     if DocumentModified(Doc) and (not Discard) then
@@ -465,7 +477,6 @@ begin
         Exit;
     end;
     Path := Doc.FileName;
-    Kind := Doc.Kind;
     if DocumentModified(Doc) then Doc.SetModified(False);
     Client.CloseDocument(Doc);
     Doc := Client.OpenDocument(Kind, Path);
