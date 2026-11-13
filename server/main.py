@@ -13,7 +13,7 @@ import tempfile
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 import sys
 import win32gui
 import win32ui
@@ -453,6 +453,9 @@ def altium_limit_problem() -> Optional[str]:
     return None
 
 class AltiumBridge:
+    # Seconds given to Altium to act on a Stop before the locks are released
+    STOP_SETTLE = 2
+
     def __init__(self):
         # Ensure the MCP directory exists
         MCP_DIR.mkdir(exist_ok=True)
@@ -501,8 +504,19 @@ class AltiumBridge:
                     f"Altium_API.PrjScr, then retry.")
         return None
 
-    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
-        """Execute a command in Altium via the bridge script"""
+    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                              watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None) -> Dict[str, Any]:
+        """Execute a command in Altium via the bridge script.
+
+        watcher, if given, runs beside the command while it holds the locks
+        (to answer dialogs the command raises, say), from the moment the
+        bridge script has picked the request up: a box Altium shows before
+        then (a refused launch, the recovery of a stuck script) is not the
+        command's. When it sets the event it is passed, the command is given
+        up: its script is stopped in Altium before the locks are released,
+        so the Stop cannot reach the next command's script, and the response
+        has "aborted": true.
+        """
         async with self._command_lock:
             problem = await self.ensure_paths()
             if problem:
@@ -520,10 +534,47 @@ class AltiumBridge:
                 # is no reason to give up.
                 if await asyncio.to_thread(sandbox.altium_hung):
                     return {"success": False, "error": ALTIUM_HUNG_ERROR}
-                response = await self._execute_command_locked(command, params, timeout)
+                if watcher is None:
+                    response = await self._execute_command_locked(command, params, timeout)
+                else:
+                    response = await self._execute_watched(command, params, timeout, watcher)
             finally:
                 self._exchange_lock.release()
         return _lift_failed_result(response)
+
+    async def _execute_watched(self, command: str, params: Dict[str, Any], timeout: float,
+                               watcher: Callable[[asyncio.Event], Awaitable[None]]) -> Dict[str, Any]:
+        """_execute_command_locked with watcher beside it once the request is
+        picked up; called with the locks held."""
+        abort, started = asyncio.Event(), asyncio.Event()
+
+        async def watch_once_started():
+            await started.wait()
+            await watcher(abort)
+
+        run = asyncio.create_task(self._execute_command_locked(command, params, timeout, picked_up=started))
+        watch = asyncio.create_task(watch_once_started())
+        aborted = asyncio.create_task(abort.wait())
+        try:
+            await asyncio.wait({run, aborted}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (watch, aborted):
+                task.cancel()
+            if not run.done() and not abort.is_set():
+                run.cancel()  # this call itself was cancelled
+        if run.done():
+            return run.result()
+        # The script was cancelled and will not answer: stop it while this
+        # server still holds the locks, and give Altium time to act on the
+        # Stop before the next command is launched
+        run.cancel()
+        try:
+            await run
+        except (asyncio.CancelledError, Exception):
+            pass
+        await self.stop_script_debugger()
+        await asyncio.sleep(self.STOP_SETTLE)
+        return {"success": False, "aborted": True, "error": f"'{command}' was stopped in Altium"}
 
     @staticmethod
     def _altium_running() -> bool:
@@ -575,7 +626,10 @@ class AltiumBridge:
                 await asyncio.sleep(0.25)
         return text
 
-    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                                      picked_up: Optional[asyncio.Event] = None) -> Dict[str, Any]:
+        """Run one command with the locks held. picked_up, if given, is set
+        once the bridge script has picked the request up."""
         try:
             problem = altium_limit_problem()
             if problem:
@@ -647,6 +701,8 @@ class AltiumBridge:
                                  f"the Altium window for an open dialog or a running or paused "
                                  f"script, then retry."}
             _clear_script_stuck()
+            if picked_up is not None:
+                picked_up.set()
 
             logger.info("Bridge script started, waiting for response file...")
             # Wait as long as the command keeps reporting progress, up to
@@ -3621,6 +3677,179 @@ async def modify_pcb_objects(ctx: Context, kinds: list = None, net: str = "", la
 
 MUTATING_COMMANDS.add("edit_pcb_objects")
 
+async def _run_query(command: str, params: dict) -> Tuple[Optional[dict], str]:
+    """Run a query command, answering Altium's parse error dialog if one opens.
+
+    The dialogs are watched only while the command holds the bridge, and a
+    query the watcher gives up on is stopped before the bridge is released
+    (see AltiumBridge.execute_command). A stopped query never restored the
+    user's selection, so query_restore does that after it."""
+    import pcb_query
+
+    errors: list = []
+    result, error = await _bridge_json(command, params,
+                                       watcher=lambda abort: pcb_query.watch_errors(errors, abort))
+    if errors and result is None:
+        # Stopped mid-query (or failed after a dialog): put the selection back
+        _, restore_error = await _bridge_json("query_restore", {"board_path": params.get("board_path", "")})
+        message = "Altium could not evaluate the expression: " + errors[0]
+        if restore_error:
+            message += (f". The user's selection could not be restored ({restore_error}); "
+                        f"the next query call restores it")
+        return None, message
+    if errors:
+        return None, "Altium could not read the expression: " + "; ".join(errors)
+    return result, error
+
+@_tool(read_only=True)
+async def query_objects(ctx: Context, expression: str, area: list = None, unit: str = "mil", limit: int = 200,
+                        board_path: str = "") -> str:
+    """
+    Find PCB objects with Altium's own query language, as the PCB Filter
+    panel and rule scopes use it.
+
+    Examples: "IsVia And InNet('GND')", "IsTrack And OnTopLayer And
+    (Width < 6mil)", "InComponent('U1') And IsPad", "IsPolygon",
+    "InNetClass('Power')". A component is found by Name ("IsComponent And
+    (Name = 'U1')"; there is no Designator property) and a pad by its full
+    name ("IsPad And (Name = 'U1-3')"). Text is quoted with ' and compared
+    as text: Name = 1 fails where Name = '1' works. Put each comparison in
+    brackets: IsComponent And Footprint = 'X' is read as
+    (IsComponent And Footprint) = 'X' and fails.
+
+    An expression Altium cannot read or evaluate comes back as an error with
+    Altium's message; the dialog it raises is answered, so Altium is not
+    left waiting.
+
+    Layers are named as the board names them in its layer stack
+    (OnLayer('GND1')); Altium's generic names ('Mid Layer 1', 'Mechanical
+    17') given to OnLayer(), ExistsOnLayer() or Layer = are translated to
+    the board's, so both work. Each object gives both: layer (generic) and
+    layer_name (the board's, when it has its own).
+
+    The engine has no position properties (X, Y): give a box as area
+    instead (clamped to Altium's design space, +-100,000 mil). It keeps the
+    objects whose bounds touch the box, so a pour larger than the box is
+    kept wherever its copper is.
+
+    Give sizes with a unit (6mil, 0.15mm). The engine reads bare numbers in
+    its own unit, which is not always the board's display unit, and a unit
+    written inside the query is a syntax error; so each value with a unit is
+    converted to the unit the engine uses on this board before the query
+    runs. Decimals take a dot. Quoted text is sent as written, units and
+    commas included (InNet('D0,1'), Comment = '4.7uF 2.2mm').
+
+    The engine works through the selection, so the user's selection is
+    selected again afterwards, also after a query Altium could not
+    evaluate; objects of kinds the PCB Selection Filter (Properties panel)
+    leaves out cannot be selected by a script and stay unselected. A filter
+    applied in the PCB Filter panel is cleared: a script cannot read it back
+    to restore it.
+
+    Args:
+        expression (str): The query.
+        area (list): Only objects touching [x1, y1, x2, y2], from the board
+            origin in unit. Default the whole board.
+        unit (str): "mil" (default) or "mm", for area.
+        limit (int): How many objects to list in full, 0 to 1,000,000
+            (0 lists none); matched counts all.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with matched, by_kind counts, and the objects: kind, name
+             (component designator, pad, polygon, rule, net), net, layer,
+             layer_name and bounds in mils from the board origin.
+             expression_run is what the engine ran.
+             copper_polygons_without_net counts matched pours with no net,
+             which InNet() cannot find.
+    """
+    import pcb_query
+
+    error = pcb_query.check(expression) or pcb_query.check_limit(limit)
+    box, area_error = pcb_query.area_text(area, unit)
+    if error or area_error:
+        return json.dumps({"success": False, "error": error or area_error})
+    in_mm, in_mil, values = pcb_query.with_units(pcb_query.layer_arguments(expression))
+    result, error = await _run_query("query_objects", {
+        "expr_mm": in_mm, "expr_mil": in_mil, "limit": int(limit), "area": box,
+        "board_path": long_path(board_path)})
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    bare = pcb_query.bare_numbers(expression)
+    if bare:
+        result["warning"] = (f"{', '.join(bare)} has no unit, so the engine read it in "
+                             f"{result.get('engine_unit') or 'its own unit'}. Give sizes with a unit.")
+    if result.get("copper_polygons_without_net"):
+        result["polygon_warning"] = (f"{result['copper_polygons_without_net']} copper polygon(s) have no net: "
+                                     "InNet() and net filters cannot find them, and a repour removes their "
+                                     "copper as dead copper if Remove Dead Copper is on.")
+    if not result.get("matched"):
+        result["note"] = "Nothing matched."
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+@_tool(read_only=True)
+async def which_rule(ctx: Context, object_a: str, object_b: str = "", rule_kind: str = "clearance",
+                     area_a: list = None, area_b: list = None, unit: str = "mil", board_path: str = "") -> str:
+    """
+    Which design rule applies to a PCB object, or between two, and whether
+    they pass it: the rule the DRC picks (FindDominantRuleForObject or
+    ...ForObjectPair) and the DRC's own test of it (Rule.ActualCheck, on
+    a pair both ways round), so net scope and the clearance matrix count as
+    they do in a DRC.
+
+    Each object is a query expression (as for query_objects) that must match
+    exactly one object, e.g. "IsPad And (Name = 'U1-3')". The engine has no
+    X or Y, so narrow one down by position with area_a / area_b, e.g.
+    object_a="IsVia And InNet('GND')", area_a=[1245, 795, 1255, 805].
+
+    Args:
+        object_a (str): Query expression for the object.
+        object_b (str): Query expression for the other object of a pair
+            rule; leave empty for a one-object rule (width, hole_size,
+            routing_via, solder_mask_expansion, paste_mask_expansion,
+            plane_connect).
+        rule_kind (str): clearance (default), short_circuit, hole_to_hole,
+            silk_to_silk, silk_to_mask, component_clearance, polygon_connect
+            (pairs); or one of the one-object kinds above.
+        area_a, area_b (list): Only objects touching [x1, y1, x2, y2] from the
+            board origin, in unit, count for object_a / object_b.
+        unit (str): "mil" (default) or "mm", for the areas.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the object(s), distance_mils (edge to edge) for a
+             pair, and the rule: name, descriptor, priority, enabled,
+             scopes, gap_mils for clearance, and passes (Altium's own check)
+             for the kinds the DRC tests.
+    """
+    import pcb_query
+
+    kind = rule_kind.strip().lower()
+    error = pcb_query.check_rule_kind(kind, object_b)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    for expr in (object_a, object_b) if object_b.strip() else (object_a,):
+        error = pcb_query.check(expr)
+        if error:
+            return json.dumps({"success": False, "error": error})
+    box_a, error_a = pcb_query.area_text(area_a, unit)
+    box_b, error_b = pcb_query.area_text(area_b, unit)
+    if error_a or error_b:
+        return json.dumps({"success": False, "error": error_a or error_b})
+    a_mm, a_mil, _ = pcb_query.with_units(pcb_query.layer_arguments(object_a))
+    b_mm, b_mil, _ = pcb_query.with_units(pcb_query.layer_arguments(object_b.strip()))
+    result, error = await _run_query("which_rule", {
+        "a_mm": a_mm, "a_mil": a_mil, "b_mm": b_mm, "b_mil": b_mil, "area_a": box_a, "area_b": box_b,
+        "rule_kind": kind, "board_path": long_path(board_path)})
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    note = pcb_query.rule_note(kind, result)
+    if note:
+        result["note"] = note
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
                       diagonal_first: bool = False, corner_chamfer_mils: float = 0,
@@ -6441,14 +6670,19 @@ async def _simple_command(command: str, params: dict, what: str) -> str:
     return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
 
 
-async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None) -> Tuple[Optional[dict], str]:
+async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None,
+                       watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None
+                       ) -> Tuple[Optional[dict], str]:
     """(result, "") of a bridge command that returns JSON, or (None, error).
     One helper for the tools that work with the reply instead of passing it
-    on; strict=False because Altium text can hold control characters."""
-    if timeout is None:
-        response = await altium_bridge.execute_command(command, params)
-    else:
-        response = await altium_bridge.execute_command(command, params, timeout=timeout)
+    on; strict=False because Altium text can hold control characters.
+    watcher is passed on to execute_command."""
+    options = {}
+    if timeout is not None:
+        options["timeout"] = timeout
+    if watcher is not None:
+        options["watcher"] = watcher
+    response = await altium_bridge.execute_command(command, params, **options)
     if not response.get("success", False):
         return None, response.get("error", "unknown error")
     result = response.get("result", {})
