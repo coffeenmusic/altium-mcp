@@ -1612,6 +1612,12 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
       OpenSchDoc(path) returns the ISch_Document, opening the file if needed
       (GetSchDocumentByPath alone returns nil for a closed file, and a call on
       nil stops the script); SaveDoc(path) marks a document modified and saves it.
+      CurrentBoard(0) is the focused board, or nil with a step saying which
+      document is focused instead (PCBServer.GetCurrentPCBBoard is nil when no
+      PCB view is active, e.g. after run_drc); BoardByPath(path) brings that
+      board to the front, opening it if needed. BX(mils) / BY(mils) are
+      internal units from the focused board's origin. "hints" in the reply
+      points at a GetCurrentPCBBoard result used without a nil check.
     - Errors inside the script (undeclared identifiers, calls on nil, bad
       conversions) are caught by the sandbox and come back as "script error"
       with Altium's message and the last step; no try/except is needed.
@@ -1689,6 +1695,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     sb = _sandbox()
     report = {}
+    hints = sandbox.board_hints(split.body, split.body_offset)
+    if hints:
+        report["hints"] = hints
     # A script-error dialog left open blocks every new run. Answer it only
     # when a script of ours is stuck; one from the user's own script is theirs.
     if any(d.is_script_error for d in sandbox.altium_dialogs()):
