@@ -1891,13 +1891,18 @@ end;
 // leaves on the board. PCB:DesignRuleCheck opens the modal Design Rule
 // Checker dialog and returns once it closes; run_drc presses its Run button
 // from outside Altium. Coordinates are mils relative to the board origin.
-function RunDRC(MaxViolations: Integer): String;
+// The enabled rules go along, so run_drc can tell which ones the check
+// skipped. Restore brings the board back to the front afterwards: Altium
+// focuses the report it opens, and GetCurrentPCBBoard is then nil.
+function RunDRC(MaxViolations: Integer; Restore: Boolean): String;
 var
     Board     : IPCB_Board;
     Iterator  : IPCB_BoardIterator;
     Violation : IPCB_Violation;
+    Rule      : IPCB_Rule;
+    BoardDoc  : IServerDocument;
     Rect      : TCoordRect;
-    Items, Props, ResultProps : TStringList;
+    Items, Rules, Props, ResultProps : TStringList;
     Count     : Integer;
     RuleName  : String;
 begin
@@ -1908,8 +1913,41 @@ begin
         Exit;
     end;
 
+    Rules := TStringList.Create;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Rule := Iterator.FirstPCBObject;
+    while Rule <> nil do
+    begin
+        if Rule.Enabled then
+        begin
+            Props := TStringList.Create;
+            try
+                AddJSONProperty(Props, 'name', Rule.Name);
+                AddJSONInteger(Props, 'kind', Rule.RuleKind);
+                AddJSONProperty(Props, 'kind_name', Rule.GetState_ShortDescriptorString);
+                AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
+                AddJSONProperty(Props, 'filter1', Rule.Scope1Expression);
+                AddJSONProperty(Props, 'filter2', Rule.Scope2Expression);
+                Rules.Add(BuildJSONObject(Props, 1));
+            finally
+                Props.Free;
+            end;
+        end;
+        Rule := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+
     ResetParameters;
     RunProcess('PCB:DesignRuleCheck');
+
+    if Restore then
+    begin
+        BoardDoc := Client.GetDocumentByPath(Board.FileName);
+        if BoardDoc <> nil then Client.ShowDocument(BoardDoc);
+    end;
 
     Items := TStringList.Create;
     ResultProps := TStringList.Create;
@@ -1962,9 +2000,11 @@ begin
         AddJSONProperty(ResultProps, 'board', Board.FileName);
         AddJSONInteger(ResultProps, 'violation_count', Count);
         ResultProps.Add(BuildJSONArray(Items, 'violations'));
+        ResultProps.Add(BuildJSONArray(Rules, 'enabled_rules'));
         Result := BuildJSONObject(ResultProps);
     finally
         Items.Free;
+        Rules.Free;
         ResultProps.Free;
     end;
 end;

@@ -17,17 +17,18 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from sandbox import _process_name, _window_text
 
 DIALOG_CLASS = "TDesignRuleCheckForm"
+FLOATING_PANEL_CLASS = "TClientBarControl"
 RUN_BUTTON = "run design rule check"
 WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON = 0x0010, 0x0201, 0x0202, 0x0001
 
 
-def find_dialog() -> Optional[int]:
-    """The visible Design Rule Checker dialog of X2.EXE, if one is open."""
+def _altium_windows(window_class: str) -> List[int]:
+    """X2.EXE's visible top-level windows of a class, topmost first."""
     from ctypes import wintypes
     user32 = ctypes.windll.user32
     found = []
@@ -37,12 +38,34 @@ def find_dialog() -> Optional[int]:
         if user32.IsWindowVisible(hwnd):
             cls = ctypes.create_unicode_buffer(64)
             user32.GetClassNameW(hwnd, cls, 64)
-            if cls.value == DIALOG_CLASS and _process_name(hwnd).lower() == "x2.exe":
+            if cls.value == window_class and _process_name(hwnd).lower() == "x2.exe":
                 found.append(hwnd)
         return True
 
     user32.EnumWindows(proto(top), 0)
+    return found
+
+
+def find_dialog() -> Optional[int]:
+    """The visible Design Rule Checker dialog of X2.EXE, if one is open."""
+    found = _altium_windows(DIALOG_CLASS)
     return found[0] if found else None
+
+
+def floating_panels() -> Set[int]:
+    """Altium's floating panels: a panel undocked from the main window is a
+    top-level window of its own. The check opens the Messages panel, which
+    may come up floating over the board."""
+    return set(_altium_windows(FLOATING_PANEL_CLASS))
+
+
+def close_new_panels(before: Set[int]) -> int:
+    """Close the floating panels that were not open before, as their close
+    button does; panels the user had open stay. How many were closed."""
+    new = floating_panels() - before
+    for hwnd in new:
+        ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    return len(new)
 
 
 def _run_button(dialog: int) -> Optional[int]:
@@ -241,3 +264,52 @@ def find_report(board_path: str, since: float) -> Optional[Path]:
             except OSError:
                 pass
     return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").split()).lower()
+
+
+def _same_kind_and_scopes(rule: dict, block: str) -> bool:
+    """A report block for this rule although its text is not the rule's
+    descriptor word for word: the same rule kind, and both scopes in it."""
+    if rule_key(_kind(rule.get("descriptor", ""))) != rule_key(_kind(block)):
+        return False
+    return all(_norm(f) in block for f in (rule.get("filter1"), rule.get("filter2")) if f and f.strip())
+
+
+def rules_not_checked(enabled: List[dict], processed: List[str]) -> List[dict]:
+    """The enabled rules the check skipped. A batch check only processes the
+    rule kinds ticked "Batch" under Rules To Check in the Design Rule Checker
+    dialog, and the report has a "Processing Rule : <descriptor>" block for
+    each rule it processed; a rule of another kind has none, and no
+    violations either, exactly like a rule that passes.
+
+    enabled: {"descriptor", "filter1", "filter2", ...} for each enabled rule;
+    processed: the descriptors of the report's blocks (parse_report's rules).
+    A block counts for one rule only."""
+    blocks = [_norm(b) for b in processed]
+    unmatched = []
+    for rule in enabled:
+        d = _norm(rule.get("descriptor", ""))
+        if d and d in blocks:
+            blocks.remove(d)
+        else:
+            unmatched.append(rule)
+    skipped = []
+    for rule in unmatched:
+        i = next((i for i, b in enumerate(blocks) if _same_kind_and_scopes(rule, b)), None)
+        if i is None:
+            skipped.append(rule)
+        else:
+            blocks.pop(i)
+    return skipped
+
+
+def not_checked_warning(skipped: List[dict]) -> str:
+    names = ", ".join(r.get("name", "?") for r in skipped)
+    kinds = ", ".join(dict.fromkeys(r.get("kind_name") or _kind(r.get("descriptor", "")) for r in skipped))
+    return (f"{len(skipped)} enabled rule(s) were not checked: {names}. The report has no block for "
+            f"them, most likely because their kind ({kinds}) is not ticked for Batch, so no violations "
+            f"does not mean they pass. In Altium: Tools » Design Rule Check » Rules To Check, tick "
+            f"Batch for {kinds}, then run the check again.")
