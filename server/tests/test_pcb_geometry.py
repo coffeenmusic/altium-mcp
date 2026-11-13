@@ -1,0 +1,286 @@
+"""Unit tests for pcb_geometry (pure Python, no Altium needed).
+
+Run from server/:  python -m unittest tests.test_pcb_geometry -v
+"""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+import pcb_geometry as geo  # noqa: E402
+
+ORIGIN = (1000000, 2000000)
+RECORDS = [
+    "track|Top Layer|GND||1010000|2020000|1030000|2020000|80000|0",
+    "track|Top Layer|GND||1010000|2020000|1030000|2020000|80000|1",
+    "arc|Bottom Layer|SIG|U1|1100000|2100000|50000|0|90000|10000|0",
+    "via|Top Layer:Bottom Layer|GND||1050000|2050000|236220|98425",
+    "via|Top Layer:Mid Layer 1|SIG||1060000|2060000|236220|98425",
+    "pad|Multi Layer|SIG|J1|1200000|2200000|600000|600000|1|350000|90000|1",
+    "pad|Top Layer|||1300000|2300000|100000|200000|2|0|0|MH|A",
+    "fill|Top Layer|GND||1000000|2000000|1100000|2100000|45000",
+    "region|Bottom Layer|GND||1000000|2000000|1500000|2500000|1",
+    "polygon|Top Layer|GND||1000000|2000000|1500000|2500000",
+    "text|Top Overlay||U1|1010000|2010000|600000|90000|0|U1|x",
+    "text|Top Overlay||U1|1010000|2010000|600000|0|1|Comment",
+    "component|Top Layer||U1|1100000|2100000|180000|1000000|2000000|1200000|2200000|SOIC8",
+    "bogus|record",
+]
+
+
+class ParseTest(unittest.TestCase):
+    def test_board_relative_in_mils_and_refs(self):
+        t = geo.parse_object(RECORDS[0], ORIGIN, "mil")
+        self.assertEqual((t["x1"], t["y1"], t["x2"], t["y2"], t["width"]), (1.0, 2.0, 3.0, 2.0, 8.0))
+        self.assertEqual(t["ref"], "track|Top Layer|1010000|2020000|1030000|2020000")
+        self.assertNotIn("in_polygon", t)
+        self.assertTrue(geo.parse_object(RECORDS[1], ORIGIN)["in_polygon"])
+        a = geo.parse_object(RECORDS[2], ORIGIN)
+        self.assertEqual((a["cx"], a["radius"], a["start_angle"], a["end_angle"], a["component"]),
+                         (10.0, 5.0, 0.0, 90.0, "U1"))
+        v = geo.parse_object(RECORDS[3], ORIGIN, "mm")
+        self.assertEqual((v["low_layer"], v["high_layer"], v["size"], v["hole"]), ("Top Layer", "Bottom Layer", 0.6, 0.25))
+        self.assertEqual(v["ref"], "via|1050000|2050000")
+        self.assertNotIn("layer", v)
+
+    def test_pads_fills_regions_text_components(self):
+        p = geo.parse_object(RECORDS[5], ORIGIN)
+        self.assertEqual((p["name"], p["shape"], p["rotation"], p["ref"]), ("1", "round", 90.0, "pad|J1|1"))
+        free = geo.parse_object(RECORDS[6], ORIGIN)
+        self.assertEqual((free["name"], free["shape"], free["ref"]), ("MH|A", "rectangle", "pad|1300000|2300000"))
+        self.assertEqual(geo.parse_object(RECORDS[7], ORIGIN)["rotation"], 45.0)
+        r = geo.parse_object(RECORDS[8], ORIGIN)
+        self.assertEqual((r["bounds"], r["in_polygon"]), ([0.0, 0.0, 50.0, 50.0], True))
+        self.assertNotIn("ref", geo.parse_object(RECORDS[9], ORIGIN))
+        self.assertEqual(geo.parse_object(RECORDS[10], ORIGIN)["text"], "U1|x")
+        self.assertNotIn("hidden", geo.parse_object(RECORDS[10], ORIGIN))
+        self.assertTrue(geo.parse_object(RECORDS[11], ORIGIN)["hidden"])
+        c = geo.parse_object(RECORDS[12], ORIGIN)
+        self.assertEqual((c["designator"], c["rotation"], c["footprint"], c["ref"]),
+                         ("U1", 180.0, "SOIC8", "component|U1"))
+        self.assertIsNone(geo.parse_object(RECORDS[13]))
+
+
+class ShapeTest(unittest.TestCase):
+    def test_region_contours_and_outline(self):
+        rec = "region|Top Layer|GND||1000000|2000000|1100000|2100000|1|GND_TOP|s:1000000,2000000;1100000,2000000;1100000,2100000~h:1010000,2010000;1020000,2010000;1020000,2020000"
+        r = geo.parse_object(rec, ORIGIN)
+        self.assertEqual(r["polygon"], "GND_TOP")
+        self.assertEqual(r["contours"], [{"hole": False, "points": [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]},
+                                         {"hole": True, "points": [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0)]}])
+        self.assertNotIn("contours", geo.parse_object(RECORDS[8], ORIGIN))
+        out = geo.parse_outline("1000000,2000000,0,0,0,0,0,0;1100000,2000000,1,1100000,2050000,50000,270000,90000;x", ORIGIN)
+        self.assertEqual(out, [{"x": 0.0, "y": 0.0, "kind": 0, "cx": -100.0, "cy": -200.0, "radius": 0.0},
+                               {"x": 10.0, "y": 0.0, "kind": 1, "cx": 10.0, "cy": 5.0, "radius": 5.0,
+                                "start_angle": 270.0, "end_angle": 90.0}])
+
+
+class ViolationTest(unittest.TestCase):
+    def test_violations_in_unit(self):
+        result = {"origin_x": 1000000, "origin_y": 2000000, "violations": [
+            {"rule": "Clearance", "kind": "clearance", "a": RECORDS[3], "b": RECORDS[0], "distance": 20000,
+             "gap": 50000, "descriptor": "d"},
+            {"rule": "Width", "kind": "width", "a": RECORDS[0], "descriptor": "w"}]}
+        out = geo.describe_violations(result, "mil")
+        self.assertEqual((out[0]["a"]["kind"], out[0]["b"]["kind"]), ("via", "track"))
+        self.assertEqual((out[0]["distance"], out[0]["rule_gap"]), (2.0, 5.0))
+        self.assertNotIn("b", out[1])
+
+    def test_check_reply_says_when_nothing_was_checked(self):
+        base = {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "pairs_checked": 0, "violations": []}
+        out = geo.check_reply(dict(base, objects_checked=0, objects_found=0, not_found=["via|1|2"]), "mil")
+        self.assertFalse(out["success"])
+        self.assertIn("Nothing was checked", out["note"])
+        self.assertEqual(out["not_found"], ["via|1|2"])
+        out = geo.check_reply(dict(base, objects_checked=2, objects_found=2, search_margin=210000), "mil")
+        self.assertNotIn("success", out)
+        self.assertEqual((out["note"], out["search_margin"]), ("No violations.", 21.0))
+        out = geo.check_reply(dict(base, objects_checked=1, objects_found=1, not_found=["via|1|2"]), "mil")
+        self.assertIn("not found", out["note"])
+        flagged = dict(base, objects_checked=1, objects_found=1, violations=[
+            {"rule": "Clearance", "kind": "clearance", "a": RECORDS[3], "b": RECORDS[8], "distance": 0,
+             "gap": 50000, "descriptor": "d", "same_net_pour": True}])
+        out = geo.check_reply(flagged, "mil")
+        # a hit on pour copper is listed apart, still flagged
+        self.assertEqual(out["violations"], [])
+        self.assertTrue(out["pour_violations"][0]["same_net_pour"])
+        self.assertIn("run_drc", out["same_net_pour_note"])
+        self.assertNotIn("note", out)
+
+    def test_component_refs_refused(self):
+        for bad in ("component|U1", "polygon|Top Layer|1|2|3|4"):
+            with self.assertRaises(ValueError):
+                geo.clearance_ref(bad)
+        self.assertEqual(geo.clearance_ref("U1-3"), "pad|U1|3")
+
+    def test_locate_refs(self):
+        self.assertEqual(geo.locate_ref("U1-3"), "pad|U1|3")
+        self.assertEqual(geo.locate_ref("via|1050000|-2050000"), "via|1050000|-2050000")
+        self.assertEqual(geo.locate_ref("pad|1300000|2300000"), "pad|1300000|2300000")
+        self.assertEqual(geo.locate_ref("component|U1"), "component|U1")
+        for bad in ("track|Top Layer|1|2|3|4", "region|Top Layer|1|2|3|4", "text|Top Overlay|1|2", "via|a|b",
+                    "via|1"):
+            with self.assertRaises(ValueError):
+                geo.locate_ref(bad)
+
+
+class PourSplitTest(unittest.TestCase):
+    def test_pour_hits_apart(self):
+        pour = {"kind": "region", "in_polygon": True}
+        hatch = {"kind": "track", "in_polygon": True}
+        hard = {"rule": "c", "a": {"kind": "track"}, "b": {"kind": "pad"}}
+        soft = {"rule": "c", "a": {"kind": "track"}, "b": pour}
+        hatched = {"rule": "c", "a": hatch, "b": {"kind": "via"}}
+        own = {"rule": "w", "a": {"kind": "track"}}
+        self.assertEqual(geo.split_pour_violations([hard, soft, hatched, own]), ([hard, own], [soft, hatched]))
+
+
+class SelectTest(unittest.TestCase):
+    def test_layers_and_nets(self):
+        top = geo.select(RECORDS, ORIGIN, "mil", layers=["top layer"])
+        kinds = [o["kind"] for o in top]
+        # the through via and the multi-layer pad are on every copper layer;
+        # the blind via ends on Top Layer
+        self.assertEqual(kinds, ["track", "track", "via", "via", "pad", "pad", "fill", "polygon", "component"])
+        mid = geo.select(RECORDS, ORIGIN, "mil", layers=["Mid Layer 1"])
+        self.assertEqual([o["kind"] for o in mid], ["via", "via", "pad"])
+        sig = geo.select(RECORDS, ORIGIN, "mil", nets=["sig"])
+        # Altium drops an object its search returns twice, by its handle: two
+        # identical records here are two objects (regions or tracks stacked)
+        region = [r for r in RECORDS if r.startswith("region|")]
+        self.assertEqual(len(geo.select(RECORDS + region, ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")) + 1)
+        self.assertEqual(len(geo.select(RECORDS + RECORDS[:2], ORIGIN, "mil")), len(geo.select(RECORDS, ORIGIN, "mil")) + 2)
+        texts = [o for o in geo.select(RECORDS, ORIGIN, "mil", include_hidden=False) if o["kind"] == "text"]
+        self.assertEqual([t["text"] for t in texts], ["U1|x"])
+        # the text ends the ref, so two texts at one point have two refs
+        self.assertEqual(texts[0]["ref"], "text|Top Overlay|1010000|2010000|U1|x")
+        both = [o["ref"] for o in geo.select(RECORDS, ORIGIN, "mil") if o["kind"] == "text"]
+        self.assertEqual(len(set(both)), 2)
+        self.assertEqual([o["kind"] for o in sig], ["arc", "via", "pad"])
+
+    def test_through_copper_only_on_copper_layers(self):
+        # an overlay or mechanical layer holds no through via or Multi Layer pad
+        overlay = geo.select(RECORDS, ORIGIN, "mil", layers=["Top Overlay"])
+        self.assertEqual({o["kind"] for o in overlay}, {"text"})
+        self.assertEqual(geo.select(RECORDS, ORIGIN, "mil", layers=["Mechanical 1"]), [])
+        # Multi Layer itself, written either way
+        multi = geo.select(RECORDS, ORIGIN, "mil", layers=["multi-layer"])
+        self.assertEqual([o["kind"] for o in multi], ["via", "pad"])
+        # with the board's copper layers known, a layer it lacks holds nothing
+        stack = ["Top Layer", "Bottom Layer"]
+        self.assertEqual(geo.select(RECORDS[3:6], ORIGIN, "mil", layers=["Mid Layer 3"], stack=stack), [])
+        inner = geo.select(RECORDS[3:6], ORIGIN, "mil", layers=["Internal Plane 1"])
+        self.assertEqual([o["kind"] for o in inner], ["via", "pad"])
+
+    def test_layer_names_compare_loosely(self):
+        self.assertEqual(geo.layer_key("Multi Layer"), geo.layer_key("multi-layer"))
+        self.assertTrue(geo.is_multi_layer("MultiLayer"))
+        self.assertFalse(geo.is_multi_layer("Top Layer"))
+        self.assertTrue(geo.is_copper_layer("Mid-Layer 2"))
+        self.assertFalse(geo.is_copper_layer("Top Overlay"))
+        self.assertFalse(geo.is_copper_layer("Mid Layer 2", ["Top Layer", "Bottom Layer"]))
+
+    def test_blind_via_on_its_middle_layers(self):
+        stack = ["Top Layer", "Mid Layer 1", "Mid Layer 2", "Bottom Layer"]
+        blind = "via|Top Layer:Mid Layer 2|SIG||1060000|2060000|236220|98425"
+        buried = "via|Bottom Layer:Mid Layer 1|SIG||1060000|2060000|236220|98425"
+        self.assertEqual(len(geo.select([blind], ORIGIN, "mil", layers=["mid layer 1"], stack=stack)), 1)
+        self.assertEqual(len(geo.select([blind], ORIGIN, "mil", layers=["Bottom Layer"], stack=stack)), 0)
+        # low and high in either order
+        self.assertEqual(len(geo.select([buried], ORIGIN, "mil", layers=["Mid Layer 2"], stack=stack)), 1)
+        self.assertEqual(len(geo.select([buried], ORIGIN, "mil", layers=["Top Layer"], stack=stack)), 0)
+        # without the stack only its end layers are known
+        self.assertEqual(len(geo.select([blind], ORIGIN, "mil", layers=["Mid Layer 1"])), 0)
+        self.assertEqual(geo.via_layers("Top Layer", "Mid Layer 1", ["Top Layer", "Mid Layer 1", "Bottom Layer"]),
+                         ["top layer", "mid layer 1"])
+
+
+class AreaReplyTest(unittest.TestCase):
+    TRACK = "track|{}|GND||{}|2020000|1030000|2020000|80000|0"
+    REGION = "region|{}|GND||{}|2000000|1100000|2100000|1|GND_POUR"
+
+    def result(self, n_top, n_bottom, total=None, twice=0, kind="TRACK"):
+        rec = getattr(self, kind)
+        recs = [rec.format("Bottom Layer", 1000000 + i) for i in range(n_bottom)]
+        recs += [rec.format("Top Layer", 1000000 + i) for i in range(n_top)]
+        recs += recs[:twice]
+        return {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "objects": recs,
+                "total": len(recs) if total is None else total}
+
+    def test_limit_applies_after_the_filters(self):
+        # without filters Altium is asked for one more than the limit
+        self.assertEqual(geo.scan_limit(10), 11)
+        self.assertEqual(geo.scan_limit(500, layers=["Top Layer"]), geo.SCAN_CAP)
+        self.assertEqual(geo.scan_limit(50000, nets=["GND"]), 50001)
+        # many bottom-layer objects come first, yet the top-layer ones are found
+        out = geo.area_reply(self.result(3, 600), "mil", 2, layers=["Top Layer"])
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 2, True))
+        self.assertIn("first 2 of 3", out["note"])
+        out = geo.area_reply(self.result(3, 600), "mil", 10, layers=["Top Layer"])
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (3, 3, False))
+        self.assertNotIn("note", out)
+
+    def test_identical_objects_and_hidden(self):
+        # two identical regions or tracks are a stack, and both count
+        for kind in ("REGION", "TRACK"):
+            out = geo.area_reply(self.result(3, 3, twice=2, kind=kind), "mil", 10)
+            self.assertEqual(out["total"], 8, kind)
+        hidden = {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "total": 2, "objects": RECORDS[10:12]}
+        self.assertEqual(geo.area_reply(hidden, "mil", 5, include_hidden=False)["total"], 1)
+        self.assertEqual(geo.area_reply(hidden, "mil", 5)["total"], 2)
+
+    def test_cut_by_altium_is_said(self):
+        # with a filter: Altium stopped at the cap before the filter ran
+        result = dict(self.result(1, 4), complete=False)
+        out = geo.area_reply(result, "mil", 10, layers=["Top Layer"])
+        self.assertIsNone(out["total"])
+        self.assertTrue(out["truncated"])
+        self.assertIn("first 5", out["note"])
+        # without: Altium stopped at limit + 1, so there are more
+        result = dict(self.result(0, 11), complete=False)
+        out = geo.area_reply(result, "mil", 10)
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (None, 10, True))
+        self.assertIn("More than 10", out["note"])
+        # exactly the limit, all sent
+        out = geo.area_reply(dict(self.result(0, 10), complete=True), "mil", 10)
+        self.assertEqual((out["total"], out["returned"], out["truncated"]), (10, 10, False))
+
+
+class RefTest(unittest.TestCase):
+    def test_refs_and_pad_shorthand(self):
+        self.assertEqual(geo.normalize_ref(" via|1|2 "), "via|1|2")
+        self.assertEqual(geo.normalize_ref("U1-3"), "pad|U1|3")
+        self.assertEqual(geo.normalize_ref("U_LS-9-A1"), "pad|U_LS-9|A1")
+        for bad in ("", "U1", "polygon|x|1", "-3"):
+            with self.assertRaises(ValueError):
+                geo.normalize_ref(bad)
+
+    def test_clearance_takes_no_components(self):
+        self.assertEqual(geo.clearance_ref("U1-3"), "pad|U1|3")
+        self.assertEqual(geo.clearance_ref("text|Top Overlay|1|2"), "text|Top Overlay|1|2")
+        self.assertEqual(geo.normalize_ref("component|U1"), "component|U1")
+        with self.assertRaises(ValueError):
+            geo.clearance_ref("component|U1")
+
+    def test_units_and_clearance(self):
+        self.assertEqual(geo.to_coord(1, "mil"), 10000)
+        self.assertEqual(geo.to_coord(0.0254, "mm"), 10000)
+        with self.assertRaises(ValueError):
+            geo.to_coord(1, "inch")
+        # an area corner past Altium's design space is clamped (a larger
+        # number stops the bridge script)
+        self.assertEqual(geo.area_to_coord(1e6, "mil"), 100000 * 10000)
+        self.assertEqual(geo.area_to_coord(-1e6, "mm"), -100000 * 10000)
+        self.assertEqual(geo.area_to_coord(12.5, "mil"), 125000)
+        # sent as text, so an int: Altium cannot read "1000000000.0"
+        self.assertIsInstance(geo.area_to_coord(-1e6, "mil"), int)
+        out = geo.describe_clearance({"distance": 78740, "rule": "Clearance", "rule_gap": 49213,
+                                      "rule_violated": False}, "mm")
+        self.assertEqual(out, {"distance": 0.2, "unit": "mm", "rule": "Clearance", "rule_gap": 0.125,
+                               "violates_rule": False})
+        self.assertIsNone(geo.describe_clearance({"distance": 1}, "mil")["rule"])
+
+
+if __name__ == "__main__":
+    unittest.main()

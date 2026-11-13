@@ -104,6 +104,10 @@
       "description": "List a schematic sheet's pins live from Altium: connection point, number, name and electrical type"
     },
     {
+      "name": "render_sheet",
+      "description": "Draw a schematic sheet or part of it as a picture, read from the saved .SchDoc file"
+    },
+    {
       "name": "get_symbol_placement_rules",
       "description": "Get schematic symbol placement rules from a local configuration file"
     },
@@ -148,6 +152,10 @@
       "description": "Run the design rule check on a PCB and list the violations with measured values, optionally filtered by rule, net or area"
     },
     {
+      "name": "check_objects_drc",
+      "description": "Run the board's design rules on chosen PCB objects only, without a batch DRC"
+    },
+    {
       "name": "get_selected_components_coordinates",
       "description": "Get coordinates and positioning information for selected components in Altium layout"
     },
@@ -182,6 +190,10 @@
     {
       "name": "route_track",
       "description": "Add a track through waypoints with every segment exactly 0, 45 or 90 degrees"
+    },
+    {
+      "name": "route_path",
+      "description": "Route a net through waypoints at 0/45/90 degrees, changing layer with vias, in one undo step and checked against the rules"
     },
     {
       "name": "place_vias",
@@ -230,6 +242,22 @@
     {
       "name": "get_pour_report",
       "description": "Report what each polygon pour poured: pieces, islands, slivers, and pours with no net or no copper"
+    },
+    {
+      "name": "objects_in_area",
+      "description": "List the PCB objects in a box with their layer, net, owner, geometry and a ref for the other geometry tools"
+    },
+    {
+      "name": "clearance",
+      "description": "Measure the edge-to-edge gap between two PCB objects and check the clearance rule that applies"
+    },
+    {
+      "name": "drag_copper",
+      "description": "Move a via or a track segment and keep it connected: attached track ends stretch and vias move along"
+    },
+    {
+      "name": "render_pcb",
+      "description": "Draw a PCB area as a picture from its objects, without touching Altium's view"
     },
     {
       "name": "layout_duplicator",
