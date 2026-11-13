@@ -250,6 +250,9 @@ class AltiumWindowsTest(unittest.TestCase):
             target, why = st.dismissable(ws, never)
             self.assertIsNone(target)
             self.assertIn("Open dialogs: 2 'Options for PCB Project Adapter.PrjPcb'", why)
+        self.assertIsNone(st.dismissable(ws, "\u00b2")[0])   # isdigit() but no int: no crash
+        numbered = [dict(ws[0], title="2", hwnd=8)]
+        self.assertEqual(st.dismissable(numbered, "2")[0]["hwnd"], 8)   # an all-digit title
         twins = [dict(ws[0]), dict(ws[0], hwnd=7)]
         self.assertIn("give the hwnd", st.dismissable(twins, "Options for PCB Project Adapter.PrjPcb")[1])
 

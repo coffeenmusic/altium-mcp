@@ -352,9 +352,11 @@ def dismissable(windows: Sequence[Dict], hwnd_or_title) -> Tuple[Optional[Dict],
     """(the Altium dialog to dismiss, "") or (None, why not). Only a dialog
     from altium_windows: never the main frame, a panel or another program."""
     dialogs = [w for w in windows if w["kind"] == "dialog"]
-    if isinstance(hwnd_or_title, int) or str(hwnd_or_title).strip().isdigit():
-        found = [w for w in dialogs if w["hwnd"] == int(hwnd_or_title)]
-    else:
+    try:
+        found = [w for w in dialogs if w["hwnd"] == int(str(hwnd_or_title).strip())]
+    except ValueError:
+        found = []
+    if not found:   # a title, which may also be all digits
         want = _norm(str(hwnd_or_title))
         found = [w for w in dialogs if _norm(w["title"]) == want]
     if len(found) == 1:

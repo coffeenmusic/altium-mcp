@@ -5849,6 +5849,11 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
             cover = covered()
             if cover:
                 return refuse(cover)
+            if t.kind in ("current", "document", "region"):
+                # a dialog Altium opened while the capture was being taken
+                refusal, _ = screenshot_target.altium_windows_over(rect, _altium_window_list(hwnd, pid))
+                if refusal:
+                    return {"success": False, "error": refusal}
             info["blank"] = screenshot_target.is_blank(img)
             info["paint_retries"] = tries
         finally:
