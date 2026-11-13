@@ -5122,6 +5122,596 @@ begin
     end;
 end;
 
+// Altium's query engine, as the PCB Filter panel runs it: PCB:RunQuery with
+// Apply selects the objects an expression matches, which are read from the
+// selection. The engine reads bare numbers in its own unit, which is not the
+// board's display unit (a board shown in mil queried in mm), so it is found
+// once per call by asking for a known via or track size.
+//
+// Queries change the selection and apply a filter. Each call saves the
+// user's selection first, in memory and as object addresses in StoreFile,
+// and selects it again and clears the filter when done. A call the server
+// stops (an expression Altium cannot evaluate) never gets there: query_restore,
+// or the next query call, selects it again from StoreFile. A filter the user
+// had applied cannot be read by a script, so it is cleared, not restored.
+
+// Number as the query engine reads it: always a dot, whatever the locale
+function QueryNumber(V: Double): String;
+begin
+    Result := StringReplace(FormatFloat('0.######', V), DecimalSeparator, '.', REPLACEALL);
+end;
+
+procedure QueryClearFilter(Dummy: Integer);
+begin
+    ResetParameters;
+    AddStringParameter('Clear', 'True');
+    RunProcess('PCB:RunQuery');
+end;
+
+// The objects Expr matches, in Found; the selection is left empty
+procedure RunBoardQuery(Board: IPCB_Board; Expr: String; Found: TInterfaceList);
+var
+    i : Integer;
+begin
+    Board.SelectedObjects_Clear;
+    try
+        ResetParameters;
+        AddStringParameter('Apply', 'True');
+        AddStringParameter('Expr', Expr);
+        AddStringParameter('Select', 'True');
+        RunProcess('PCB:RunQuery');
+        for i := 0 to Board.SelectecObjectCount - 1 do
+            Found.Add(Board.SelectecObject[i]);
+    finally
+        Board.SelectedObjects_Clear;
+        QueryClearFilter(0);
+    end;
+end;
+
+// Selects again what a stopped query call saved in StoreFile for this board,
+// clears the filter and deletes the file. How many objects were selected,
+// or -1 when nothing was saved for this board.
+function QueryRestoreSelection(Board: IPCB_Board; StoreFile: String): Integer;
+var
+    Lines    : TStringList;
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+begin
+    Result := -1;
+    if not FileExists(StoreFile) then Exit;
+    Lines := TStringList.Create;
+    try
+        Lines.LoadFromFile(StoreFile);
+        if Lines.Count = 0 then Exit;
+        // Saved for another board: left for a query call on that board
+        if UpperCase(Lines[0]) <> UpperCase(Board.FileName) then Exit;
+        Lines.Delete(0);
+        Lines.Sorted := True;
+        Result := 0;
+        Board.SelectedObjects_Clear;
+        QueryClearFilter(0);
+        if Lines.Count > 0 then
+        begin
+            Iterator := Board.BoardIterator_Create;
+            Iterator.AddFilter_ObjectSet(MkSet(eArcObject, ePadObject, eViaObject, eTrackObject, eTextObject,
+                eFillObject, eComponentObject, ePolyObject, eRegionObject, eDimensionObject, eComponentBodyObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Prim := Iterator.FirstPCBObject;
+            while Prim <> nil do
+            begin
+                if Lines.IndexOf(IntToStr(Prim.I_ObjectAddress)) >= 0 then
+                begin
+                    Prim.Selected := True;
+                    Result := Result + 1;
+                end;
+                Prim := Iterator.NextPCBObject;
+            end;
+            Board.BoardIterator_Destroy(Iterator);
+        end;
+        DeleteFile(StoreFile);
+    finally
+        Lines.Free;
+    end;
+end;
+
+// Saves the selection in Saved and in StoreFile, first selecting again what
+// a stopped call left in StoreFile
+procedure QuerySaveSelection(Board: IPCB_Board; StoreFile: String; Saved: TInterfaceList);
+var
+    Lines : TStringList;
+    Prim  : IPCB_Primitive;
+    i     : Integer;
+begin
+    QueryRestoreSelection(Board, StoreFile);
+    Lines := TStringList.Create;
+    try
+        Lines.Add(Board.FileName);
+        for i := 0 to Board.SelectecObjectCount - 1 do
+        begin
+            Prim := Board.SelectecObject[i];
+            Saved.Add(Prim);
+            Lines.Add(IntToStr(Prim.I_ObjectAddress));
+        end;
+        Lines.SaveToFile(StoreFile);
+    finally
+        Lines.Free;
+    end;
+end;
+
+// Selects again what QuerySaveSelection saved, with the filter cleared
+procedure QueryEndSelection(Board: IPCB_Board; StoreFile: String; Saved: TInterfaceList);
+var
+    i : Integer;
+begin
+    Board.SelectedObjects_Clear;
+    for i := 0 to Saved.Count - 1 do
+        Saved.Items[i].Selected := True;
+    DeleteFile(StoreFile);
+end;
+
+// query_restore: the selection a stopped query call left behind
+function QueryRestore(StoreFile: String): String;
+var
+    Board : IPCB_Board;
+    Props : TStringList;
+    Count : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Count := QueryRestoreSelection(Board, StoreFile);
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONBoolean(Props, 'restored', Count >= 0);
+        if Count >= 0 then AddJSONInteger(Props, 'selected', Count);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
+// 'mm' or 'mil': how the engine reads bare numbers on this board, from a via
+// hole or a track width it must find again; '' when the board has neither
+function QueryUnit(Board: IPCB_Board): String;
+var
+    Iterator : IPCB_BoardIterator;
+    Prim     : IPCB_Primitive;
+    Found    : TInterfaceList;
+    Prop, Kind : String;
+    Size     : Integer;
+begin
+    Result := '';
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eViaObject, eTrackObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Prim := Iterator.FirstPCBObject;
+    while (Prim <> nil) and (Prim.ObjectId <> eViaObject) do Prim := Iterator.NextPCBObject;
+    if Prim = nil then Prim := Iterator.FirstPCBObject;
+    Board.BoardIterator_Destroy(Iterator);
+    if Prim = nil then Exit;
+    if Prim.ObjectId = eViaObject then
+    begin
+        Kind := 'IsVia'; Prop := 'HoleSize'; Size := Prim.HoleSize;
+    end
+    else
+    begin
+        Kind := 'IsTrack'; Prop := 'Width'; Size := Prim.Width;
+    end;
+    Found := TInterfaceList.Create;
+    try
+        RunBoardQuery(Board, Kind + ' And (' + Prop + ' > ' + QueryNumber(CoordToMMs(Size) * 0.999) +
+                      ') And (' + Prop + ' < ' + QueryNumber(CoordToMMs(Size) * 1.001) + ')', Found);
+        if Found.Count > 0 then Result := 'mm'
+        else
+        begin
+            RunBoardQuery(Board, Kind + ' And (' + Prop + ' > ' + QueryNumber(CoordToMils(Size) * 0.999) +
+                          ') And (' + Prop + ' < ' + QueryNumber(CoordToMils(Size) * 1.001) + ')', Found);
+            if Found.Count > 0 then Result := 'mil';
+        end;
+    finally
+        Found.Free;
+    end;
+end;
+
+// The board's own name of a layer ('GND1' for Mid Layer 1 on a board that
+// renamed it), or '' when it has none of its own. Read from the V7 layer
+// stack: Prim.Layer holds V7 ids, and the V6 stack names Mechanical 17 and
+// up after other layers ('Mid-Layer 16' for Mechanical 17).
+function QueryBoardLayerName(Board: IPCB_Board; Layer: Integer): String;
+var
+    Obj : IPCB_LayerObject;
+begin
+    Result := '';
+    try
+        Obj := Board.LayerStack_V7.LayerObject_V7[Layer];
+        if Obj <> nil then Result := Obj.Name;
+    except
+        Result := '';
+    end;
+    if SameText(Result, Layer2String(Layer)) then Result := '';
+end;
+
+// Generic replaced by Named where a layer name is expected: OnLayer('..')
+// (ExistsOnLayer too), Layer = '..' and Layer <> '..', written as
+// pcb_query.layer_arguments writes them. Other quoted text is left alone.
+function QueryRenameLayer(Expr: String; Generic: String; Named: String): String;
+begin
+    Result := Expr;
+    if (Named = '') or SameText(Named, Generic) then Exit;
+    Result := StringReplace(Result, 'OnLayer(''' + Generic + ''')', 'OnLayer(''' + Named + ''')',
+                            MkSet(rfReplaceAll, rfIgnoreCase));
+    Result := StringReplace(Result, 'Layer = ''' + Generic + '''', 'Layer = ''' + Named + '''',
+                            MkSet(rfReplaceAll, rfIgnoreCase));
+    Result := StringReplace(Result, 'Layer <> ''' + Generic + '''', 'Layer <> ''' + Named + '''',
+                            MkSet(rfReplaceAll, rfIgnoreCase));
+end;
+
+// The engine knows layers only by the board's names: OnLayer('Mid Layer 3')
+// matches nothing on a board that calls it 'SIG/PWR'. Each generic layer
+// name given as a layer is replaced by the board's name for it, mechanical
+// layers past 16 included (their V6 ids stop at Mechanical 16, #32).
+function QueryLayerNames(Board: IPCB_Board; Expr: String): String;
+var
+    L, i      : Integer;
+    MechLayer : IPCB_MechanicalLayer;
+begin
+    Result := Expr;
+    for L := eTopLayer to eMultiLayer do
+        Result := QueryRenameLayer(Result, Layer2String(L), QueryBoardLayerName(Board, L));
+    if Pos('MECHANICAL ', UpperCase(Result)) = 0 then Exit;
+    for i := 17 to MAX_MECH_LAYERS do
+    begin
+        MechLayer := Board.LayerStack_V7.LayerObject_V7[ILayer.MechanicalLayer(i)];
+        if MechLayer <> nil then
+            Result := QueryRenameLayer(Result, 'Mechanical ' + IntToStr(i), MechLayer.Name);
+    end;
+end;
+
+// Area is 'x1|y1|x2|y2' in internal units from the board origin, or '' for
+// the whole board; True when the object's bounds touch it
+function QueryInArea(Board: IPCB_Board; Prim: IPCB_Primitive; Area: String): Boolean;
+var
+    R : TCoordRect;
+    X1, Y1, X2, Y2 : Integer;
+begin
+    Result := True;
+    if Area = '' then Exit;
+    X1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 0));
+    Y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 1));
+    X2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(Area, 2));
+    Y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(Area, 3));
+    R := Prim.BoundingRectangle;
+    Result := (R.Left <= X2) and (R.Right >= X1) and (R.Bottom <= Y2) and (R.Top >= Y1);
+end;
+
+// Keeps the objects of Found inside Area
+procedure QueryKeepInArea(Board: IPCB_Board; Found: TInterfaceList; Area: String);
+var
+    i : Integer;
+begin
+    if Area = '' then Exit;
+    for i := Found.Count - 1 downto 0 do
+        if not QueryInArea(Board, Found.Items[i], Area) then Found.Delete(i);
+end;
+
+function QueryKindName(Prim: IPCB_Primitive): String;
+begin
+    case Prim.ObjectId of
+        eArcObject:       Result := 'arc';
+        ePadObject:       Result := 'pad';
+        eViaObject:       Result := 'via';
+        eTrackObject:     Result := 'track';
+        eTextObject:      Result := 'text';
+        eFillObject:      Result := 'fill';
+        eComponentObject: Result := 'component';
+        ePolyObject:      Result := 'polygon';
+        eRegionObject:    Result := 'region';
+        eNetObject:       Result := 'net';
+        eRuleObject:      Result := 'rule';
+        eDimensionObject: Result := 'dimension';
+    else
+        Result := 'object ' + IntToStr(Prim.ObjectId);
+    end;
+end;
+
+// One matched object: kind, its name (designator, pad, polygon, rule, net),
+// net, layer and bounds in mils from the board origin
+function QueryObjectJSON(Board: IPCB_Board; Prim: IPCB_Primitive): String;
+var
+    Item : TStringList;
+    R    : TCoordRect;
+begin
+    Item := TStringList.Create;
+    try
+        AddJSONProperty(Item, 'kind', QueryKindName(Prim));
+        case Prim.ObjectId of
+            eComponentObject: AddJSONProperty(Item, 'name', Prim.Name.Text);
+            ePadObject:
+                begin
+                    if Prim.Component <> nil then
+                        AddJSONProperty(Item, 'name', Prim.Component.Name.Text + '-' + Prim.Name)
+                    else
+                        AddJSONProperty(Item, 'name', Prim.Name);
+                end;
+            ePolyObject, eRuleObject, eNetObject: AddJSONProperty(Item, 'name', Prim.Name);
+        end;
+        if (Prim.ObjectId <> eNetObject) and (Prim.ObjectId <> eRuleObject) and (Prim.ObjectId <> eComponentObject) then
+        begin
+            if Prim.Net <> nil then AddJSONProperty(Item, 'net', Prim.Net.Name) else AddJSONProperty(Item, 'net', '');
+        end;
+        if (Prim.ObjectId <> eNetObject) and (Prim.ObjectId <> eRuleObject) then
+        begin
+            if Prim.ObjectId = eViaObject then
+                AddJSONProperty(Item, 'layer', Layer2String(Prim.LowLayer) + ' - ' + Layer2String(Prim.HighLayer))
+            else
+            begin
+                AddJSONProperty(Item, 'layer', Layer2String(Prim.Layer));
+                // the name the board gives it, which is what OnLayer() takes
+                if QueryBoardLayerName(Board, Prim.Layer) <> '' then
+                    AddJSONProperty(Item, 'layer_name', QueryBoardLayerName(Board, Prim.Layer));
+            end;
+            R := Prim.BoundingRectangle;
+            AddJSONNumber(Item, 'left', CoordToMils(R.Left - Board.XOrigin));
+            AddJSONNumber(Item, 'bottom', CoordToMils(R.Bottom - Board.YOrigin));
+            AddJSONNumber(Item, 'right', CoordToMils(R.Right - Board.XOrigin));
+            AddJSONNumber(Item, 'top', CoordToMils(R.Top - Board.YOrigin));
+        end;
+        Result := BuildJSONObject(Item, 1);
+    finally
+        Item.Free;
+    end;
+end;
+
+// query_objects: ExprMM and ExprMil are the expression with its unit values
+// written in mm and in mil; the one in the engine's unit is run. Area keeps
+// the objects touching it. StoreFile keeps the user's selection while the
+// queries run.
+function QueryObjects(ExprMM: String; ExprMil: String; Limit: Integer; Area: String; StoreFile: String): String;
+var
+    Board : IPCB_Board;
+    Found, Saved : TInterfaceList;
+    Items, Kinds, Counts, Props : TStringList;
+    Units, Expr, Kind : String;
+    i, k, NoNet : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Found := TInterfaceList.Create;
+    Saved := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Kinds := TStringList.Create;
+    Counts := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        QuerySaveSelection(Board, StoreFile, Saved);
+        try
+            Units := QueryUnit(Board);
+            if Units = 'mil' then Expr := ExprMil else Expr := ExprMM;
+            Expr := QueryLayerNames(Board, Expr);
+            RunBoardQuery(Board, Expr, Found);
+        finally
+            QueryEndSelection(Board, StoreFile, Saved);
+        end;
+        QueryKeepInArea(Board, Found, Area);
+        NoNet := 0;
+        for i := 0 to Found.Count - 1 do
+        begin
+            // A copper pour that lost its net: InNet() cannot find it, and a
+            // repour would pour it as dead copper
+            if Found.Items[i].ObjectId = ePolyObject then
+                if (Found.Items[i].Net = nil) and (Found.Items[i].Layer >= eTopLayer) and (Found.Items[i].Layer <= eBottomLayer) then NoNet := NoNet + 1;
+            if i < Limit then Items.Add(QueryObjectJSON(Board, Found.Items[i]));
+            Kind := QueryKindName(Found.Items[i]);
+            k := Kinds.IndexOf(Kind);
+            if k < 0 then
+            begin
+                Kinds.Add(Kind);
+                Counts.Add('1');
+            end
+            else
+                Counts[k] := IntToStr(StrToInt(Counts[k]) + 1);
+        end;
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'expression_run', Expr);
+        AddJSONProperty(Props, 'engine_unit', Units);
+        AddJSONInteger(Props, 'matched', Found.Count);
+        if NoNet > 0 then AddJSONInteger(Props, 'copper_polygons_without_net', NoNet);
+        Item_Counts_JSON(Props, Kinds, Counts);
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'objects')) else Props.Add('"objects": []');
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        Found.Free;
+        Saved.Free;
+        Items.Free;
+        Kinds.Free;
+        Counts.Free;
+        Props.Free;
+    end;
+end;
+
+// "by_kind": {"track": 12, ...}
+procedure Item_Counts_JSON(Props: TStringList; Kinds: TStringList; Counts: TStringList);
+var
+    i : Integer;
+    S : String;
+begin
+    S := '';
+    for i := 0 to Kinds.Count - 1 do
+    begin
+        if S <> '' then S := S + ', ';
+        S := S + '"' + JSONEscapeString(Kinds[i]) + '": ' + Counts[i];
+    end;
+    Props.Add('"by_kind": {' + S + '}');
+end;
+
+// The rule kind called Name, or -1
+function RuleKindByName(Name: String): Integer;
+begin
+    Name := LowerCase(Name);
+    Result := -1;
+    if Name = 'clearance' then Result := eRule_Clearance
+    else if Name = 'width' then Result := eRule_MaxMinWidth
+    else if Name = 'routing_via' then Result := eRule_RoutingViaStyle
+    else if Name = 'hole_size' then Result := eRule_MaxMinHoleSize
+    else if Name = 'polygon_connect' then Result := eRule_PolygonConnectStyle
+    else if Name = 'plane_connect' then Result := eRule_PowerPlaneConnectStyle
+    else if Name = 'solder_mask_expansion' then Result := eRule_SolderMaskExpansion
+    else if Name = 'paste_mask_expansion' then Result := eRule_PasteMaskExpansion
+    else if Name = 'short_circuit' then Result := eRule_ShortCircuit
+    else if Name = 'hole_to_hole' then Result := eRule_HoleToHoleClearance
+    else if Name = 'silk_to_silk' then Result := eRule_SilkToSilkClearance
+    else if Name = 'silk_to_mask' then Result := eRule_SilkToSolderMaskClearance
+    else if Name = 'component_clearance' then Result := eRule_ComponentClearance;
+end;
+
+// Rule kinds that apply to one object (FindDominantRuleForObject), not to a pair
+function RuleKindIsUnary(Kind: Integer): Boolean;
+begin
+    Result := (Kind = eRule_MaxMinWidth) or (Kind = eRule_MaxMinHoleSize) or (Kind = eRule_RoutingViaStyle) or
+              (Kind = eRule_SolderMaskExpansion) or (Kind = eRule_PasteMaskExpansion) or
+              (Kind = eRule_PowerPlaneConnectStyle);
+end;
+
+// Rule kinds the DRC tests, so that Rule.ActualCheck says whether objects pass
+function RuleKindIsChecked(Kind: Integer): Boolean;
+begin
+    Result := (Kind = eRule_Clearance) or (Kind = eRule_MaxMinWidth) or (Kind = eRule_MaxMinHoleSize) or
+              (Kind = eRule_RoutingViaStyle) or (Kind = eRule_ShortCircuit) or
+              (Kind = eRule_HoleToHoleClearance) or (Kind = eRule_SilkToSilkClearance) or
+              (Kind = eRule_SilkToSolderMaskClearance) or (Kind = eRule_ComponentClearance);
+end;
+
+// which_rule: the rule of RuleName that applies to the one object ExprA
+// matches, or between it and the one ExprB matches with the distance between
+// them, and whether they pass it. ExprB is empty for a one-object kind.
+// AreaA and AreaB keep the objects touching them. StoreFile keeps the user's
+// selection while the queries run.
+function WhichRule(ExprAMM, ExprAMil, ExprBMM, ExprBMil, RuleName, AreaA, AreaB, StoreFile: String): String;
+var
+    Board     : IPCB_Board;
+    A, B      : TInterfaceList;
+    Saved     : TInterfaceList;
+    Rule      : IPCB_Rule;
+    Violation : IPCB_Violation;
+    Kind      : Integer;
+    Unary     : Boolean;
+    Units     : String;
+    Props     : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then
+    begin
+        Result := 'ERROR: No PCB document is focused';
+        Exit;
+    end;
+    Kind := RuleKindByName(RuleName);
+    if Kind < 0 then
+    begin
+        Result := 'ERROR: Unknown rule kind ' + RuleName;
+        Exit;
+    end;
+    Unary := RuleKindIsUnary(Kind);
+    if Unary and (ExprBMM <> '') then
+    begin
+        Result := 'ERROR: ' + RuleName + ' rules apply to one object: leave object_b empty';
+        Exit;
+    end;
+    if (not Unary) and (ExprBMM = '') then
+    begin
+        Result := 'ERROR: ' + RuleName + ' rules apply between two objects: give object_b';
+        Exit;
+    end;
+    A := TInterfaceList.Create;
+    B := TInterfaceList.Create;
+    Saved := TInterfaceList.Create;
+    Props := TStringList.Create;
+    try
+        QuerySaveSelection(Board, StoreFile, Saved);
+        try
+            Units := QueryUnit(Board);
+            if Units = 'mil' then RunBoardQuery(Board, QueryLayerNames(Board, ExprAMil), A)
+            else RunBoardQuery(Board, QueryLayerNames(Board, ExprAMM), A);
+            if not Unary then
+            begin
+                if Units = 'mil' then RunBoardQuery(Board, QueryLayerNames(Board, ExprBMil), B)
+                else RunBoardQuery(Board, QueryLayerNames(Board, ExprBMM), B);
+            end;
+        finally
+            QueryEndSelection(Board, StoreFile, Saved);
+        end;
+        QueryKeepInArea(Board, A, AreaA);
+        QueryKeepInArea(Board, B, AreaB);
+        if Unary and (A.Count <> 1) then
+        begin
+            Result := 'ERROR: The expression must match exactly one object; object_a matched ' + IntToStr(A.Count);
+            Exit;
+        end;
+        if (not Unary) and ((A.Count <> 1) or (B.Count <> 1)) then
+        begin
+            Result := 'ERROR: Each expression must match exactly one object; object_a matched ' +
+                      IntToStr(A.Count) + ' and object_b ' + IntToStr(B.Count);
+            Exit;
+        end;
+        AddJSONBoolean(Props, 'success', True);
+        Props.Add('"object_a": ' + QueryObjectJSON(Board, A.Items[0]));
+        if Unary then
+            Rule := Board.FindDominantRuleForObject(A.Items[0], Kind)
+        else
+        begin
+            Props.Add('"object_b": ' + QueryObjectJSON(Board, B.Items[0]));
+            AddJSONNumber(Props, 'distance_mils', CoordToMils(Board.PrimPrimDistance(A.Items[0], B.Items[0])));
+            Rule := Board.FindDominantRuleForObjectPair(A.Items[0], B.Items[0], Kind);
+        end;
+        if Rule = nil then
+            AddJSONProperty(Props, 'rule', '')
+        else
+        begin
+            AddJSONProperty(Props, 'rule', Rule.Name);
+            AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
+            AddJSONInteger(Props, 'priority', Rule.Priority);
+            AddJSONBoolean(Props, 'enabled', Rule.Enabled);
+            AddJSONProperty(Props, 'scope1', Rule.Scope1Expression);
+            if not Unary then AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
+            if Kind = eRule_Clearance then
+                AddJSONNumber(Props, 'gap_mils', CoordToMils(Rule.Gap));
+            // ActualCheck is the DRC's own test of one object or pair, net
+            // scope and clearance matrix included: nil when they comply. A
+            // pair is tested both ways round, as check_silkscreen does: a
+            // rule whose two scopes differ may only see it one way round.
+            if RuleKindIsChecked(Kind) then
+            begin
+                if Unary then
+                    Violation := Rule.ActualCheck(A.Items[0], nil)
+                else
+                begin
+                    Violation := Rule.ActualCheck(A.Items[0], B.Items[0]);
+                    if Violation = nil then
+                        Violation := Rule.ActualCheck(B.Items[0], A.Items[0]);
+                end;
+                AddJSONBoolean(Props, 'passes', Violation = nil);
+            end;
+        end;
+        AddJSONProperty(Props, 'board', Board.FileName);
+        Result := BuildJSONObject(Props);
+    finally
+        A.Free;
+        B.Free;
+        Saved.Free;
+        Props.Free;
+    end;
+end;
+
 // Add the vias of place_vias to the focused board. Each record is
 // 'x|y|diameter|hole|net|start layer|end layer', x and y in internal units
 // relative to the board origin, sizes in internal units, an empty net for a
@@ -5847,5 +6437,732 @@ begin
         Items.Free;
         Item.Free;
         Props.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- rule edits
+// IPCB_Rule.Priority cannot be set from a script (the setter raises and
+// changes nothing), but a rule removed and added again becomes priority 1
+// of its kind while the others keep their order; MoveRuleTo builds any
+// order from that. A rule changed between PCBM_BeginModify and
+// PCBM_EndModify (needed for undo) also jumps to priority 1, so an edit
+// moves it back where it was.
+
+// create_pcb_rule's name for a rule's kind, or '' for kinds it cannot edit
+function RuleKindWord(Rule: IPCB_Rule): String;
+begin
+    case Rule.RuleKind of
+        eRule_Clearance:            Result := 'clearance';
+        eRule_MaxMinWidth:          Result := 'width';
+        eRule_MaxMinHoleSize:       Result := 'hole_size';
+        eRule_RoutingViaStyle:      Result := 'routing_via';
+        eRule_SolderMaskExpansion:  Result := 'solder_mask_expansion';
+        eRule_PasteMaskExpansion:   Result := 'paste_mask_expansion';
+        eRule_PolygonConnectStyle:  Result := 'polygon_connect';
+    else
+        Result := '';
+    end;
+end;
+
+// The rules of Kind, highest priority (1) first
+procedure RulesOfKindByPriority(Board: IPCB_Board; Kind: Integer; Rules: TInterfaceList);
+var
+    Iterator : IPCB_BoardIterator;
+    Rule     : IPCB_Rule;
+    i, j     : Integer;
+begin
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Rule := Iterator.FirstPCBObject;
+    while Rule <> nil do
+    begin
+        if Rule.RuleKind = Kind then
+        begin
+            j := Rules.Count;
+            for i := Rules.Count - 1 downto 0 do
+                if Rules.Items[i].Priority > Rule.Priority then j := i;
+            Rules.Insert(j, Rule);
+        end;
+        Rule := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// "rules_of_kind": [{"name": ..., "priority": ...}, ...]
+function RuleOrderJSON(Board: IPCB_Board; Kind: Integer): String;
+var
+    Rules : TInterfaceList;
+    Items, Item : TStringList;
+    i     : Integer;
+begin
+    Rules := TInterfaceList.Create;
+    Items := TStringList.Create;
+    Item := TStringList.Create;
+    try
+        RulesOfKindByPriority(Board, Kind, Rules);
+        for i := 0 to Rules.Count - 1 do
+        begin
+            Item.Clear;
+            AddJSONProperty(Item, 'name', Rules.Items[i].Name);
+            AddJSONInteger(Item, 'priority', Rules.Items[i].Priority);
+            Items.Add(BuildJSONObject(Item, 1));
+        end;
+        Result := BuildJSONArray(Items, 'rules_of_kind');
+    finally
+        Rules.Free;
+        Items.Free;
+        Item.Free;
+    end;
+end;
+
+// The board's first signal layer
+function FirstSignalLayer(Board: IPCB_Board): Integer;
+var
+    LayerIt : IPCB_LayerObjectIterator;
+begin
+    Result := eTopLayer;
+    LayerIt := Board.ElectricalLayerIterator;
+    while LayerIt.Next do
+        if LayerIt.LayerObject.LayerID <= eBottomLayer then
+        begin
+            Result := LayerIt.LayerObject.LayerID;
+            Exit;
+        end;
+end;
+
+// Whether a width rule has the same minimum, maximum and preferred width on
+// every signal layer of the board
+function WidthRuleUniform(Board: IPCB_Board; Width: IPCB_MaxMinWidthConstraint): Boolean;
+var
+    LayerIt : IPCB_LayerObjectIterator;
+    First, L : Integer;
+begin
+    Result := True;
+    First := FirstSignalLayer(Board);
+    LayerIt := Board.ElectricalLayerIterator;
+    while LayerIt.Next do
+    begin
+        L := LayerIt.LayerObject.LayerID;
+        if L <= eBottomLayer then
+            if (Width.MinWidth(L) <> Width.MinWidth(First)) or (Width.MaxWidth(L) <> Width.MaxWidth(First)) or
+               (Width.FavoredWidth(L) <> Width.FavoredWidth(First)) then
+                Result := False;
+    end;
+end;
+
+// The rule's values under create_pcb_rule's names, in mils, so an edit can
+// be checked against them. A width rule gives those of the first signal
+// layer, and per_layer_widths when the board's signal layers differ.
+procedure RuleValuesJSON(Board: IPCB_Board; Rule: IPCB_Rule; Props: TStringList);
+var
+    Item  : TStringList;
+    L     : Integer;
+    Style : String;
+begin
+    Item := TStringList.Create;
+    try
+        case Rule.RuleKind of
+            eRule_Clearance:
+                AddJSONNumber(Item, 'gap_mils', CoordToMils(Rule.Gap));
+            eRule_MaxMinWidth:
+                begin
+                    L := FirstSignalLayer(Board);
+                    AddJSONNumber(Item, 'min_mils', CoordToMils(Rule.MinWidth(L)));
+                    AddJSONNumber(Item, 'max_mils', CoordToMils(Rule.MaxWidth(L)));
+                    AddJSONNumber(Item, 'preferred_mils', CoordToMils(Rule.FavoredWidth(L)));
+                    AddJSONBoolean(Props, 'per_layer_widths', not WidthRuleUniform(Board, Rule));
+                end;
+            eRule_MaxMinHoleSize:
+                begin
+                    AddJSONNumber(Item, 'min_mils', CoordToMils(Rule.MinLimit));
+                    AddJSONNumber(Item, 'max_mils', CoordToMils(Rule.MaxLimit));
+                end;
+            eRule_RoutingViaStyle:
+                begin
+                    AddJSONNumber(Item, 'min_diameter_mils', CoordToMils(Rule.MinWidth));
+                    AddJSONNumber(Item, 'max_diameter_mils', CoordToMils(Rule.MaxWidth));
+                    AddJSONNumber(Item, 'preferred_diameter_mils', CoordToMils(Rule.PreferedWidth));
+                    AddJSONNumber(Item, 'min_hole_mils', CoordToMils(Rule.MinHoleWidth));
+                    AddJSONNumber(Item, 'max_hole_mils', CoordToMils(Rule.MaxHoleWidth));
+                    AddJSONNumber(Item, 'preferred_hole_mils', CoordToMils(Rule.PreferedHoleWidth));
+                end;
+            eRule_SolderMaskExpansion, eRule_PasteMaskExpansion:
+                AddJSONNumber(Item, 'expansion_mils', CoordToMils(Rule.Expansion));
+            eRule_PolygonConnectStyle:
+                begin
+                    if Rule.ConnectStyle = eDirectConnectToPlane then Style := 'direct'
+                    else if Rule.ConnectStyle = eNoConnect then Style := 'none'
+                    else Style := 'relief';
+                    AddJSONProperty(Item, 'connect_style', Style);
+                    AddJSONNumber(Item, 'conductor_width_mils', CoordToMils(Rule.ReliefConductorWidth));
+                    AddJSONNumber(Item, 'air_gap_mils', CoordToMils(Rule.ReliefAirGap));
+                    AddJSONInteger(Item, 'entries', Rule.ReliefEntries);
+                end;
+        end;
+        Props.Add('"values": ' + BuildJSONObject(Item, 1));
+    finally
+        Item.Free;
+    end;
+end;
+
+procedure RuleStateJSON(Board: IPCB_Board; Rule: IPCB_Rule; Props: TStringList);
+begin
+    AddJSONProperty(Props, 'name', Rule.Name);
+    AddJSONProperty(Props, 'kind', RuleKindWord(Rule));
+    RuleValuesJSON(Board, Rule, Props);
+    AddJSONProperty(Props, 'descriptor', Rule.Descriptor);
+    AddJSONProperty(Props, 'scope1', Rule.Scope1Expression);
+    AddJSONProperty(Props, 'scope2', Rule.Scope2Expression);
+    AddJSONProperty(Props, 'comment', Rule.Comment);
+    AddJSONBoolean(Props, 'enabled', Rule.Enabled);
+    AddJSONInteger(Props, 'priority', Rule.Priority);
+    Props.Add(RuleOrderJSON(Board, Rule.RuleKind));
+    AddJSONProperty(Props, 'board', Board.FileName);
+end;
+
+// Sets the values given in Values (create_pcb_rule's keys) on Rule; values
+// not given keep what the rule has. A width changes only on the layers that
+// had the old one (that of the first signal layer): the caller refuses
+// rules whose signal layers differ, so layers the board does not use and
+// that hold something else keep it.
+procedure ApplyRuleValues(Board: IPCB_Board; Rule: IPCB_Rule; Values: TStringList);
+var
+    Clear    : IPCB_ClearanceConstraint;
+    Width    : IPCB_MaxMinWidthConstraint;
+    Hole     : IPCB_MaxMinHoleSizeConstraint;
+    Via      : IPCB_RoutingViaStyleRule;
+    SMask    : IPCB_SolderMaskExpansionRule;
+    PMask    : IPCB_PasteMaskExpansionRule;
+    Connect  : IPCB_PolygonConnectStyleRule;
+    L, First : Integer;
+    OldMin, OldMax, OldPreferred : Integer;
+    Style    : String;
+begin
+    case Rule.RuleKind of
+        eRule_Clearance:
+            begin
+                Clear := Rule;
+                if RuleHasValue(Values, 'gap') then Clear.Gap := RuleValue(Values, 'gap', 0);
+            end;
+        eRule_MaxMinWidth:
+            begin
+                Width := Rule;
+                First := FirstSignalLayer(Board);
+                OldMin := Width.MinWidth(First);
+                OldMax := Width.MaxWidth(First);
+                OldPreferred := Width.FavoredWidth(First);
+                for L := eTopLayer to eBottomLayer do
+                begin
+                    if RuleHasValue(Values, 'min') and (Width.MinWidth(L) = OldMin) then
+                        Width.MinWidth(L) := RuleValue(Values, 'min', 0);
+                    if RuleHasValue(Values, 'max') and (Width.MaxWidth(L) = OldMax) then
+                        Width.MaxWidth(L) := RuleValue(Values, 'max', 0);
+                    if RuleHasValue(Values, 'preferred') and (Width.FavoredWidth(L) = OldPreferred) then
+                        Width.FavoredWidth(L) := RuleValue(Values, 'preferred', 0);
+                end;
+            end;
+        eRule_MaxMinHoleSize:
+            begin
+                Hole := Rule;
+                if RuleHasValue(Values, 'min') then Hole.MinLimit := RuleValue(Values, 'min', 0);
+                if RuleHasValue(Values, 'max') then Hole.MaxLimit := RuleValue(Values, 'max', 0);
+            end;
+        eRule_RoutingViaStyle:
+            begin
+                Via := Rule;
+                if RuleHasValue(Values, 'min_diameter') then Via.MinWidth := RuleValue(Values, 'min_diameter', 0);
+                if RuleHasValue(Values, 'max_diameter') then Via.MaxWidth := RuleValue(Values, 'max_diameter', 0);
+                if RuleHasValue(Values, 'preferred_diameter') then Via.PreferedWidth := RuleValue(Values, 'preferred_diameter', 0);
+                if RuleHasValue(Values, 'min_hole') then Via.MinHoleWidth := RuleValue(Values, 'min_hole', 0);
+                if RuleHasValue(Values, 'max_hole') then Via.MaxHoleWidth := RuleValue(Values, 'max_hole', 0);
+                if RuleHasValue(Values, 'preferred_hole') then Via.PreferedHoleWidth := RuleValue(Values, 'preferred_hole', 0);
+            end;
+        eRule_SolderMaskExpansion:
+            begin
+                SMask := Rule;
+                if RuleHasValue(Values, 'expansion') then SMask.Expansion := RuleValue(Values, 'expansion', 0);
+            end;
+        eRule_PasteMaskExpansion:
+            begin
+                PMask := Rule;
+                if RuleHasValue(Values, 'expansion') then PMask.Expansion := RuleValue(Values, 'expansion', 0);
+            end;
+        eRule_PolygonConnectStyle:
+            begin
+                Connect := Rule;
+                if RuleHasValue(Values, 'connect_style') then
+                begin
+                    Style := Values.Values['connect_style'];
+                    if Style = 'direct' then Connect.ConnectStyle := eDirectConnectToPlane
+                    else if Style = 'none' then Connect.ConnectStyle := eNoConnect
+                    else Connect.ConnectStyle := eReliefConnectToPlane;
+                end;
+                if RuleHasValue(Values, 'conductor_width') then
+                    Connect.ReliefConductorWidth := RuleValue(Values, 'conductor_width', 0);
+                if RuleHasValue(Values, 'air_gap') then
+                    Connect.ReliefAirGap := RuleValue(Values, 'air_gap', 0);
+                if RuleHasValue(Values, 'entries') then
+                    Connect.ReliefEntries := RuleValue(Values, 'entries', 4);
+            end;
+    end;
+end;
+
+// One free object of each kind the clearance matrix has a row for, never
+// added to the board, named in Names. A kind the factory refuses is left
+// out. Free them with ClearanceProbesFree.
+procedure ClearanceProbes(Probes: TInterfaceList; Names: TStringList);
+var
+    Track   : IPCB_Track;
+    Arc     : IPCB_Arc;
+    Via     : IPCB_Via;
+    Pad     : IPCB_Pad;
+    Fill    : IPCB_Fill;
+    Region  : IPCB_Region;
+    Text    : IPCB_Text;
+    Contour : IPCB_Contour;
+begin
+    try
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        Track.x1 := 0; Track.y1 := 0; Track.x2 := MilsToCoord(100); Track.y2 := 0;
+        Track.Width := MilsToCoord(10);
+        Track.Layer := eTopLayer;
+        Probes.Add(Track); Names.Add('track');
+    except
+    end;
+    try
+        Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+        Arc.XCenter := 0; Arc.YCenter := 0; Arc.Radius := MilsToCoord(50);
+        Arc.StartAngle := 0; Arc.EndAngle := 90; Arc.LineWidth := MilsToCoord(10);
+        Arc.Layer := eTopLayer;
+        Probes.Add(Arc); Names.Add('arc');
+    except
+    end;
+    try
+        Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+        Via.x := 0; Via.y := 0; Via.Size := MilsToCoord(24); Via.HoleSize := MilsToCoord(12);
+        Via.LowLayer := eTopLayer; Via.HighLayer := eBottomLayer;
+        Probes.Add(Via); Names.Add('via');
+    except
+    end;
+    try
+        Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+        Pad.Mode := ePadMode_Simple;
+        Pad.x := 0; Pad.y := 0; Pad.TopXSize := MilsToCoord(40); Pad.TopYSize := MilsToCoord(40);
+        Pad.HoleSize := 0;
+        Pad.Layer := eTopLayer;
+        Probes.Add(Pad); Names.Add('smd_pad');
+    except
+    end;
+    try
+        Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+        Pad.Mode := ePadMode_Simple;
+        Pad.x := 0; Pad.y := 0; Pad.TopXSize := MilsToCoord(60); Pad.TopYSize := MilsToCoord(60);
+        Pad.HoleSize := MilsToCoord(35); Pad.Plated := True;
+        Pad.Layer := eMultiLayer;
+        Probes.Add(Pad); Names.Add('th_pad');
+    except
+    end;
+    try
+        Fill := PCBServer.PCBObjectFactory(eFillObject, eNoDimension, eCreate_Default);
+        Fill.x1Location := 0; Fill.y1Location := 0;
+        Fill.x2Location := MilsToCoord(50); Fill.y2Location := MilsToCoord(50);
+        Fill.Layer := eTopLayer;
+        Probes.Add(Fill); Names.Add('fill');
+    except
+    end;
+    try
+        Region := PCBServer.PCBObjectFactory(eRegionObject, eNoDimension, eCreate_Default);
+        Contour := PCBServer.PCBContourFactory;
+        Contour.AddPoint(0, 0);
+        Contour.AddPoint(MilsToCoord(50), 0);
+        Contour.AddPoint(MilsToCoord(50), MilsToCoord(50));
+        Contour.AddPoint(0, MilsToCoord(50));
+        Region.SetOutlineContour(Contour);
+        Region.Layer := eTopLayer;
+        Probes.Add(Region); Names.Add('region');
+    except
+    end;
+    try
+        Text := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+        Text.XLocation := 0; Text.YLocation := 0;
+        Text.Size := MilsToCoord(50); Text.Width := MilsToCoord(5);
+        Text.Text := 'X';
+        Text.Layer := eTopLayer;
+        Probes.Add(Text); Names.Add('text');
+    except
+    end;
+end;
+
+procedure ClearanceProbesFree(Probes: TInterfaceList);
+var
+    i : Integer;
+begin
+    for i := 0 to Probes.Count - 1 do
+    begin
+        try
+            PCBServer.DestroyPCBObject(Probes.Items[i]);
+        except
+        end;
+    end;
+    Probes.Clear;
+end;
+
+// The clearance matrix of a clearance rule, which the script API does not
+// expose (no GenericClearance or matrix property): Rule.GetClearance on a
+// pair of free probe objects gives the value for that pair of kinds. Adds
+// each pair whose clearance is not Gap to Diffs as 'kinds=coord'
+// ('track-via=80000'); none when the matrix is uniform.
+procedure ClearanceMatrixDiffs(Rule: IPCB_Rule; Gap: Integer; Diffs: TStringList);
+var
+    Probes : TInterfaceList;
+    Names  : TStringList;
+    i, j   : Integer;
+    Value  : Integer;
+begin
+    Probes := TInterfaceList.Create;
+    Names := TStringList.Create;
+    try
+        try
+            ClearanceProbes(Probes, Names);
+            for i := 0 to Probes.Count - 1 do
+                for j := i to Probes.Count - 1 do
+                begin
+                    Value := Rule.GetClearance(Probes.Items[i], Probes.Items[j]);
+                    if Value <> Gap then
+                        Diffs.Add(Names[i] + '-' + Names[j] + '=' + IntToStr(Value));
+                end;
+        finally
+            ClearanceProbesFree(Probes);
+        end;
+    finally
+        Probes.Free;
+        Names.Free;
+    end;
+end;
+
+// A length as text in mils, with a dot whatever the locale
+function ClearanceMilsText(Value: Integer): String;
+begin
+    Result := StringReplace(FloatToStr(CoordToMils(Value)), ',', '.', REPLACEALL);
+end;
+
+// Diffs ('kinds=coord') as '"Key": {"track-via": 8, ...}' in mils
+function ClearanceDiffsJSON(Key: String; Diffs: TStringList): String;
+var
+    Item : TStringList;
+    i    : Integer;
+begin
+    Item := TStringList.Create;
+    try
+        for i := 0 to Diffs.Count - 1 do
+            AddJSONNumber(Item, Diffs.Names[i], CoordToMils(StrToInt(Diffs.Values[Diffs.Names[i]])));
+        Result := '"' + Key + '": ' + BuildJSONObject(Item, 1);
+    finally
+        Item.Free;
+    end;
+end;
+
+// Diffs as 'track-via 8 mil, ...' for a message
+function ClearanceDiffsText(Diffs: TStringList): String;
+var
+    i : Integer;
+begin
+    Result := '';
+    for i := 0 to Diffs.Count - 1 do
+    begin
+        if Result <> '' then Result := Result + ', ';
+        Result := Result + Diffs.Names[i] + ' ' + ClearanceMilsText(StrToInt(Diffs.Values[Diffs.Names[i]])) + ' mil';
+    end;
+end;
+
+// pcb_rule_info: a rule's kind, scopes, priority and the order of its kind;
+// for a clearance rule, object_clearances lists the pairs of object kinds
+// whose clearance (the rules editor's matrix) is not the gap
+function PcbRuleInfo(Name: String): String;
+var
+    Board : IPCB_Board;
+    Rule  : IPCB_Rule;
+    Props, Diffs : TStringList;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
+    Rule := FindRuleByName(Board, Name);
+    if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
+    Props := TStringList.Create;
+    Diffs := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        RuleStateJSON(Board, Rule, Props);
+        if Rule.RuleKind = eRule_Clearance then
+        begin
+            ClearanceMatrixDiffs(Rule, Rule.Gap, Diffs);
+            if Diffs.Count > 0 then Props.Add(ClearanceDiffsJSON('object_clearances', Diffs));
+        end;
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+        Diffs.Free;
+    end;
+end;
+
+// Takes Rule off the board and adds it again: it becomes priority 1 of its
+// kind, the others keep their order
+procedure RuleToTop(Board: IPCB_Board; Rule: IPCB_Rule);
+begin
+    Board.RemovePCBObject(Rule);
+    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Rule.I_ObjectAddress);
+    Board.AddPCBObject(Rule);
+    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Rule.I_ObjectAddress);
+end;
+
+// Moves Rule to priority Wanted of its kind (clamped to the rules there
+// are); returns how many rules were added again. The rules that should
+// stay above it are added again after it, lowest first, so they end up
+// above it in their old order; the rules below are not touched. Call
+// between PreProcess and PostProcess.
+function MoveRuleTo(Board: IPCB_Board; Rule: IPCB_Rule; Wanted: Integer): Integer;
+var
+    Rules : TInterfaceList;
+    i     : Integer;
+begin
+    Result := 0;
+    Rules := TInterfaceList.Create;
+    try
+        RulesOfKindByPriority(Board, Rule.RuleKind, Rules);
+        for i := Rules.Count - 1 downto 0 do
+            if Rules.Items[i].I_ObjectAddress = Rule.I_ObjectAddress then Rules.Delete(i);
+        if Wanted < 1 then Wanted := 1;
+        if Wanted > Rules.Count + 1 then Wanted := Rules.Count + 1;
+        if Wanted = Rule.Priority then Exit;
+        RuleToTop(Board, Rule);
+        for i := Wanted - 2 downto 0 do
+            RuleToTop(Board, Rules.Items[i]);
+        Result := Wanted;
+    finally
+        Rules.Free;
+    end;
+end;
+
+// The rules a move of Rule to priority Wanted may take off and add again:
+// Rule and those of its kind that stay above it. Read before the move, so
+// the reply can say which of them came from the design (schematic
+// directives, rooms) and whether any unique id changed. Ids gets their
+// unique ids, Design the JSON-quoted names of those from the design; both
+// are read here, before anything changes.
+procedure RulesReadded(Board: IPCB_Board; Rule: IPCB_Rule; Wanted: Integer; Moves: TInterfaceList;
+                       Ids: TStringList; Design: TStringList);
+var
+    Rules : TInterfaceList;
+    i     : Integer;
+begin
+    Rules := TInterfaceList.Create;
+    try
+        RulesOfKindByPriority(Board, Rule.RuleKind, Rules);
+        for i := Rules.Count - 1 downto 0 do
+            if Rules.Items[i].I_ObjectAddress = Rule.I_ObjectAddress then Rules.Delete(i);
+        Moves.Add(Rule);
+        for i := 0 to Rules.Count - 1 do
+            if i <= Wanted - 2 then Moves.Add(Rules.Items[i]);
+        for i := 0 to Moves.Count - 1 do
+        begin
+            Ids.Add(Moves.Items[i].UniqueId);
+            if Moves.Items[i].DefinedByLogicalDocument then
+                Design.Add('"' + JSONEscapeString(Moves.Items[i].Name) + '"');
+        end;
+    finally
+        Rules.Free;
+    end;
+end;
+
+// "readded_rules", "readded_from_design" and "unique_id_changed" for the
+// rules RulesReadded listed, after a move
+procedure RuleMoveJSON(Props: TStringList; Moves: TInterfaceList; Ids: TStringList; Design: TStringList);
+var
+    Names, Changed : TStringList;
+    i : Integer;
+    Quoted : String;
+begin
+    Names := TStringList.Create;
+    Changed := TStringList.Create;
+    try
+        for i := 0 to Moves.Count - 1 do
+        begin
+            Quoted := '"' + JSONEscapeString(Moves.Items[i].Name) + '"';
+            Names.Add(Quoted);
+            if Moves.Items[i].UniqueId <> Ids[i] then Changed.Add(Quoted);
+        end;
+        Props.Add(BuildJSONArray(Names, 'readded_rules'));
+        Props.Add(BuildJSONArray(Design, 'readded_from_design'));
+        Props.Add(BuildJSONArray(Changed, 'unique_id_changed'));
+    finally
+        Names.Free;
+        Changed.Free;
+    end;
+end;
+
+// edit_pcb_rule: changes what is given and keeps the rule where it is in
+// its kind's priority order. Fields is '|scope1|scope2|comment|enabled|name|'
+// for the fields to change.
+function EditPCBRule(Name, NewName, Scope1, Scope2, Comment, Enabled, Fields: String; Values: TStringList): String;
+var
+    Board : IPCB_Board;
+    Rule, Clash : IPCB_Rule;
+    Props, Ids, Design, Diffs : TStringList;
+    Moves : TInterfaceList;
+    Before, Moved : Integer;
+    GapEdit : Boolean;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
+    Rule := FindRuleByName(Board, Name);
+    if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
+    if Pos('|name|', Fields) > 0 then
+    begin
+        if Trim(NewName) = '' then begin Result := 'ERROR: The new name is empty'; Exit; end;
+        Clash := FindRuleByName(Board, NewName);
+        if Clash <> nil then
+            if Clash.I_ObjectAddress <> Rule.I_ObjectAddress then
+            begin
+                Result := 'ERROR: A rule named ' + NewName + ' already exists';
+                Exit;
+            end;
+    end;
+    if (Rule.RuleKind = eRule_MaxMinWidth) and (Values.Count > 0) then
+        if not WidthRuleUniform(Board, Rule) then
+        begin
+            Result := 'ERROR: ' + Name + ' has different widths per layer; edit them in Altium''s ' +
+                      'PCB Rules and Constraints Editor';
+            Exit;
+        end;
+    // A gap edit sets only Rule.Gap: a rule whose matrix holds other values
+    // for some kinds of object would keep them, and the DRC would not change
+    GapEdit := (Rule.RuleKind = eRule_Clearance) and RuleHasValue(Values, 'gap');
+    if GapEdit then
+    begin
+        Diffs := TStringList.Create;
+        try
+            ClearanceMatrixDiffs(Rule, Rule.Gap, Diffs);
+            if Diffs.Count > 0 then
+            begin
+                Result := 'ERROR: ' + Name + ' has per-object clearances (the matrix in the rules editor: ' +
+                          ClearanceDiffsText(Diffs) + '; the gap is ' + ClearanceMilsText(Rule.Gap) +
+                          ' mil); edit it in Altium''s PCB Rules and Constraints Editor';
+                Exit;
+            end;
+        finally
+            Diffs.Free;
+        end;
+    end;
+    Before := Rule.Priority;
+    Moves := TInterfaceList.Create;
+    Ids := TStringList.Create;
+    Design := TStringList.Create;
+    Props := TStringList.Create;
+    Diffs := TStringList.Create;
+    try
+        RulesReadded(Board, Rule, Before, Moves, Ids, Design);
+        PCBServer.PreProcess;
+        try
+            PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            // EndModify is sent even when a change raises, so the rule is
+            // not left open for modification
+            try
+                if Pos('|scope1|', Fields) > 0 then Rule.Scope1Expression := Scope1;
+                if Pos('|scope2|', Fields) > 0 then Rule.Scope2Expression := Scope2;
+                if Pos('|comment|', Fields) > 0 then Rule.Comment := Comment;
+                if Pos('|enabled|', Fields) > 0 then Rule.Enabled := Enabled = 'true';
+                if Pos('|name|', Fields) > 0 then Rule.Name := NewName;
+                ApplyRuleValues(Board, Rule, Values);
+            finally
+                PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+            end;
+            Moved := MoveRuleTo(Board, Rule, Before);
+        finally
+            PCBServer.PostProcess;
+        end;
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'priority_before', Before);
+        AddJSONInteger(Props, 'rules_moved', Moved);
+        if Moved > 0 then RuleMoveJSON(Props, Moves, Ids, Design);
+        RuleStateJSON(Board, Rule, Props);
+        // Every kind of object should now have the new gap
+        if GapEdit then
+        begin
+            ClearanceMatrixDiffs(Rule, Rule.Gap, Diffs);
+            if Diffs.Count > 0 then Props.Add(ClearanceDiffsJSON('object_clearances', Diffs));
+        end;
+        Result := BuildJSONObject(Props);
+    finally
+        Moves.Free;
+        Ids.Free;
+        Design.Free;
+        Props.Free;
+        Diffs.Free;
+    end;
+end;
+
+// set_rule_priority: Name to priority Wanted (1 is highest) of its kind
+function SetRulePriority(Name: String; Wanted: Integer): String;
+var
+    Board : IPCB_Board;
+    Rule  : IPCB_Rule;
+    Props, Ids, Design : TStringList;
+    Moves : TInterfaceList;
+    Before, Moved : Integer;
+begin
+    Board := GetBoardSafe(0);
+    if Board = nil then begin Result := 'ERROR: No PCB document is focused'; Exit; end;
+    Rule := FindRuleByName(Board, Name);
+    if Rule = nil then begin Result := 'ERROR: No rule named ' + Name; Exit; end;
+    Before := Rule.Priority;
+    Moves := TInterfaceList.Create;
+    Ids := TStringList.Create;
+    Design := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        RulesReadded(Board, Rule, Wanted, Moves, Ids, Design);
+        PCBServer.PreProcess;
+        try
+            Moved := MoveRuleTo(Board, Rule, Wanted);
+        finally
+            PCBServer.PostProcess;
+        end;
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'priority_before', Before);
+        AddJSONInteger(Props, 'rules_moved', Moved);
+        if Moved > 0 then RuleMoveJSON(Props, Moves, Ids, Design);
+        RuleStateJSON(Board, Rule, Props);
+        Result := BuildJSONObject(Props);
+    finally
+        Moves.Free;
+        Ids.Free;
+        Design.Free;
+        Props.Free;
+    end;
+end;
+
+function ExecuteRuleEdit(CommandName: String; RequestData: TStringList): String;
+var
+    Values : TStringList;
+begin
+    if CommandName = 'pcb_rule_info' then
+        Result := PcbRuleInfo(RequestText(RequestData, 'rule_name', ''))
+    else if CommandName = 'set_rule_priority' then
+        Result := SetRulePriority(RequestText(RequestData, 'rule_name', ''),
+                                  StrToInt(RequestText(RequestData, 'priority', '1')))
+    else
+    begin
+        Values := TStringList.Create;
+        try
+            Values.Text := StringReplace(RequestText(RequestData, 'values', ''), ';', #13#10, REPLACEALL);
+            Result := EditPCBRule(RequestText(RequestData, 'rule_name', ''), RequestText(RequestData, 'new_name', ''),
+                                  RequestText(RequestData, 'scope1', ''), RequestText(RequestData, 'scope2', ''),
+                                  RequestText(RequestData, 'comment', ''), RequestText(RequestData, 'enabled', ''),
+                                  RequestText(RequestData, 'set', ''), Values);
+        finally
+            Values.Free;
+        end;
     end;
 end;

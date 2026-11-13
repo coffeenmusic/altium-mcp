@@ -13,7 +13,7 @@ import tempfile
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 import sys
 import win32gui
 import win32ui
@@ -453,6 +453,9 @@ def altium_limit_problem() -> Optional[str]:
     return None
 
 class AltiumBridge:
+    # Seconds given to Altium to act on a Stop before the locks are released
+    STOP_SETTLE = 2
+
     def __init__(self):
         # Ensure the MCP directory exists
         MCP_DIR.mkdir(exist_ok=True)
@@ -501,8 +504,19 @@ class AltiumBridge:
                     f"Altium_API.PrjScr, then retry.")
         return None
 
-    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
-        """Execute a command in Altium via the bridge script"""
+    async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                              watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None) -> Dict[str, Any]:
+        """Execute a command in Altium via the bridge script.
+
+        watcher, if given, runs beside the command while it holds the locks
+        (to answer dialogs the command raises, say), from the moment the
+        bridge script has picked the request up: a box Altium shows before
+        then (a refused launch, the recovery of a stuck script) is not the
+        command's. When it sets the event it is passed, the command is given
+        up: its script is stopped in Altium before the locks are released,
+        so the Stop cannot reach the next command's script, and the response
+        has "aborted": true.
+        """
         async with self._command_lock:
             problem = await self.ensure_paths()
             if problem:
@@ -520,10 +534,47 @@ class AltiumBridge:
                 # is no reason to give up.
                 if await asyncio.to_thread(sandbox.altium_hung):
                     return {"success": False, "error": ALTIUM_HUNG_ERROR}
-                response = await self._execute_command_locked(command, params, timeout)
+                if watcher is None:
+                    response = await self._execute_command_locked(command, params, timeout)
+                else:
+                    response = await self._execute_watched(command, params, timeout, watcher)
             finally:
                 self._exchange_lock.release()
         return _lift_failed_result(response)
+
+    async def _execute_watched(self, command: str, params: Dict[str, Any], timeout: float,
+                               watcher: Callable[[asyncio.Event], Awaitable[None]]) -> Dict[str, Any]:
+        """_execute_command_locked with watcher beside it once the request is
+        picked up; called with the locks held."""
+        abort, started = asyncio.Event(), asyncio.Event()
+
+        async def watch_once_started():
+            await started.wait()
+            await watcher(abort)
+
+        run = asyncio.create_task(self._execute_command_locked(command, params, timeout, picked_up=started))
+        watch = asyncio.create_task(watch_once_started())
+        aborted = asyncio.create_task(abort.wait())
+        try:
+            await asyncio.wait({run, aborted}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (watch, aborted):
+                task.cancel()
+            if not run.done() and not abort.is_set():
+                run.cancel()  # this call itself was cancelled
+        if run.done():
+            return run.result()
+        # The script was cancelled and will not answer: stop it while this
+        # server still holds the locks, and give Altium time to act on the
+        # Stop before the next command is launched
+        run.cancel()
+        try:
+            await run
+        except (asyncio.CancelledError, Exception):
+            pass
+        await self.stop_script_debugger()
+        await asyncio.sleep(self.STOP_SETTLE)
+        return {"success": False, "aborted": True, "error": f"'{command}' was stopped in Altium"}
 
     @staticmethod
     def _altium_running() -> bool:
@@ -575,7 +626,10 @@ class AltiumBridge:
                 await asyncio.sleep(0.25)
         return text
 
-    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
+    async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
+                                      picked_up: Optional[asyncio.Event] = None) -> Dict[str, Any]:
+        """Run one command with the locks held. picked_up, if given, is set
+        once the bridge script has picked the request up."""
         try:
             problem = altium_limit_problem()
             if problem:
@@ -647,6 +701,8 @@ class AltiumBridge:
                                  f"the Altium window for an open dialog or a running or paused "
                                  f"script, then retry."}
             _clear_script_stuck()
+            if picked_up is not None:
+                picked_up.set()
 
             logger.info("Bridge script started, waiting for response file...")
             # Wait as long as the command keeps reporting progress, up to
@@ -3621,6 +3677,179 @@ async def modify_pcb_objects(ctx: Context, kinds: list = None, net: str = "", la
 
 MUTATING_COMMANDS.add("edit_pcb_objects")
 
+async def _run_query(command: str, params: dict) -> Tuple[Optional[dict], str]:
+    """Run a query command, answering Altium's parse error dialog if one opens.
+
+    The dialogs are watched only while the command holds the bridge, and a
+    query the watcher gives up on is stopped before the bridge is released
+    (see AltiumBridge.execute_command). A stopped query never restored the
+    user's selection, so query_restore does that after it."""
+    import pcb_query
+
+    errors: list = []
+    result, error = await _bridge_json(command, params,
+                                       watcher=lambda abort: pcb_query.watch_errors(errors, abort))
+    if errors and result is None:
+        # Stopped mid-query (or failed after a dialog): put the selection back
+        _, restore_error = await _bridge_json("query_restore", {"board_path": params.get("board_path", "")})
+        message = "Altium could not evaluate the expression: " + errors[0]
+        if restore_error:
+            message += (f". The user's selection could not be restored ({restore_error}); "
+                        f"the next query call restores it")
+        return None, message
+    if errors:
+        return None, "Altium could not read the expression: " + "; ".join(errors)
+    return result, error
+
+@_tool(read_only=True)
+async def query_objects(ctx: Context, expression: str, area: list = None, unit: str = "mil", limit: int = 200,
+                        board_path: str = "") -> str:
+    """
+    Find PCB objects with Altium's own query language, as the PCB Filter
+    panel and rule scopes use it.
+
+    Examples: "IsVia And InNet('GND')", "IsTrack And OnTopLayer And
+    (Width < 6mil)", "InComponent('U1') And IsPad", "IsPolygon",
+    "InNetClass('Power')". A component is found by Name ("IsComponent And
+    (Name = 'U1')"; there is no Designator property) and a pad by its full
+    name ("IsPad And (Name = 'U1-3')"). Text is quoted with ' and compared
+    as text: Name = 1 fails where Name = '1' works. Put each comparison in
+    brackets: IsComponent And Footprint = 'X' is read as
+    (IsComponent And Footprint) = 'X' and fails.
+
+    An expression Altium cannot read or evaluate comes back as an error with
+    Altium's message; the dialog it raises is answered, so Altium is not
+    left waiting.
+
+    Layers are named as the board names them in its layer stack
+    (OnLayer('GND1')); Altium's generic names ('Mid Layer 1', 'Mechanical
+    17') given to OnLayer(), ExistsOnLayer() or Layer = are translated to
+    the board's, so both work. Each object gives both: layer (generic) and
+    layer_name (the board's, when it has its own).
+
+    The engine has no position properties (X, Y): give a box as area
+    instead (clamped to Altium's design space, +-100,000 mil). It keeps the
+    objects whose bounds touch the box, so a pour larger than the box is
+    kept wherever its copper is.
+
+    Give sizes with a unit (6mil, 0.15mm). The engine reads bare numbers in
+    its own unit, which is not always the board's display unit, and a unit
+    written inside the query is a syntax error; so each value with a unit is
+    converted to the unit the engine uses on this board before the query
+    runs. Decimals take a dot. Quoted text is sent as written, units and
+    commas included (InNet('D0,1'), Comment = '4.7uF 2.2mm').
+
+    The engine works through the selection, so the user's selection is
+    selected again afterwards, also after a query Altium could not
+    evaluate; objects of kinds the PCB Selection Filter (Properties panel)
+    leaves out cannot be selected by a script and stay unselected. A filter
+    applied in the PCB Filter panel is cleared: a script cannot read it back
+    to restore it.
+
+    Args:
+        expression (str): The query.
+        area (list): Only objects touching [x1, y1, x2, y2], from the board
+            origin in unit. Default the whole board.
+        unit (str): "mil" (default) or "mm", for area.
+        limit (int): How many objects to list in full, 0 to 1,000,000
+            (0 lists none); matched counts all.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with matched, by_kind counts, and the objects: kind, name
+             (component designator, pad, polygon, rule, net), net, layer,
+             layer_name and bounds in mils from the board origin.
+             expression_run is what the engine ran.
+             copper_polygons_without_net counts matched pours with no net,
+             which InNet() cannot find.
+    """
+    import pcb_query
+
+    error = pcb_query.check(expression) or pcb_query.check_limit(limit)
+    box, area_error = pcb_query.area_text(area, unit)
+    if error or area_error:
+        return json.dumps({"success": False, "error": error or area_error})
+    in_mm, in_mil, values = pcb_query.with_units(pcb_query.layer_arguments(expression))
+    result, error = await _run_query("query_objects", {
+        "expr_mm": in_mm, "expr_mil": in_mil, "limit": int(limit), "area": box,
+        "board_path": long_path(board_path)})
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    bare = pcb_query.bare_numbers(expression)
+    if bare:
+        result["warning"] = (f"{', '.join(bare)} has no unit, so the engine read it in "
+                             f"{result.get('engine_unit') or 'its own unit'}. Give sizes with a unit.")
+    if result.get("copper_polygons_without_net"):
+        result["polygon_warning"] = (f"{result['copper_polygons_without_net']} copper polygon(s) have no net: "
+                                     "InNet() and net filters cannot find them, and a repour removes their "
+                                     "copper as dead copper if Remove Dead Copper is on.")
+    if not result.get("matched"):
+        result["note"] = "Nothing matched."
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+@_tool(read_only=True)
+async def which_rule(ctx: Context, object_a: str, object_b: str = "", rule_kind: str = "clearance",
+                     area_a: list = None, area_b: list = None, unit: str = "mil", board_path: str = "") -> str:
+    """
+    Which design rule applies to a PCB object, or between two, and whether
+    they pass it: the rule the DRC picks (FindDominantRuleForObject or
+    ...ForObjectPair) and the DRC's own test of it (Rule.ActualCheck, on
+    a pair both ways round), so net scope and the clearance matrix count as
+    they do in a DRC.
+
+    Each object is a query expression (as for query_objects) that must match
+    exactly one object, e.g. "IsPad And (Name = 'U1-3')". The engine has no
+    X or Y, so narrow one down by position with area_a / area_b, e.g.
+    object_a="IsVia And InNet('GND')", area_a=[1245, 795, 1255, 805].
+
+    Args:
+        object_a (str): Query expression for the object.
+        object_b (str): Query expression for the other object of a pair
+            rule; leave empty for a one-object rule (width, hole_size,
+            routing_via, solder_mask_expansion, paste_mask_expansion,
+            plane_connect).
+        rule_kind (str): clearance (default), short_circuit, hole_to_hole,
+            silk_to_silk, silk_to_mask, component_clearance, polygon_connect
+            (pairs); or one of the one-object kinds above.
+        area_a, area_b (list): Only objects touching [x1, y1, x2, y2] from the
+            board origin, in unit, count for object_a / object_b.
+        unit (str): "mil" (default) or "mm", for the areas.
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the object(s), distance_mils (edge to edge) for a
+             pair, and the rule: name, descriptor, priority, enabled,
+             scopes, gap_mils for clearance, and passes (Altium's own check)
+             for the kinds the DRC tests.
+    """
+    import pcb_query
+
+    kind = rule_kind.strip().lower()
+    error = pcb_query.check_rule_kind(kind, object_b)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    for expr in (object_a, object_b) if object_b.strip() else (object_a,):
+        error = pcb_query.check(expr)
+        if error:
+            return json.dumps({"success": False, "error": error})
+    box_a, error_a = pcb_query.area_text(area_a, unit)
+    box_b, error_b = pcb_query.area_text(area_b, unit)
+    if error_a or error_b:
+        return json.dumps({"success": False, "error": error_a or error_b})
+    a_mm, a_mil, _ = pcb_query.with_units(pcb_query.layer_arguments(object_a))
+    b_mm, b_mil, _ = pcb_query.with_units(pcb_query.layer_arguments(object_b.strip()))
+    result, error = await _run_query("which_rule", {
+        "a_mm": a_mm, "a_mil": a_mil, "b_mm": b_mm, "b_mil": b_mil, "area_a": box_a, "area_b": box_b,
+        "rule_kind": kind, "board_path": long_path(board_path)})
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    note = pcb_query.rule_note(kind, result)
+    if note:
+        result["note"] = note
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
 @_tool()
 async def route_track(ctx: Context, net_name: str, layer: str, width_mils: float, points: list,
                       diagonal_first: bool = False, corner_chamfer_mils: float = 0,
@@ -6282,7 +6511,7 @@ async def get_pcb_layer_stackup(ctx: Context) -> str:
 @_tool()
 async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
                           scope1: str = "All", scope2: str = "All", comment: str = "",
-                          replace: bool = False, board_path: str = "") -> str:
+                          replace: bool = False, check_scope: bool = True, board_path: str = "") -> str:
     """
     Add a design rule to a PCB.
 
@@ -6303,12 +6532,23 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
     rule (width, hole size, via, mask, ...) uses scope1 only.
 
     PRIORITY: Altium makes a rule added this way priority 1, the highest
-    of its kind, and moves the others down; a script cannot set priority.
-    So a new rule wins wherever its scope applies. Give it a narrow scope
-    (a net, class or object kind), or reorder priorities in Altium's PCB
-    Rules and Constraints Editor afterwards. get_pcb_rules lists all rules
-    with their priorities. Check the result's "descriptor": it is what
-    Altium stored.
+    of its kind, and moves the others down. So a new rule wins wherever its
+    scope applies. Move it with set_rule_priority afterwards. To change an
+    existing rule, use edit_pcb_rule, which keeps its priority (replace=True
+    here makes the rule priority 1). get_pcb_rules lists all rules with
+    their priorities. Check the result's "descriptor": it is what Altium
+    stored.
+
+    Scopes are first run through Altium's query engine (check_scope, on by
+    default), as query_objects runs them: one extra bridge call per scope
+    that is not "All", so one or two per rule. A scope Altium cannot
+    evaluate is refused with its message, so a scope that was stored
+    before (and matched nothing) may now be refused; generic layer names in
+    OnLayer() are stored as the board names them. Like query_objects, the
+    check works through the selection: the user's selection is selected
+    again afterwards, and a filter applied in the PCB Filter panel is
+    cleared. Set check_scope=False to skip the check and store the scopes
+    as given. An empty scope is "All".
 
     Args:
         rule_type (str): One of the kinds above.
@@ -6318,13 +6558,16 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
         scope2 (str): Second scope, for two-object rules such as clearance.
         comment (str): Optional rule comment.
         replace (bool): Replace an existing rule of the same name instead
-            of refusing.
+            of refusing. The replacement becomes priority 1.
+        check_scope (bool): Check the scopes first (default True).
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
 
     Returns:
         str: JSON with the rule's name, descriptor, scopes, priority and
-             whether it replaced an existing rule.
+             whether it replaced an existing rule; with check_scope,
+             scope_check ({scope1/scope2: {matched, stored_as}}) and
+             scope_warning when a scope matches nothing now.
     """
     import pcb_rules
 
@@ -6334,6 +6577,14 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
         return json.dumps({"success": False, "error": error})
     if not name.strip():
         return json.dumps({"success": False, "error": "name is empty"})
+    scope1, scope2 = pcb_rules.scope_or_all(scope1), pcb_rules.scope_or_all(scope2)
+    checks = {}
+    if check_scope:
+        checks, error = await _check_scopes({"scope1": scope1, "scope2": scope2}, board_path)
+        if error:
+            return json.dumps({"success": False, "error": error})
+        scope1 = checks.get("scope1", {}).get("stored_as", scope1)
+        scope2 = checks.get("scope2", {}).get("stored_as", scope2)
     logger.info(f"Creating {rule_type} rule {name}")
     response = await altium_bridge.execute_command("create_pcb_rule", {
         "rule_kind": rule_type, "rule_name": name.strip(), "scope1": scope1 or "All",
@@ -6345,15 +6596,199 @@ async def create_pcb_rule(ctx: Context, rule_type: str, name: str, values: dict,
     result = response.get("result", {})
     if isinstance(result, str):
         return result
+    if checks:
+        result["scope_check"] = checks
+        empty = [k for k, c in checks.items() if not c["matched"]]
+        if empty:
+            result["scope_warning"] = f"{', '.join(empty)} matches no object on the board now."
     others = result.get("other_rules_of_kind", 0)
     if others and (scope1 or "All").strip().lower() == "all" and (scope2 or "All").strip().lower() == "all":
         result["warning"] = (f"This rule applies to everything at priority 1, so it now overrides the "
                              f"{others} other {rule_type} rule(s) on the board. Narrow its scope or "
-                             f"move it down in Altium's rules editor if that is not intended.")
+                             f"move it down with set_rule_priority if that is not intended.")
     return json.dumps(result, indent=2)
 
 # Changes the design: a timeout leaves its outcome unknown, so no blind retry
 MUTATING_COMMANDS.add("create_pcb_rule")
+
+async def _check_scopes(scopes: dict, board_path: str) -> Tuple[dict, str]:
+    """Run each rule scope through Altium's query engine, which rules use
+    too: {field: {"matched": n, "stored_as": expression}} or ({}, error).
+    A layer named generically ('Mid Layer 1') is stored as the board names
+    it, since the rule would otherwise match nothing there."""
+    import pcb_query
+
+    out = {}
+    for field, expr in scopes.items():
+        expr = (expr or "").strip()
+        if not expr or expr.lower() == "all":
+            continue
+        error = pcb_query.check(expr)
+        if error:
+            return {}, f"{field}: {error}"
+        # Bare numbers stay as they are: a rule reads them as Altium does
+        expr = pcb_query.layer_arguments(expr)
+        result, error = await _run_query("query_objects", {
+            "expr_mm": expr, "expr_mil": expr, "limit": 0, "area": "", "board_path": board_path})
+        if result is None:
+            return {}, f"{field} cannot be evaluated by Altium: {error}"
+        out[field] = {"matched": result.get("matched", 0), "stored_as": result.get("expression_run", expr)}
+    return out, ""
+
+
+@_tool()
+async def edit_pcb_rule(ctx: Context, name: str, scope1: str = None, scope2: str = None, values: dict = None,
+                        comment: str = None, enabled: bool = None, new_name: str = None,
+                        check_scope: bool = True, board_path: str = "") -> str:
+    """
+    Change an existing design rule in place. It keeps its priority, unlike
+    create_pcb_rule(replace=True), which makes the new rule priority 1 of
+    its kind (so a re-scoped rule would override the rules above it).
+
+    Only the arguments given change. values takes create_pcb_rule's keys
+    for the rule's kind, any subset of them (e.g. {"gap_mils": 10} for a
+    clearance rule); merged with the rule's other values they must pass
+    create_pcb_rule's checks (min <= preferred <= max, via hole smaller
+    than the via). A width rule with different widths per layer is
+    refused; a width changes on the layers that had the old one. A gap edit
+    of a clearance rule whose matrix (the rules editor's per-object-kind
+    clearances) holds other values than the gap is refused, listing them:
+    the edit sets only the gap. An empty scope is "All"; new_name may not
+    be blank.
+
+    Altium moves a modified rule to priority 1, so the rule and those above
+    it are taken off and added again to put it back (see set_rule_priority).
+
+    Each new scope is first run through Altium's query engine, as the rule
+    will be: a scope Altium cannot evaluate is refused with Altium's
+    message, and the number of objects it matches is reported (0 is a
+    warning). Layers named generically ('Mid Layer 1') are stored as the
+    board names them. As in create_pcb_rule, this costs a bridge call per
+    scope, and clears a filter applied in the PCB Filter panel (the user's
+    selection is selected again); check_scope=False skips it.
+
+    Args:
+        name (str): The rule's current name.
+        scope1, scope2 (str): New object scopes (query expressions).
+        values (dict): New values, e.g. {"gap_mils": 10}.
+        comment (str): New comment.
+        enabled (bool): Enable or disable the rule.
+        new_name (str): Rename it.
+        check_scope (bool): Check new scopes first (default True).
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with the rule as Altium now has it (descriptor, scopes,
+             values, enabled, priority and priority_before), the order of
+             its kind, the rules re-added to keep the order, and the scope
+             check; after a gap edit, object_clearances and matrix_warning
+             if some pairs of object kinds still have another clearance.
+    """
+    import pcb_rules
+
+    board_path = long_path(board_path)
+    if new_name is not None:
+        new_name = new_name.strip()
+        if not new_name:
+            return json.dumps({"success": False, "error": "new_name is empty"})
+    info, error = await _bridge_json("pcb_rule_info", {"rule_name": name, "board_path": board_path})
+    if info is None:
+        return json.dumps({"success": False, "error": error})
+    encoded = ""
+    if values:
+        if not info.get("kind"):
+            return json.dumps({"success": False, "error": f"{name} is a rule kind whose values this tool "
+                                                          f"cannot set ({info.get('descriptor')})"})
+        if info.get("per_layer_widths"):
+            return json.dumps({"success": False, "error": f"{name} has different widths per layer; edit them "
+                                                          f"in Altium's PCB Rules and Constraints Editor"})
+        encoded, error = pcb_rules.encode_values(info["kind"], values, partial=True)
+        if not error:
+            error = pcb_rules.check_merged(info["kind"], info.get("values"), values)
+        if not error:
+            error = pcb_rules.matrix_refusal(name, info, values)
+        if error:
+            return json.dumps({"success": False, "error": error})
+    if scope1 is not None:
+        scope1 = pcb_rules.scope_or_all(scope1)
+    if scope2 is not None:
+        scope2 = pcb_rules.scope_or_all(scope2)
+    fields = {"scope1": scope1, "scope2": scope2, "comment": comment, "name": new_name}
+    if enabled is not None:
+        fields["enabled"] = "true" if enabled else "false"
+    given = {k: v for k, v in fields.items() if v is not None}
+    if not given and not encoded:
+        return json.dumps({"success": False, "error": "nothing to change"})
+    checks = {}
+    if check_scope:
+        checks, error = await _check_scopes({k: given[k] for k in ("scope1", "scope2") if k in given}, board_path)
+        if error:
+            return json.dumps({"success": False, "error": error, "rule_unchanged": True})
+        for k, c in checks.items():
+            given[k] = c["stored_as"]
+    params = {"rule_name": name, "new_name": given.get("name", ""), "scope1": given.get("scope1", ""),
+              "scope2": given.get("scope2", ""), "comment": given.get("comment", ""),
+              "enabled": given.get("enabled", ""), "values": encoded,
+              "set": "|" + "|".join(given) + "|", "board_path": board_path}
+    result, error = await _bridge_json("edit_pcb_rule", params)
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    if checks:
+        result["scope_check"] = checks
+        empty = [k for k, c in checks.items() if not c["matched"]]
+        if empty:
+            result["warning"] = f"{', '.join(empty)} matches no object on the board now."
+    matrix = pcb_rules.matrix_warning(result)
+    if matrix:
+        result["matrix_warning"] = matrix
+    result.update(pcb_rules.move_notes(result, name))
+    return json.dumps(result, indent=2)
+
+MUTATING_COMMANDS.add("edit_pcb_rule")
+
+
+@_tool()
+async def set_rule_priority(ctx: Context, name: str, priority: int, board_path: str = "") -> str:
+    """
+    Move a design rule to a priority within its kind (1 is the highest:
+    where scopes overlap, the rule with the lower number wins).
+
+    Altium does not let a script set a priority, but a rule added again
+    becomes priority 1 while the others keep their order. So the rule and
+    the rules that stay above it are taken off and added again, lowest
+    first; the rules below are not touched. This is one undo group, but
+    Altium's Undo may not restore the old order, since re-adding a rule
+    renumbers it: call set_rule_priority again with priority_before to put
+    it back. Rules that came from the design (schematic directives, rooms)
+    and were re-added are listed in readded_from_design.
+
+    Args:
+        name (str): The rule.
+        priority (int): Its new priority, from 1; beyond the last moves it
+            last (values above 1,000,000 are taken as 1,000,000).
+        board_path (str): Full path of the .PcbDoc; empty for the focused
+            board, or the one the PCB tools last used.
+
+    Returns:
+        str: JSON with priority_before, the new priority, the order of every
+             rule of that kind and the rules re-added (readded_rules,
+             readded_from_design, unique_id_changed).
+    """
+    import pcb_rules
+
+    priority, error = pcb_rules.priority_value(priority)
+    if error:
+        return json.dumps({"success": False, "error": error})
+    result, error = await _bridge_json("set_rule_priority", {"rule_name": name, "priority": priority,
+                                                              "board_path": long_path(board_path)})
+    if result is None:
+        return json.dumps({"success": False, "error": error})
+    result.update(pcb_rules.move_notes(result, name))
+    return json.dumps(result, indent=2)
+
+MUTATING_COMMANDS.add("set_rule_priority")
+
 
 @_tool(read_only=True)
 async def get_output_job_containers(ctx: Context, outjob_path: str = "") -> str:
@@ -6441,14 +6876,19 @@ async def _simple_command(command: str, params: dict, what: str) -> str:
     return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
 
 
-async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None) -> Tuple[Optional[dict], str]:
+async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None,
+                       watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None
+                       ) -> Tuple[Optional[dict], str]:
     """(result, "") of a bridge command that returns JSON, or (None, error).
     One helper for the tools that work with the reply instead of passing it
-    on; strict=False because Altium text can hold control characters."""
-    if timeout is None:
-        response = await altium_bridge.execute_command(command, params)
-    else:
-        response = await altium_bridge.execute_command(command, params, timeout=timeout)
+    on; strict=False because Altium text can hold control characters.
+    watcher is passed on to execute_command."""
+    options = {}
+    if timeout is not None:
+        options["timeout"] = timeout
+    if watcher is not None:
+        options["watcher"] = watcher
+    response = await altium_bridge.execute_command(command, params, **options)
     if not response.get("success", False):
         return None, response.get("error", "unknown error")
     result = response.get("result", {})
