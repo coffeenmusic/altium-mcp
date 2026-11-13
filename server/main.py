@@ -5601,7 +5601,7 @@ async def render_pcb(ctx: Context, bbox: list = None, layers: list = None, dpi: 
             box = render.outline_box(outline)
             if not box:
                 raise ValueError("the board has no outline; give bbox")
-        x1, y1, x2, y2 = (geo.to_coord(v, "mil") for v in box)
+        x1, y1, x2, y2 = (geo.area_to_coord(v, "mil") for v in box)
     except (TypeError, ValueError) as e:
         return json.dumps({"success": False, "error": str(e)})
     reply, error = await _bridge_json("geometry", {
