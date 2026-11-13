@@ -2081,17 +2081,20 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
     if closed is None:
         return json.dumps({"success": False, "error": "Altium did not close the documents; nothing "
                                                       "was restored", "dialogs_closed": dialogs})
-    status = {}
+    status, names = {}, {}
     for ln in closed.splitlines():
-        kind, _, path = ln.partition("|")
+        kind, path, name = (ln.split("|", 2) + ["", ""])[:3]
         status[path.lower()] = kind
+        names[path.lower()] = name or path
     # Still open in Altium (a prompt was cancelled): restoring the file under
     # it would leave Altium's copy out of step with the disk
     still_open = [e["path"] for e in entries if status.get(e["path"].lower()) not in ("open", "closed")]
     restored, failed = _restore_snapshot_files(snap_dir, [e for e in entries if e["path"] not in still_open])
     was_open = [e["path"] for e in entries if status.get(e["path"].lower()) == "open"]
     # Projects first: a sheet opened before its project lands in Free Documents
-    reopen = sorted([p for p in was_open if p in restored], key=lambda p: not p.lower().endswith(".prjpcb"))
+    # Reopened under the name Altium had for them, not the snapshot's spelling
+    reopen = sorted([names[p.lower()] for p in was_open if p in restored],
+                    key=lambda p: not p.lower().endswith(".prjpcb"))
     reopened = None
     if reopen:
         reopened = await asyncio.to_thread(sb.run_quick, sandbox.reopen_script(reopen), 30.0,

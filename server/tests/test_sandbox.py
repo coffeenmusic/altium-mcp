@@ -830,6 +830,16 @@ class RollbackToolTest(unittest.TestCase):
         self.assertIn("SbxCloseDoc(", calls[1])
         self.assertEqual(self.doc.read_bytes(), b"before")
 
+    def test_reopened_under_the_name_altium_had(self):
+        # The snapshot was given another spelling of the path; Altium's own
+        # name for the document is the one it is reopened under
+        shown = str(self.doc).upper()
+        result, calls = self.rollback(running=True, discard_unsaved=True,
+                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}|{shown}\n", "reopened"])
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["reopened"], [shown])
+        self.assertIn(shown.replace("'", "''"), calls[2])
+
 
 if __name__ == "__main__":
     unittest.main()

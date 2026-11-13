@@ -852,14 +852,18 @@ def parse_states(text: str):
 
 def close_script(paths: List[str]) -> str:
     """A sandbox script that closes `paths` in Altium without saving and
-    reports, one line each, 'closed|path' (was not open), 'open|path' (was
-    open, now closed) or 'stillopen|path'. Documents close before projects:
+    reports, one line each, 'closed|path' (was not open), 'open|path|name'
+    (was open, now closed; name is the path as Altium had it, which may be
+    spelled otherwise) or 'stillopen|path'. Documents close before projects:
     closing a project first would close its sheets with it, and a sheet with
     unsaved changes would make Altium ask to save it."""
     lines = []
     for p in sorted(paths, key=_is_project):
         q = _pascal_string(p)
-        lines.append(f"S1 := S1 + SbxCloseDoc({q}) + '|' + {q} + #13#10;")
+        lines += ["Obj1 := SbxFindDoc(" + q + ");",
+                  "S2 := '';",
+                  "if Obj1 <> nil then S2 := Obj1.FileName;",
+                  f"S1 := S1 + SbxCloseDoc({q}) + '|' + {q} + '|' + S2 + #13#10;"]
     lines.append("ResultText := S1;")
     return "\n".join(lines)
 
