@@ -207,12 +207,15 @@ def pick_document_view(children: Sequence[Win], document: str) -> Optional[Win]:
     return None
 
 
-def focus_params(t: Target, zoom_to: Optional[Sequence[str]], open_if_closed: bool) -> Dict:
+def focus_params(t: Target, zoom_to, open_if_closed: bool) -> Dict:
     """The focus_document request for a document target. The path goes the way
     Altium writes it: as written, an open document may not be recognised, and
-    open_if_closed would then open a second copy of it."""
+    open_if_closed would then open a second copy of it. zoom_to is a list of
+    designators, or "board" for the whole board outline."""
     params = {"path": long_path(t.name), "open_if_closed": "true" if open_if_closed else "false"}
-    if zoom_to:
+    if zoom_to == "board":
+        params["zoom_board"] = "true"
+    elif zoom_to:
         params["designators"] = list(zoom_to)
     return params
 
@@ -365,6 +368,42 @@ def dismissable(windows: Sequence[Dict], hwnd_or_title) -> Tuple[Optional[Dict],
     if not found:
         return None, f"No open Altium dialog is {hwnd_or_title!r}. Open dialogs: {open_}"
     return None, f"Several Altium dialogs are titled {hwnd_or_title!r}; give the hwnd. Open dialogs: {open_}"
+def save_target(path: Optional[str], roots: Sequence[str]) -> Tuple[Optional[str], str]:
+    """(where to write a capture, "") or (None, why not). An absolute path
+    of a .png file in an existing folder inside one of roots (the user's
+    profile): a screenshot tool should not write just anywhere."""
+    text = (path or "").strip()
+    if not text.lower().endswith(".png") or not os.path.isabs(text):
+        return None, "save_path is the full path of a .png file"
+    full = os.path.realpath(text)
+    if not os.path.isdir(os.path.dirname(full)):
+        return None, f"The folder of save_path does not exist: {os.path.dirname(text)}"
+    for root in roots:
+        root = os.path.realpath(root)
+        try:
+            if os.path.normcase(os.path.commonpath([full, root])) == os.path.normcase(root):
+                return full, ""
+        except ValueError:
+            pass  # another drive
+    return None, "save_path must be inside your user profile folder"
+
+
+def park_point(views: Sequence[Rect], screen: Rect, cursor: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+    """Where to move the mouse pointer for a capture, or None to leave it:
+    over a document view Altium draws its heads-up coordinate display by
+    the pointer, and a capture would show it. Just outside the views, on
+    the screen: left of them, right of them, above, or below."""
+    if not views:
+        return None
+    l, t = min(v[0] for v in views), min(v[1] for v in views)
+    r, b = max(v[2] for v in views), max(v[3] for v in views)
+    x, y = cursor
+    if not (l <= x < r and t <= y < b):
+        return None
+    for px, py in ((l - 1, t), (r, t), (l, t - 1), (l, b)):
+        if screen[0] <= px < screen[2] and screen[1] <= py < screen[3]:
+            return (px, py)
+    return None
 
 
 def is_blank(img) -> bool:

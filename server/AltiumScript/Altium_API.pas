@@ -269,12 +269,14 @@ var
     Opened       : Boolean;
     Closed       : Boolean;
     Zoomed       : Integer;
+    ZoomBoard    : Boolean;
     Props        : TStringList;
 begin
     Result := '';
     Name := '';
     ClosePath := '';
     OpenIfClosed := False;
+    ZoomBoard := False;
     Opened := False;
     Closed := False;
     Zoomed := 0;
@@ -289,6 +291,8 @@ begin
                 ClosePath := Trim(JSONLineValue(RequestData[i]))
             else if (Pos('"open_if_closed"', RequestData[i]) > 0) then
                 OpenIfClosed := LowerCase(Trim(JSONLineValue(RequestData[i]))) = 'true'
+            else if (Pos('"zoom_board"', RequestData[i]) > 0) then
+                ZoomBoard := LowerCase(Trim(JSONLineValue(RequestData[i]))) = 'true'
             else if (Pos('"designators"', RequestData[i]) > 0) then
                 i := ReadJSONStringArray(RequestData, i, Designators);
         end;
@@ -357,6 +361,15 @@ begin
            (Client.CurrentView.OwnerDocument <> nil) and
            (UpperCase(Client.CurrentView.OwnerDocument.Kind) = 'PCB') then
             Zoomed := ZoomToComponents(Designators);
+
+        if ZoomBoard then
+        begin
+            if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) and
+               (UpperCase(Client.CurrentView.OwnerDocument.Kind) = 'PCB') then
+                AddJSONBoolean(Props, 'zoomed_board', ZoomToBoard(0))
+            else
+                AddJSONBoolean(Props, 'zoomed_board', False);
+        end;
 
         AddJSONBoolean(Props, 'success', True);
         AddJSONProperty(Props, 'previous_document', PrevPath);
