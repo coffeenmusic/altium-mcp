@@ -1196,12 +1196,18 @@ end;
 function ExecuteRunDRC(RequestData: TStringList): String;
 var
     i, MaxViolations : Integer;
+    Restore : Boolean;
 begin
     MaxViolations := 200;
+    Restore := True;
     for i := 0 to RequestData.Count - 1 do
+    begin
         if Pos('"max_violations"', RequestData[i]) > 0 then
             MaxViolations := StrToInt(JSONLineValue(RequestData[i]));
-    Result := RunDRC(MaxViolations);
+        if Pos('"restore_workspace"', RequestData[i]) > 0 then
+            Restore := JSONLineValue(RequestData[i]) <> 'false';
+    end;
+    Result := RunDRC(MaxViolations, Restore);
 end;
 
 // Function to execute run output jobs

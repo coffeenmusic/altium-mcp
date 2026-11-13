@@ -6121,7 +6121,7 @@ async def get_pcb_rules(ctx: Context) -> str:
 
 @_tool()
 async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200, rules: list = None,
-                  nets: list = None, area: list = None) -> str:
+                  nets: list = None, area: list = None, restore_workspace: bool = True) -> str:
     """
     Run the design rule check (DRC) on a PCB and list the violations.
 
@@ -6135,6 +6135,11 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     "ran" says whether the check really ran: the Run button was pressed and
     the dialog closed. "report" (when Altium wrote one) gives the per-rule
     counts and confirms it independently.
+
+    Altium only checks the rule kinds ticked "Batch" in that dialog; an
+    enabled rule of any other kind is skipped and shows no violations, as
+    if it passed. "rules_not_checked" lists those rules (name, kind,
+    kind_name), with a "warning" that says how to include them.
 
     Args:
         board_path (str): Full path of the .PcbDoc to check. It is opened if
@@ -6156,12 +6161,17 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
             Altium stops the check at its own violation limit (500 unless
             changed in its Design Rule Checker dialog); "complete": false
             then says the board may have more.
+        restore_workspace (bool): Afterwards bring the board back to the
+            front (Altium focuses the report it opens) and close the
+            floating panels the check opened, such as Messages, which can
+            lie over the board. Panels that were open before stay. Default
+            true.
 
     Returns:
         str: JSON with ran, violation_count, the violations (rule,
              description, x_mils/y_mils relative to the board origin, and
-             the primitives involved with their net and layer), and the
-             report's per-rule counts.
+             the primitives involved with their net and layer), the
+             report's per-rule counts, and rules_not_checked.
     """
     import drc
 
@@ -6183,6 +6193,12 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     board_path = long_path(board_path)
     logger.info(f"Running DRC on {board_path or 'the focused board'}")
     started = time.time()
+    panels_before = None
+    if restore_workspace:
+        try:
+            panels_before = await asyncio.to_thread(drc.floating_panels)
+        except Exception as e:
+            logger.warning(f"run_drc: could not list Altium's floating panels: {e}")
     outcome = drc.DialogOutcome()
     driver = asyncio.create_task(drc.drive_dialog(outcome, PROGRESS_FILE))
     try:
@@ -6190,13 +6206,19 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
             "run_drc", {"board_path": board_path,
                         # filtered: the violations Altium kept (500 unless its
                         # limit was raised), up to a cap, then filter
-                        "max_violations": drc.FILTER_FETCH if filtered else int(max_violations)})
+                        "max_violations": drc.FILTER_FETCH if filtered else int(max_violations),
+                        "restore_workspace": bool(restore_workspace)})
     finally:
         driver.cancel()
         try:
             await driver
         except asyncio.CancelledError:
             pass
+        if panels_before is not None:
+            try:
+                await asyncio.to_thread(drc.close_new_panels, panels_before)
+            except Exception as e:
+                logger.warning(f"run_drc: could not close the panels the check opened: {e}")
 
     if not response.get("success", False):
         return json.dumps({"success": False, "ran": outcome.pressed,
@@ -6217,7 +6239,7 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
                         "violation_count is what was already on the board, not a result.")
         if outcome.notes:
             out["notes"] = outcome.notes
-    out.update({k: v for k, v in result.items() if k != "success"})
+    out.update({k: v for k, v in result.items() if k not in ("success", "enabled_rules")})
     # By how much each violation fails, as numbers; then the filters
     for v in out.get("violations", []):
         v.update(drc.measurement(v.get("description", "")))
@@ -6244,6 +6266,19 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
         out["complete"] = False
         out["note"] = ("Altium stopped the check at its violation limit (set in its Design Rule "
                        "Checker dialog), so the board may have more violations than violation_count.")
+    elif outcome.pressed and "enabled_rules" in result:
+        # Rules the check skipped look exactly like rules that pass
+        if "report" in out:
+            skipped = drc.rules_not_checked(result["enabled_rules"],
+                                            [r["rule"] for r in out["report"]["rules"]])
+            out["rules_not_checked"] = [{k: r.get(k) for k in ("name", "kind", "kind_name")}
+                                        for r in skipped]
+            if skipped:
+                out["warning"] = drc.not_checked_warning(skipped)
+        else:
+            out["warning"] = ("Altium wrote no .drc report, so it is unknown whether every enabled "
+                              "rule was checked: rule kinds not ticked for Batch in its Design Rule "
+                              "Checker dialog are skipped and show no violations.")
     return json.dumps(out, indent=2)
 
 @_tool(read_only=True)
