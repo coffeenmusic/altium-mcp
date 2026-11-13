@@ -164,5 +164,65 @@ class ViolationTest(unittest.TestCase):
         self.assertFalse(drc.matches(net, rules=["Net"]))
 
 
+# The rules of REPORT as get_pcb_rules / run_drc read them, plus a
+# differential pair rule. Its kind (51) was not ticked for Batch: the report
+# has no block for it.
+CLEARANCE = {"name": "Clearance", "kind": 0, "kind_name": "Clearance",
+             "descriptor": "Clearance Constraint (Gap=0.15mm) (All),(All)", "filter1": "All", "filter2": "All"}
+WIDTH = {"name": "Width", "kind": 2, "kind_name": "Width",
+         "descriptor": "Width Constraint (Min=0.15mm) (Max=3mm) (Preferred=0.15mm) (All)",
+         "filter1": "All", "filter2": ""}
+HOLES = {"name": "HoleToHoleClearance", "kind_name": "Hole To Hole Clearance",
+         "descriptor": "Hole To Hole Clearance (Gap=0.2mm) (IsMicroVia and ((StartLayer = 'Top Layer') "
+                       "and (StopLayer = 'Inner 1'))),(All)",
+         "filter1": "IsMicroVia and ((StartLayer = 'Top Layer') and (StopLayer = 'Inner 1'))", "filter2": "All"}
+DIFF_PAIR = {"name": "DP_eDP", "kind": 51, "kind_name": "Differential Pairs Routing",
+             "descriptor": "Differential Pairs Uncoupled Length using the Gap Constraints (Min=0.1mm) "
+                           "(Max=0.1mm) (Prefered=0.1mm) and Width Constraints (Min=0.1mm) (Max=0.1mm) "
+                           "(Prefered=0.1mm) (InDifferentialPairClass('eDP'))",
+             "filter1": "InDifferentialPairClass('eDP')", "filter2": ""}
+# The same report once kind 51 is ticked for Batch
+REPORT_51 = REPORT.replace("\n\nViolations Detected", "\n\nProcessing Rule : " + DIFF_PAIR["descriptor"]
+                           + "\nRule Violations :0\n\nViolations Detected")
+
+
+class RulesNotCheckedTest(unittest.TestCase):
+    def processed(self, report):
+        return [r["rule"] for r in drc.parse_report(report)["rules"]]
+
+    def test_rule_without_a_block_was_not_checked(self):
+        skipped = drc.rules_not_checked([CLEARANCE, WIDTH, HOLES, DIFF_PAIR], self.processed(REPORT))
+        self.assertEqual(skipped, [DIFF_PAIR])
+        warning = drc.not_checked_warning(skipped)
+        self.assertIn("DP_eDP", warning)
+        self.assertIn("Batch for Differential Pairs Routing", warning)
+
+    def test_every_rule_checked(self):
+        self.assertEqual(drc.rules_not_checked([CLEARANCE, WIDTH, HOLES, DIFF_PAIR],
+                                               self.processed(REPORT_51)), [])
+
+    def test_block_text_differing_from_the_descriptor(self):
+        # Same kind and scopes, values written differently: still that rule
+        rule = dict(CLEARANCE, descriptor="Clearance Constraint (Gap=0.150mm) (All),(All)")
+        self.assertEqual(drc.rules_not_checked([rule], self.processed(REPORT)), [])
+        # Same kind, another scope: not that rule
+        rule = dict(CLEARANCE, descriptor="Clearance Constraint (Gap=0.3mm) (InNet('GND')),(All)",
+                    filter1="InNet('GND')")
+        self.assertEqual(drc.rules_not_checked([rule], self.processed(REPORT)), [rule])
+
+    def test_a_block_counts_for_one_rule(self):
+        twin = dict(CLEARANCE, name="Clearance_2")
+        self.assertEqual(drc.rules_not_checked([CLEARANCE, twin], self.processed(REPORT)), [twin])
+
+
+class PanelsTest(unittest.TestCase):
+    def test_only_panels_the_check_opened_are_closed(self):
+        with mock.patch.object(drc, "_altium_windows", return_value=[7, 9]) as found, \
+                mock.patch.object(drc.ctypes, "windll", create=True) as windll:
+            self.assertEqual(drc.close_new_panels({7}), 1)
+        found.assert_called_with(drc.FLOATING_PANEL_CLASS)
+        self.assertEqual([c.args[:2] for c in windll.user32.PostMessageW.call_args_list], [(9, drc.WM_CLOSE)])
+
+
 if __name__ == "__main__":
     unittest.main()
