@@ -751,6 +751,26 @@ begin
     end;
 end;
 
+// Fit the focused board's outline in the view, with a 2% margin
+function ZoomToBoard(Dummy: Integer): Boolean;
+var
+    Board  : IPCB_Board;
+    Rect   : TCoordRect;
+    Margin : TCoord;
+begin
+    Result := False;
+    Board := GetBoardSafe(0);
+    if Board = nil then Exit;
+    if Board.BoardOutline = nil then Exit;
+    Rect := Board.BoardOutline.BoundingRectangle;
+    Margin := Rect.Right - Rect.Left;
+    if (Rect.Top - Rect.Bottom) > Margin then Margin := Rect.Top - Rect.Bottom;
+    Margin := Margin div 50;
+    Board.GraphicalView_ZoomOnRect(Rect.Left - Margin, Rect.Bottom - Margin, Rect.Right + Margin, Rect.Top + Margin);
+    Board.GraphicalView_ZoomRedraw;
+    Result := True;
+end;
+
 // Add a screenshot function that supports both PCB and SCH views.
 // If DesignatorsList is non-empty (PCB view only), the view is zoomed to
 // those components before the server captures the window.

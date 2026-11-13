@@ -5,6 +5,7 @@ or from server/:          python -m unittest tests.test_screenshot_target -v
 """
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -132,6 +133,9 @@ class PickTest(unittest.TestCase):
         self.assertEqual(st.focus_params(t, ("C46",), True),
                          {"path": "PD_Mon.SchDoc", "open_if_closed": "true", "designators": ["C46"]})
         self.assertEqual(st.focus_params(st.parse_target("document"), ["C46"], False)["path"], "")
+        board = st.focus_params(st.parse_target("document"), "board", False)
+        self.assertEqual(board["zoom_board"], "true")
+        self.assertNotIn("designators", board)
 
     def test_view_document(self):
         self.assertEqual(st.view_document("[24] PD_Mon.SchDoc"), "PD_Mon.SchDoc")
@@ -255,6 +259,30 @@ class AltiumWindowsTest(unittest.TestCase):
         self.assertEqual(st.dismissable(numbered, "2")[0]["hwnd"], 8)   # an all-digit title
         twins = [dict(ws[0]), dict(ws[0], hwnd=7)]
         self.assertIn("give the hwnd", st.dismissable(twins, "Options for PCB Project Adapter.PrjPcb")[1])
+class SaveAndPointerTest(unittest.TestCase):
+    def test_save_target_inside_the_profile_only(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as elsewhere:
+            os.mkdir(os.path.join(home, "evidence"))
+            ok, why = st.save_target(os.path.join(home, "evidence", "top.png"), [home])
+            self.assertEqual((ok, why), (os.path.realpath(os.path.join(home, "evidence", "top.png")), ""))
+            for bad in (os.path.join(elsewhere, "top.png"),                    # outside the profile
+                        os.path.join(home, "evidence", "..", "..", "x.png"),   # climbs out of it
+                        os.path.join(home, "missing", "top.png"),              # no such folder
+                        os.path.join(home, "top.jpg"), "top.png", "", None):
+                self.assertIsNone(st.save_target(bad, [home])[0], bad)
+            self.assertIn("user profile", st.save_target(os.path.join(elsewhere, "a.png"), [home])[1])
+
+    def test_park_point(self):
+        screen = (0, 0, 3840, 1080)
+        view = (300, 100, 1800, 950)
+        self.assertIsNone(st.park_point([view], screen, (100, 100)))     # not over a view: left alone
+        self.assertEqual(st.park_point([view], screen, (900, 500)), (299, 100))
+        split = [view, (1800, 100, 3000, 950)]                           # two views side by side
+        self.assertEqual(st.park_point(split, screen, (2000, 500)), (299, 100))
+        full = (0, 0, 1920, 1080)                                         # filling the left monitor
+        self.assertEqual(st.park_point([full], screen, (5, 5)), (1920, 0))
+        self.assertIsNone(st.park_point([screen], screen, (5, 5)))       # nowhere off the views
+        self.assertIsNone(st.park_point([], screen, (5, 5)))
 
 
 if __name__ == "__main__":
