@@ -2266,7 +2266,12 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         [mirror true/false]. x, y is the part's origin.
       delete_component  designator, [part]
       place_component   library (.SchLib path), symbol, designator, x, y,
-                        [rotation], [mirror], [comment]
+                        [rotation], [mirror], [comment]. For a part from a
+                        database library, dblib (.DbLib path) and
+                        part_number (its key), [table], in place of library
+                        and symbol: the row gives the symbol, footprints,
+                        description and parameters, and the part is linked
+                        to the DbLib as when Altium places it (Excel tables)
       set_parameter     designator, name, value, [part], [visible]
                         (creates the parameter when missing)
       move_text         designator, name ("Designator", "Comment" or a
@@ -2312,8 +2317,27 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     Returns:
         str: JSON with how many operations were applied and the errors.
     """
+    import configparser
+    import zipfile
+    from xml.etree import ElementTree
+    import dblib
     import sch_edit
 
+    # A part from a database library: its row gives the symbol and the link
+    expanded = []
+    for i, op in enumerate(operations or []):
+        if isinstance(op, dict) and op.get("op") == "place_component" and (op.get("dblib") or op.get("part_number")):
+            if not (op.get("dblib") and op.get("part_number")) or op.get("library") or op.get("symbol"):
+                return json.dumps({"success": False, "error": f"operation {i + 1}: a DbLib part takes dblib and "
+                                                              f"part_number (and table), not library or symbol"})
+            try:
+                # In a thread: the DbLib's table and library folders may be on a slow share
+                op = await asyncio.to_thread(dblib.place_operation, dict(op, dblib=long_path(op["dblib"])))
+            except (dblib.DbLibError, OSError, KeyError, IndexError, ValueError, configparser.Error,
+                    ElementTree.ParseError, zipfile.BadZipFile) as e:
+                return json.dumps({"success": False, "error": f"operation {i + 1}: {e}"})
+        expanded.append(op)
+    operations = expanded
     # Long paths, or Altium opens a second copy of a sheet or library that
     # is already open
     sheet_path = long_path(sheet_path)
