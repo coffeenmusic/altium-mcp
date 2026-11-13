@@ -120,6 +120,36 @@ class ComponentTest(unittest.TestCase):
         d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(TARGET))
         self.assertEqual([c["designator"] for c in d["add_components"]], ["R5", "R?", "R?"])
 
+    def test_shared_power_pins_of_a_multi_part_component(self):
+        # U2's pin 4 is listed once per part; the second part's copy is
+        # unconnected (auto net NetU2_4) and must not take it off GND
+        for pins in (SOURCE["pins"] + ["U2|4|NetU2_4"], ["U2|4|NetU2_4"] + SOURCE["pins"]):
+            d = eco_preview.compare(eco_preview.parse_source(dict(SOURCE, pins=pins)),
+                                    eco_preview.parse_target(TARGET))
+            self.assertNotIn("U3-4", [c["pin"] for c in d["change_pin_nets"]])
+
+    def test_variant_alternates(self):
+        # R20's alternate has another footprint: the board keeps both parts,
+        # the alternate under '<id>@<variant>'. R21's alternate has the same
+        # footprint: one board part, with the alternate's comment. R22's
+        # alternate was never placed and is not added. As AD25's Update PCB
+        source = dict(SOURCE, components=SOURCE["components"] + [
+            r"\S1\A1|R20|R0603|1k", r"\S1\A1@V1|R20|R0805|1k5",
+            r"\S1\A2|R21|R0603|2k", r"\S1\A2@V1|R21|R0603|2k2",
+            r"\S1\A3|R22|R0603|3k", r"\S1\A3@V1|R22|R0603|3k3"])
+        target = dict(TARGET, components=TARGET["components"] + [
+            r"\S1\A1|R20|R0603|1k", r"\S1\A1@V1|R20|R0805|1k5",
+            r"\S1\A2|R21|R0603|2k2", r"\S1\A3|R22|R0603|3k"])
+        d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target))
+        self.assertEqual([c["designator"] for c in d["add_components"]], ["R5"])
+        self.assertEqual([c["designator"] for c in d["remove_components"]], ["R9"])
+        self.assertEqual(d["change_comments"], [])
+        self.assertEqual(d["change_footprints"], [{"designator": "C1", "from": "C0805", "to": "C0603"}])
+        # a board part with neither the original's nor the alternate's values changes
+        target["components"][-1] = r"\S1\A3|R22|R0603|4k"
+        d = eco_preview.compare(eco_preview.parse_source(source), eco_preview.parse_target(target))
+        self.assertEqual(d["change_comments"], [{"designator": "R22", "from": "4k", "to": "3k"}])
+
 
 class NetTest(unittest.TestCase):
     def test_rename_pin_changes_and_single_pin_nets(self):

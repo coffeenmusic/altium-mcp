@@ -11,6 +11,15 @@ path plus the component's id), and a net matches by its pins, so a net whose
 pins all stay together under another name is a rename. Rooms and classes
 match by name.
 
+A variant's alternate part is compiled as a second component, under its
+original's id with '@<variant>' added. When its footprint differs the board
+keeps it as a component of its own under that id; when it is the same, the
+board has one component for both, under the original's id, with the
+alternate's values. So an alternate is matched by its own id when the board
+has it, and otherwise a board component that equals either its original or
+the alternate is no change. An alternate is never added on its own (checked
+against AD25's Update PCB).
+
 The project's own options are followed (parse_project_options): a kind the
 comparator ignores (Project Options > Comparator) or the ECO does not
 generate (Project Options > ECO Generation) is left out, and so are classes
@@ -117,6 +126,11 @@ def _members(text: str) -> List[str]:
     return [m for m in text.split(",") if m]
 
 
+def _auto_net(net: str, designator: str, pin: str) -> bool:
+    """Whether net is the name Altium gives an unconnected pin."""
+    return net.lower() == f"net{designator}_{pin}".lower()
+
+
 def parse_source(data: dict) -> dict:
     comps = {}
     for item in data.get("components", []):
@@ -125,7 +139,13 @@ def parse_source(data: dict) -> dict:
     pins = {}
     for item in data.get("pins", []):
         des, pin, net = _split(item, 3)
-        pins[(des.lower(), pin.lower())] = net
+        key = (des.lower(), pin.lower())
+        # A pin every part of a multi-part component has (power pins) is
+        # listed once per part; the copies left unconnected get an auto net
+        # (Net<designator>_<pin>), so a real net wins
+        if key in pins and pins[key] and not _auto_net(pins[key], *key):
+            continue
+        pins[key] = net
     classes = []
     for item in data.get("component_classes", []):
         name, sheet, members = _split(item, 3)
@@ -250,6 +270,11 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
     difference is listed.
     """
     sc, tc = source["components"], target["components"]
+    # The alternates of a variant ('<original id>@<variant>') by original id
+    alternates = defaultdict(list)
+    for uid, s in sc.items():
+        if "@" in uid:
+            alternates[uid.split("@", 1)[0]].append(s)
     out = {k: [] for k in ("add_components", "remove_components", "change_designators", "change_footprints",
                            "change_comments", "add_nets", "remove_nets", "rename_nets", "change_pin_nets",
                            "add_component_classes", "remove_component_classes", "change_component_class_members",
@@ -265,6 +290,14 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
     sch_to_pcb = {}                                   # schematic designator -> board designator
     for uid, s in sc.items():
         t = tc.get(uid)
+        if t is None and "@" in uid:
+            continue                                  # an alternate the board has no part of its own for
+        # The board's one component for an original and its same-footprint
+        # alternate may hold either one's values
+        shared = [a for a in alternates.get(uid, []) if a["unique_id"].lower() not in tc]
+        if t is not None and any(a["footprint"].lower() == t["footprint"].lower()
+                                 and a["comment"] == t["comment"] for a in shared):
+            s = dict(s, footprint=t["footprint"], comment=t["comment"])
         if t is None:
             des = s["designator"].lower()
             if des in matched:
@@ -304,7 +337,7 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
         sizes = defaultdict(int)
         for n in all_pins.values():
             sizes[n] += 1
-        solo_named = {n for (d, p), n in all_pins.items() if n and sizes[n] == 1 and n.lower() != f"net{d}_{p}"}
+        solo_named = {n for (d, p), n in all_pins.items() if n and sizes[n] == 1 and not _auto_net(n, d, p)}
         all_pins = {k: (n if sizes[n] > 1 else "") for k, n in all_pins.items()}
     sch_pins = {(sch_to_pcb[d].lower(), p): n for (d, p), n in all_pins.items() if d in sch_to_pcb}
     pcb_pins = {k: n for k, n in target["pads"].items() if k[0] in linked}

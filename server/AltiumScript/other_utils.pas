@@ -1802,7 +1802,7 @@ var
     Comp    : IComponent;
     I, J    : Integer;
     Id, Err, Members : String;
-    Comps, Pins, Classes, Rooms, NetClasses, Props, Listed : TStringList;
+    Comps, Pins, Classes, Rooms, NetClasses, Props : TStringList;
 begin
     Project := TargetProject(ProjectPath, Err);
     if Project = nil then
@@ -1823,28 +1823,19 @@ begin
     Rooms := TStringList.Create;
     NetClasses := TStringList.Create;
     Props := TStringList.Create;
-    Listed := TStringList.Create;
     try
         // An alternate part is listed a second time, under its original's
-        // id with '@<variant>' added. Update PCB compares the original, so
-        // the alternate is skipped; only if the original itself is not
-        // listed does the alternate stand in for it, under the original's
-        // id, so that the board part is not taken for a removal
-        for I := 0 to Flat.DM_ComponentCount - 1 do
-            if Pos('@', Flat.DM_Components(I).DM_UniqueId) = 0 then
-                Listed.Add(Flat.DM_Components(I).DM_UniqueId);
+        // id with '@<variant>' added; it is sent under that id (the board
+        // keeps it so when its footprint differs) and eco_preview decides
+        // how it matches. Its pins are the original's, so they are not sent
+        // twice
         for I := 0 to Flat.DM_ComponentCount - 1 do
         begin
             Comp := Flat.DM_Components(I);
             Id := Comp.DM_UniqueId;
-            if Pos('@', Id) > 0 then
-            begin
-                Id := Copy(Id, 1, Pos('@', Id) - 1);
-                if Listed.IndexOf(Id) >= 0 then Continue;
-                Listed.Add(Id);
-            end;
             Comps.Add(EcoQuote(Id + '|' + Comp.DM_PhysicalDesignator + '|' + Comp.DM_Footprint + '|' +
                                Comp.DM_Comment));
+            if Pos('@', Id) > 0 then Continue;
             for J := 0 to Comp.DM_PinCount - 1 do
                 Pins.Add(EcoQuote(Comp.DM_PhysicalDesignator + '|' + Comp.DM_Pins(J).DM_PinNumber + '|' +
                                   Comp.DM_Pins(J).DM_FlattenedNetName));
@@ -1891,7 +1882,6 @@ begin
         Rooms.Free;
         NetClasses.Free;
         Props.Free;
-        Listed.Free;
     end;
 end;
 
