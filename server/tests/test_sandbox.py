@@ -641,7 +641,9 @@ class UndoGroupTest(unittest.TestCase):
         # Exit in the script ends Run; only a finally block still runs then,
         # so cleanup and the result file must be inside one
         run = TEMPLATE[TEMPLATE.index("procedure Run;"):]
-        body = run.index(sandbox.BODY_BEGIN)
+        # the script itself is in SbxBody, which Run calls
+        self.assertIn(sandbox.BODY_BEGIN, TEMPLATE[TEMPLATE.index("procedure SbxBody;"):TEMPLATE.index("procedure Run;")])
+        body = run.index("SbxBody;")
         except_at = run.index("\n    except", body)
         finally_at = run.index("finally", except_at)
         for step in ("List1.Free;", "SbxCloseUndo;", "OutLines.SaveToFile(OutPath);"):
