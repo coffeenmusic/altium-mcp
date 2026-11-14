@@ -3103,6 +3103,90 @@ begin
     end;
 end;
 
+// Sets the text Name of Comp (a parameter, or the Designator or Comment) to
+// Value. A missing parameter is added and registered, so undo and the
+// netlist see it. Visible: 1 shown, 0 hidden, -1 unchanged (a new
+// parameter is then hidden).
+procedure SetSchParameter(Comp: ISch_Component; Name, Value: String; Visible: Integer);
+var
+    Obj   : ISch_GraphicalObject;
+    Param : ISch_Parameter;
+begin
+    Obj := FindSchText(Comp, Name);
+    if Obj = nil then
+    begin
+        Param := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+        Param.Name := Name;
+        Param.Text := Value;
+        Param.IsHidden := Visible <> 1;
+        Param.Location := Comp.Location;
+        Comp.AddSchObject(Param);
+        SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
+    end
+    else
+    begin
+        SchBeginModify(Obj);
+        Obj.Text := Value;
+        if Visible >= 0 then Obj.IsHidden := Visible = 0;
+        SchEndModify(Obj);
+    end;
+end;
+
+// Links a placed component to its DbLib row as Altium's own placement from a
+// DbLib does: Rec continues at field First with
+// DB|library|table|key|description|n|name|visible|value...|m|footprint...
+// The footprints replace the symbol's own, the first one current.
+procedure ApplyDbLink(Comp: ISch_Component; Rec: String; First: Integer);
+var
+    Iter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    Old  : TInterfaceList;
+    F, N, i : Integer;
+begin
+    Comp.SourceLibraryName := GetFieldFromPipeString(Rec, First + 1);
+    Comp.LibraryPath := '*';
+    Comp.DatabaseTableName := GetFieldFromPipeString(Rec, First + 2);
+    Comp.DesignItemId := GetFieldFromPipeString(Rec, First + 3);
+    if GetFieldFromPipeString(Rec, First + 4) <> '' then
+        Comp.ComponentDescription := GetFieldFromPipeString(Rec, First + 4);
+    F := First + 5;
+    N := StrToInt(GetFieldFromPipeString(Rec, F));
+    for i := 0 to N - 1 do
+        SetSchParameter(Comp, GetFieldFromPipeString(Rec, F + 1 + 3 * i),
+                        GetFieldFromPipeString(Rec, F + 3 + 3 * i),
+                        StrToInt(GetFieldFromPipeString(Rec, F + 2 + 3 * i)));
+    F := F + 1 + 3 * N;
+    N := StrToIntDef(GetFieldFromPipeString(Rec, F), 0);
+    if N = 0 then Exit;
+    Old := TInterfaceList.Create;
+    try
+        Iter := Comp.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := Iter.FirstSchObject;
+        while Impl <> nil do
+        begin
+            if SameText(Impl.ModelType, 'PCBLIB') then Old.Add(Impl);
+            Impl := Iter.NextSchObject;
+        end;
+        Comp.SchIterator_Destroy(Iter);
+        for i := 0 to Old.Count - 1 do
+            Comp.RemoveSchImplementation(Old.Items[i]);
+    finally
+        Old.Free;
+    end;
+    for i := 1 to N do
+    begin
+        Impl := Comp.AddSchImplementation;
+        Impl.ModelName := GetFieldFromPipeString(Rec, F + i);
+        Impl.ModelType := 'PCBLIB';
+        Impl.ClearAllDatafileLinks;
+        Impl.AddDataFileLink(GetFieldFromPipeString(Rec, F + i), '', 'PCBLib');
+        Impl.UseComponentLibrary := True;
+        Impl.DatabaseDatalinksLocked := True;
+        Impl.IsCurrent := i = 1;
+    end;
+end;
+
 // Place a symbol from a .SchLib on Doc. Opening the library makes it the
 // current document, so Doc is held by reference throughout.
 function PlaceSchComponent(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
@@ -3153,16 +3237,16 @@ begin
     Replica.MoveByXY(StrToInt(GetFieldFromPipeString(Rec, 4)) - Replica.Location.X,
                      StrToInt(GetFieldFromPipeString(Rec, 5)) - Replica.Location.Y);
     if GetFieldFromPipeString(Rec, 8) <> '' then Replica.Comment.Text := GetFieldFromPipeString(Rec, 8);
+    if GetFieldFromPipeString(Rec, 9) = 'DB' then ApplyDbLink(Replica, Rec, 9);
     Result := True;
 end;
 
 // One edit record; Msg says why it failed
 function ApplySchEdit(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
-    Kind, Name : String;
+    Kind       : String;
     Comp       : ISch_Component;
     Obj        : ISch_GraphicalObject;
-    Param      : ISch_Parameter;
     Ambiguous  : Boolean;
     fld, vtx, n, Want : Integer;
 begin
@@ -3210,26 +3294,8 @@ begin
     end
     else if Kind = 'PARAM' then
     begin
-        Name := GetFieldFromPipeString(Rec, 3);
-        Obj := FindSchText(Comp, Name);
-        if Obj = nil then
-        begin
-            Param := SchServer.SchObjectFactory(eParameter, eCreate_Default);
-            Param.Name := Name;
-            Param.Text := GetFieldFromPipeString(Rec, 4);
-            Param.IsHidden := GetFieldFromPipeString(Rec, 5) <> '1';
-            Param.Location := Comp.Location;
-            Comp.AddSchObject(Param);
-            SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
-        end
-        else
-        begin
-            SchBeginModify(Obj);
-            Obj.Text := GetFieldFromPipeString(Rec, 4);
-            Want := StrToInt(GetFieldFromPipeString(Rec, 5));
-            if Want >= 0 then Obj.IsHidden := Want = 0;
-            SchEndModify(Obj);
-        end;
+        SetSchParameter(Comp, GetFieldFromPipeString(Rec, 3), GetFieldFromPipeString(Rec, 4),
+                        StrToInt(GetFieldFromPipeString(Rec, 5)));
         Result := True;
     end
     else if Kind = 'TEXT' then
