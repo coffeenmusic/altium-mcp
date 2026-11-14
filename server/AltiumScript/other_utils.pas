@@ -462,7 +462,9 @@ begin
        (CommandName = 'get_erc_violations') or
        (CommandName = 'focus_document') or
        (CommandName = 'get_eco_source') or
-       (CommandName = 'get_eco_target') then
+       (CommandName = 'get_eco_target') or
+       (CommandName = 'list_open_documents') or
+       (CommandName = 'reload_document') then
     begin
         Result := True;
         Exit;
