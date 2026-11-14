@@ -2349,6 +2349,31 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
                         top_bottom, none_vertical], [width]:
                         a width turns auto size off, so the port keeps its
                         length and stays on its wire when renamed
+      edit_sheet_symbol sheet (its sheet name, or file name if unique),
+                        [x, y] (top left; entries and texts move along),
+                        [width, height], [fill_color, border_color]
+                        ("#RRGGBB"), [line_width smallest/small/medium/
+                        large], [name_x, name_y], [file_x, file_y] (where
+                        the sheet name and file name texts sit). A size
+                        that would leave an entry outside is refused; on a
+                        resize the right and bottom entries move with their
+                        edge (wires to them are not dragged)
+      edit_sheet_entry  sheet, name, [side left/right/top/bottom],
+                        [distance] (from the symbol's top edge on the left
+                        and right sides, from its left edge on the top and
+                        bottom), [io_type], [style, as add_port], [new_name]
+      move_wire_vertex  x, y, to_x, to_y: moves the vertex at x, y of every
+                        wire with one there (an end or a corner), so wires
+                        that meet there stay joined; junctions, net labels
+                        and power ports at x, y, and ports with an end
+                        there, move with it; also to trim a wire. Refused
+                        when a wire passes through x, y mid-segment (a T
+                        connection)
+      move_net_label    x, y (the label's location), [text], [to_x, to_y],
+                        [orientation], [justification],
+                        [snap_to_wire_end] (true, or a search radius in
+                        unit: puts the label on the nearest wire end to its
+                        target, 100 mil by default)
       delete_at         kind (wire, net_label, power_port, junction, no_erc,
                         port, note), x, y, [text]: removes a wire passing
                         through the point, or the object located there

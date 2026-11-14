@@ -173,5 +173,42 @@ class MultiPartTest(unittest.TestCase):
         self.assertEqual(find_pin("U1A.1", pins)["x"], 100000)
 
 
+class SheetAndWireTest(unittest.TestCase):
+    def test_sheet_symbol(self):
+        lines, error = encode_operations([{"op": "edit_sheet_symbol", "sheet": "Filter", "width": 800, "height": 300,
+                                           "fill_color": "#FFFFB0", "line_width": "small", "file_x": 10, "file_y": 20}])
+        self.assertEqual(error, "")
+        self.assertEqual(lines, ["SHEETSYM|Filter|||8000000|3000000|11599871||1|||100000|200000"])
+        self.assertIn("together", encode_operations([{"op": "edit_sheet_symbol", "sheet": "F", "name_x": 1}])[1])
+        self.assertIn("#RRGGBB", encode_operations([{"op": "edit_sheet_symbol", "sheet": "F", "fill_color": "red"}])[1])
+        self.assertIn("positive", encode_operations([{"op": "edit_sheet_symbol", "sheet": "F", "width": 0}])[1])
+
+    def test_sheet_entry(self):
+        lines, error = encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN", "side": "right",
+                                           "distance": 2.54, "io_type": "input"}], "mm")
+        self.assertEqual(lines, ["SHEETENTRY|F|IN|1|1000000|2||"])
+        self.assertIn("side", encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN",
+                                                  "side": "up"}])[1])
+        # The distance runs from the left edge on the top and bottom sides
+        error = encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN", "side": "top",
+                                    "distance": -1}])[1]
+        self.assertIn("left edge on the top and bottom", error)
+
+    def test_sheet_entry_styles_follow_altium(self):
+        # The same TPortArrowStyle order as ports: top_bottom is 7, none_vertical 4
+        for name, n in (("left_right", 3), ("none_vertical", 4), ("top", 5), ("bottom", 6), ("top_bottom", 7)):
+            lines, _ = encode_operations([{"op": "edit_sheet_entry", "sheet": "F", "name": "IN", "style": name}])
+            self.assertEqual(lines[0].split("|")[6], str(n), name)
+
+    def test_wire_vertex_and_label(self):
+        lines, _ = encode_operations([{"op": "move_wire_vertex", "x": 1, "y": 2, "to_x": 3, "to_y": 4},
+                                      {"op": "move_net_label", "x": 1, "y": 2, "text": "A", "snap_to_wire_end": True},
+                                      {"op": "move_net_label", "x": 1, "y": 2, "to_x": 5, "to_y": 6,
+                                       "orientation": 1}])
+        self.assertEqual(lines, ["WIREVTX|10000|20000|30000|40000", "LABELMOVE|10000|20000|A|||||1000000",
+                                 "LABELMOVE|10000|20000||50000|60000|1||"])
+        self.assertIn("together", encode_operations([{"op": "move_net_label", "x": 1, "y": 2, "to_x": 5}])[1])
+
+
 if __name__ == "__main__":
     unittest.main()
