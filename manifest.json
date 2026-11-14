@@ -233,7 +233,7 @@
     },
     {
       "name": "query_objects",
-      "description": "Find PCB objects with Altium's query language (as the PCB Filter panel runs it), with sizes given in a unit"
+      "description": "Find PCB objects with Altium's query language (as the PCB Filter panel runs it), with sizes given in a unit and an optional area"
     },
     {
       "name": "which_rule",
