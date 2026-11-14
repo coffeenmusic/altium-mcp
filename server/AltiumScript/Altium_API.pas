@@ -1678,6 +1678,8 @@ begin
             Result := ExecuteCreateNetClass(RequestData);            
         'get_all_component_data':
             Result := GetAllComponentData(ROOT_DIR, False);            
+        'geometry':
+            Result := ExecuteGeometry(RequestData);
         'take_view_screenshot':
             Result := ExecuteTakeViewScreenshot(RequestData);            
         'focus_document':
