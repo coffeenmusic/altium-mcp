@@ -232,6 +232,14 @@
       "description": "Report what each polygon pour poured: pieces, islands, slivers, and pours with no net or no copper"
     },
     {
+      "name": "query_objects",
+      "description": "Find PCB objects with Altium's query language (as the PCB Filter panel runs it), with sizes given in a unit"
+    },
+    {
+      "name": "which_rule",
+      "description": "Give the design rule the DRC applies to a PCB object or a pair of objects, and whether they pass it"
+    },
+    {
       "name": "layout_duplicator",
       "description": "First step of layout duplication. Selects source components and returns data to match with destination components"
     },
