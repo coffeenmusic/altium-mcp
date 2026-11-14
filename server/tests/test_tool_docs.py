@@ -17,7 +17,7 @@ import main  # noqa: E402
 ROOT = os.path.join(SERVER, "..")
 READ_ONLY = ("get_screenshot", "objects_in_area", "clearance", "render_pcb", "render_sheet",
              "check_objects_drc")
-CHANGING = ("drag_copper",)
+CHANGING = ("drag_copper", "route_path")
 
 
 class ToolDocsTest(unittest.TestCase):

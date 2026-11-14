@@ -7630,10 +7630,22 @@ begin
                 Result := SameText(GeoNet(Pour), GeoNet(Other));
 end;
 
-procedure GeoAddViolation(Board: IPCB_Board; Items: TStringList; Rule: IPCB_Rule; A, B: IPCB_Primitive);
+// Copper a polygon poured: its regions, or a hatched pour's tracks and arcs
+function GeoIsPourCopper(Prim: IPCB_Primitive): Boolean;
+begin
+    Result := False;
+    if Prim <> nil then
+        Result := Prim.InPolygon and ((Prim.ObjectId = eRegionObject) or (Prim.ObjectId = eTrackObject) or
+                                      (Prim.ObjectId = eArcObject));
+end;
+
+procedure GeoAddViolation(Board: IPCB_Board; Items: TStringList; Rule: IPCB_Rule; A, B: IPCB_Primitive;
+                          var Hard: Integer);
 var
     Item : TStringList;
 begin
+    // a hit on pour copper goes away with a repour; the rest are hard
+    if not (GeoIsPourCopper(A) or GeoIsPourCopper(B)) then Hard := Hard + 1;
     Item := TStringList.Create;
     try
         AddJSONProperty(Item, 'rule', Rule.Name);
@@ -7654,9 +7666,9 @@ begin
 end;
 
 // Checks Objects against what lies within Margin of them; Items gets one
-// JSON object per violation
+// JSON object per violation, Hard counts those not against pour copper
 procedure GeoCheckObjects(Board: IPCB_Board; Objects: TInterfaceList; Items: TStringList; Margin: Integer;
-                          var Pairs: Integer);
+                          var Pairs: Integer; var Hard: Integer);
 var
     A, B  : IPCB_Primitive;
     Rule  : IPCB_Rule;
@@ -7683,7 +7695,7 @@ begin
                 begin
                     Rule := Board.FindDominantRuleForObject(A, Kind);
                     if (Rule <> nil) and Rule.Enabled then
-                        if Rule.ActualCheck(A, nil) <> nil then GeoAddViolation(Board, Items, Rule, A, nil);
+                        if Rule.ActualCheck(A, nil) <> nil then GeoAddViolation(Board, Items, Rule, A, nil, Hard);
                 end;
             end;
             // against what is near it
@@ -7715,7 +7727,7 @@ begin
                             begin
                                 Rule := Board.FindDominantRuleForObjectPair(A, B, Kind);
                                 if (Rule <> nil) and Rule.Enabled then
-                                    if Rule.ActualCheck(A, B) <> nil then GeoAddViolation(Board, Items, Rule, A, B);
+                                    if Rule.ActualCheck(A, B) <> nil then GeoAddViolation(Board, Items, Rule, A, B, Hard);
                             end;
                         end;
                     end;
@@ -7740,7 +7752,7 @@ var
     Prim : IPCB_Primitive;
     It   : IPCB_SpatialIterator;
     Ref  : String;
-    i, Pairs, Total, FromRefs : Integer;
+    i, Pairs, Total, FromRefs, Hard : Integer;
 begin
     Objects := TInterfaceList.Create;
     Items := TStringList.Create;
@@ -7779,11 +7791,12 @@ begin
             Board.SpatialIterator_Destroy(It);
         end;
         Pairs := 0;
+        Hard := 0;
         if Objects.Count = 0 then Margin := 0
         else
         begin
             if Margin < 0 then Margin := GeoLargestGap(Board) + MilsToCoord(1);
-            GeoCheckObjects(Board, Objects, Items, Margin, Pairs);
+            GeoCheckObjects(Board, Objects, Items, Margin, Pairs, Hard);
         end;
         AddJSONProperty(Props, 'board_path', Board.FileName);
         AddJSONInteger(Props, 'origin_x', Board.XOrigin);
@@ -7801,6 +7814,242 @@ begin
         Props.Free;
         Missing.Free;
         RefList.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- route
+// route_path's Altium side: where pins are, and adding a planned route's
+// tracks and vias in one undo step, sized by the rules when no size is
+// given, then checked with GeoCheckObjects.
+
+// locate: Refs ('~'-separated) as kind|x|y|layer|through_hole|net each, in
+// order ('' when not found). through_hole is 1 for a pad or via on the Multi
+// Layer (reachable on any copper layer), told by its layer id, not its name.
+// Pads, vias and components only: they have one point, and the other kinds
+// have no x and y to read.
+function GeoLocate(Board: IPCB_Board; Refs: String): String;
+var
+    List, Items, Props : TStringList;
+    Prim : IPCB_Primitive;
+    Comp : IPCB_Component;
+    i    : Integer;
+    Kind, Rec : String;
+begin
+    List := TStringList.Create;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        List.Text := StringReplace(Refs, '~', #13#10, REPLACEALL);
+        for i := 0 to List.Count - 1 do
+        begin
+            Rec := '';
+            Kind := GetFieldFromPipeString(Trim(List[i]), 0);
+            Prim := nil;
+            if (Kind = 'pad') or (Kind = 'via') or (Kind = 'component') then
+                Prim := GeoFind(Board, Trim(List[i]));
+            if Prim <> nil then
+            begin
+                if (Prim.ObjectId = eViaObject) or (Prim.ObjectId = ePadObject) then
+                begin
+                    if Prim.ObjectId = eViaObject then Kind := 'via|' else Kind := 'pad|';
+                    Rec := Kind + IntToStr(Prim.x - Board.XOrigin) + '|' + IntToStr(Prim.y - Board.YOrigin) + '|' +
+                           Layer2String(Prim.Layer) + '|' + GeoFlag(Prim.Layer = eMultiLayer) + '|' + GeoNet(Prim);
+                end
+                else if Prim.ObjectId = eComponentObject then
+                begin
+                    Comp := Prim;
+                    Rec := 'component|' + IntToStr(Comp.x - Board.XOrigin) + '|' + IntToStr(Comp.y - Board.YOrigin) +
+                           '||0|';
+                end;
+            end;
+            Items.Add('"' + JSONEscapeString(Rec) + '"');
+        end;
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        Props.Add(BuildJSONArray(Items, 'located'));
+        Result := BuildJSONObject(Props);
+    finally
+        List.Free;
+        Items.Free;
+        Props.Free;
+    end;
+end;
+
+// route: Tracks 'layer|x1|y1|x2|y2' and Vias 'x|y|layer|layer' per
+// '~'-separated item (internal units from the origin). Width, ViaSize,
+// ViaHole 0: from the rules. The net and every layer are checked before
+// anything is added, so a bad item adds nothing. With Undo, a route that
+// breaks a rule (other than against pour copper) is taken off again before
+// the undo step closes: nothing of it is left, and Ctrl+Z cannot bring it
+// back.
+function GeoRoute(Board: IPCB_Board; NetName, Tracks, Vias, Layers: String; Width, ViaSize, ViaHole: Integer;
+                  Check, Undo: Boolean): String;
+var
+    Net    : IPCB_Net;
+    TrackList, ViaList, LayerList, Items, Made, Props : TStringList;
+    Created : TInterfaceList;
+    Track  : IPCB_Track;
+    Via    : IPCB_Via;
+    Rule   : IPCB_Rule;
+    Prim   : IPCB_Primitive;
+    i, Pairs, L, LowL, HighL, Hard : Integer;
+    Removed : Boolean;
+    Bad    : String;
+begin
+    Net := FindBoardNet(Board, NetName);
+    if Net = nil then
+    begin
+        Result := 'ERROR: no net ' + NetName + ' on the board';
+        Exit;
+    end;
+    TrackList := TStringList.Create;
+    ViaList := TStringList.Create;
+    LayerList := TStringList.Create;
+    Items := TStringList.Create;
+    Made := TStringList.Create;
+    Props := TStringList.Create;
+    Created := TInterfaceList.Create;
+    try
+        TrackList.Text := StringReplace(Tracks, '~', #13#10, REPLACEALL);
+        ViaList.Text := StringReplace(Vias, '~', #13#10, REPLACEALL);
+        // Every layer is checked before PreProcess, as in CreateVias:
+        // String2Layer alone accepts layers the board does not have
+        Bad := '';
+        // every layer the route names, also one that gets no copper
+        LayerList.Text := StringReplace(Layers, '~', #13#10, REPLACEALL);
+        for i := 0 to LayerList.Count - 1 do
+            if Trim(LayerList[i]) <> '' then
+            begin
+                L := ResolveBoardLayer(Board, Trim(LayerList[i]));
+                if (L = eNoLayer) or (L > eBottomLayer) then
+                    Bad := Trim(LayerList[i]) + ' is not a signal layer of this board';
+            end;
+        for i := 0 to TrackList.Count - 1 do
+            if Trim(TrackList[i]) <> '' then
+            begin
+                L := ResolveBoardLayer(Board, GetFieldFromPipeString(TrackList[i], 0));
+                if (L = eNoLayer) or (L > eBottomLayer) then
+                    Bad := GetFieldFromPipeString(TrackList[i], 0) + ' is not a signal layer of this board';
+            end;
+        for i := 0 to ViaList.Count - 1 do
+            if Trim(ViaList[i]) <> '' then
+            begin
+                LowL := ResolveBoardLayer(Board, GetFieldFromPipeString(ViaList[i], 2));
+                HighL := ResolveBoardLayer(Board, GetFieldFromPipeString(ViaList[i], 3));
+                if (LowL = eNoLayer) or (HighL = eNoLayer) or (LowL > eBottomLayer) or (HighL > eBottomLayer) or
+                   (LowL = HighL) then
+                    Bad := 'a via joins two different signal layers of this board; ' +
+                           GetFieldFromPipeString(ViaList[i], 2) + ' to ' + GetFieldFromPipeString(ViaList[i], 3) +
+                           ' is not that';
+            end;
+        if Bad <> '' then
+        begin
+            Result := 'ERROR: ' + Bad + '; nothing was added';
+            Exit;
+        end;
+
+        Pairs := 0;
+        Hard := 0;
+        Removed := False;
+        // PostProcess must run whatever happens, or Altium's undo stays broken
+        PCBServer.PreProcess;
+        try
+            for i := 0 to TrackList.Count - 1 do
+            begin
+                if Trim(TrackList[i]) = '' then Continue;
+                Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                Track.x1 := Board.XOrigin + StrToInt(GetFieldFromPipeString(TrackList[i], 1));
+                Track.y1 := Board.YOrigin + StrToInt(GetFieldFromPipeString(TrackList[i], 2));
+                Track.x2 := Board.XOrigin + StrToInt(GetFieldFromPipeString(TrackList[i], 3));
+                Track.y2 := Board.YOrigin + StrToInt(GetFieldFromPipeString(TrackList[i], 4));
+                Track.Layer := ResolveBoardLayer(Board, GetFieldFromPipeString(TrackList[i], 0));
+                Track.Net := Net;
+                if Width > 0 then Track.Width := Width else Track.Width := MilsToCoord(10);
+                Board.AddPCBObject(Track);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
+                // The width rule for this net and layer, as interactive routing
+                // uses it. A rule is found only for an object on the board, so
+                // the width changes after AddPCBObject, inside Begin/EndModify.
+                if Width <= 0 then
+                begin
+                    Rule := Board.FindDominantRuleForObject(Track, eRule_MaxMinWidth);
+                    if Rule <> nil then
+                    begin
+                        GeoBeginModify(Track);
+                        Track.Width := Rule.FavoredWidth(Track.Layer);
+                        GeoEndModify(Track);
+                    end;
+                end;
+                Created.Add(Track);
+            end;
+            for i := 0 to ViaList.Count - 1 do
+            begin
+                if Trim(ViaList[i]) = '' then Continue;
+                LowL := ResolveBoardLayer(Board, GetFieldFromPipeString(ViaList[i], 2));
+                HighL := ResolveBoardLayer(Board, GetFieldFromPipeString(ViaList[i], 3));
+                Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+                Via.x := Board.XOrigin + StrToInt(GetFieldFromPipeString(ViaList[i], 0));
+                Via.y := Board.YOrigin + StrToInt(GetFieldFromPipeString(ViaList[i], 1));
+                // LowLayer and HighLayer are the lower and higher layer
+                // numbers (Top Layer is 1), whichever end came first
+                Via.LowLayer := Min(LowL, HighL);
+                Via.HighLayer := Max(LowL, HighL);
+                Via.Net := Net;
+                if ViaSize > 0 then Via.Size := ViaSize else Via.Size := MilsToCoord(20);
+                if ViaHole > 0 then Via.HoleSize := ViaHole else Via.HoleSize := MilsToCoord(10);
+                Board.AddPCBObject(Via);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Via.I_ObjectAddress);
+                if (ViaSize <= 0) or (ViaHole <= 0) then
+                begin
+                    Rule := Board.FindDominantRuleForObject(Via, eRule_RoutingViaStyle);
+                    if Rule <> nil then
+                    begin
+                        GeoBeginModify(Via);
+                        if ViaSize <= 0 then Via.Size := Rule.PreferedWidth;
+                        if ViaHole <= 0 then Via.HoleSize := Rule.PreferedHoleWidth;
+                        GeoEndModify(Via);
+                    end;
+                end;
+                Created.Add(Via);
+            end;
+            if Check then
+                GeoCheckObjects(Board, Created, Items, GeoLargestGap(Board) + MilsToCoord(1), Pairs, Hard);
+            for i := 0 to Created.Count - 1 do
+                Made.Add('"' + JSONEscapeString(GeoRecord(Created.Items[i])) + '"');
+            // Taken off inside the same undo step it was added in
+            if Undo and (Hard > 0) then
+            begin
+                for i := 0 to Created.Count - 1 do
+                begin
+                    Prim := Created.Items[i];
+                    Board.RemovePCBObject(Prim);
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration,
+                                                  Prim.I_ObjectAddress);
+                end;
+                Removed := True;
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+        // Bring the ratsnest up to date on the net, as place_copper does, or
+        // the lines the route now connects stay drawn
+        Board.AnalyzeNet(Net);
+        Board.ViewManager_FullUpdate;
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        AddJSONInteger(Props, 'origin_x', Board.XOrigin);
+        AddJSONInteger(Props, 'origin_y', Board.YOrigin);
+        AddJSONBoolean(Props, 'removed_again', Removed);
+        AddJSONInteger(Props, 'pairs_checked', Pairs);
+        Props.Add(BuildJSONArray(Made, 'created'));
+        Props.Add(BuildJSONArray(Items, 'violations'));
+        Result := BuildJSONObject(Props);
+    finally
+        TrackList.Free;
+        ViaList.Free;
+        LayerList.Free;
+        Items.Free;
+        Made.Free;
+        Props.Free;
+        Created.Free;
     end;
 end;
 
@@ -7832,6 +8081,16 @@ begin
         Result := GeoOutline(Board)
     else if Cmd = 'clearance' then
         Result := GeoClearance(Board, RequestText(RequestData, 'a', ''), RequestText(RequestData, 'b', ''))
+    else if Cmd = 'locate' then
+        Result := GeoLocate(Board, RequestText(RequestData, 'refs', ''))
+    else if Cmd = 'route' then
+        Result := GeoRoute(Board, RequestText(RequestData, 'net', ''), RequestText(RequestData, 'tracks', ''),
+                           RequestText(RequestData, 'vias', ''), RequestText(RequestData, 'layers', ''),
+                           StrToInt(RequestText(RequestData, 'width', '0')),
+                           StrToInt(RequestText(RequestData, 'via_size', '0')),
+                           StrToInt(RequestText(RequestData, 'via_hole', '0')),
+                           RequestText(RequestData, 'check', 'true') = 'true',
+                           RequestText(RequestData, 'undo_on_violation', 'false') = 'true')
     else if Cmd = 'check' then
         Result := GeoCheck(Board, RequestText(RequestData, 'refs', ''), RequestText(RequestData, 'x1', '') <> '',
                            Board.XOrigin + StrToIntDef(RequestText(RequestData, 'x1', '0'), 0),

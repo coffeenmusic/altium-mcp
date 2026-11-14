@@ -173,6 +173,104 @@ def route(points: List[Tuple[int, int]], diagonal_first: bool = False, chamfer: 
     return [(a[0], a[1], b[0], b[1]) for a, b in zip(clean, clean[1:]) if a != b]
 
 
+def plan_path(start: Tuple[int, int, str], waypoints: List[Tuple[int, int, Optional[str]]],
+              diagonal_first: bool = False, chamfer: int = 0, via_span: str = "through",
+              end_in_pad: bool = False):
+    """A route through waypoints that may change layer: ([(layer, x1, y1, x2,
+    y2)], [(x, y, low layer, high layer)]).
+
+    start is (x, y, layer). A waypoint whose layer differs from the current
+    one ends the stretch there, drops a via at that point and goes on in the
+    new layer. Each stretch is routed with route(): 0, 45 and 90 degree
+    segments only. via_span "through" gives Top Layer to Bottom Layer vias,
+    "layers" vias between the two layers only. Layer names are compared
+    without case: "top layer" is Top Layer and needs no via.
+
+    A layer change at the last waypoint is refused (the via would lead
+    nowhere) unless end_in_pad: the last waypoint is a pad on that layer,
+    reached with a via in the pad (allow_via_in_pad), and the route ends there.
+    """
+    tracks, vias = [], []
+    layer = start[2]
+    stretch = [(start[0], start[1])]
+    last = waypoints[-1][2] if waypoints else None
+    before = layer
+    for w in waypoints[:-1]:
+        if w[2]:
+            before = w[2]
+    if last and last.lower() != before.lower() and not end_in_pad:
+        raise ValueError(f"the last waypoint changes layer to {last}: a via there would lead nowhere; "
+                         "add a waypoint on that layer after it")
+    for x, y, wl in waypoints:
+        stretch.append((x, y))
+        if wl and wl.lower() != layer.lower():
+            tracks += [(layer,) + s for s in route(stretch, diagonal_first, chamfer)]
+            if via_span == "through":
+                low, high = "Top Layer", "Bottom Layer"
+            else:
+                low, high = layer, wl
+            vias.append((x, y, low, high))
+            layer = wl
+            stretch = [(x, y)]
+    if len(stretch) > 1:
+        tracks += [(layer,) + s for s in route(stretch, diagonal_first, chamfer)]
+    return tracks, vias
+
+
+def resolve_route_points(points: list, located: dict, net: str, layer: str = "",
+                         allow_via_in_pad: bool = False, allow_other_net: bool = False):
+    """route_path's start and waypoints as (x, y, layer or None) for
+    plan_path, the starting layer, and warnings.
+
+    points holds ("xy", (x, y, layer)) or ("ref", ref); located maps each ref
+    to (kind, x, y, layer, net, through_hole) as the 'locate' command found
+    it; through_hole (Altium's Multi Layer, told by layer id) marks a pad
+    reachable on any layer. A surface-mount pad has one layer: reaching it on
+    another would put a via in the pad, which is refused unless
+    allow_via_in_pad (then plan_path takes end_in_pad for the last one). A
+    pad or via on another net is refused unless allow_other_net (then it is a
+    warning). Raises ValueError.
+    """
+    warnings = []
+    resolved = []
+    first = current = None
+    for i, (kind, p) in enumerate(points):
+        what = "start" if i == 0 else f"waypoint {i}"
+        if kind == "xy":
+            resolved.append(p)
+            point_layer = p[2]
+            if i == 0:
+                first = layer or point_layer or "Top Layer"
+        else:
+            obj_kind, x, y, obj_layer, obj_net, through_hole = located[p]
+            if obj_net and obj_kind in ("pad", "via") and obj_net.lower() != net.lower():
+                message = f"{what} {p} is on net {obj_net}, not {net}"
+                if not allow_other_net:
+                    raise ValueError(message + "; set allow_other_net to route to it anyway")
+                warnings.append(message)
+            smd = obj_kind == "pad" and not through_hole
+            point_layer = obj_layer if smd else None
+            resolved.append((x, y, point_layer))
+            if i == 0:
+                first = obj_layer if smd else (layer or "Top Layer")
+                if smd and layer and layer.lower() != obj_layer.lower():
+                    if not allow_via_in_pad:
+                        raise ValueError(f"start {p} is a surface-mount pad on {obj_layer}; starting on {layer} "
+                                         "would put a via in the pad. Leave layer empty, or set allow_via_in_pad")
+                    # a via in the pad, then on in the layer asked for
+                    resolved.append((x, y, layer))
+                    point_layer = layer
+            elif smd and obj_layer.lower() != current.lower() and not allow_via_in_pad:
+                raise ValueError(f"{what} {p} is a surface-mount pad on {obj_layer}, but the route reaches it on "
+                                 f"{current}: that would put a via in the pad. Route to it on {obj_layer}, or "
+                                 "set allow_via_in_pad")
+        if i == 0:
+            current = point_layer if (kind == "ref" and point_layer) else first
+        elif point_layer:
+            current = point_layer
+    return resolved, first, warnings
+
+
 VIA_KEYS = {"net", "diameter_mils", "hole_mils", "start_layer", "end_layer"}
 
 
