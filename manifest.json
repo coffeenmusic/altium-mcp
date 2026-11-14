@@ -28,6 +28,14 @@
       "description": "Read an .OutJob file from disk and return containers, outputs and decoded fabrication settings (Gerber layers, NC Drill, IPC-D-356, pick and place)"
     },
     {
+      "name": "create_outjob",
+      "description": "Create an .OutJob file, empty or from a template OutJob, and optionally add it to a project"
+    },
+    {
+      "name": "edit_outjob",
+      "description": "Add, change or remove an OutJob's containers, and copy, remove, rename, enable or move its outputs or change one output setting"
+    },
+    {
       "name": "get_project_info",
       "description": "Get the focused project's parameters, documents with unsaved-changes state, sheet count and variants"
     },
