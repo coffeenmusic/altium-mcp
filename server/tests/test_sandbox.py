@@ -3,9 +3,11 @@
 Run from the repo root:  python -m unittest server.tests.test_sandbox -v
 or from server/:          python -m unittest tests.test_sandbox -v
 """
+import hashlib
 import os
 import re
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -127,6 +129,31 @@ class LintTest(unittest.TestCase):
         self.assertEqual(self.lint(script), [])
         self.assertEqual(len(self.lint("I1 := Obj3.BoundingRectangle.Left;")), 1)
 
+    def test_record_reads_through_routine_parameters_and_locals(self):
+        script = ("function Left(Prim : IDispatch; N : Integer) : Integer;\n"   # line 1
+                  "var\n    A, B : IDispatch;\n    C : IPCB_Component;\n"
+                  "begin\n"
+                  "    Result := Prim.BoundingRectangle.Left;\n"                # line 6
+                  "    I1 := B.Corner.X;\n"                                     # line 7
+                  "    I2 := C.BoundingRectangle.Left;\n"
+                  "end;\n"
+                  "function Get : IDispatch;\n"                                # line 10
+                  "begin\n    Result := nil;\n    I3 := Result.Corner.X;\nend;\n"  # line 13
+                  "procedure Other(X : IPCB_Component);\n"
+                  "begin\n    I4 := X.BoundingRectangle.Left;\n    I5 := Prim.Corner.X;\nend;\n"
+                  "I6 := Left(nil, 1);\nI7 := A.Corner.X;")
+        sp = sandbox.split_var_block(script)
+        problems = sandbox.lint_script(sp.routines + sp.body, sp.routines_offset, sp.decls,
+                                       sandbox.routines(sp))
+        self.assertEqual([p.split(":")[0] for p in problems], ["line 6", "line 7", "line 13"])
+        self.assertIn("(Prim)", problems[0])
+        self.assertIn("(B)", problems[1])
+        # A routine's own names do not reach other routines or the statements
+        # (Prim in Other and A in the statements are some other, undeclared name)
+        self.assertEqual(sandbox.routines(sp)[0].untyped, ["Prim", "A", "B"])
+        self.assertEqual(sandbox.routines(sp)[1].untyped, ["Result"])
+        self.assertEqual(sandbox.routines(sp)[2].untyped, [])
+
     def test_case_insensitive(self):
         self.assertEqual(len(self.lint("S1 := Obj1.getstate_descriptionstring;")), 1)
         self.assertEqual(len(self.lint("list1.free;")), 1)
@@ -175,13 +202,358 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(lines[b.body_first_line - 1], "        ResultText := 'ok';")
         self.assertIn("// === END EXPERIMENT", lines[b.body_first_line])
 
-    def test_user_vars_inserted_in_run(self):
+    def test_user_vars_are_globals(self):
+        # Global, so the script's own functions and procedures can use them
         b = build("var\n  Doc : IDispatch;\nDoc := nil;")
         lines = b.text.splitlines()
         self.assertEqual(lines[b.vars_first_line - 1], "    Doc : IDispatch;")
+        self.assertLess(b.text.index("    Doc : IDispatch;"), b.text.index("procedure SandboxLog"))
+
+    def test_body_is_its_own_procedure(self):
+        # An Exit in the script ends SbxBody; Run still writes the result
+        b = build("Exit;")
+        body = b.text.index("procedure SbxBody;")
         run = b.text.index("procedure Run;")
-        self.assertGreater(b.text.index("    Doc : IDispatch;"), run)
-        self.assertLess(b.text.index("    Doc : IDispatch;"), b.text.index("begin", run))
+        # (the template's own routines use Exit too, further indented)
+        self.assertLess(body, b.text.index("\n        Exit;"))
+        self.assertLess(b.text.index("\n        Exit;"), run)
+        tail = b.text[run:]
+        self.assertLess(tail.index("SbxBody;"), tail.index("OutLines.SaveToFile(OutPath);"))
+
+class RoutineTest(unittest.TestCase):
+    SCRIPT = ("var\n    N : Integer;\n"
+              "function Twice(X : Integer) : Integer;\nvar\n    Y : Integer;\nbegin\n"
+              "    Y := X * 2;\n    if Y > 0 then\n    begin\n        Result := Y;\n    end;\nend;\n"
+              "\n"
+              "procedure Note(S : String);\nbegin\n    try\n        SandboxLog(S);\n    finally\n"
+              "        N := N + 1;\n    end;\nend;\n"
+              "N := Twice(2);\nNote('x');\nResultText := IntToStr(N);")
+
+    def test_split(self):
+        sp = sandbox.split_var_block(self.SCRIPT)
+        self.assertEqual(sp.decls, ["N : Integer;"])
+        self.assertEqual(sp.routines[0], "function Twice(X : Integer) : Integer;")
+        self.assertEqual(sp.routines[-1], "end;")
+        self.assertEqual(sp.routines_offset, 2)
+        self.assertEqual(sp.body[0], "N := Twice(2);")
+        self.assertEqual(sp.body_offset, 21)
+        rs = sandbox.routines(sp)
+        self.assertEqual([r.name for r in rs], ["Twice", "Note"])
+        self.assertEqual(rs[0].names, ["X", "Y"])
+        self.assertEqual([r.first_line for r in rs], [3, 14])
+
+    def test_routines_without_var_block_and_none_at_all(self):
+        sp = sandbox.split_var_block("procedure P;\nbegin\n    S1 := 'end';\nend;\nP;")
+        self.assertEqual(len(sp.routines), 4)
+        self.assertEqual(sp.body, ["P;"])
+        sp = sandbox.split_var_block("var\n  X : Integer;\n\nX := 1;")
+        self.assertEqual(sp.routines, [])
+        self.assertEqual(sp.body, ["X := 1;"])
+        self.assertEqual(sp.body_offset, 3)
+
+    def test_checks_know_params_locals_and_result(self):
+        sp = sandbox.split_var_block(self.SCRIPT)
+        self.assertEqual(sandbox.check_routines(sp), [])
+        self.assertEqual(sandbox.check_declarations(sp), [])
+        sp = sandbox.split_var_block("function F(A : Integer) : Integer;\nbegin\n    Z := A;\nend;\nI1 := F(1);")
+        problems = sandbox.check_routines(sp)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("line 3", problems[0])
+        self.assertIn("'Z'", problems[0])
+
+    def test_built_in_order_with_lines_mapped(self):
+        b = build(self.SCRIPT)
+        t = b.text
+        self.assertLess(t.index("    N : Integer;"), t.index("procedure SandboxLog"))
+        self.assertLess(t.index("procedure SaveDoc"), t.index("function Twice"))
+        self.assertLess(t.index("function Twice"), t.index("procedure SbxBody"))
+        self.assertLess(t.index("procedure SbxBody"), t.index("N := Twice(2);"))
+        self.assertLess(t.index("N := Twice(2);"), t.index("procedure Run;"))
+        lines = t.splitlines()
+        self.assertEqual(lines[b.routines_first_line - 1], "function Twice(X : Integer) : Integer;")
+        msg = f"Undeclared identifier at Line:{b.routines_first_line + 4}, Char:5"
+        self.assertEqual(sandbox.map_error_line(b, msg), {"where": "script", "line": 7, "char": 5})
+        msg = f"x at Line:{b.body_first_line + 1}, Char:9"
+        self.assertEqual(sandbox.map_error_line(b, msg), {"where": "script", "line": 23, "char": 1})
+
+    def test_loops_in_routines_guarded(self):
+        b = build("procedure P;\nbegin\n    while I1 < 3 do I1 := I1 + 1;\nend;\nP;")
+        self.assertIn("while SandboxTick(3) and (I1 < 3) do", b.text)
+
+
+class DeclarationTest(unittest.TestCase):
+    def test_reserved_words(self):
+        sp = sandbox.split_var_block("var\n    Label, X : Integer;\n    Object : IDispatch;\nX := 1;")
+        problems = sandbox.check_declarations(sp)
+        self.assertEqual(len(problems), 2)
+        self.assertIn("line 2", problems[0])
+        self.assertIn("'Label' is a reserved word", problems[0])
+        self.assertIn("line 3", problems[1])
+        sp = sandbox.split_var_block("procedure P(Unit : Integer);\nbegin\nend;\nP(1);")
+        self.assertIn("'Unit' is a reserved word", sandbox.check_declarations(sp)[0])
+
+    def test_directives_that_broke_builds(self):
+        for word in ("Stored", "Index", "Default", "Read", "Write", "Message", "At", "On", "Absolute"):
+            sp = sandbox.split_var_block(f"var\n    {word} : Integer;\nS1 := 'x';")
+            problems = sandbox.check_declarations(sp)
+            self.assertEqual(len(problems), 1, word)
+            self.assertIn(f"'{word}' is a reserved word", problems[0])
+        sp = sandbox.split_var_block("function F(Index : Integer) : Integer;\nvar\n    Read : Integer;\n"
+                                     "begin\n    Result := 1;\nend;\nI1 := F(1);")
+        self.assertEqual(len(sandbox.check_declarations(sp)), 2)
+
+    def test_skip_lint_skips_reserved_words_only(self):
+        sp = sandbox.split_var_block("var\n    Label, S1 : Integer;\nprocedure Read(Unit : Integer);\n"
+                                     "begin\nend;\nRead(1);")
+        self.assertEqual(len(sandbox.check_declarations(sp)), 4)
+        # A sandbox name declared again never compiles, so it stays refused
+        problems = sandbox.check_declarations(sp, reserved_words=False)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("'S1' is already declared", problems[0])
+
+    def test_names_the_template_declares(self):
+        sp = sandbox.split_var_block("var\n    S1 : Integer;\nfunction MM(V : Double) : Integer;\nbegin\nend;\nI1 := 1;")
+        problems = sandbox.check_declarations(sp)
+        self.assertEqual(len(problems), 2)
+        self.assertIn("'S1' is already declared", problems[0])
+        self.assertIn("'MM' is already a sandbox name", problems[1])
+
+    def test_template_globals_listed(self):
+        code = sandbox.strip_strings_and_comments(TEMPLATE)
+        routines = re.findall(r"^\s*(?:procedure|function)\s+([A-Za-z_]\w*)", code, re.M | re.I)
+        self.assertEqual([n for n in routines if n not in sandbox.TEMPLATE_GLOBALS], [])
+        consts = re.findall(r"^\s*([A-Za-z_]\w*)\s*=", code, re.M)
+        self.assertEqual([n for n in consts if n not in sandbox.TEMPLATE_GLOBALS], [])
+        globals_block = code[:code.index("procedure SandboxLog")]
+        for m in re.finditer(r"^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:\s*[A-Za-z_]\w*\s*;", globals_block, re.M):
+            for n in m.group(1).split(","):
+                self.assertIn(n.strip(), sandbox.TEMPLATE_NAMES + sandbox.TEMPLATE_GLOBALS)
+
+
+class PrecedenceTest(unittest.TestCase):
+    def problems(self, code):
+        return sandbox.precedence_problems(sandbox.strip_strings_and_comments(code))
+
+    def test_comparison_next_to_and_or(self):
+        p = self.problems("I1 := 1;\nif I1 = 1 and I2 = 2 then S1 := 'a';")
+        self.assertEqual(len(p), 1)
+        self.assertIn("line 2", p[0])
+        self.assertEqual(len(self.problems("while (I1 < 3) and\n  I2 > 0 do I1 := I1 + 1;")), 1)
+        self.assertEqual(len(self.problems("B1 := X = 1 or Y;")), 1)
+        self.assertEqual(len(self.problems("if F(A = 1 or B) then ;")), 1)
+        # Within one argument the comma does not hide it
+        self.assertEqual(len(self.problems("I1 := Max(I2, A = 1 or B);")), 1)
+        self.assertEqual(len(self.problems("I1 := Max(A = 1 or B, I2);")), 1)
+
+    def test_parenthesized_and_plain_pass(self):
+        for ok in ("if (I1 = 1) and (I2 = 2) then S1 := 'a';",
+                   "if A and B then S1 := 'x' else if C = 2 then S1 := 'y';",
+                   "S1 := 'a = 1 and b';\nI1 := I2 and 3;\nif I1 = 1 then I2 := 3 and I1;",
+                   "repeat I1 := I1 + 1 until (I1 = 3) or (I2 > 4);",
+                   "Ok := Pos('x', S1) > 0;\nX := A[I1 = 1];",
+                   "function F(A : Integer = 4; B : Boolean = False) : Integer;",
+                   # Commas separate arguments: a comparison in one, or in another
+                   "I1 := Max(A = 1, B or C);",
+                   "S1 := Copy(S2, I1 = 1, I2 and 3);"):
+            self.assertEqual(self.problems(ok), [], ok)
+
+    def test_not_before_comparison(self):
+        p = self.problems("if not I1 = 1 then S1 := 'a';")
+        self.assertEqual(len(p), 1)
+        self.assertIn("not I1 =", p[0])
+        self.assertEqual(len(self.problems("if not Obj1.Selection(1) <> 0 then ;")), 1)
+        self.assertEqual(self.problems("if not (I1 = 1) then ;\nif not B1 then ;\nif I1 <> 1 then ;"), [])
+
+    def test_reported_by_lint(self):
+        sp = sandbox.split_var_block("var\n  X : Integer;\nif X = 1 and X = 2 then X := 3;")
+        p = sandbox.lint_script(sp.body, sp.body_offset, sp.decls)
+        self.assertEqual(len(p), 1)
+        self.assertIn("line 3", p[0])
+
+
+class SnapshotTest(unittest.TestCase):
+    def test_doc_paths_from_string_literals(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = Path(d) / "A.SchDoc"
+            b = Path(d) / "it's.PcbDoc"
+            a.write_text("x")
+            b.write_text("y")
+            q = str(b).replace("'", "''")
+            script = (f"Obj1 := OpenSchDoc('{a}');\nSaveDoc('{str(a).upper()}');\n"
+                      f"S1 := '{q}';\nS2 := '{d}\\missing.SchDoc';\nS3 := 'Rel.SchDoc';")
+            self.assertEqual(sandbox.doc_paths(script), [str(a), str(b)])
+
+    def test_take_snapshot_and_doc_states(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = Path(d) / "A.SchDoc"
+            a.write_bytes(b"abc")
+            entries = sandbox.take_snapshot(Path(d) / "snap", [str(a)])
+            self.assertEqual(entries, [{"path": str(a), "copy": "0_A.SchDoc", "bytes": 3,
+                                        "sha256": hashlib.sha256(b"abc").hexdigest()}])
+            self.assertEqual((Path(d) / "snap" / "0_A.SchDoc").read_bytes(), b"abc")
+            self.assertEqual(json.loads((Path(d) / "snap" / "manifest.json").read_text()), entries)
+        states = sandbox.doc_states(["sandbox start", "DOC STATE: unsaved|C:\\X\\A.SchDoc",
+                                     "DOC STATE: closed|C:\\X\\B.PcbDoc", "DOC AFTER: open|C:\\X\\B.PcbDoc"])
+        self.assertEqual(states, {"c:\\x\\a.schdoc": "unsaved", "c:\\x\\b.pcbdoc": "closed"})
+        after = sandbox.doc_states(["DOC AFTER: open|C:\\X\\B.PcbDoc"], sandbox.DOC_AFTER_PREFIX)
+        self.assertEqual(after, {"c:\\x\\b.pcbdoc": "open"})
+
+    def test_rollback_refused_after_a_later_save(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a, b = Path(d) / "A.SchDoc", Path(d) / "B.PcbDoc"
+            a.write_bytes(b"before")
+            b.write_bytes(b"pcb")
+            snap = Path(d) / "snap"
+            sandbox.take_snapshot(snap, [str(a), str(b)])
+            # The end of the run was never recorded: nothing is safe to restore
+            self.assertEqual(sandbox.changed_since_run(sandbox.read_manifest(snap)), [str(a), str(b)])
+            a.write_bytes(b"script saved this")
+            entries = sandbox.record_run_end(snap, [f"DOC STATE: open|{a}", f"DOC AFTER: unsaved|{a}"])
+            self.assertEqual(entries[0]["state_before"], "open")
+            self.assertEqual(entries[0]["state_after"], "unsaved")
+            self.assertIsNone(entries[1]["state_before"])
+            self.assertEqual(sandbox.read_manifest(snap), entries)
+            self.assertEqual(sandbox.changed_since_run(entries), [])
+            # The user saves later work: rolling back would lose it
+            b.write_bytes(b"user saved this")
+            self.assertEqual(sandbox.changed_since_run(entries), [str(b)])
+            b.unlink()
+            self.assertEqual(sandbox.changed_since_run(entries), [str(b)])
+        self.assertIsNone(sandbox.read_manifest(Path(d) / "gone"))
+
+    def test_unique_paths_normalised(self):
+        norm = lambda p: p.replace("/", "\\")
+        self.assertEqual(sandbox.unique_paths(["C:/p/A.SchDoc", "c:\\P\\a.schdoc", "C:\\p\\B.PcbDoc"], norm),
+                         ["C:\\p\\A.SchDoc", "C:\\p\\B.PcbDoc"])
+
+    def test_nothing_snapshotted_note(self):
+        self.assertIn("GetCurrentPCBBoard", sandbox.nothing_snapshotted_note(False))
+        self.assertIn("snapshot=[] was passed", sandbox.nothing_snapshotted_note(True))
+
+    def test_doc_states_logged_before_and_after_the_script(self):
+        b = sandbox.build_script(TEMPLATE, "S1 := 'x';", "l", "o", snapshot_docs=["C:\\it's\\A.SchDoc"])
+        run = b.text[b.text.index("procedure Run;"):]
+        self.assertIn("SbxNoteDoc('C:\\it''s\\A.SchDoc');", run)
+        self.assertLess(run.index("SbxNoteDoc("), run.index("SbxBody;"))
+        self.assertLess(run.index("SbxSnapDocs := TStringList.Create;"), run.index("SbxNoteDoc("))
+        self.assertLess(run.index("SbxBody;"), run.index("SbxNoteDocsAfter;"))
+        self.assertLess(run.index("SbxNoteDocsAfter;"), run.index("SbxSnapDocs.Free;"))
+
+    def test_norm_path(self):
+        self.assertEqual(sandbox.norm_path(" C:/P//Sub\\A.SchDoc "), "c:\\p\\sub\\a.schdoc")
+        self.assertEqual(sandbox.norm_path("\\\\Srv\\Share\\\\A.SchDoc"), "\\\\srv\\share\\a.schdoc")
+
+    def test_template_finds_open_documents_by_any_spelling(self):
+        # Client.IsDocumentOpen and GetDocumentByPath miss a path spelled
+        # differently from Altium's; the template compares normalised paths
+        code = sandbox.strip_strings_and_comments(TEMPLATE)
+        self.assertNotIn("IsDocumentOpen", code)
+        for name in ("SbxDocState", "SbxCloseDoc", "SbxProjectUnsaved"):
+            start = code.index(f"function {name}(")
+            body = code[start:code.index("\nend;", start)]
+            self.assertIn("SbxFindDoc(", body, name)
+            self.assertNotIn("GetDocumentByPath", body, name)
+
+    def test_template_reads_modified_through_booltostr(self):
+        # Modified read directly in a condition is always False in a script
+        code = sandbox.strip_strings_and_comments(TEMPLATE)
+        self.assertEqual(re.findall(r"\.Modified\b(?!\s*,\s*True\))", code), [])
+        self.assertIn("D.SetModified(False);", code)
+
+    def test_close_state_and_reopen_scripts(self):
+        paths = ["C:\\p\\A.SchDoc", "C:\\p\\P.PrjPcb", "C:\\p\\B.PcbDoc"]
+        close = sandbox.close_script(paths)
+        # Documents before the project, which would close them with it
+        self.assertEqual(re.findall(r"SbxCloseDoc\('([^']+)'\)", close),
+                         ["C:\\p\\A.SchDoc", "C:\\p\\B.PcbDoc", "C:\\p\\P.PrjPcb"])
+        self.assertEqual(sandbox.check_script(close.split("\n"), []), [])
+        state = sandbox.state_script(paths)
+        self.assertEqual(state.count("SbxDocState("), 3)
+        self.assertEqual(state.count("SbxProjectUnsaved("), 1)
+        self.assertIn("SbxProjectUnsaved('C:\\p\\P.PrjPcb', '|C:\\P\\A.SCHDOC||C:\\P\\P.PRJPCB||C:\\P\\B.PCBDOC|')",
+                      state)
+        # The skip list is compared with SbxNormPath's form of each path
+        self.assertIn("'|C:\\P\\A.SCHDOC||\\\\SRV\\P\\B.PCBDOC||C:\\P\\P.PRJPCB|'",
+                      sandbox.state_script(["C:/p//A.SchDoc", "\\\\srv\\p\\\\B.PcbDoc", "C:\\p\\P.PrjPcb"]))
+        self.assertEqual(sandbox.check_script(state.split("\n"), []), [])
+        now, children = sandbox.parse_states(
+            "unsaved|C:\\p\\A.SchDoc\nopen|C:\\p\\P.PrjPcb\nchildren|C:\\p\\P.PrjPcb|C:\\p\\C.SchDoc*C:\\p\\D.SchDoc*\n"
+            "closed|C:\\p\\B.PcbDoc\n")
+        self.assertEqual(now, {"c:\\p\\a.schdoc": "unsaved", "c:\\p\\p.prjpcb": "open", "c:\\p\\b.pcbdoc": "closed"})
+        self.assertEqual(children, {"c:\\p\\p.prjpcb": ["C:\\p\\C.SchDoc", "C:\\p\\D.SchDoc"]})
+        self.assertEqual(sandbox.parse_states("children|C:\\p\\P.PrjPcb|\n")[1], {"c:\\p\\p.prjpcb": []})
+        reopen = sandbox.reopen_script(paths)
+        self.assertIn("Client.OpenDocument('SCH', 'C:\\p\\A.SchDoc');", reopen)
+        self.assertIn("GetWorkspace.DM_OpenProject('C:\\p\\P.PrjPcb', True);", reopen)
+        self.assertIn("Client.OpenDocument('PCB', 'C:\\p\\B.PcbDoc');", reopen)
+
+    def test_snapshot_dir_by_id(self):
+        sb = sandbox.Sandbox("x", Path("t.pas"), Path("runs"), snapshots_dir=Path("snaps"))
+        self.assertEqual(sb.snapshot_dir("Sbx_1"), Path("snaps") / "Sbx_1")
+        self.assertIsNone(sb.snapshot_dir("..\\Sbx_1"))
+        self.assertIsNone(sb.snapshot_dir(""))
+        self.assertIsNone(sandbox.Sandbox("x", Path("t.pas"), Path("runs")).snapshot_dir("Sbx_1"))
+
+    def test_prune_keeps_script_runs_apart_from_helpers(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            runs, snaps = Path(d) / "runs", Path(d) / "snaps"
+            sb = sandbox.Sandbox("x", Path(d) / "t.pas", runs, keep_runs=2, snapshots_dir=snaps)
+            runs.mkdir()
+            t = time.time() - 100
+            for n in range(3):
+                for tag in ("Sbx", "Helper", "Probe"):
+                    p = runs / f"{tag}_{n}.pas"
+                    p.write_text("x")
+                    os.utime(p, (t + n, t + n))
+                (snaps / f"Sbx_{n}").mkdir(parents=True)
+                os.utime(snaps / f"Sbx_{n}", (t + n, t + n))
+            (runs / "Sbx_0_snapshot").mkdir()        # the old place, readable by every account
+            sb.prune()
+            self.assertEqual(sorted(p.stem for p in runs.glob("Sbx_*.pas")), ["Sbx_1", "Sbx_2"])
+            # Five helper and probe runs after them did not push the script runs out
+            self.assertEqual(len([p for p in runs.glob("*.pas") if not p.stem.startswith("Sbx")]), 2)
+            self.assertEqual(sorted(p.name for p in snaps.iterdir()), ["Sbx_1", "Sbx_2"])
+            self.assertFalse((runs / "Sbx_0_snapshot").exists())
+
+
+class HelperDialogTest(unittest.TestCase):
+    def test_only_new_dialogs_closed_and_listed_once(self):
+        import tempfile
+        from unittest import mock
+        users = sandbox.Dialog(1, "TMessageForm", "Confirm")
+        prompt = sandbox.Dialog(2, "TMessageForm", "Confirm")
+        error = sandbox.Dialog(3, "TMessageForm", "Error")
+        calls = {"n": 0}
+
+        def dialogs():
+            calls["n"] += 1
+            return [users] if calls["n"] == 1 else [users, prompt, error]
+
+        answered = []
+        with tempfile.TemporaryDirectory() as d:
+            sb = sandbox.Sandbox("x", Path(d) / "t.pas", Path(d))
+            files = sb.new_run_files("Helper")
+            with mock.patch.object(sandbox, "altium_dialogs", dialogs), \
+                    mock.patch.object(sandbox, "answer_dialog", lambda dlg: answered.append(dlg.hwnd)), \
+                    mock.patch.object(sandbox.Sandbox, "write", lambda self, f, script: None), \
+                    mock.patch.object(sandbox.Sandbox, "launch", lambda self, f: None), \
+                    mock.patch.object(sandbox.time, "sleep", lambda s: None):
+                closed = []
+                self.assertFalse(sb._run_until_done(files, "x", 0.3, closed))
+                self.assertEqual(closed, [{"title": "Confirm", "picture": None}])
+                self.assertNotIn(1, answered)
+                self.assertIn(2, answered)
+                self.assertIn(3, answered)
+                # Without the list, only error boxes are answered
+                answered.clear()
+                calls["n"] = 0
+                sb._run_until_done(files, "x", 0.3)
+                self.assertEqual(set(answered), {3})
 
 
 class LoopGuardTest(unittest.TestCase):
@@ -269,7 +641,9 @@ class UndoGroupTest(unittest.TestCase):
         # Exit in the script ends Run; only a finally block still runs then,
         # so cleanup and the result file must be inside one
         run = TEMPLATE[TEMPLATE.index("procedure Run;"):]
-        body = run.index(sandbox.BODY_BEGIN)
+        # the script itself is in SbxBody, which Run calls
+        self.assertIn(sandbox.BODY_BEGIN, TEMPLATE[TEMPLATE.index("procedure SbxBody;"):TEMPLATE.index("procedure Run;")])
+        body = run.index("SbxBody;")
         except_at = run.index("\n    except", body)
         finally_at = run.index("finally", except_at)
         for step in ("List1.Free;", "SbxCloseUndo;", "OutLines.SaveToFile(OutPath);"):
@@ -361,6 +735,112 @@ class DialogTest(unittest.TestCase):
         self.assertFalse(sandbox.Dialog(4, "TMessageForm", "Confirm").is_error_box)
         self.assertFalse(sandbox.Dialog(5, "TMessageForm", "Warning").is_error_box)
         self.assertFalse(sandbox.Dialog(6, "#32770", "Save As", "File name:").is_error_box)
+
+
+
+class OneLineVarBlockTest(unittest.TestCase):
+    def test_several_declarations_on_one_line(self):
+        split = sandbox.split_var_block("var D: IServerDocument; P, S: String;\nS := P;\nResultText := S;")
+        self.assertEqual(split.decls, ["D: IServerDocument;", "P, S: String;"])
+        self.assertEqual(sandbox.declared_names(split.decls), ["D", "P", "S"])
+        self.assertEqual(split.body, ["S := P;", "ResultText := S;"])
+
+    def test_array_types(self):
+        decls = ["Ls : array[0..9] of Integer;", "Names: Array of String;", "M: array [1..N, 0..3] of Double;"]
+        tail = ["function F(X: Integer): Integer;", "begin", "    Result := X;", "end;", "ResultText := 'x';"]
+        split = sandbox.split_var_block("\n".join(["var", "    " + decls[0], "    " + " ".join(decls[1:])] + tail))
+        self.assertEqual(split.decls, decls)
+        self.assertEqual(sandbox.declared_names(split.decls), ["Ls", "Names", "M"])
+        self.assertEqual([r.name for r in sandbox.routines(split)], ["F"])
+        # still strict: no 'of' is not a declaration, and the var block ends there
+        split = sandbox.split_var_block("\n".join(["var", "    " + decls[0], "    Bad : array[0..9] Integer;"] + tail))
+        self.assertEqual(split.decls, decls[:1])
+
+
+class RollbackToolTest(unittest.TestCase):
+    """main.rollback_altium_script with Altium faked."""
+
+    def setUp(self):
+        import asyncio
+        import json
+        import tempfile
+        from unittest import mock
+        import main
+        self.main, self.json, self.mock, self.asyncio = main, json, mock, asyncio
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.doc = self.dir / "A.SchDoc"
+        self.doc.write_bytes(b"before")
+        patch = mock.patch.object(main, "SANDBOX_SNAPSHOTS", self.dir / "snaps")
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.sb = main._sandbox()
+        sandbox.take_snapshot(self.sb.snapshot_dir("Sbx_1"), [str(self.doc)])
+        # The script edits the document and leaves it unsaved
+        self.doc.write_bytes(b"script saved this")
+        sandbox.record_run_end(self.sb.snapshot_dir("Sbx_1"),
+                               [f"DOC STATE: open|{self.doc}", f"DOC AFTER: unsaved|{self.doc}"])
+
+    def rollback(self, running, replies=(), **kw):
+        mock, main = self.mock, self.main
+        calls = []
+
+        def run_quick(_self, script, timeout=30.0, closed_dialogs=None):
+            calls.append(script)
+            return replies[len(calls) - 1]
+
+        async def ensure_paths(need_script=True):
+            return None
+        with mock.patch.object(type(main.altium_bridge), "_altium_running", staticmethod(lambda: running)), \
+                mock.patch.object(main.altium_bridge, "ensure_paths", ensure_paths), \
+                mock.patch.object(main, "altium_limit_problem", lambda: None), \
+                mock.patch.object(sandbox, "altium_hung", lambda: False), \
+                mock.patch.object(sandbox, "altium_dialogs", lambda: []), \
+                mock.patch.object(sandbox.Sandbox, "run_quick", run_quick), \
+                mock.patch.object(sandbox.Sandbox, "prune", lambda _self: None):
+            result = self.asyncio.run(main.rollback_altium_script(None, "Sbx_1", **kw))
+        return self.json.loads(result), calls
+
+    def test_altium_not_running_restores_without_starting_it(self):
+        result, calls = self.rollback(running=False)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["restored"], [str(self.doc)])
+        self.assertEqual(calls, [])
+        self.assertEqual(self.doc.read_bytes(), b"before")
+
+    def test_altium_not_running_still_checks_the_disk(self):
+        self.doc.write_bytes(b"user saved this")
+        result, calls = self.rollback(running=False)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["changed_since_run"], [str(self.doc)])
+        self.assertEqual(self.doc.read_bytes(), b"user saved this")
+
+    def test_unsaved_at_rollback_refused_even_if_the_run_left_it_so(self):
+        result, calls = self.rollback(running=True, replies=[f"unsaved|{self.doc}\n"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["unsaved_now"], [str(self.doc)])
+        self.assertEqual(result["left_unsaved_by_run"], [str(self.doc)])
+        self.assertEqual(len(calls), 1)          # only asked for the state; nothing closed
+        self.assertEqual(self.doc.read_bytes(), b"script saved this")
+
+    def test_unsaved_restored_with_discard_unsaved(self):
+        result, calls = self.rollback(running=True, discard_unsaved=True,
+                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}\n", "reopened"])
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["reopened"], [str(self.doc)])
+        self.assertIn("SbxCloseDoc(", calls[1])
+        self.assertEqual(self.doc.read_bytes(), b"before")
+
+    def test_reopened_under_the_name_altium_had(self):
+        # The snapshot was given another spelling of the path; Altium's own
+        # name for the document is the one it is reopened under
+        shown = str(self.doc).upper()
+        result, calls = self.rollback(running=True, discard_unsaved=True,
+                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}|{shown}\n", "reopened"])
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["reopened"], [shown])
+        self.assertIn(shown.replace("'", "''"), calls[2])
 
 
 if __name__ == "__main__":
