@@ -103,9 +103,13 @@ def parse_object(record: str, origin=(0, 0), unit: str = "mil") -> Optional[dict
             if rest[4:5] == ["1"]:
                 obj["in_polygon"] = True
             obj["ref"] = f"region|{layer}|{left}|{bottom}|{right}|{top}"
+            if len(rest) > 5 and rest[5]:
+                obj["contours"] = parse_contours(rest[5], x, y)
     elif kind == "text":
         tx, ty, size, rot = _ints(rest, 4)
-        obj.update({"x": x(tx), "y": y(ty), "height": d(size), "rotation": rot / 1000, "text": "|".join(rest[4:])})
+        obj.update({"x": x(tx), "y": y(ty), "height": d(size), "rotation": rot / 1000, "text": "|".join(rest[5:])})
+        if rest[4:5] == ["1"]:
+            obj["hidden"] = True
     elif kind == "component":
         cx, cy, rot, left, bottom, right, top = _ints(rest, 7)
         obj.update({"designator": owner, "x": x(cx), "y": y(cy), "rotation": rot / 1000,
@@ -150,6 +154,41 @@ def via_layers(low: str, high: str, stack: Optional[List[str]] = None) -> List[s
         i, j = sorted((keys.index(layer_key(low)), keys.index(layer_key(high))))
         return names[i:j + 1]
     return [low.lower(), high.lower()]
+
+
+def parse_contours(text: str, x, y) -> List[dict]:
+    """A region's outline as sent for drawing: contours joined by '~', each
+    's:' (solid) or 'h:' (hole) and x,y points joined by ';'."""
+    out = []
+    for part in text.split("~"):
+        tag, _, points = part.partition(":")
+        pts = []
+        for p in points.split(";"):
+            if "," in p:
+                px, py = p.split(",", 1)
+                pts.append((x(px), y(py)))
+        out.append({"hole": tag == "h", "points": pts})
+    return out
+
+
+def parse_outline(text: str, origin=(0, 0), unit: str = "mil") -> List[dict]:
+    """The board outline from the 'outline' geometry command: per segment its
+    start vertex, kind (0 line, 1 arc) and the arc's centre and radius, and
+    for an arc its start and end angles (degrees; Altium's arc runs
+    counter-clockwise from start to end)."""
+    k = unit_factor(unit)
+    out = []
+    for seg in (text or "").split(";"):
+        f = seg.split(",")
+        if len(f) < 6:
+            continue
+        vx, vy, kind, cx, cy, r = (int(v) for v in f[:6])
+        item = {"x": (vx - origin[0]) / k, "y": (vy - origin[1]) / k, "kind": kind,
+                "cx": (cx - origin[0]) / k, "cy": (cy - origin[1]) / k, "radius": r / k}
+        if kind == 1 and len(f) >= 8:
+            item.update({"start_angle": int(f[6]) / 1000, "end_angle": int(f[7]) / 1000})
+        out.append(item)
+    return out
 
 
 def _layer_match(obj: dict, layers: List[str], stack: Optional[List[str]] = None) -> bool:
