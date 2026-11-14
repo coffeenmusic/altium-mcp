@@ -76,6 +76,56 @@ class ShapeTest(unittest.TestCase):
                                 "start_angle": 270.0, "end_angle": 90.0}])
 
 
+class ViolationTest(unittest.TestCase):
+    def test_violations_in_unit(self):
+        result = {"origin_x": 1000000, "origin_y": 2000000, "violations": [
+            {"rule": "Clearance", "kind": "clearance", "a": RECORDS[3], "b": RECORDS[0], "distance": 20000,
+             "gap": 50000, "descriptor": "d"},
+            {"rule": "Width", "kind": "width", "a": RECORDS[0], "descriptor": "w"}]}
+        out = geo.describe_violations(result, "mil")
+        self.assertEqual((out[0]["a"]["kind"], out[0]["b"]["kind"]), ("via", "track"))
+        self.assertEqual((out[0]["distance"], out[0]["rule_gap"]), (2.0, 5.0))
+        self.assertNotIn("b", out[1])
+
+    def test_check_reply_says_when_nothing_was_checked(self):
+        base = {"origin_x": ORIGIN[0], "origin_y": ORIGIN[1], "pairs_checked": 0, "violations": []}
+        out = geo.check_reply(dict(base, objects_checked=0, objects_found=0, not_found=["via|1|2"]), "mil")
+        self.assertFalse(out["success"])
+        self.assertIn("Nothing was checked", out["note"])
+        self.assertEqual(out["not_found"], ["via|1|2"])
+        out = geo.check_reply(dict(base, objects_checked=2, objects_found=2, search_margin=210000), "mil")
+        self.assertNotIn("success", out)
+        self.assertEqual((out["note"], out["search_margin"]), ("No violations.", 21.0))
+        out = geo.check_reply(dict(base, objects_checked=1, objects_found=1, not_found=["via|1|2"]), "mil")
+        self.assertIn("not found", out["note"])
+        flagged = dict(base, objects_checked=1, objects_found=1, violations=[
+            {"rule": "Clearance", "kind": "clearance", "a": RECORDS[3], "b": RECORDS[8], "distance": 0,
+             "gap": 50000, "descriptor": "d", "same_net_pour": True}])
+        out = geo.check_reply(flagged, "mil")
+        # a hit on pour copper is listed apart, still flagged
+        self.assertEqual(out["violations"], [])
+        self.assertTrue(out["pour_violations"][0]["same_net_pour"])
+        self.assertIn("run_drc", out["same_net_pour_note"])
+        self.assertNotIn("note", out)
+
+    def test_component_refs_refused(self):
+        for bad in ("component|U1", "polygon|Top Layer|1|2|3|4"):
+            with self.assertRaises(ValueError):
+                geo.clearance_ref(bad)
+        self.assertEqual(geo.clearance_ref("U1-3"), "pad|U1|3")
+
+
+class PourSplitTest(unittest.TestCase):
+    def test_pour_hits_apart(self):
+        pour = {"kind": "region", "in_polygon": True}
+        hatch = {"kind": "track", "in_polygon": True}
+        hard = {"rule": "c", "a": {"kind": "track"}, "b": {"kind": "pad"}}
+        soft = {"rule": "c", "a": {"kind": "track"}, "b": pour}
+        hatched = {"rule": "c", "a": hatch, "b": {"kind": "via"}}
+        own = {"rule": "w", "a": {"kind": "track"}}
+        self.assertEqual(geo.split_pour_violations([hard, soft, hatched, own]), ([hard, own], [soft, hatched]))
+
+
 class SelectTest(unittest.TestCase):
     def test_layers_and_nets(self):
         top = geo.select(RECORDS, ORIGIN, "mil", layers=["top layer"])
