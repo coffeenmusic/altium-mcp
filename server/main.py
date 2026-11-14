@@ -5672,7 +5672,8 @@ def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
 
 @_tool(read_only=True)
 async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: list = None, nets: list = None,
-                          unit: str = "mil", limit: int = 500, board_path: str = "") -> str:
+                          unit: str = "mil", limit: int = 500, include_hidden: bool = False,
+                          board_path: str = "") -> str:
     """
     List the board objects in a box: tracks, arcs, vias, pads, fills,
     regions, polygons, texts and components, with their layer, net, owner and
@@ -5681,6 +5682,12 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
     Each object has a "ref" that clearance and drag_copper take to find it
     again (opaque: pass it on as is). To read a group's copper in the form
     place_copper takes, to edit and place it again, use get_layout instead.
+
+    Regions, tracks and polygons are matched by their real shape, so a
+    board-sized pour is listed only where its copper reaches the box: a
+    polygon when one of its poured regions does (or, with none, such as a
+    hatched or unpoured one, its outline). A pour's copper (a region with
+    in_polygon) carries its polygon's name, net and layer.
 
     Args:
         bbox (list): [x1, y1, x2, y2] relative to the board origin, in unit.
@@ -5693,8 +5700,11 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
         nets (list): Only objects on these nets.
         unit (str): "mil" (default) or "mm", for bbox and the reply.
         limit (int): At most this many objects (default 500), counted after
-            the layer and net filters; total says how many match, and
-            truncated whether the list was cut.
+            the filters; total says how many match (null when there are more
+            than Altium was asked for), and truncated whether the list was
+            cut.
+        include_hidden (bool): Also list component designators and comments
+            that are switched off (hidden: true). Default False.
         board_path (str): Full path of the .PcbDoc; default the focused board.
 
     Returns:
@@ -5716,10 +5726,11 @@ async def objects_in_area(ctx: Context, bbox: list, layers: list = None, kinds: 
     kind_filter = "|" + "|".join(kinds) + "|" if kinds else ""
     result, error = await _bridge_json("geometry", {
         "geometry": "area", "x1": str(min(x1, x2)), "y1": str(min(y1, y2)), "x2": str(max(x1, x2)),
-        "y2": str(max(y1, y2)), "kinds": kind_filter, "limit": str(scan), "board_path": long_path(board_path)})
+        "y2": str(max(y1, y2)), "kinds": kind_filter, "limit": str(scan),
+        "include_hidden": "true" if include_hidden else "false", "board_path": long_path(board_path)})
     if error:
         return json.dumps({"success": False, "error": error})
-    return json.dumps(geo.area_reply(result, unit, limit, layers, nets), indent=1)
+    return json.dumps(geo.area_reply(result, unit, limit, layers, nets, include_hidden), indent=1)
 
 
 @_tool(read_only=True)
@@ -5729,7 +5740,8 @@ async def clearance(ctx: Context, object_a: str, object_b: str, unit: str = "mil
     governs them.
 
     Args:
-        object_a (str): A "ref" from objects_in_area, or a pad as "U1-3".
+        object_a (str): A "ref" from objects_in_area (any kind but polygon
+            and component), or a pad as "U1-3".
         object_b (str): The other object, likewise.
         unit (str): "mil" (default) or "mm".
         board_path (str): Full path of the .PcbDoc; default the focused board.
@@ -5742,7 +5754,7 @@ async def clearance(ctx: Context, object_a: str, object_b: str, unit: str = "mil
     import pcb_geometry as geo
 
     try:
-        a, b = geo.normalize_ref(object_a), geo.normalize_ref(object_b)
+        a, b = geo.clearance_ref(object_a), geo.clearance_ref(object_b)
         geo.unit_factor(unit)
     except ValueError as e:
         return json.dumps({"success": False, "error": str(e)})

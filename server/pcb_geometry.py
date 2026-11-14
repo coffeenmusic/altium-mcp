@@ -102,12 +102,17 @@ def parse_object(record: str, origin=(0, 0), unit: str = "mil") -> Optional[dict
         if kind == "region":
             if rest[4:5] == ["1"]:
                 obj["in_polygon"] = True
-            obj["ref"] = f"region|{layer}|{left}|{bottom}|{right}|{top}"
             if len(rest) > 5 and rest[5]:
-                obj["contours"] = parse_contours(rest[5], x, y)
+                obj["polygon"] = rest[5]
+            obj["ref"] = f"region|{layer}|{left}|{bottom}|{right}|{top}"
+            if len(rest) > 6 and rest[6]:
+                obj["contours"] = parse_contours(rest[6], x, y)
     elif kind == "text":
         tx, ty, size, rot = _ints(rest, 4)
-        obj.update({"x": x(tx), "y": y(ty), "height": d(size), "rotation": rot / 1000, "text": "|".join(rest[5:])})
+        text = "|".join(rest[5:])
+        # The text itself ends the ref: two texts at one point are told apart
+        obj.update({"x": x(tx), "y": y(ty), "height": d(size), "rotation": rot / 1000, "text": text,
+                    "ref": f"text|{layer}|{tx}|{ty}|{text}"})
         if rest[4:5] == ["1"]:
             obj["hidden"] = True
     elif kind == "component":
@@ -209,12 +214,19 @@ def _layer_match(obj: dict, layers: List[str], stack: Optional[List[str]] = None
 
 
 def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = None,
-           nets: Optional[List[str]] = None, stack: Optional[List[str]] = None) -> List[dict]:
+           nets: Optional[List[str]] = None, stack: Optional[List[str]] = None,
+           include_hidden: bool = True) -> List[dict]:
+    """The records as objects, filtered. Altium sends each object once (it
+    drops one its search returns twice by its handle), so two identical
+    objects, such as two regions or vias stacked on each other, are both
+    listed."""
     out = []
     want_nets = {n.lower() for n in nets} if nets else None
     for rec in records:
         obj = parse_object(rec, origin, unit)
         if obj is None:
+            continue
+        if not include_hidden and obj.get("hidden"):
             continue
         if layers and not _layer_match(obj, layers, stack):
             continue
@@ -225,38 +237,37 @@ def select(records: List[str], origin, unit: str, layers: Optional[List[str]] = 
 
 
 # How many objects Altium sends at most when a layer or net filter is set:
-# the filters run here, after Altium's limit, so it sends this many and the
-# caller's limit is applied to what passes
+# those filters run here, after Altium's limit, so it sends this many and the
+# caller's limit is applied to what passes. Without them Altium stops at one
+# more than the limit, which says whether there are more.
 SCAN_CAP = 20000
 
 
 def scan_limit(limit: int, layers=None, nets=None) -> int:
     """The limit to give Altium for objects_in_area's `limit`."""
-    limit = max(1, int(limit))
+    limit = max(1, int(limit)) + 1
     return max(limit, SCAN_CAP) if (layers or nets) else limit
 
 
-def area_reply(result: dict, unit: str, limit: int, layers=None, nets=None) -> dict:
+def area_reply(result: dict, unit: str, limit: int, layers=None, nets=None, include_hidden: bool = True) -> dict:
     """objects_in_area's reply from the 'area' command's result: filtered by
-    layer and net first, then cut to limit. total counts the objects that
-    pass the filters; None when Altium stopped at its cap before the filters
-    ran, so the count is not known."""
+    layer and net, hidden texts dropped, then cut to limit. total counts what
+    is left; None when Altium stopped at its limit (complete false), so the
+    count is not known."""
     records = result.get("objects", [])
     origin = (result.get("origin_x", 0), result.get("origin_y", 0))
-    matched = select(records, origin, unit, layers, nets, result.get("copper_layers"))
-    altium_total = result.get("total", len(records))
-    if not (layers or nets):
-        total = altium_total
-    elif altium_total <= len(records):
-        total = len(matched)
-    else:
-        total = None
-    objects = matched[:max(1, int(limit))]
+    matched = select(records, origin, unit, layers, nets, result.get("copper_layers"), include_hidden)
+    complete = result.get("complete", result.get("total", len(records)) <= len(records))
+    total = len(matched) if complete else None
+    limit = max(1, int(limit))
+    objects = matched[:limit]
     reply = {"board_path": result.get("board_path"), "unit": unit, "total": total, "returned": len(objects),
              "truncated": total is None or len(objects) < total, "objects": objects}
-    if total is None:
-        reply["note"] = (f"The box holds {altium_total} objects and Altium sent the first {len(records)}; the "
-                         "layer and net filters ran on those, so matches may be missing. Use a smaller box.")
+    if total is None and (layers or nets):
+        reply["note"] = (f"Altium stopped after the first {len(records)} objects in the box; the layer and net "
+                         "filters ran on those, so matches may be missing. Use a smaller box.")
+    elif total is None:
+        reply["note"] = f"More than {limit} objects: raise limit or use a smaller box."
     elif reply["truncated"]:
         reply["note"] = f"Only the first {len(objects)} of {total}: raise limit or use a smaller box."
     return reply
@@ -269,7 +280,7 @@ def normalize_ref(ref: str) -> str:
         raise ValueError("empty object reference")
     if "|" in ref:
         kind = ref.split("|", 1)[0]
-        if kind not in ("track", "arc", "via", "pad", "fill", "region", "component"):
+        if kind not in ("track", "arc", "via", "pad", "fill", "region", "text", "component"):
             raise ValueError(f"cannot find a '{kind}' by reference; use a ref from objects_in_area")
         return ref
     if "-" in ref:
@@ -277,6 +288,21 @@ def normalize_ref(ref: str) -> str:
         if designator and pad:
             return f"pad|{designator}|{pad}"
     raise ValueError(f"'{ref}' is not a ref from objects_in_area or a pad like 'U1-3'")
+
+
+# What clearance measures: copper and texts, not a component as a whole
+# or a polygon (its copper is the regions in it)
+CLEARANCE_KINDS = ("track", "arc", "via", "pad", "fill", "region", "text")
+
+
+def clearance_ref(ref: str) -> str:
+    """normalize_ref for clearance: refused for a component or polygon."""
+    ref = normalize_ref(ref)
+    kind = ref.split("|", 1)[0]
+    if kind not in CLEARANCE_KINDS:
+        raise ValueError(f"clearance measures {', '.join(CLEARANCE_KINDS)}, not a {kind}; for a component "
+                         "give one of its pads (U1-3)")
+    return ref
 
 
 def describe_clearance(result: dict, unit: str) -> dict:
