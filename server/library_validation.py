@@ -8,6 +8,7 @@ import re
 from urllib.parse import urlsplit
 
 import library_components_data as reader
+from pcb_layers import canonical_name
 from library_geometry import EPS, annular_ring, gap, hole_shape, pad_shape
 from schematic_document import disk_state
 from symbol_metadata import REQUIRED_PARAMETERS, PLACEHOLDERS
@@ -192,7 +193,7 @@ def footprint_checks(row, rules, roles, check):
             check.add("electrical_pad_unnamed","Electrical pad has no name",**target)
         hole=hole_shape(pad)
         if pad["hole_size_mm"]>EPS:
-            if pad["layer"].replace('-',' ').casefold()!="multi layer":
+            if canonical_name(pad["layer"]) != "Multi-Layer":
                 check.add("hole_layer","Drilled pad must be on Multi Layer",**target)
             if hole is None:
                 check.defer("hole_geometry_unsupported","Unsupported hole type or invalid slot dimensions",**target)
@@ -201,8 +202,8 @@ def footprint_checks(row, rules, roles, check):
         if pad["mode"] not in (0,1):
             check.defer("full_stack_unchecked","Full/custom layer stacks need per-layer inspection",**target)
             continue
-        layer=pad["layer"].replace('-',' ').casefold()
-        sides=("top","middle","bottom") if layer=="multi layer" else ("top",) if layer=="top layer" else ("bottom",) if layer=="bottom layer" else ()
+        layer=canonical_name(pad["layer"])
+        sides=("top","middle","bottom") if layer=="Multi-Layer" else ("top",) if layer=="Top Layer" else ("bottom",) if layer=="Bottom Layer" else ()
         if not sides:
             check.defer("pad_layer_unsupported","Pad is outside supported copper layers",**target,layer=pad["layer"])
         for side_name in sides:

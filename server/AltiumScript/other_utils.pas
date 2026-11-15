@@ -288,12 +288,12 @@ var
     Layer    : IPCB_LayerObject;
 begin
     Result := eNoLayer;
-    Name := UpperCase(Trim(Name));
+    Name := UpperCase(PCBCanonicalLayerName(Name));
     Iterator := Board.ElectricalLayerIterator;
     while (Result = eNoLayer) and Iterator.Next do
     begin
         Layer := Iterator.LayerObject;
-        if (UpperCase(Layer.Name) = Name) or (UpperCase(Layer2String(Layer.LayerID)) = Name) then
+        if (UpperCase(Layer.Name) = Name) or (UpperCase(PCBLayerName(Layer.LayerID)) = Name) then
             Result := Layer.LayerID;
     end;
 end;

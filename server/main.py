@@ -26,6 +26,7 @@ import silkscreen
 import label_blocks
 import script_bundle
 import pcblib_file
+import pcb_layers
 import uuid
 
 from altium_files import long_path, read_altium_text, write_altium_text, ensure_unicode_table
@@ -550,6 +551,10 @@ class AltiumBridge:
 
     async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script"""
+        try:
+            params = pcb_layers.normalize_fields(params)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc), "command_started": False}
         async with self._command_lock:
             problem = await self.ensure_paths()
             if problem:
@@ -570,7 +575,12 @@ class AltiumBridge:
                 response = await self._execute_command_locked(command, params, timeout)
             finally:
                 self._exchange_lock.release()
-        return _lift_failed_result(response)
+        response = pcb_layers.normalize_fields(_lift_failed_result(response))
+        result = response.get("result")
+        accepted = pcb_layers.requested_names(params)
+        if accepted and response.get("success") and isinstance(result, dict):
+            result["accepted_layers"] = [name for name in accepted if name not in result.get("not_found_layers", [])]
+        return response
 
     @staticmethod
     def _altium_running() -> bool:
@@ -2040,8 +2050,11 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
       standoff_height and overall_height (mils), layer, and
       rotation_x/y/z (degrees) and model_z_offset (mils). The rotations and
       offset come from the saved library file (Altium's script API cannot
-      return them); "placement" says so, and they are null for a body that
-      is not saved yet.
+      return them). Matching normalizes Windows paths and falls back to an
+      unambiguous filename when one reference is shortened. "placement" and
+      "placement_match" identify the source or an unmatched/ambiguous reference.
+      Unsaved bodies without a saved match have null pose values; matched poses
+      are saved-file snapshots and may differ from a dirty buffer.
     - footprint_name "*": full dump of every footprint
 
     Use as the reference when recreating or validating footprints, and to
@@ -2191,9 +2204,13 @@ async def edit_footprint_primitives(ctx: Context, library_path: str, footprint_n
 async def get_pcb_api_constants(ctx: Context, names: list[str]) -> str:
     """Read selected native PCB enum values without arbitrary script evaluation.
 
-    Supported: eRound, eRectangular, eOctagonal, eRoundedRectangular, eCacheManual,
+    Supported: eRound, eRounded, eRectangular, eOctagonal, eRoundedRectangular, eCacheManual,
     eTopLayer, eBottomLayer, eTopOverlay, eBottomOverlay, eMechanical13,
-    eMechanical15, eMultiLayer, eNoLayer. Does not modify or save documents.
+    eMechanical15, eMultiLayer, eNoLayer. Each identifier is evaluated in running
+    Altium. availability reports native availability and resolution separately;
+    unavailable eRound falls back explicitly to the native TShape eRounded.
+    Other unavailable identifiers return partial constants and success=false.
+    Does not modify or save documents.
     """
     return await footprint_editor.execute(altium_bridge, EXCHANGE_DIR, "get_pcb_api_constants",
                                           footprint_editor.prepare_constants, names)
@@ -2266,6 +2283,7 @@ async def create_footprints_batch(ctx: Context, spec_file: str, units: str = "mi
     try:
         prepared_spec = footprint_editor.prepare_batch_file(spec_file, EXCHANGE_DIR, units)
         expected = footprint_editor.batch_expectations(prepared_spec)
+        accepted_layers = footprint_editor.batch_layer_names(prepared_spec)
     except (ValueError, TypeError, OSError) as exc:
         return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
     try:
@@ -2296,6 +2314,8 @@ async def create_footprints_batch(ctx: Context, spec_file: str, units: str = "mi
     result["input_units"] = footprint_editor.batch_units(units)
     result["verification"] = {"passed": not errors, "errors": errors}
     result["success"] = not errors and not result.get("failed") and not result.get("problems") and not result.get("primitive_errors")
+    if result["success"]:
+        result["accepted_layers"] = accepted_layers
     result["may_have_partial_changes"] = not result["success"] and bool(result.get("created") or result.get("edited"))
     if errors:
         result["error"] = "batch footprint property readback failed"

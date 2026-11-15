@@ -1,34 +1,8 @@
 // Exact-library pad overrides and layer-only graphic edits. Never saves.
 
 function FootprintEditLayer(Name: String): Integer;
-var
-    N: Integer;
 begin
-    Result := String2Layer(Name);
-    // Match the spelling returned by Layer2String for through-hole pads.
-    if SameText(Name, 'Multi-Layer') or SameText(Name, 'Multi Layer') or
-       SameText(Name, 'MultiLayer') or SameText(Name, 'eMultiLayer') then Result := eMultiLayer;
-    // String2Layer does not consistently recognize mechanical layer names.
-    for N := 1 to 16 do
-        if SameText(Name, 'Mechanical ' + IntToStr(N)) then
-            case N of
-                1: Result := eMechanical1;
-                2: Result := eMechanical2;
-                3: Result := eMechanical3;
-                4: Result := eMechanical4;
-                5: Result := eMechanical5;
-                6: Result := eMechanical6;
-                7: Result := eMechanical7;
-                8: Result := eMechanical8;
-                9: Result := eMechanical9;
-                10: Result := eMechanical10;
-                11: Result := eMechanical11;
-                12: Result := eMechanical12;
-                13: Result := eMechanical13;
-                14: Result := eMechanical14;
-                15: Result := eMechanical15;
-                16: Result := eMechanical16;
-            end;
+    Result := PCBLayerFromName(Name);
 end;
 
 function FootprintEditValue(Spec: TStringList; Key: String): String;
@@ -115,6 +89,7 @@ function FootprintAPIConstant(Name: String; var Value: Integer): Boolean;
 begin
     Result := True;
     if Name = 'eRound' then Value := eRound
+    else if Name = 'eRounded' then Value := eRounded
     else if Name = 'eRectangular' then Value := eRectangular
     else if Name = 'eOctagonal' then Value := eOctagonal
     else if Name = 'eRoundedRectangular' then Value := eRoundedRectangular
@@ -139,7 +114,7 @@ begin
         AddJSONBoolean(Props, 'is_testpoint_top', Pad.IsTestpoint_Top);
         AddJSONBoolean(Props, 'is_testpoint_bottom', Pad.IsTestpoint_Bottom);
         AddJSONBoolean(Props, 'locked', not Pad.Moveable);
-        AddJSONProperty(Props, 'layer', Layer2String(Pad.Layer));
+        AddJSONProperty(Props, 'layer', PCBLayerName(Pad.Layer));
         Props.Add('"mask_settings":' + FootprintEditPadSnapshot(Pad));
         Result := BuildJSONObject(Props);
     finally Props.Free; end;
@@ -179,16 +154,16 @@ end;
 
 function ExecuteFootprintLibraryCommand(Command: String; Request: TStringList): String;
 var
-    Spec, Props, Addresses, BeforeItems, AfterItems, Constants: TStringList;
+    Spec, Props, Addresses, BeforeItems, AfterItems, Constants, Availability, Entry: TStringList;
     PcbLib: IPCB_Library;
     Comp: IPCB_LibComponent;
     Iter: IPCB_GroupIterator;
     Prim: IPCB_Primitive;
     Doc: IServerDocument;
-    SpecPath, Path, Name, Prefix, ErrorText, Address, Item: String;
+    SpecPath, Path, Name, Prefix, ErrorText, Address, Item, NativeName, NativeError: String;
     I, Count, Matches, OX, OY, Updated, Verified, Value, TargetHeight: Integer;
     HeightMM: Double;
-    Editing, IsPad, IsPadProperties, WasModified, HaveProperties, NeedChanges, DoEdit: Boolean;
+    Editing, IsPad, IsPadProperties, WasModified, HaveProperties, NeedChanges, DoEdit, Available, Resolved: Boolean;
 begin
     Spec := TStringList.Create;
     Props := TStringList.Create;
@@ -196,6 +171,8 @@ begin
     BeforeItems := TStringList.Create;
     AfterItems := TStringList.Create;
     Constants := TStringList.Create;
+    Availability := TStringList.Create;
+    Entry := TStringList.Create;
     ErrorText := '';
     Updated := 0;
     Verified := 0;
@@ -222,11 +199,35 @@ begin
                 for I := 0 to Count - 1 do
                 begin
                     Name := FootprintEditValue(Spec, 'name.' + IntToStr(I));
-                    if not FootprintAPIConstant(Name, Value) then
-                    begin ErrorText := 'Unsupported API constant: ' + Name; Break; end;
-                    AddJSONInteger(Constants, Name, Value);
+                    NativeName := Name;
+                    NativeError := '';
+                    Value := 0;
+                    Available := False;
+                    try
+                        Available := FootprintAPIConstant(Name, Value);
+                        if not Available then NativeError := 'Unsupported API constant';
+                    except NativeError := ExceptionMessage; end;
+                    Resolved := Available;
+                    // eRound was advertised by this tool, but TShape uses eRounded.
+                    if not Resolved and (Name = 'eRound') then
+                    begin
+                        NativeName := 'eRounded';
+                        try Resolved := FootprintAPIConstant(NativeName, Value);
+                        except Resolved := False; end;
+                    end;
+                    Entry.Clear;
+                    AddJSONBoolean(Entry, 'available', Available);
+                    AddJSONBoolean(Entry, 'resolved', Resolved);
+                    AddJSONBoolean(Entry, 'alias', NativeName <> Name);
+                    AddJSONProperty(Entry, 'native_name', NativeName);
+                    if NativeError <> '' then AddJSONProperty(Entry, 'native_error', NativeError);
+                    Availability.Add('"' + JSONEscapeString(Name) + '": ' + BuildJSONObject(Entry));
+                    if Resolved then AddJSONInteger(Constants, Name, Value)
+                    else ErrorText := 'One or more PCB API constants are unavailable in this Altium version';
                 end;
                 Props.Add('"constants": ' + BuildJSONObject(Constants));
+                Props.Add('"availability": ' + BuildJSONObject(Availability));
+                AddJSONBoolean(Props, 'checked_in_running_altium', True);
                 Break;
             end;
             IsPadProperties := Command = 'set_footprint_pad_properties';
@@ -351,7 +352,7 @@ begin
                     if Prim = nil then begin ErrorText := 'Preflight object disappeared'; Break; end;
                     if IsPadProperties then BeforeItems.Add(FootprintPadPropertiesSnapshot(Prim))
                     else if IsPad then BeforeItems.Add(FootprintEditPadSnapshot(Prim))
-                    else AddJSONProperty(BeforeItems, IntToStr(I), Layer2String(Prim.Layer));
+                    else AddJSONProperty(BeforeItems, IntToStr(I), PCBLayerName(Prim.Layer));
                     DoEdit := True;
                     if IsPadProperties then DoEdit := FootprintPadPropertiesChanged(Prim, Spec);
                     if DoEdit then
@@ -385,7 +386,7 @@ begin
                     end
                     else
                     begin
-                        AddJSONProperty(AfterItems, IntToStr(I), Layer2String(Prim.Layer));
+                        AddJSONProperty(AfterItems, IntToStr(I), PCBLayerName(Prim.Layer));
                         if Prim.Layer = FootprintEditLayer(FootprintEditValue(Spec, Prefix + 'to_layer')) then
                             Verified := Verified + 1;
                     end;
@@ -446,6 +447,8 @@ begin
         BeforeItems.Free;
         AfterItems.Free;
         Constants.Free;
+        Availability.Free;
+        Entry.Free;
     end;
 end;
 

@@ -10,10 +10,11 @@ from collections import Counter
 from altium_files import read_altium_text, write_altium_text
 from library_component_data import library_path, text
 from schematic_document import disk_state
+from pcb_layers import canonical_name
 
 
 CONSTANT_NAMES = {
-    "eRound", "eRectangular", "eOctagonal", "eRoundedRectangular",
+    "eRound", "eRounded", "eRectangular", "eOctagonal", "eRoundedRectangular",
     "eCacheManual",
     "eTopLayer", "eBottomLayer", "eTopOverlay", "eBottomOverlay",
     "eMechanical13", "eMechanical15", "eMultiLayer", "eNoLayer",
@@ -32,24 +33,7 @@ def number(value, label):
 
 
 def layer_name(value, allow_no_layer=False, legacy_only=True):
-    text(value, "layer", True)
-    if any(c in value for c in "|\r\n"):
-        raise ValueError("layer contains a record delimiter")
-    name = value.strip()
-    mech = re.fullmatch(r"e?Mechanical\s*(?:Layer\s*)?(\d+)", name, re.I)
-    if mech:
-        index = int(mech[1])
-        # These are the mechanical layers exposed by the legacy Layer property.
-        if not 1 <= index <= 1024:
-            raise ValueError("mechanical layer number must be within 1..1024")
-        if legacy_only and index > 16:
-            raise ValueError("mechanical layers above 16 require the V7 layer API")
-        return f"Mechanical {index}"
-    if name.casefold().replace(" ", "") in ("nolayer", "enolayer"):
-        if not allow_no_layer:
-            raise ValueError("No Layer is not a valid destination")
-        return "No Layer"
-    return name
+    return canonical_name(value, allow_no_layer=allow_no_layer, legacy_only=legacy_only)
 
 
 def base(path, footprint_name):
@@ -244,6 +228,28 @@ async def execute(bridge, exchange_dir, command, prepare, *args, **kwargs):
                                "outcome_unknown": True, "saved": False,
                                "may_have_partial_changes": mutating, "spec_file": str(spec_path)})
         errors = []
+        if command == "get_pcb_api_constants" and "constants" in result:
+            expected = {spec[f"name.{i}"] for i in range(int(spec["count"]))}
+            values, availability = result.get("constants"), result.get("availability")
+            if not isinstance(availability, dict) or set(availability) != expected or not isinstance(values, dict):
+                errors.append("constant availability readback mismatch")
+            else:
+                resolved = set()
+                for name, status in availability.items():
+                    if (not isinstance(status, dict) or any(type(status.get(k)) is not bool for k in ("available", "resolved", "alias"))
+                            or status.get("native_name") != ("eRounded" if status.get("alias") and name == "eRound" else name)
+                            or (status.get("alias") and name != "eRound")
+                            or (status.get("resolved") and not status.get("available") and not status.get("alias"))
+                            or (status.get("available") and (not status.get("resolved") or status.get("alias")))):
+                        errors.append("invalid constant availability: " + name)
+                    elif status["resolved"]:
+                        resolved.add(name)
+                if set(values) != resolved or any(type(v) is not int for v in values.values()):
+                    errors.append("constant readback mismatch")
+                if result.get("success") != (resolved == expected):
+                    errors.append("constant success/availability mismatch")
+            if result.get("checked_in_running_altium") is not True:
+                errors.append("native constant evaluation was not confirmed")
         if result.get("success"):
             if command != "get_pcb_api_constants":
                 actual_path = result.get("library_path")
@@ -259,7 +265,7 @@ async def execute(bridge, exchange_dir, command, prepare, *args, **kwargs):
             else:
                 values = result.get("constants")
                 expected = {spec[f"name.{i}"] for i in range(int(spec["count"]))}
-                if not isinstance(values, dict) or set(values) != expected or any(type(v) is not int for v in values.values()):
+                if not isinstance(values, dict) or set(values) != expected or any(type(v) is not int for v in values.values()) or "availability" not in result:
                     errors.append("constant readback mismatch")
             if result.get("saved") is not False:
                 errors.append("edit readback was not confirmed")
@@ -273,6 +279,8 @@ async def execute(bridge, exchange_dir, command, prepare, *args, **kwargs):
             result["verification"] = {"passed": not errors, "errors": errors}
         if errors:
             result.update(success=False, error="footprint API readback failed", may_have_partial_changes=mutating)
+        if result.get("success") and command == "edit_footprint_primitives":
+            result["accepted_layers"] = list(dict.fromkeys(v for k, v in spec.items() if k.endswith(".to_layer")))
         return json.dumps(result, indent=2, ensure_ascii=False)
     finally:
         if completed:
@@ -285,6 +293,18 @@ BATCH_LINEAR_FIELDS = {
     "TEXT": (1, 2, 3, 4), "MODEL3D": (6, 7, 8), "VIA": (1, 2, 3, 4),
     "FOOTPRINT": (3,),
 }
+BATCH_LAYER_FIELDS = {"PAD": (5,), "TRACK": (6,), "ARC": (7,), "FILL": (6,),
+                      "TEXT": (6,), "REGION": (1,), "MODEL3D": (2,), "VIA": (5, 6)}
+
+
+def batch_layer_names(path):
+    names = []
+    for line in read_altium_text(path).splitlines():
+        fields = line.split("|")
+        for index in BATCH_LAYER_FIELDS.get(fields[0].strip().upper(), ()):
+            if fields[index] not in names:
+                names.append(fields[index])
+    return names
 
 
 def batch_units(units):
@@ -300,8 +320,7 @@ def prepare_batch_file(spec_file, exchange_dir, units="mil"):
     if not source.is_file():
         raise ValueError("spec_file must be an existing file")
     lines = read_altium_text(source).splitlines()
-    fields_by_kind = {"PAD": (5,), "TRACK": (6,), "ARC": (7,), "FILL": (6,),
-                      "TEXT": (6,), "REGION": (1,), "MODEL3D": (2,), "VIA": (5, 6)}
+    fields_by_kind = BATCH_LAYER_FIELDS
     for index, line in enumerate(lines):
         fields = line.split("|")
         kind = fields[0].strip().upper()
@@ -320,11 +339,6 @@ def prepare_batch_file(spec_file, exchange_dir, units="mil"):
             if position >= len(fields):
                 raise ValueError(f"line {index + 1}: missing layer")
             fields[position] = layer_name(fields[position], legacy_only=False)
-            alias = re.sub(r"[\s-]", "", fields[position].casefold())
-            canonical = {"toplayer": "Top Layer", "etoplayer": "Top Layer",
-                         "bottomlayer": "Bottom Layer", "ebottomlayer": "Bottom Layer",
-                         "multilayer": "Multi-Layer", "emultilayer": "Multi-Layer"}
-            fields[position] = canonical.get(alias, fields[position])
         positions = range(3, len(fields)) if kind == "REGION" else BATCH_LINEAR_FIELDS.get(kind, ())
         for position in positions:
             if position >= len(fields) or not fields[position].strip():

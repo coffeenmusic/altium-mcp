@@ -14,6 +14,7 @@ its primitives. A body record's properties are one null-terminated text of
 """
 
 import os
+import ntpath
 import re
 import shutil
 import tempfile
@@ -132,27 +133,60 @@ def body_placements(path, footprints):
 _PLACEMENT = ("rotation_x", "rotation_y", "rotation_z", "model_z_offset")
 
 
+def _model_path(value):
+    """Compare Windows model references without requiring the STEP source to exist."""
+    value = str(value or "").strip().strip('"')
+    return ntpath.normcase(ntpath.normpath(value)) if value else ""
+
+
 def merge_placements(bodies, saved):
-    """Copy rotations and Z offset from the saved records onto the bodies
-    Altium reported. Each body takes the first unused saved record with the
-    same model file name, so bodies not saved yet (or changed since) are
-    marked rather than given another body's placement."""
-    used = set()
-    for body in bodies:
-        match = None
-        for i, record in enumerate(saved or []):
-            if i not in used and record["model_name"].upper() == str(body.get("model_file", "")).upper():
-                match = i
-                break
-        if match is None:
-            for key in _PLACEMENT:
-                body[key] = None
-            body["placement"] = "not in the saved library file"
-        else:
-            used.add(match)
-            for key in _PLACEMENT:
-                body[key] = saved[match][key]
-            body["placement"] = "saved library file"
+    """Match normalized full paths first, then unambiguous filename references.
+
+    A basename may stand for a full path in an embedded model. Two different
+    qualified paths are never equivalent. Duplicate names with different poses
+    cannot be paired by iterator order: leave those poses unknown.
+    """
+    saved = saved or []
+    names = [_model_path(record.get("model_name")) for record in saved]
+    live = [_model_path(body.get("model_file")) for body in bodies]
+    used, matches, ambiguous = set(), {}, set()
+
+    def assign(index, candidates, method):
+        if not candidates:
+            return
+        signatures = {(names[i], *(saved[i].get(k) for k in _PLACEMENT)) for i in candidates}
+        if len(signatures) != 1:
+            ambiguous.add(index)
+            return
+        match = candidates[0]
+        used.add(match)
+        matches[index] = (match, method)
+
+    # Reserve all exact matches before considering shortened filenames.
+    for index, name in enumerate(live):
+        assign(index, [i for i, other in enumerate(names) if i not in used and name == other], "full_path")
+    for index, name in enumerate(live):
+        if index in matches or index in ambiguous or not name:
+            continue
+        candidates = [i for i, other in enumerate(names) if i not in used and other
+                      and ntpath.basename(name) == ntpath.basename(other)
+                      and (ntpath.dirname(name) == "" or ntpath.dirname(other) == "")]
+        competing = {other for j, other in enumerate(live) if j not in matches and j not in ambiguous
+                     and any(ntpath.basename(other) == ntpath.basename(names[i])
+                             and (not ntpath.dirname(other) or not ntpath.dirname(names[i])) for i in candidates)}
+        if len(competing) > 1:
+            # Do not let iterator order choose between different source paths.
+            ambiguous.update(j for j, other in enumerate(live) if j not in matches and other in competing)
+            continue
+        assign(index, candidates, "file_name")
+    for index, body in enumerate(bodies):
+        match = matches.get(index)
+        for key in _PLACEMENT:
+            body[key] = saved[match[0]].get(key) if match else None
+        body["placement"] = ("saved library file" if match else
+                             "ambiguous saved model reference" if index in ambiguous else
+                             "not in the saved library file")
+        body["placement_match"] = match[1] if match else "ambiguous" if index in ambiguous else "unmatched"
     return bodies
 
 

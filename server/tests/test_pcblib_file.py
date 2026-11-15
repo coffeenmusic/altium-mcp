@@ -75,14 +75,41 @@ class PcbLibFileTests(unittest.TestCase):
     def test_unreadable_file_gives_nothing(self):
         self.assertEqual(pf.body_placements(Path(self.dir.name) / "none.PcbLib", ["OSC"]), {})
 
-    def test_merge_matches_by_model_name_in_order(self):
+    def test_duplicate_models_with_different_poses_are_ambiguous(self):
         bodies = [{"model_file": "a.STEP"}, {"model_file": "new.step"}, {"model_file": "A.step"}]
         saved = [{"model_name": "A.step", "rotation_x": 1.0, "rotation_y": 0.0, "rotation_z": 0.0, "model_z_offset": 0.0},
                  {"model_name": "A.step", "rotation_x": 2.0, "rotation_y": 0.0, "rotation_z": 0.0, "model_z_offset": 0.0}]
         pf.merge_placements(bodies, saved)
-        self.assertEqual([b["rotation_x"] for b in bodies], [1.0, None, 2.0])
+        self.assertEqual([b["rotation_x"] for b in bodies], [None, None, None])
         self.assertEqual(bodies[1]["placement"], "not in the saved library file")
-        self.assertEqual(bodies[0]["placement"], "saved library file")
+        self.assertEqual(bodies[0]["placement"], "ambiguous saved model reference")
+
+    def test_windows_paths_and_basename_fallback_are_bidirectional(self):
+        saved = pf.body_placements(self.path, ["OSC"])["OSC"]
+        for live_name, saved_name, method in (
+                (r'C:\models\ECS-2520.STEP', 'ECS-2520.step', 'file_name'),
+                ('ECS-2520.step', r'C:\models\ECS-2520.STEP', 'file_name'),
+                ('c:/Models/sub/../ECS-2520.STEP', r'C:\models\ECS-2520.step', 'full_path')):
+            with self.subTest(live_name=live_name):
+                bodies = [{"model_file": live_name}]
+                pf.merge_placements(bodies, [{**saved[0], "model_name": saved_name}])
+                self.assertEqual(bodies[0]['rotation_x'], 90)
+                self.assertEqual(bodies[0]['placement_match'], method)
+
+    def test_reserves_exact_paths_and_does_not_guess_between_directories(self):
+        def record(name, angle):
+            return dict(model_name=name, rotation_x=angle, rotation_y=0, rotation_z=0, model_z_offset=0)
+        bodies = [dict(model_file='a.step'), dict(model_file=r'C:\one\a.step')]
+        pf.merge_placements(bodies, [record(r'C:\one\a.step', 10), record(r'C:\two\a.step', 20)])
+        self.assertEqual([b['rotation_x'] for b in bodies], [20, 10])
+        for bodies, records in (
+                ([dict(model_file='a.step')], [record(r'C:\one\a.step', 10), record(r'C:\two\a.step', 20)]),
+                ([dict(model_file=r'C:\one\a.step'), dict(model_file=r'C:\two\a.step')], [record('a.step', 10)])):
+            pf.merge_placements(bodies, records)
+            self.assertTrue(all(b['placement_match'] == 'ambiguous' for b in bodies))
+        bodies = [dict(model_file=r'C:\other\a.step')]
+        pf.merge_placements(bodies, [record(r'C:\one\a.step', 10)])
+        self.assertEqual(bodies[0]['placement_match'], 'unmatched')
 
     def test_adds_placements_to_single_and_all_dumps(self):
         single = {"library_path": str(self.path), "footprint_name": "OSC",

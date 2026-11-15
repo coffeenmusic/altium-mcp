@@ -2,6 +2,8 @@
 
 For existing STEP body position, pose, embedding, replacement and deletion, see
 [`edit_footprint_model3d`](FOOTPRINT_MODEL3D.md). Batch creation still adds bodies.
+For STEP full-path/filename matching, per-constant availability and shared layer
+aliases, see [PCB readback fixes](PCB_READBACK_FIXES.md).
 
 Analysis of the supplied `1-operation_report.md` (TPS3808G01DBVR, 2026-11-03).
 The report describes historical results. Subsequent live validation and fixes are

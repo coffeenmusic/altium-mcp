@@ -614,7 +614,7 @@ begin
                                     AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.x - OX));
                                     AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y - OY));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
-                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONProperty(PrimProps, 'layer', PCBLayerName(Prim.Layer));
                                     AddJSONBoolean(PrimProps, 'plated', Prim.Plated);
                                     AddJSONInteger(PrimProps, 'mode', Prim.Mode);
                                     AddJSONNumber(PrimProps, 'top_x_size', CoordToMils(Prim.TopXSize));
@@ -656,7 +656,7 @@ begin
                                     AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2 - OX));
                                     AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2 - OY));
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
-                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONProperty(PrimProps, 'layer', PCBLayerName(Prim.Layer));
                                 end;
                                 eArcObject:
                                 begin
@@ -667,7 +667,7 @@ begin
                                     AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
                                     AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.LineWidth));
-                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONProperty(PrimProps, 'layer', PCBLayerName(Prim.Layer));
                                 end;
                                 eFillObject:
                                 begin
@@ -677,7 +677,7 @@ begin
                                     AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.x2Location - OX));
                                     AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.y2Location - OY));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
-                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONProperty(PrimProps, 'layer', PCBLayerName(Prim.Layer));
                                 end;
                                 eTextObject:
                                 begin
@@ -688,14 +688,14 @@ begin
                                     AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
-                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONProperty(PrimProps, 'layer', PCBLayerName(Prim.Layer));
                                     AddJSONBoolean(PrimProps, 'mirror', Prim.MirrorFlag);
                                     AddJSONBoolean(PrimProps, 'ttf', Prim.UseTTFonts);
                                 end;
                                 eRegionObject:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'region');
-                                    AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                                    AddJSONProperty(PrimProps, 'layer', PCBLayerName(Prim.Layer));
                                     AddJSONInteger(PrimProps, 'kind', Prim.Kind);
                                     PointsArray := TStringList.Create;
                                     try
@@ -723,8 +723,8 @@ begin
                                     AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.y - OY));
                                     AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
                                     AddJSONNumber(PrimProps, 'hole_size', CoordToMils(Prim.HoleSize));
-                                    AddJSONProperty(PrimProps, 'low_layer', Layer2String(Prim.LowLayer));
-                                    AddJSONProperty(PrimProps, 'high_layer', Layer2String(Prim.HighLayer));
+                                    AddJSONProperty(PrimProps, 'low_layer', PCBLayerName(Prim.LowLayer));
+                                    AddJSONProperty(PrimProps, 'high_layer', PCBLayerName(Prim.HighLayer));
                                 end;
                                 eComponentBodyObject:
                                 begin
@@ -751,7 +751,7 @@ begin
                                             AddJSONProperty(BodyProps, 'model_file', '');
                                         AddJSONNumber(BodyProps, 'standoff_height', CoordToMils(Prim.StandoffHeight));
                                         AddJSONNumber(BodyProps, 'overall_height', CoordToMils(Prim.OverallHeight));
-                                        AddJSONProperty(BodyProps, 'layer', Layer2String(Prim.Layer));
+                                        AddJSONProperty(BodyProps, 'layer', PCBLayerName(Prim.Layer));
                                         BodiesArray.Add(BuildJSONObject(BodyProps, 2));
                                     finally
                                         BodyProps.Free;
@@ -1059,7 +1059,7 @@ begin
             try
                 // Basic layer information
                 AddJSONProperty(LayerProps, 'layer_name', LayerObject.Name);
-                AddJSONProperty(LayerProps, 'layer_id', Layer2String(LayerObject.LayerID));
+                AddJSONProperty(LayerProps, 'layer_id', PCBLayerName(LayerObject.LayerID));
                 AddJSONProperty(LayerProps, 'material_type', 'Copper');
                 AddJSONNumber(LayerProps, 'copper_thickness_mils', LayerObject.CopperThickness / 10000);
                 AddJSONNumber(LayerProps, 'copper_thickness_um', LayerObject.CopperThickness * 0.00254);
@@ -1249,11 +1249,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Top Overlay');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Top Overlay')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Top Overlay')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'overlay');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Top Overlay')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Top Overlay')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Top Overlay')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Top Overlay')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1263,11 +1263,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Bottom Overlay');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Bottom Overlay')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Bottom Overlay')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'overlay');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Bottom Overlay')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Bottom Overlay')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Bottom Overlay')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Bottom Overlay')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1277,11 +1277,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Top Solder Mask');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Top Solder Mask')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Top Solder Mask')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'solder_mask');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Top Solder Mask')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Top Solder Mask')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Top Solder Mask')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Top Solder Mask')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1291,11 +1291,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Bottom Solder Mask');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Bottom Solder Mask')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Bottom Solder Mask')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'solder_mask');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Bottom Solder Mask')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Bottom Solder Mask')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Bottom Solder Mask')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Bottom Solder Mask')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1305,11 +1305,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Top Paste');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Top Paste')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Top Paste')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'paste');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Top Paste')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Top Paste')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Top Paste')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Top Paste')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1319,11 +1319,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Bottom Paste');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Bottom Paste')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Bottom Paste')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'paste');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Bottom Paste')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Bottom Paste')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Bottom Paste')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Bottom Paste')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1333,11 +1333,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Drill Guide');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Drill Guide')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Drill Guide')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'drill');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Drill Guide')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Drill Guide')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Drill Guide')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Drill Guide')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1347,11 +1347,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Drill Drawing');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Drill Drawing')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Drill Drawing')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'drill');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Drill Drawing')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Drill Drawing')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Drill Drawing')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Drill Drawing')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1360,12 +1360,12 @@ begin
         // Multi Layer
         LayerProps := TStringList.Create;
         try
-            AddJSONProperty(LayerProps, 'name', 'Multi Layer');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Multi Layer')));
+            AddJSONProperty(LayerProps, 'name', 'Multi-Layer');
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Multi Layer')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'multi');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Multi Layer')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Multi Layer')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Multi Layer')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Multi Layer')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1375,11 +1375,11 @@ begin
         LayerProps := TStringList.Create;
         try
             AddJSONProperty(LayerProps, 'name', 'Keep Out Layer');
-            AddJSONProperty(LayerProps, 'layer_id', IntToStr(String2Layer('Keep Out Layer')));
+            AddJSONProperty(LayerProps, 'layer_id', IntToStr(PCBLayerFromName('Keep Out Layer')));
             AddJSONProperty(LayerProps, 'layer_type', 'special');
             AddJSONProperty(LayerProps, 'special_type', 'keepout');
-            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[String2Layer('Keep Out Layer')]);
-            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[String2Layer('Keep Out Layer')]));
+            AddJSONBoolean(LayerProps, 'is_displayed', Board.LayerIsDisplayed[PCBLayerFromName('Keep Out Layer')]);
+            AddJSONProperty(LayerProps, 'color', ColorToString(Board.LayerColor[PCBLayerFromName('Keep Out Layer')]));
             OtherArray.Add(BuildJSONObject(LayerProps, 1));
         finally
             LayerProps.Free;
@@ -1467,7 +1467,7 @@ begin
         // First phase: identify all specified layers
         for i := 0 to LayerNamesList.Count - 1 do
         begin
-            LayerName := LayerNamesList[i];
+            LayerName := PCBCanonicalLayerName(LayerNamesList[i]);
             
             // Try to find the layer by name
             // First check special layers (since they have specific names)
@@ -1479,11 +1479,11 @@ begin
                (LayerName = 'Bottom Paste') or
                (LayerName = 'Drill Guide') or
                (LayerName = 'Drill Drawing') or
-               (LayerName = 'Multi Layer') or
+               (LayerName = 'Multi-Layer') or
                (LayerName = 'Keep Out Layer') then
             begin
                 // Get layer ID from name
-                LayerID := String2Layer(LayerName);
+                LayerID := PCBLayerFromName(LayerName);
                 if (LayerID <> eNoLayer) then
                 begin
                     FoundLayers.Add(IntToStr(LayerID));
@@ -1523,7 +1523,8 @@ begin
             begin
                 MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(j)];
                 
-                if (MechLayer <> nil) and MechLayer.MechanicalLayerEnabled and (MechLayer.Name = LayerName) then
+                if (MechLayer <> nil) and MechLayer.MechanicalLayerEnabled and
+                   (SameText(MechLayer.Name, LayerName) or (PCBMechanicalNumber(LayerName) = j)) then
                 begin
                     FoundLayers.Add(IntToStr(ILayer.MechanicalLayer(j)));
                     FoundCount := FoundCount + 1;
@@ -1573,16 +1574,16 @@ begin
             for j := 1 to 10 do
             begin
                 case j of
-                    1: LayerID := String2Layer('Top Overlay');
-                    2: LayerID := String2Layer('Bottom Overlay');
-                    3: LayerID := String2Layer('Top Solder Mask');
-                    4: LayerID := String2Layer('Bottom Solder Mask');
-                    5: LayerID := String2Layer('Top Paste');
-                    6: LayerID := String2Layer('Bottom Paste');
-                    7: LayerID := String2Layer('Drill Guide');
-                    8: LayerID := String2Layer('Drill Drawing');
-                    9: LayerID := String2Layer('Multi Layer');
-                    10: LayerID := String2Layer('Keep Out Layer');
+                    1: LayerID := PCBLayerFromName('Top Overlay');
+                    2: LayerID := PCBLayerFromName('Bottom Overlay');
+                    3: LayerID := PCBLayerFromName('Top Solder Mask');
+                    4: LayerID := PCBLayerFromName('Bottom Solder Mask');
+                    5: LayerID := PCBLayerFromName('Top Paste');
+                    6: LayerID := PCBLayerFromName('Bottom Paste');
+                    7: LayerID := PCBLayerFromName('Drill Guide');
+                    8: LayerID := PCBLayerFromName('Drill Drawing');
+                    9: LayerID := PCBLayerFromName('Multi Layer');
+                    10: LayerID := PCBLayerFromName('Keep Out Layer');
                 end;
                 
                 if (FoundLayers.IndexOf(IntToStr(LayerID)) >= 0) then
@@ -1622,16 +1623,16 @@ begin
             for j := 1 to 10 do
             begin
                 case j of
-                    1: LayerID := String2Layer('Top Overlay');
-                    2: LayerID := String2Layer('Bottom Overlay');
-                    3: LayerID := String2Layer('Top Solder Mask');
-                    4: LayerID := String2Layer('Bottom Solder Mask');
-                    5: LayerID := String2Layer('Top Paste');
-                    6: LayerID := String2Layer('Bottom Paste');
-                    7: LayerID := String2Layer('Drill Guide');
-                    8: LayerID := String2Layer('Drill Drawing');
-                    9: LayerID := String2Layer('Multi Layer');
-                    10: LayerID := String2Layer('Keep Out Layer');
+                    1: LayerID := PCBLayerFromName('Top Overlay');
+                    2: LayerID := PCBLayerFromName('Bottom Overlay');
+                    3: LayerID := PCBLayerFromName('Top Solder Mask');
+                    4: LayerID := PCBLayerFromName('Bottom Solder Mask');
+                    5: LayerID := PCBLayerFromName('Top Paste');
+                    6: LayerID := PCBLayerFromName('Bottom Paste');
+                    7: LayerID := PCBLayerFromName('Drill Guide');
+                    8: LayerID := PCBLayerFromName('Drill Drawing');
+                    9: LayerID := PCBLayerFromName('Multi Layer');
+                    10: LayerID := PCBLayerFromName('Keep Out Layer');
                 end;
                 
                 if (FoundLayers.IndexOf(IntToStr(LayerID)) >= 0) then
@@ -1958,7 +1959,7 @@ begin
         try if Prim.Net <> nil then NetName := Prim.Net.Name; except end;
         AddJSONProperty(Props, 'object', Detail);
         AddJSONProperty(Props, 'net', NetName);
-        try AddJSONProperty(Props, 'layer', Layer2String(Prim.Layer)); except end;
+        try AddJSONProperty(Props, 'layer', PCBLayerName(Prim.Layer)); except end;
         try
             Rect := Prim.BoundingRectangle;
             AddJSONNumber(Props, 'x_mils', CoordToMils((Rect.Left + Rect.Right) div 2 - Board.XOrigin));
@@ -2107,7 +2108,7 @@ begin
                     AddJSONProperty(ComponentProps, 'name', Component.Identifier);
                     AddJSONProperty(ComponentProps, 'description', Component.SourceDescription);
                     AddJSONProperty(ComponentProps, 'footprint', Component.Pattern);
-                    AddJSONProperty(ComponentProps, 'layer', Layer2String(Component.Layer));
+                    AddJSONProperty(ComponentProps, 'layer', PCBLayerName(Component.Layer));
                     AddJSONNumber(ComponentProps, 'x', CoordToMils(Component.x - xorigin));
                     AddJSONNumber(ComponentProps, 'y', CoordToMils(Component.y - yorigin));
                     AddJSONNumber(ComponentProps, 'width', CoordToMils(Rect.Right - Rect.Left));
@@ -2185,7 +2186,7 @@ begin
                 try
                     // Add component properties
                     AddJSONProperty(ComponentProps, 'designator', Component.Name.Text);
-                    AddJSONProperty(ComponentProps, 'layer', Layer2String(Component.Layer));
+                    AddJSONProperty(ComponentProps, 'layer', PCBLayerName(Component.Layer));
                     AddJSONProperty(ComponentProps, 'footprint', Component.Pattern);
                     AddJSONNumber(ComponentProps, 'x', CoordToMils(Component.x - xorigin));
                     AddJSONNumber(ComponentProps, 'y', CoordToMils(Component.y - yorigin));
@@ -2279,7 +2280,7 @@ begin
                     AddJSONNumber(CompProps, 'x', CompX);
                     AddJSONNumber(CompProps, 'y', CompY);
                     AddJSONNumber(CompProps, 'rotation', Component.Rotation);
-                    AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                    AddJSONProperty(CompProps, 'layer', PCBLayerName(Component.Layer));
 
                     // Create pad iterator
                     GrpIter := Component.GroupIterator_Create;
@@ -2345,7 +2346,7 @@ begin
                                 AddJSONNumber(PinProps, 'dy', RelDY);
 
                                 AddJSONNumber(PinProps, 'rotation', Pad.Rotation);
-                                AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
+                                AddJSONProperty(PinProps, 'layer', PCBLayerName(Pad.Layer));
                                 AddJSONNumber(PinProps, 'width', CoordToMils(Pad.XSizeOnLayer[Pad.Layer]));
                                 AddJSONNumber(PinProps, 'height', CoordToMils(Pad.YSizeOnLayer[Pad.Layer]));
                                 AddJSONProperty(PinProps, 'shape', ShapeToString(Pad.ShapeOnLayer[Pad.Layer]));
@@ -2499,7 +2500,7 @@ begin
     PadCount := 0;
     MaxX := -1e9; MaxY := -1e9;
     MinX :=  1e9; MinY :=  1e9;
-    SilkLayer := String2Layer('Top Overlay');
+    SilkLayer := PCBLayerFromName('Top Overlay');
 
     try
         // One undo step; this is also what marks the library as modified
@@ -2932,7 +2933,7 @@ begin
                             try
                                 AddJSONProperty(VProps, 'a', Target.Name.Text);
                                 AddJSONProperty(VProps, 'b', Other.Name.Text);
-                                AddJSONProperty(VProps, 'layer', Layer2String(Target.Layer));
+                                AddJSONProperty(VProps, 'layer', PCBLayerName(Target.Layer));
                                 if IsOverlap then
                                     AddJSONProperty(VProps, 'type', 'bounding_box_overlap')
                                 else
@@ -3239,7 +3240,7 @@ begin
                         AddJSONNumber(CompProps, 'x', CoordToMils(Component.x - xorigin));
                         AddJSONNumber(CompProps, 'y', CoordToMils(Component.y - yorigin));
                         AddJSONNumber(CompProps, 'rotation', Component.Rotation);
-                        AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                        AddJSONProperty(CompProps, 'layer', PCBLayerName(Component.Layer));
                         PlacedArray.Add(BuildJSONObject(CompProps, 2));
                     finally
                         CompProps.Free;
@@ -4573,7 +4574,7 @@ begin
         begin
             Props := TStringList.Create;
             try
-                AddJSONProperty(Props, 'layer', Layer2String(Obj.Layer));
+                AddJSONProperty(Props, 'layer', PCBLayerName(Obj.Layer));
                 AddJSONNumber(Props, 'x1_mm', RoundedMMs(Obj.BoundingRectangle.Left - OX));
                 AddJSONNumber(Props, 'y1_mm', RoundedMMs(Obj.BoundingRectangle.Bottom - OY));
                 AddJSONNumber(Props, 'x2_mm', RoundedMMs(Obj.BoundingRectangle.Right - OX));
@@ -4624,7 +4625,7 @@ begin
         Obj := Iterator.FirstPCBObject;
         while Obj <> Nil do
         begin
-            LayerName := Layer2String(Obj.Layer);
+            LayerName := PCBLayerName(Obj.Layer);
             if Obj.InComponent then
                 TallyKey(LayerKeys, LayerCounts, LayerName + '|component')
             else
@@ -4726,7 +4727,7 @@ begin
                         PrimProps := TStringList.Create;
                         try
                             AddJSONProperty(PrimProps, 'type', PrimitiveTypeName(Prim.ObjectId));
-                            AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
+                            AddJSONProperty(PrimProps, 'layer', PCBLayerName(Prim.Layer));
                             if Prim.ObjectId = ePadObject then
                             begin
                                 AddJSONProperty(PrimProps, 'name', Prim.Name);
@@ -4752,7 +4753,7 @@ begin
 
                     AddJSONProperty(CompProps, 'designator', Comp.Name.Text);
                     AddJSONProperty(CompProps, 'footprint', Comp.Pattern);
-                    AddJSONProperty(CompProps, 'layer', Layer2String(Comp.Layer));
+                    AddJSONProperty(CompProps, 'layer', PCBLayerName(Comp.Layer));
                     AddJSONNumber(CompProps, 'x_mm', RoundedMMs(Comp.X - OX));
                     AddJSONNumber(CompProps, 'y_mm', RoundedMMs(Comp.Y - OY));
                     AddJSONNumber(CompProps, 'rotation', Comp.Rotation);
@@ -4922,11 +4923,11 @@ begin
                 if (NetName <> '') and (not Prim.InComponent) and (not Prim.InPolygon) then
                 begin
                     if Prim.ObjectId = eTrackObject then
-                        Lines.Add('T|' + Layer2String(Prim.Layer) + '|' + NetName + '|' +
+                        Lines.Add('T|' + PCBLayerName(Prim.Layer) + '|' + NetName + '|' +
                                   IntToStr(Prim.x1) + '|' + IntToStr(Prim.y1) + '|' +
                                   IntToStr(Prim.x2) + '|' + IntToStr(Prim.y2) + '|' + IntToStr(Prim.Width))
                     else
-                        Lines.Add('A|' + Layer2String(Prim.Layer) + '|' + NetName);
+                        Lines.Add('A|' + PCBLayerName(Prim.Layer) + '|' + NetName);
                 end;
             end
             else if Prim.ObjectId = eViaObject then
@@ -4963,7 +4964,7 @@ begin
         Result := 'ERROR: No PCB document is focused';
         Exit;
     end;
-    Layer := String2Layer(LayerName);
+    Layer := PCBLayerFromName(LayerName);
     if Layer = eNoLayer then
     begin
         Result := 'ERROR: Unknown layer: ' + LayerName;
@@ -5019,7 +5020,7 @@ begin
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONInteger(ResultProps, 'created', Created);
         AddJSONProperty(ResultProps, 'net', Net.Name);
-        AddJSONProperty(ResultProps, 'layer', Layer2String(Layer));
+        AddJSONProperty(ResultProps, 'layer', PCBLayerName(Layer));
         Result := BuildJSONObject(ResultProps);
     finally
         ResultProps.Free;
@@ -5146,7 +5147,7 @@ begin
     try
         AddJSONBoolean(Props, 'success', True);
         AddJSONProperty(Props, 'name', Poly.Name);
-        AddJSONProperty(Props, 'layer', Layer2String(Poly.Layer));
+        AddJSONProperty(Props, 'layer', PCBLayerName(Poly.Layer));
         if Net <> nil then AddJSONProperty(Props, 'net', Net.Name) else AddJSONProperty(Props, 'net', '');
         AddJSONInteger(Props, 'corners', Poly.PointCount);
         AddJSONInteger(Props, 'poured_regions', PolygonPourCount(Poly, True));

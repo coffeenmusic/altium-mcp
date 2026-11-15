@@ -70,7 +70,7 @@ var P,Sides,Side: TStringList; I: Integer; ShapeName: String; XSize,YSize: Doubl
 begin
     P := TStringList.Create; Sides := TStringList.Create; Side := TStringList.Create;
     try
-        AddJSONProperty(P,'name',Pad.Name); AddJSONProperty(P,'layer',Layer2String(Pad.Layer));
+        AddJSONProperty(P,'name',Pad.Name); AddJSONProperty(P,'layer',PCBLayerName(Pad.Layer));
         AddJSONNumber(P,'x_mm',CoordToMils(Pad.X-OX)*0.0254); AddJSONNumber(P,'y_mm',CoordToMils(Pad.Y-OY)*0.0254);
         AddJSONNumber(P,'rotation',Pad.Rotation); AddJSONBoolean(P,'plated',Pad.Plated);
         AddJSONInteger(P,'mode',Pad.Mode); AddJSONNumber(P,'hole_size_mm',CoordToMils(Pad.HoleSize)*0.0254);
@@ -129,7 +129,7 @@ begin
                     begin
                         Pad := Prim; PadProps := TStringList.Create;
                         try
-                            AddJSONProperty(PadProps,'name',Pad.Name); AddJSONProperty(PadProps,'layer',Layer2String(Pad.Layer));
+                            AddJSONProperty(PadProps,'name',Pad.Name); AddJSONProperty(PadProps,'layer',PCBLayerName(Pad.Layer));
                             AddJSONBoolean(PadProps,'is_testpoint_top',Pad.IsTestpoint_Top);
                             AddJSONBoolean(PadProps,'is_testpoint_bottom',Pad.IsTestpoint_Bottom);
                             Pads.Add(BuildJSONObject(PadProps)); Count := Count+1;

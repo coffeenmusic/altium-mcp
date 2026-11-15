@@ -14,7 +14,7 @@ begin
     Props := TStringList.Create;
     try
         AddJSONProperty(Props, 'body_address', IntToStr(Body.I_ObjectAddress));
-        AddJSONProperty(Props, 'layer', Layer2String(Body.Layer));
+        AddJSONProperty(Props, 'layer', PCBLayerName(Body.Layer));
         AddJSONNumber(Props, 'standoff_height_mm', FootprintModelMM(Body.StandoffHeight));
         AddJSONNumber(Props, 'overall_height_mm', FootprintModelMM(Body.OverallHeight));
         Bounds := Body.BoundingRectangle;

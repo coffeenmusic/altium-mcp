@@ -1205,3 +1205,6 @@ DocumentPath=footprint_model3d.pas
 
 [Document22]
 DocumentPath=pcb_component_properties.pas
+
+[Document23]
+DocumentPath=pcb_layers.pas

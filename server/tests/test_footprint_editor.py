@@ -171,7 +171,9 @@ class FootprintEditorTest(unittest.TestCase):
             None, str(self.library), "TEST", [self.operation])))
         self.assertTrue(result["success"])
         bridge.execute_command.return_value = {"success": True, "result": {
-            "success": True, "saved": False, "constants": {"eRound": 1}}}
+            "success": True, "saved": False, "constants": {"eRound": 1},
+            "checked_in_running_altium": True,
+            "availability": {"eRound": dict(available=False, resolved=True, alias=True, native_name="eRounded")}}}
         result = json.loads(asyncio.run(namespace["get_pcb_api_constants"](None, ["eRound"])))
         self.assertTrue(result["success"])
         self.assertEqual({call.args[0] for call in bridge.execute_command.call_args_list}, names)
@@ -182,6 +184,27 @@ class FootprintEditorTest(unittest.TestCase):
             self.root, "get_pcb_api_constants", editor.prepare_constants, ["eRound"])))
         self.assertFalse(result["success"])
         self.assertFalse(result["may_have_partial_changes"])
+
+    def test_constants_alias_zero_and_partial_unavailability(self):
+        def run(native):
+            return json.loads(asyncio.run(editor.execute(self.bridge(native), self.root,
+                "get_pcb_api_constants", editor.prepare_constants, ["eRound", "eNoLayer"])))
+        result = dict(success=True, saved=False, constants=dict(eRound=1, eNoLayer=0),
+                      checked_in_running_altium=True, availability=dict(
+                          eRound=dict(available=False, resolved=True, alias=True, native_name="eRounded"),
+                          eNoLayer=dict(available=True, resolved=True, alias=False, native_name="eNoLayer")))
+        self.assertTrue(run(result)['verification']['passed'])
+        partial = json.loads(json.dumps(result))
+        partial.update(success=False, constants=dict(eNoLayer=0))
+        partial['availability']['eRound']['resolved'] = False
+        self.assertFalse(run(partial)['success'])
+        for key, value in (("alias", False), ("native_name", "eNoLayer"), ("available", True), ("resolved", "yes")):
+            invalid = json.loads(json.dumps(result))
+            invalid['availability']['eRound'][key] = value
+            with self.subTest(key=key):
+                checked = run(invalid)
+                self.assertFalse(checked['success'])
+                self.assertFalse(checked['may_have_partial_changes'])
 
     def test_screenshot_library_request_and_wrong_kind_guard(self):
         tree = ast.parse((Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8"))
