@@ -170,7 +170,45 @@ begin
     end;
 end;
 
-function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; GraphicsList: TStringList; PartCount: Integer = 1): String;
+function SymbolMetadataError(SymbolName, Description: String; Parameters: TStringList): String;
+var
+    Required: TStringList;
+    I: Integer;
+begin
+    Result := '';
+    if (Trim(Description) = '') or SameText(Description, 'New Component') or
+       SameText(Description, SymbolName) then
+    begin
+        Result := 'a searchable component Description is required';
+        Exit;
+    end;
+    if Parameters = nil then
+    begin
+        Result := 'component parameters are required';
+        Exit;
+    end;
+    if (Parameters.IndexOfName('Pacage') >= 0) or (Parameters.IndexOfName('Pacage Metric') >= 0) then
+    begin
+        Result := 'Pacage is obsolete; use Package';
+        Exit;
+    end;
+    Required := TStringList.Create;
+    try
+        Required.CommaText := 'Value,MF,MP,HelpURL,Package,Type,Instructions,System';
+        for I := 0 to Required.Count - 1 do
+            if Trim(Parameters.Values[Required[I]]) = '' then
+            begin
+                Result := 'missing or empty required parameter: ' + Required[I];
+                Exit;
+            end;
+    finally
+        Required.Free;
+    end;
+end;
+
+function CreateSchematicSymbol(SymbolName, Description: String; PinsList, GraphicsList,
+                               Parameters: TStringList; PartCount: Integer = 1;
+                               DesignatorTemplate: String = 'U?'; ComponentKindName: String = 'standard'): String;
 var
     CurrentLib       : ISch_Lib;
     SchComponent     : ISch_Component;
@@ -182,7 +220,9 @@ var
     SchArc           : ISch_Arc;
     SchEllipse       : ISch_Ellipse;
     SchLabel         : ISch_Label;
-    I, J, PinCount   : Integer;
+    Parameter, ValueParameter : ISch_Parameter;
+    ClientDoc        : IServerDocument;
+    I, J, PinCount, KindValue: Integer;
     GraphicsCount    : Integer;
     Entry            : String;
     FieldValue       : String;
@@ -200,35 +240,38 @@ var
     MinX, MaxX, MinY, MaxY : Integer;
     HasPins          : Boolean;
     ResultProps      : TStringList;
-    Description      : String;
-    OutputLines      : TStringList;
 begin
+    Result := SymbolMetadataError(SymbolName, Description, Parameters);
+    if Result <> '' then
+    begin
+        Result := 'ERROR: ' + Result;
+        Exit;
+    end;
+    KindValue := LibraryComponentKindValue(ComponentKindName);
+    if KindValue < 0 then begin Result := 'ERROR: Unsupported component kind'; Exit; end;
+    if DesignatorTemplate = '' then begin Result := 'ERROR: Empty designator template'; Exit; end;
     // Check if we have a schematic library document
     CurrentLib := SchServer.GetCurrentSchDocument;
+    if CurrentLib = nil then
+    begin
+        Result := 'ERROR: Please open a schematic library document';
+        Exit;
+    end;
     if (CurrentLib.ObjectID <> eSchLib) Then
     begin
         Result := 'ERROR: Please open a schematic library document';
         Exit;
     end;
 
-    Description := 'New Component';  // Default description
-
-    // Parse the pins list for description and auto-detect PartCount from max owner_part_id
+    // Auto-detect PartCount from max owner_part_id.
     for I := 0 to PinsList.Count - 1 do
     begin
-        if (Pos('Description=', PinsList[I]) = 1) then
+        FieldValue := Trim(GetFieldFromPipeString(PinsList[I], 6));
+        if (FieldValue <> '') then
         begin
-            Description := Copy(PinsList[I], 13, Length(PinsList[I]) - 12);
-        end
-        else
-        begin
-            FieldValue := Trim(GetFieldFromPipeString(PinsList[I], 6));
-            if (FieldValue <> '') then
-            begin
-                PinOwnerPartId := StrToInt(FieldValue);
-                if (PinOwnerPartId > PartCount) then
-                    PartCount := PinOwnerPartId;
-            end;
+            PinOwnerPartId := StrToInt(FieldValue);
+            if (PinOwnerPartId > PartCount) then
+                PartCount := PinOwnerPartId;
         end;
     end;
 
@@ -266,7 +309,29 @@ begin
     // Define the LibReference and component description
     SchComponent.LibReference := SymbolName;
     SchComponent.ComponentDescription := Description;
-    SchComponent.Designator.Text := 'U?';
+    SchComponent.Designator.Text := DesignatorTemplate;
+    SchComponent.ComponentKind := KindValue;
+    SchComponent.Comment.Text := Parameters.Values['MP'];
+    SchComponent.Comment.IsHidden := True;
+    ValueParameter := nil;
+    for I := 0 to Parameters.Count - 1 do
+    begin
+        Parameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+        if Parameter = nil then
+        begin
+            SchServer.ProcessControl.PostProcess(CurrentLib, '');
+            Result := 'ERROR: could not create component parameter';
+            Exit;
+        end;
+        Parameter.Name := Parameters.Names[I];
+        Parameter.Text := Parameters.Values[Parameter.Name];
+        Parameter.OwnerPartId := 0;
+        Parameter.ParamType := eParameterType_String;
+        Parameter.ReadOnlyState := eReadOnly_None;
+        Parameter.IsHidden := True;
+        if SameText(Parameter.Name, 'Value') then ValueParameter := Parameter;
+        SchComponent.AddSchObject(Parameter);
+    end;
 
     // Create a body for each part: an auto-sized rectangle when no explicit
     // graphics are given (legacy behavior), otherwise the caller's graphics
@@ -285,8 +350,6 @@ begin
 
         for I := 0 to PinsList.Count - 1 do
         begin
-            if (Pos('Description=', PinsList[I]) = 1) then Continue;
-
             FieldValue := Trim(GetFieldFromPipeString(PinsList[I], 4));
             if (FieldValue = '') then Continue;
             PinX := StrToInt(FieldValue);
@@ -513,8 +576,6 @@ begin
     //   number|name|electrical|orientation|x|y[|owner_part_id[|length[|show_name[|show_designator]]]]
     for I := 0 to PinsList.Count - 1 do
     begin
-        if (Pos('Description=', PinsList[I]) = 1) then Continue;
-
         Entry := PinsList[I];
         FieldValue := Trim(GetFieldFromPipeString(Entry, 5));
         if (FieldValue = '') then Continue;
@@ -571,6 +632,14 @@ begin
         PinCount := PinCount + 1;
     end;
 
+    if ValueParameter <> nil then
+    begin
+        ValueParameter.Autoposition := False;
+        ValueParameter.Location := Point(SchComponent.BoundingRectangle.Left,
+            SchComponent.BoundingRectangle.Bottom - MilsToCoord(100));
+        ValueParameter.IsHidden := False;
+    end;
+
     // Add the component to the library and register it with the document
     CurrentLib.AddSchComponent(SchComponent);
     SchServer.RobotManager.SendMessage(CurrentLib.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, SchComponent.I_ObjectAddress);
@@ -579,9 +648,11 @@ begin
     // Adding a symbol from a script does not set the library's modified
     // flag, so closing it would drop the symbol without asking (#30)
     MarkDocumentModified(CurrentLib.DocumentName);
+    ClientDoc := Client.GetDocumentByPath(CurrentLib.DocumentName);
 
     // Refresh library
     CurrentLib.GraphicallyInvalidate;
+    if ClientDoc <> nil then ClientDoc.Modified := True;
 
     // Create result JSON
     ResultProps := TStringList.Create;
@@ -590,15 +661,10 @@ begin
         AddJSONProperty(ResultProps, 'component_name', SymbolName);
         AddJSONInteger(ResultProps, 'pins_count', PinCount);
         AddJSONInteger(ResultProps, 'part_count', PartCount);
-
-        // Build final JSON
-        OutputLines := TStringList.Create;
-        try
-            OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := OutputLines.Text;
-        finally
-            OutputLines.Free;
-        end;
+        AddJSONBoolean(ResultProps, 'saved', False);
+        if ClientDoc <> nil then AddJSONBoolean(ResultProps, 'is_modified', ClientDoc.Modified);
+        ResultProps.Add('"metadata": ' + LibraryComponentSnapshot(SchComponent));
+        Result := LibraryDataASCIIJSON(BuildJSONObject(ResultProps));
     finally
         ResultProps.Free;
     end;
@@ -791,17 +857,51 @@ begin
     end;
 end;
 
-// Create one symbol for CreateSymbolsBatch. Returns True when created.
-function BatchCreateOne(SymName, SymDesc: String; PartCount: Integer; PinsList, GraphicsList: TStringList): Boolean;
+// Create one symbol and retain its actual metadata readback, including failures.
+function BatchCreateOne(SymName, SymDesc: String; PartCount: Integer; SymDesignator, SymKind: String;
+                        PinsList, GraphicsList, ParametersList, ComponentsArray: TStringList): Boolean;
 var
     R: String;
 begin
     Result := False;
     if (SymName = '') then Exit;
-    if (SymDesc <> '') then
-        PinsList.Add('Description=' + SymDesc);
-    R := CreateSchematicSymbol(SymName, PinsList, GraphicsList, PartCount);
+    R := CreateSchematicSymbol(SymName, SymDesc, PinsList, GraphicsList, ParametersList, PartCount, SymDesignator, SymKind);
     Result := (Pos('"success": true', R) > 0);
+    if Result then ComponentsArray.Add(R)
+    else ComponentsArray.Add('{"success": false, "component_name": "' + JSONEscapeString(SymName) +
+        '", "error": "' + JSONEscapeString(R) + '"}');
+end;
+
+// Read back after all batch edits, rather than reporting pre-edit metadata.
+function BatchSymbolReadback(Comp: ISch_Component): String;
+var
+    Props: TStringList;
+    Iterator: ISch_Iterator;
+    Pin: ISch_Pin;
+    PinCount: Integer;
+begin
+    Props := TStringList.Create;
+    Iterator := Comp.SchIterator_Create;
+    try
+        Iterator.AddFilter_ObjectSet(MkSet(ePin));
+        PinCount := 0;
+        Pin := Iterator.FirstSchObject;
+        while Pin <> nil do
+        begin
+            PinCount := PinCount + 1;
+            Pin := Iterator.NextSchObject;
+        end;
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONBoolean(Props, 'saved', False);
+        AddJSONProperty(Props, 'component_name', Comp.LibReference);
+        AddJSONInteger(Props, 'pins_count', PinCount);
+        AddJSONInteger(Props, 'part_count', Comp.PartCount);
+        Props.Add('"metadata": ' + LibraryComponentSnapshot(Comp));
+        Result := LibraryDataASCIIJSON(BuildJSONObject(Props));
+    finally
+        Comp.SchIterator_Destroy(Iterator);
+        Props.Free;
+    end;
 end;
 
 // Redraw the library editor's current symbol. The editor draws it from a
@@ -846,8 +946,8 @@ end;
 // (Mode 'EDITSYMBOL' - never created when missing), then apply its edit
 // records. Returns 1 created, 2 edited, 0 nothing to do, -1 failed (the name
 // is added to Failed, the reason to Problems).
-function BatchFlushSymbol(Mode, SymName, SymDesc: String; PartCount: Integer;
-    PinsList, GraphicsList, EditsList, Failed, Problems: TStringList): Integer;
+function BatchFlushSymbol(Mode, SymName, SymDesc: String; PartCount: Integer; SymDesignator, SymKind: String;
+    PinsList, GraphicsList, ParametersList, ComponentsArray, EditsList, Failed, Problems: TStringList): Integer;
 var
     Lib  : ISch_Lib;
     Comp : ISch_Component;
@@ -857,7 +957,7 @@ begin
 
     if (Mode = 'SYMBOL') then
     begin
-        if not BatchCreateOne(SymName, SymDesc, PartCount, PinsList, GraphicsList) then
+        if not BatchCreateOne(SymName, SymDesc, PartCount, SymDesignator, SymKind, PinsList, GraphicsList, ParametersList, ComponentsArray) then
         begin
             Failed.Add('"' + JSONEscapeString(SymName) + '"');
             Result := -1;
@@ -886,13 +986,16 @@ begin
         Exit;
     end;
     ApplySymbolEdits(Lib, Comp, EditsList, Problems);
+    if Mode = 'SYMBOL' then
+        ComponentsArray[ComponentsArray.Count - 1] := BatchSymbolReadback(Comp);
 end;
 
 // Create or edit many symbols in a single script run from a spec file. The
 // file is plain text, one record per line, pipe-delimited (no JSON, so field
 // text is preserved exactly):
 //   LIBRARY|<path to .SchLib>            (optional first line - focus/open)
-//   SYMBOL|<name>|<description>|<part_count>   start a new symbol
+//   SYMBOL|<name>|<description>|<part_count>[|designator_template[|component_kind]]
+//   PARAM|<name>|<value>                 creation metadata
 //   EDITSYMBOL|<name>                    start editing an existing symbol
 //   PIN|<same fields as create_schematic_symbol pins>      (SYMBOL only)
 //   GRAPHIC|<same entry format as create_schematic_symbol graphics>  (SYMBOL only)
@@ -911,6 +1014,7 @@ var
     PinsList      : TStringList;
     GraphicsList  : TStringList;
     EditsList     : TStringList;
+    ParametersList, ComponentsArray: TStringList;
     FailedArray   : TStringList;
     ProblemsArray : TStringList;
     ResultProps   : TStringList;
@@ -919,8 +1023,8 @@ var
     LibPath       : String;
     Mode          : String;
     CurrentName   : String;
-    CurrentDesc   : String;
-    FieldValue    : String;
+    CurrentDesc, CurrentDesignator, CurrentKind: String;
+    FieldValue, ParameterName : String;
     PartCount     : Integer;
     CreatedCount  : Integer;
     EditedCount   : Integer;
@@ -939,6 +1043,8 @@ begin
     Lines := TStringList.Create;
     PinsList := TStringList.Create;
     GraphicsList := TStringList.Create;
+    ParametersList := TStringList.Create;
+    ComponentsArray := TStringList.Create;
     EditsList := TStringList.Create;
     FailedArray := TStringList.Create;
     ProblemsArray := TStringList.Create;
@@ -946,6 +1052,7 @@ begin
     Mode := '';
     CurrentName := '';
     CurrentDesc := '';
+    CurrentDesignator := 'U?'; CurrentKind := 'standard';
     PartCount := 1;
     CreatedCount := 0;
     EditedCount := 0;
@@ -985,8 +1092,9 @@ begin
             else if (Kind = 'SYMBOL') or (Kind = 'EDITSYMBOL') or (Kind = 'END') then
             begin
                 // Finish the previous symbol
-                Outcome := BatchFlushSymbol(Mode, CurrentName, CurrentDesc, PartCount,
-                                            PinsList, GraphicsList, EditsList, FailedArray, ProblemsArray);
+                Outcome := BatchFlushSymbol(Mode, CurrentName, CurrentDesc, PartCount, CurrentDesignator, CurrentKind,
+                                            PinsList, GraphicsList, ParametersList, ComponentsArray,
+                                            EditsList, FailedArray, ProblemsArray);
                 if (Outcome > 0) and (EditsList.Count > 0) then
                     EditsApplied := True;
                 if (Outcome = 1) then
@@ -995,10 +1103,12 @@ begin
                     EditedCount := EditedCount + 1;
                 PinsList.Clear;
                 GraphicsList.Clear;
+                ParametersList.Clear;
                 EditsList.Clear;
                 Mode := Kind;
                 CurrentName := Trim(GetFieldFromPipeString(Line, 1));
                 CurrentDesc := '';
+                CurrentDesignator := 'U?'; CurrentKind := 'standard';
                 PartCount := 1;
                 if (Kind = 'SYMBOL') then
                 begin
@@ -1006,7 +1116,26 @@ begin
                     FieldValue := Trim(GetFieldFromPipeString(Line, 3));
                     if (FieldValue <> '') then
                         PartCount := StrToInt(FieldValue);
+                    FieldValue := Trim(GetFieldFromPipeString(Line, 4));
+                    if FieldValue <> '' then CurrentDesignator := FieldValue;
+                    FieldValue := Trim(GetFieldFromPipeString(Line, 5));
+                    if FieldValue <> '' then CurrentKind := FieldValue;
                 end;
+            end
+            else if (Kind = 'PARAM') then
+            begin
+                ParameterName := GetFieldFromPipeString(Line, 1);
+                if SameText(ParameterName, 'value') then ParameterName := 'Value';
+                if SameText(ParameterName, 'mf') then ParameterName := 'MF';
+                if SameText(ParameterName, 'mp') then ParameterName := 'MP';
+                if SameText(ParameterName, 'helpurl') then ParameterName := 'HelpURL';
+                if SameText(ParameterName, 'package') then ParameterName := 'Package';
+                if SameText(ParameterName, 'type') then ParameterName := 'Type';
+                if SameText(ParameterName, 'instructions') then ParameterName := 'Instructions';
+                if SameText(ParameterName, 'system') then ParameterName := 'System';
+                FieldValue := Copy(Line, 7, Length(Line));
+                FieldValue := Copy(FieldValue, Pos('|', FieldValue) + 1, Length(FieldValue));
+                ParametersList.Add(ParameterName + '=' + FieldValue);
             end
             else if (Kind = 'PIN') then
             begin
@@ -1051,6 +1180,9 @@ begin
         end;
         AddJSONInteger(ResultProps, 'created', CreatedCount);
         AddJSONInteger(ResultProps, 'edited', EditedCount);
+        AddJSONBoolean(ResultProps, 'success', (FailedArray.Count = 0) and (ProblemsArray.Count = 0));
+        AddJSONBoolean(ResultProps, 'saved', False);
+        ResultProps.Add(BuildJSONArray(ComponentsArray, 'components'));
         if (FailedArray.Count > 0) then
             ResultProps.Add(BuildJSONArray(FailedArray, 'failed'))
         else
@@ -1060,11 +1192,13 @@ begin
         else
             ResultProps.Add('"problems": []');
 
-        Result := BuildJSONObject(ResultProps);
+        Result := LibraryDataASCIIJSON(BuildJSONObject(ResultProps));
     finally
         Lines.Free;
         PinsList.Free;
         GraphicsList.Free;
+        ParametersList.Free;
+        ComponentsArray.Free;
         EditsList.Free;
         FailedArray.Free;
         ProblemsArray.Free;
@@ -1101,7 +1235,7 @@ end;
 // Get the graphic primitives of symbols in a schematic library.
 // SymbolName = '' -> inventory mode: every symbol with per-type primitive
 // counts. SymbolName given -> full geometry dump of that symbol (mils).
-function GetSymbolPrimitives(ROOT_DIR: String; LibraryPath: String; SymbolName: String): String;
+function GetSymbolPrimitivesJSON(ROOT_DIR: String; LibraryPath: String; SymbolName: String): String;
 var
     CurrentLib   : ISch_Lib;
     LibIterator  : ISch_Iterator;
@@ -1149,6 +1283,11 @@ begin
         Exit;
     end;
 
+    if (LibraryPath <> '') and (NormalizedPath(CurrentLib.DocumentName) <> NormalizedPath(LibraryPath)) then
+    begin
+        Result := 'ERROR: Focused schematic library identity mismatch';
+        Exit;
+    end;
     ResultProps := TStringList.Create;
     SymbolsArray := TStringList.Create;
     Found := False;
@@ -1371,6 +1510,8 @@ begin
                                 AddJSONProperty(PrimProps, 'type', '');
                             eImplementationMap:
                                 AddJSONProperty(PrimProps, 'type', '');
+                            eMapDefiner:
+                                AddJSONProperty(PrimProps, 'type', '');
                             else
                             begin
                                 // Surface unknown graphic types instead of
@@ -1435,17 +1576,21 @@ begin
             Exit;
         end;
 
-        OutputLines := TStringList.Create;
-        try
-            OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := WriteJSONToFile(OutputLines, ROOT_DIR + '\temp_symbol_primitives.json');
-        finally
-            OutputLines.Free;
-        end;
+        Result := BuildJSONObject(ResultProps);
     finally
         ResultProps.Free;
         SymbolsArray.Free;
     end;
+end;
+
+function GetSymbolPrimitives(ROOT_DIR: String; LibraryPath: String; SymbolName: String): String;
+var Value: String; Lines: TStringList;
+begin
+    Value := GetSymbolPrimitivesJSON(ROOT_DIR,LibraryPath,SymbolName);
+    if Pos('ERROR:',Value)=1 then begin Result := Value; Exit; end;
+    Lines := TStringList.Create;
+    try Lines.Text := Value; Result := WriteJSONToFile(Lines,ROOT_DIR+'\temp_symbol_primitives.json');
+    finally Lines.Free; end;
 end;
 
 // Function to get all schematic component data
@@ -2297,11 +2442,9 @@ begin
         if not Found then
         begin
             Iter := Comp.SchIterator_Create;
-            // Only what is measured below: a footprint model (implementation)
-            // has no OwnerPartId, and reading it failed every edit of a
-            // symbol that has one
-            Iter.AddFilter_ObjectSet(MkSet(ePin, eRectangle, eRoundRectangle, eLine, ePolyline, ePolygon,
-                                           eBezier, eArc, ePie, eEllipticalArc, eEllipse));
+            // Implementation/model objects have no OwnerPartId or geometry.
+            Iter.AddFilter_ObjectSet(MkSet(ePin, eRectangle, eRoundRectangle, eLine,
+                ePolyline, ePolygon, eBezier, eArc, ePie, eEllipticalArc, eEllipse));
             Prim := Iter.FirstSchObject;
             while (Prim <> nil) do
             begin
@@ -2775,6 +2918,11 @@ begin
     try
         AddJSONProperty(PProps, 'text', Comp.Comment.Text);
         AddJSONBoolean(PProps, 'visible', not Comp.Comment.IsHidden);
+        AddJSONNumber(PProps, 'x', CoordToMils(Comp.Comment.Location.X));
+        AddJSONNumber(PProps, 'y', CoordToMils(Comp.Comment.Location.Y));
+        AddJSONProperty(PProps, 'justification', JustificationName(Comp.Comment.Justification));
+        AddJSONBoolean(PProps, 'autoposition', Comp.Comment.Autoposition);
+        PProps.Add('"font": ' + FontJSON(Comp.Comment.FontID));
         Props.Add('"comment": ' + BuildJSONObject(PProps, 2));
     finally
         PProps.Free;

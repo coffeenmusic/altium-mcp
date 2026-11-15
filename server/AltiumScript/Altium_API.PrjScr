@@ -1,4 +1,4 @@
-﻿[Design]
+[Design]
 Version=1.0
 HierarchyMode=0
 ChannelRoomNamingStyle=0
@@ -134,6 +134,22 @@ GenerateClassCluster=0
 DocumentUniqueId=
 
 [Document6]
+DocumentPath=document_management.pas
+AnnotationEnabled=1
+
+[Document7]
+DocumentPath=library_component_data.pas
+AnnotationEnabled=1
+
+[Document8]
+DocumentPath=schematic_connectivity.pas
+AnnotationEnabled=1
+
+[Document9]
+DocumentPath=schematic_editor.pas
+AnnotationEnabled=1
+
+[Document10]
 DocumentPath=json_utils.pas
 AnnotationEnabled=1
 AnnotateStartValue=1
@@ -150,7 +166,7 @@ DItemRevisionGUID=
 GenerateClassCluster=0
 DocumentUniqueId=
 
-[Document7]
+[Document11]
 DocumentPath=silk_autoplacer.pas
 AnnotationEnabled=1
 AnnotateStartValue=1
@@ -167,7 +183,18 @@ DItemRevisionGUID=
 GenerateClassCluster=0
 DocumentUniqueId=
 
-[Document8]
+[Document12]
+DocumentPath=schematic_cloning.pas
+AnnotationEnabled=1
+
+[Document13]
+DocumentPath=footprint_editor.pas
+AnnotationEnabled=1
+
+[Document14]
+DocumentPath=schematic_document.pas
+AnnotationEnabled=1
+[Document15]
 DocumentPath=pcb_layout.pas
 AnnotationEnabled=1
 AnnotateStartValue=1
@@ -1170,3 +1197,30 @@ ComparisonOptions5=Kind=Structure Class|MinPercent=75|MinMatch=3|ShowMatch=0|Use
 [SmartPDF]
 PageOptions=Record=PageOptions|CenterHorizontal=True|CenterVertical=True|PrintScale=1.00|XCorrection=1.00|YCorrection=1.00|PrintKind=1|BorderSize=5000000|LeftOffset=0|BottomOffset=0|Orientation=2|PaperLength=1000|PaperWidth=1000|Scale=100|PaperSource=7|PrintQuality=-3|MediaType=1|DitherType=10|PrintScaleMode=1|PaperKind=Letter|PaperIndex=1
 
+
+[Document16]
+DocumentPath=schematic_diagram.pas
+
+[Document17]
+DocumentPath=symbol_primitives.pas
+
+[Document18]
+DocumentPath=empty_library_component.pas
+
+[Document19]
+DocumentPath=library_view.pas
+
+[Document20]
+DocumentPath=library_components_data.pas
+
+[Document21]
+DocumentPath=library_roundtrip.pas
+
+[Document22]
+DocumentPath=footprint_model3d.pas
+
+[Document23]
+DocumentPath=pcb_component_properties.pas
+
+[Document24]
+DocumentPath=pcb_layers.pas

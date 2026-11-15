@@ -12,6 +12,25 @@
 
 Tools for developing new Altium API functionality. Not part of the MCP server.
 
+Library operations from the supplied TPS3808 report are mapped to existing and
+new tools in [FOOTPRINT_EDITOR.md](FOOTPRINT_EDITOR.md), including the no-save
+live harness and [passing verification](FOOTPRINT_EDITOR_LIVE_TEST.md).
+
+## Upstream integration regression
+
+Using the MCP environment's Python, run:
+
+```powershell
+python dev/test_upstream_merge_live.py --exercise
+```
+
+The harness copies the focused project's saved documents into `.altium-mcp`,
+tests both schematic editors, compiler connectivity, symbols, library edits,
+footprint links, saving and PCB tools, and checks that the original inputs and
+document states remain unchanged. Its generated copies remain open for review.
+Without `--exercise`, it only reads server and project context. Reports stay
+under `.altium-mcp/upstream_live_<timestamp>` and are not committed.
+
 ## Why
 
 Altium has no headless test mode for DelphiScript, and its failure modes are

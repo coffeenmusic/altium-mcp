@@ -1,15 +1,77 @@
-"""Layer names for set_pcb_layer_visibility, resolved against the board's own.
+"""Shared PCB aliases and visibility planning against the board's actual layers."""
 
-Altium spells one layer several ways: its layer tab says "Multi-Layer", the
-Layer Stack Manager "Top Solder", the scripting API "Multi Layer" and "Top
-Solder Mask", and a copper layer may be renamed ("Inner 1" for Mid Layer 1).
-The Altium side matches names exactly, so a name it did not know used to be
-skipped while the rest were applied: an exclusive show then hid that layer
-too. Here every name is resolved against get_pcb_layers first.
-"""
+import json
 import difflib
 import re
 from typing import Dict, List, Tuple
+
+
+_NAMES = ("Top Layer", "Bottom Layer", "Top Overlay", "Bottom Overlay",
+          "Top Paste", "Bottom Paste", "Top Solder Mask", "Bottom Solder Mask",
+          "Drill Guide", "Drill Drawing", "Keep Out Layer", "Multi-Layer", "No Layer")
+_ALIASES = {re.sub(r"[\s_-]", "", name).casefold(): name for name in _NAMES}
+_ALIASES.update({"topsolder": "Top Solder Mask", "bottomsolder": "Bottom Solder Mask",
+                 "keepout": "Keep Out Layer"})
+_FIELDS = {"layer", "layer_name", "from_layer", "to_layer", "low_layer", "high_layer",
+           "start_layer", "end_layer", "layers", "layer_names"}
+
+
+def canonical_name(value, allow_no_layer=True, legacy_only=False):
+    if not isinstance(value, str) or not value.strip() or any(c in value for c in "|\r\n\x00"):
+        raise ValueError("layer must be a nonempty name without record delimiters")
+    name = value.strip()
+    compact = re.sub(r"[\s_-]", "", name).casefold()
+    if compact.startswith("e"):
+        compact = compact[1:]
+    mechanical = re.fullmatch(r"(?:mechanical|mech)(?:layer)?(\d+)", compact)
+    if mechanical:
+        index = int(mechanical[1])
+        if not 1 <= index <= 1024:
+            raise ValueError("mechanical layer number must be within 1..1024")
+        if legacy_only and index > 16:
+            raise ValueError("mechanical layers above 16 require the V7 layer API")
+        return f"Mechanical {index}"
+    mid = re.fullmatch(r"mid(?:layer)?(\d+)", compact)
+    if mid and 1 <= int(mid[1]) <= 30:
+        return f"Mid Layer {int(mid[1])}"
+    canonical = _ALIASES.get(compact, name)
+    if canonical == "No Layer" and not allow_no_layer:
+        raise ValueError("No Layer is not a valid destination")
+    return canonical
+
+
+def normalize_fields(value, key=""):
+    """Copy JSON payloads, normalizing only layer fields, never free text or paths."""
+    if isinstance(value, dict):
+        return {k: normalize_fields(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [normalize_fields(v, key) for v in value]
+    if isinstance(value, str) and value.strip() and key in _FIELDS:
+        return canonical_name(value)
+    if isinstance(value, str) and key == "result":
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        if isinstance(parsed, (dict, list)):
+            return json.dumps(normalize_fields(parsed), ensure_ascii=False)
+    return value
+
+
+def requested_names(value):
+    names = []
+    def visit(item, key=""):
+        if isinstance(item, dict):
+            for k, v in item.items():
+                visit(v, k)
+        elif isinstance(item, list):
+            for v in item:
+                visit(v, key)
+        elif isinstance(item, str) and key in _FIELDS and item not in names:
+            names.append(item)
+    visit(value)
+    return names
+
 
 # Altium's V6 layer ids by the names Altium uses for them (as key() makes
 # them). Mechanical layers are left out: the board reports them by their
@@ -40,6 +102,25 @@ def displayed(layers) -> Dict[str, bool]:
     return {l["name"]: bool(l.get("is_displayed")) for l in board_layers(layers)}
 
 
+def accepted_names(requested, applied, resolved_names=None):
+    """Canonical requested aliases, while retaining real names for custom layers."""
+    if requested is None or requested == ["*"]:
+        return list(applied)
+    if isinstance(requested, str):
+        requested = [requested]
+    accepted = []
+    for name in requested:
+        native = (resolved_names or {}).get(name, name)
+        if native not in applied and canonical_name(native) not in applied:
+            continue
+        canonical = canonical_name(name)
+        known_alias = key(canonical) in _IDS or re.fullmatch(r"(?:Mechanical|Mid Layer) \d+", canonical)
+        value = canonical if known_alias else native
+        if value not in accepted:
+            accepted.append(value)
+    return accepted
+
+
 def resolve(names: List[str], layers) -> Tuple[List[str], Dict[str, str], List[dict]]:
     """(the board's names for `names`, {asked: board's name} where they
     differ, [{"name", "suggestions"}] for names no layer has).
@@ -53,11 +134,23 @@ def resolve(names: List[str], layers) -> Tuple[List[str], Dict[str, str], List[d
     for l in board:
         by_key.setdefault(key(l["name"]), l["name"])
     by_id = {str(l.get("layer_id")): l["name"] for l in board}
+    by_mechanical = {str(int(str(l["mechanical_number"]))): l["name"] for l in board
+                     if str(l.get("mechanical_number", "")).isdigit()}
     exact = {l["name"] for l in board}
     found, renamed, unknown = [], {}, []
     for name in names:
         k = key(name)
         real = name if name in exact else by_key.get(k) or (by_id.get(str(_IDS[k])) if k in _IDS else None)
+        if real is None:
+            try:
+                canonical = canonical_name(name)
+            except ValueError:
+                canonical = name
+            alias = key(canonical)
+            real = by_key.get(alias) or (by_id.get(str(_IDS[alias])) if alias in _IDS else None)
+            mechanical = re.fullmatch(r"Mechanical (\d+)", canonical)
+            if real is None and mechanical:
+                real = by_mechanical.get(str(int(mechanical[1])))
         if real is None:
             close = difflib.get_close_matches(k, list(by_key), n=3, cutoff=0.6)
             unknown.append({"name": name, "suggestions": [by_key[c] for c in close]})

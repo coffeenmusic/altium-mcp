@@ -29,9 +29,10 @@ import silkscreen
 import label_blocks
 import script_bundle
 import pcblib_file
+import pcb_layers
 import uuid
 
-from altium_files import long_path, read_altium_text, spec_with_long_library, write_altium_text
+from altium_files import long_path, read_altium_text, spec_with_long_library, write_altium_text, ensure_unicode_table
 from exchange_lock import ExchangeLock
 from altium_install import find_altium_exe
 import routing
@@ -40,6 +41,32 @@ import screenshot_target
 import sandbox
 import win_processes
 from outjob_parser import parse_outjob
+from schematic_editor import validate_request as validate_schematic_edit, compact_result as compact_schematic_result
+import schematic_connectivity
+import library_component_data
+import symbol_metadata
+import document_management
+import document_closing
+import schematic_cloning
+import schematic_document
+import library_component_properties
+import schematic_diagram
+import symbol_primitives
+import empty_library_component
+import library_view
+import library_components_data
+import library_validation
+import library_roundtrip
+import footprint_editor
+import footprint_model3d
+import pcb_component_properties
+import project_selection
+import lcsc_catalog
+from server_info import capture_runtime_info
+
+# Freeze source identity before serving requests, even if files are later updated.
+SERVER_INFO = capture_runtime_info()
+SERVER_STARTED_MONOTONIC = time.monotonic()
 
 # Set MCP_DIR to the directory of the current Python file
 MCP_DIR = Path(__file__).parent
@@ -134,6 +161,7 @@ def _remove_leftover_temp_files(folder: Path = EXCHANGE_DIR):
 
 
 _remove_leftover_temp_files()
+ensure_unicode_table(EXCHANGE_DIR)
 
 # Seconds for a running Altium to pick up a request (normally ~1-5 s), for a
 # cold Altium launch to get that far, for a started command to go without
@@ -154,7 +182,11 @@ MUTATING_COMMANDS = {
     "create_net_class", "create_schematic_symbol", "set_component_position",
     "move_components", "place_components", "create_symbols_batch", "build_circuit",
     "create_footprints_batch", "layout_duplicator", "layout_duplicator_apply",
-    "run_output_jobs", "create_pcb_footprint",
+    "run_output_jobs", "create_pcb_footprint", "edit_schematic", "edit_schematic_actions",
+    "set_library_component_data", "update_symbol_primitives", "remove_empty_library_component", "set_library_view", "verify_library_roundtrip", "create_document", "open_document", "save_document",
+    "add_document_to_project", "open_project", "select_project", "close_document", "clone_schematic_components",
+    "set_footprint_pad_settings", "edit_footprint_primitives", "set_footprint_properties", "set_footprint_pad_properties", "edit_footprint_model3d",
+    "set_schematic_sheet_properties", "save_project", "edit_sheet_symbols", "draw_block_diagram", "set_pcb_component_properties",
 }
 
 # Present while a script the MCP launched is stuck (paused in Altium's
@@ -213,8 +245,28 @@ def _lift_failed_result(response: Dict[str, Any]) -> Dict[str, Any]:
     return response
 
 
+# Instructions exposed to MCP clients during initialization.
+AGENT_INSTRUCTIONS = """Prefer dedicated Altium MCP tools. Before using custom DelphiScript through
+run_altium_script for a new operation, tell the user in their language what
+operation needs a script, why the available tools cannot cover it, and a proposed
+reusable tool name. This is a progress update: continue within the user's existing
+authorization. After execution, report whether the operation succeeded or failed.
+
+Check the available tool descriptions before declaring a capability missing.
+Distinguish a missing tool or unsupported parameter from a workaround for an
+existing tool's error and from API exploration. Group retries of the same
+operation under one announcement unless the purpose or scope changes.
+
+At the end of the task, include a concise, deduplicated list of operations that
+needed custom scripts: operation, reason, proposed permanent tool with its main
+arguments, and outcome. The user uses this list to plan additions to the MCP.
+Only include operations actually attempted; do not call a capability missing when
+an existing dedicated tool covers it.
+"""
+
 # Initialize FastMCP server
-mcp = FastMCP("AltiumMCP", instructions="Altium integration through the Model Context Protocol")
+mcp = FastMCP("AltiumMCP", instructions=AGENT_INSTRUCTIONS)
+mcp._mcp_server.version = SERVER_INFO["server_version"]
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
@@ -528,6 +580,13 @@ class AltiumBridge:
         so the Stop cannot reach the next command's script, and the response
         has "aborted": true.
         """
+        try:
+            # Visibility planning already resolved exact board names. Rewriting
+            # them here could select another layer with a similar alias.
+            if command != "set_pcb_layer_visibility":
+                params = pcb_layers.normalize_fields(params)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc), "command_started": False}
         async with self._command_lock:
             problem = await self.ensure_paths()
             if problem:
@@ -544,14 +603,19 @@ class AltiumBridge:
                 # for it, Altium is busy with another server's command, which
                 # is no reason to give up.
                 if await asyncio.to_thread(sandbox.altium_hung):
-                    return {"success": False, "error": ALTIUM_HUNG_ERROR}
+                    return {"success": False, "error": ALTIUM_HUNG_ERROR, "command_started": False}
                 if watcher is None:
                     response = await self._execute_command_locked(command, params, timeout)
                 else:
                     response = await self._execute_watched(command, params, timeout, watcher)
             finally:
                 self._exchange_lock.release()
-        return _lift_failed_result(response)
+        response = pcb_layers.normalize_fields(_lift_failed_result(response))
+        result = response.get("result")
+        accepted = pcb_layers.requested_names(params)
+        if accepted and response.get("success") and isinstance(result, dict):
+            result["accepted_layers"] = [name for name in accepted if name not in result.get("not_found_layers", [])]
+        return response
 
     async def _execute_watched(self, command: str, params: Dict[str, Any], timeout: float,
                                watcher: Callable[[asyncio.Event], Awaitable[None]]) -> Dict[str, Any]:
@@ -1119,7 +1183,8 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
     return json.dumps(result, indent=2)
 
 @_tool()
-async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1, graphics: list = None) -> str:
+async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list,
+                                  parameters: dict, part_count: int = 1, graphics: list = None) -> str:
     r"""
     Before executing, run get_symbol_placement_rules first.
 
@@ -1148,7 +1213,17 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
 
     Args:
         symbol_name (str): Name of the symbol to create
-        description (str): Description of the schematic symbol
+        description (str): Searchable native Description: component category,
+                    function, key ratings/specifications and package, based on
+                    the datasheet. At least three words; never just an MPN or
+                    placeholder. Do not guess unavailable specifications.
+        parameters (dict): Required nonempty string fields: Value, MF, MP,
+                    HelpURL (absolute HTTP(S) documentation URL), Package, Type,
+                    Instructions (e.g. Fit or DNP), System (functional block).
+                    Missing/placeholder data fails before Altium is called.
+                    Names are case-insensitive and stored with canonical spelling.
+                    Pacage/Pacage Metric are obsolete; use Package. JLCPCB fields
+                    are optional. Comment is set to MP and hidden; Value is visible.
         pins (list): List of pin data in format
                     "pin_number|pin_name|pin_type|pin_orientation|x|y[|owner_part_id[|length[|show_name[|show_designator]]]]"
                     Pin types: eElectricHiZ, eElectricInput, eElectricIO, eElectricOpenCollector,
@@ -1185,11 +1260,16 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     Returns:
         str: JSON object with the result of the component creation
     """
+    try:
+        spec, parameters = symbol_metadata.prepare(symbol_name, description, pins, parameters, part_count, graphics)
+    except (ValueError, TypeError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
     logger.info(f"Creating schematic symbol: {symbol_name} with {len(pins)} pins, {part_count} part(s)")
-
+    metadata_file = EXCHANGE_DIR / f"symbol_metadata_{uuid.uuid4().hex}.txt"
+    write_altium_text(metadata_file, spec)
     params = {
         "symbol_name": symbol_name,
-        "description": description,
+        "metadata_file": str(metadata_file),
         "part_count": part_count,
         "pins": pins
     }
@@ -1197,19 +1277,25 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
         params["graphics"] = graphics
 
     # Execute the command in Altium to create the symbol
-    response = await altium_bridge.execute_command(
-        "create_schematic_symbol",
-        params
-    )
+    try:
+        response = await altium_bridge.execute_command("create_schematic_symbol", params)
+    finally:
+        if 'response' in locals() and response.get("success", False):
+            metadata_file.unlink(missing_ok=True)
     
     # Check for success
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error creating symbol: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to create symbol: {error_msg}"})
+        return json.dumps({"success": False, "error": f"Failed to create symbol: {error_msg}",
+                           "saved": False, "may_have_partial_changes": True, "metadata_file": str(metadata_file)})
     
     # Get the result data
     result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result)
+    if result.get("success"):
+        symbol_metadata.verify(result, description, parameters)
     
     logger.info(f"Symbol {symbol_name} created successfully with {len(pins)} pins")
     return json.dumps(result, indent=2)
@@ -1367,7 +1453,7 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list = None, visib
     if out.get("success") is False:
         return json.dumps(out, indent=2)
     logger.info(f"Setting layer visibility: {calls}")
-    out.update(success=True, updated_count=0, not_found_layers=[])
+    out.update(success=True, updated_count=0, not_found_layers=[], accepted_layers=[])
     for params in calls:
         result, error = await _bridge_json("set_pcb_layer_visibility", params)
         if error:
@@ -1376,6 +1462,13 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list = None, visib
             return json.dumps(out, indent=2)
         out["updated_count"] += int(result.get("updated_count") or 0)
         out["not_found_layers"] += result.get("not_found_layers") or []
+        accepted = result.get("accepted_layers", [name for name in params["layer_names"]
+                                                   if name not in out["not_found_layers"]])
+        for name in accepted:
+            if name not in out["accepted_layers"]:
+                out["accepted_layers"].append(name)
+    if restore_state is None:
+        out["accepted_layers"] = pcb_layers.accepted_names(layer_names, out["accepted_layers"], out.get("resolved_names"))
     return json.dumps(out, indent=2)
 
 @_tool(read_only=True)
@@ -1666,6 +1759,15 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     """
     Run a DelphiScript snippet inside an isolated Altium sandbox and report
     what happened, step by step.
+
+    Agent disclosure: before using this tool for a new operation, tell the user
+    in their language what needs custom DelphiScript, why the dedicated tools
+    cannot cover it, and a proposed permanent tool name. This is a progress
+    update; continue within the user's existing authorization. Group retries
+    of the same operation under one announcement. Report the outcome afterwards
+    and include a deduplicated list of these operations, reasons, proposed tool
+    signatures and outcomes in the final response. Distinguish missing features
+    from existing-tool errors and API exploration; check the catalog first.
 
     Use this to develop and verify Altium API code before relying on it.
     Each call writes the script into a fresh copy of SandboxScript/Sandbox.pas
@@ -2260,6 +2362,11 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
     """
     Read the primitives of footprints in a PCB library (.PcbLib).
 
+    Both modes report the native footprint Height as height_mm, separately from
+    3D body heights. Use set_footprint_properties to change this stored property.
+    Pad dumps report native is_testpoint_top/is_testpoint_bottom flags; change
+    them with set_footprint_pad_properties.
+
     Modes:
     - footprint_name omitted: inventory of every footprint with per-type
       primitive counts (pads, tracks, arcs, fills, texts, regions, vias,
@@ -2267,19 +2374,24 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
     - footprint_name given (exact, case-insensitive): full geometry dump -
       pads (position, rotation, layer, sizes/shape per stack, hole size/
       type/width/rotation, plating, paste_mode/paste_expansion,
-      mask_mode/mask_expansion, locked), tracks, arcs, fills, texts,
+      mask_mode/mask_expansion, locked, pad_settings with mm expansions
+      and native cache validity), tracks, arcs, fills, texts,
       regions (outline vertices). Coordinates in mils relative to the
       footprint origin (also for the footprint shown in the editor, which
       Altium holds offset by the library origin); shapes and hole types as
-      raw Altium enum ints; layers as names. 3D component bodies are listed
+      raw Altium enum ints; layers as names. library_origin_x/y are in mils.
+      3D component bodies are listed
       apart in bodies_3d, not among the primitives, so the
       create_footprints_batch round-trip is unchanged: model_file,
       model_embedded, model_x/model_y (offset from the footprint origin),
       standoff_height and overall_height (mils), layer, and
       rotation_x/y/z (degrees) and model_z_offset (mils). The rotations and
       offset come from the saved library file (Altium's script API cannot
-      return them); "placement" says so, and they are null for a body that
-      is not saved yet.
+      return them). Matching normalizes Windows paths and falls back to an
+      unambiguous filename when one reference is shortened. "placement" and
+      "placement_match" identify the source or an unmatched/ambiguous reference.
+      Unsaved bodies without a saved match have null pose values; matched poses
+      are saved-file snapshots and may differ from a dirty buffer.
     - footprint_name "*": full dump of every footprint
 
     Use as the reference when recreating or validating footprints, and to
@@ -2318,7 +2430,131 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
     return json.dumps(result, indent=2)
 
 @_tool()
-async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
+async def edit_footprint_model3d(ctx: Context, library_path: str, footprint_name: str,
+                               body_index: Optional[int] = None, changes: Optional[Dict[str, Any]] = None,
+                               delete: bool = False, expected_model_file: Optional[str] = None,
+                               body_id: Optional[str] = None) -> str:
+    """Read/edit/replace/delete existing footprint 3D bodies in an exact PcbLib; never save.
+
+    Omit changes/delete to inventory live bodies in list order. body_index is
+    zero-based; an edit without either selector requires exactly one body. Optional
+    expected_model_file must match the inventory filename exactly before editing.
+    Prefer body_id=<body_address from inventory> to select a session body regardless
+    of iterator reordering. A stale ID fails; reread after switching/reopening.
+    Reuses dirty buffers. Coordinates are mm relative to the footprint origin.
+    changes accepts x_mm, y_mm, embed (boolean), model_path (existing absolute
+    .step/.stp), rotation_x/y/z (degrees) and z_mm. Omitted X/Y/embedding stay
+    unchanged. Rotation/Z updates require all four pose values together; replacing
+    a model also requires that complete pose. The script API cannot read these
+    out-parameters: partial pose edits are refused, and pose_applied acknowledges
+    dispatch rather than independent rotation/Z readback. Full pose requests
+    always run, even if identical. Position/embedding no-ops preserve Modified.
+    Linking needs an existing absolute model source; when an embedded model has
+    only a basename, supply model_path and the complete pose. embed defaults to
+    the old value on replacement. delete=True is exclusive with changes and
+    removes just the selected body; update/replace supports generic STEP bodies.
+    Native before/after snapshots verify X/Y, filename, embedding and unrelated
+    geometry. Inspect outcome_unknown/may_have_partial_changes before retrying.
+    """
+    return await footprint_model3d.execute(altium_bridge, EXCHANGE_DIR, library_path, footprint_name,
+                                           body_index, changes, delete, expected_model_file, body_id)
+
+
+@_tool()
+async def set_footprint_properties(ctx: Context, library_path: str, footprint_name: str,
+                                   height_mm: Optional[float] = None) -> str:
+    """Read/set native Height of one existing footprint in an exact .PcbLib; never save.
+
+    library_path is an absolute existing .PcbLib path. Reuses open unsaved edits;
+    footprint_name matches exactly once, case-insensitively. height_mm is a finite
+    number from 0 to 1000 mm; zero clears the stored height. Omit it to read.
+    Changes IPCB_LibComponent.Height, preserving primitives, pads and 3D bodies.
+    This stored property does not resize 3D geometry; Altium height rules may
+    prioritize existing 3D bodies. Does not update placed PCB parts or save files.
+    One undo group; identical requests preserve Modified. Returns before/after
+    height_mm, changed and native readback/disk verification. On errors inspect
+    may_have_partial_changes/outcome_unknown before retrying.
+    """
+    return await footprint_editor.execute(altium_bridge, EXCHANGE_DIR, "set_footprint_properties",
+                                          footprint_editor.prepare_properties, library_path, footprint_name, height_mm)
+
+
+@_tool()
+async def set_footprint_pad_properties(ctx: Context, library_path: str, footprint_name: str, pad_names: list[str],
+                                       is_testpoint_top: Optional[bool] = None,
+                                       is_testpoint_bottom: Optional[bool] = None) -> str:
+    """Read/set native Testpoint Top/Bottom flags on exact existing PcbLib pads; never save.
+
+    Absolute existing library_path; reuses open dirty buffers without reloading.
+    footprint_name and each of 1..1000 distinct pad_names must match exactly once,
+    case-insensitively. All targets are preflighted before any change. True enables,
+    False clears; omitted sides are preserved. Omit both to read selected pads.
+    Writes native IsTestpoint_Top/IsTestpoint_Bottom; no text parameters are created.
+    Enabling Top requires Top Layer/Multi-Layer copper; Bottom requires Bottom
+    Layer/Multi-Layer. An incompatible side rejects the whole batch before edits.
+    Preserves geometry, layers, locks, mask/paste settings and unselected pads.
+    One undo group, idempotent no-ops, Modified/readback and disk verification.
+    Does not update placed components, run testpoint assignment or save files.
+    Inspect may_have_partial_changes/outcome_unknown before retrying errors.
+    """
+    return await footprint_editor.execute(altium_bridge, EXCHANGE_DIR, "set_footprint_pad_properties",
+                                          footprint_editor.prepare_pad_properties, library_path, footprint_name,
+                                          pad_names, is_testpoint_top, is_testpoint_bottom)
+
+
+@_tool()
+async def set_footprint_pad_settings(ctx: Context, library_path: str, footprint_name: str,
+                                     pad_names: list[str], mask_expansion_mm: Optional[float] = None,
+                                     paste_expansion_mm: Optional[float] = None, mode: str = "manual") -> str:
+    """Update existing PcbLib pads without saving. All names must match one pad each.
+
+    mode='manual': set the supplied solder mask and/or paste expansions in mm;
+    omitted settings are preserved. mode='rule': reset both overrides to rules,
+    without expansion arguments. Uses TPadCache and verifies the resulting values.
+    Returns before/after settings and verified_count. Geometry and locks are preserved.
+    A timeout can leave partial edits: inspect before retrying.
+    """
+    return await footprint_editor.execute(altium_bridge, EXCHANGE_DIR, "set_footprint_pad_settings",
+                                          footprint_editor.prepare_pads, library_path, footprint_name,
+                                          pad_names, mask_expansion_mm, paste_expansion_mm, mode)
+
+
+@_tool()
+async def edit_footprint_primitives(ctx: Context, library_path: str, footprint_name: str,
+                                    operations: list[dict]) -> str:
+    """Change layers of existing track, arc or fill primitives in a PcbLib; never save.
+
+    Each operation: {"target": {"type":"track", "layer":"No Layer",
+    "x1":0,"y1":0,"x2":100,"y2":0,"width":5}, "layer":"Mechanical 13"}.
+    Copy target geometry from get_footprint_primitives (mils relative to footprint
+    origin). Arc targets require cx,cy,radius,start_angle,end_angle,width,layer;
+    fill targets require x1,y1,x2,y2,rotation,layer. Every selector must match
+    exactly one object. Preflights the entire batch; geometry is preserved.
+    Supports mechanical layers 1..16, including 'Mechanical Layer 13' aliases.
+    This command does not add/delete objects or change their geometry.
+    """
+    return await footprint_editor.execute(altium_bridge, EXCHANGE_DIR, "edit_footprint_primitives",
+                                          footprint_editor.prepare_layers, library_path, footprint_name, operations)
+
+
+@_tool(read_only=True)
+async def get_pcb_api_constants(ctx: Context, names: list[str]) -> str:
+    """Read selected native PCB enum values without arbitrary script evaluation.
+
+    Supported: eRound, eRounded, eRectangular, eOctagonal, eRoundedRectangular, eCacheManual,
+    eTopLayer, eBottomLayer, eTopOverlay, eBottomOverlay, eMechanical13,
+    eMechanical15, eMultiLayer, eNoLayer. Each identifier is evaluated in running
+    Altium. availability reports native availability and resolution separately;
+    unavailable eRound falls back explicitly to the native TShape eRounded.
+    Other unavailable identifiers return partial constants and success=false.
+    Does not modify or save documents.
+    """
+    return await footprint_editor.execute(altium_bridge, EXCHANGE_DIR, "get_pcb_api_constants",
+                                          footprint_editor.prepare_constants, names)
+
+
+@_tool()
+async def create_footprints_batch(ctx: Context, spec_file: str, units: str = "mil") -> str:
     """
     Create many PCB footprints in a single Altium script run.
 
@@ -2331,19 +2567,27 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
     field conventions.
 
     Args:
+        units (str): 'mil' (legacy default) or 'mm', case-insensitive. Applies
+            to ALL linear fields: coordinates, sizes, holes/stacks, mask/paste
+            expansions, text dimensions, Height and MODEL3D x/y/z offsets.
+            Angles, percentages, enum integers and booleans are unchanged.
+            Read getters still return their documented mil/mm units.
         spec_file (str): Path to a plain-text spec file, one record per line
-            (coords in mils, layers as names, shapes/hole types as raw
+            (linear dimensions in units, layers as names, shapes/hole types as raw
             Altium enum ints, booleans as 1/0):
             FPLIB|<path to .PcbLib>   (optional first line: opens/focuses)
-            FOOTPRINT|<name>|<description>
+            FOOTPRINT|<name>|<description>[|height]
+                Native Height, 0..1000 mm equivalent; omitted/blank defaults 0.
             EDITFOOTPRINT|<name>      add MODEL3D records to an existing
                                       footprint (never creates one; other
                                       records under it are reported and
                                       ignored)
-            PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape[|paste_mode|paste_expansion|mask_mode|mask_expansion]]]
+            PAD|name|x|y|rot|layer|plated|hole_size|hole_type|hole_width|hole_rot|top_x|top_y|top_shape[|corner_pct[|mode|mid_x|mid_y|mid_shape|bot_x|bot_y|bot_shape[|paste_mode|paste_expansion|mask_mode|mask_expansion[|testpoint_top|testpoint_bottom]]]]
+                Testpoint flags: 1/0, omitted/blank False. Top=True requires
+                Top Layer/Multi-Layer; Bottom=True requires Bottom/Multi-Layer.
                 Leave a field empty to skip it and still give a later one.
                 paste_mode/mask_mode are TMaskExpansionMode ints: 1 rule,
-                2 manual (with the expansion in mils). 0 (no mask) cannot
+                2 manual (with the expansion in units). 0 (no mask) cannot
                 be set on a pad by script and is reported as a problem.
                 Omitted: rule. Every pad the tool creates is locked.
             TRACK|x1|y1|x2|y2|width|layer
@@ -2351,14 +2595,19 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
             FILL|x1|y1|x2|y2|rotation|layer
             TEXT|x|y|size|width|rotation|layer|mirror|ttf|text
             REGION|layer|kind|x1|y1|x2|y2|...
+            VIA|x|y|size|hole_size|low_layer|high_layer
             MODEL3D|<STEP file>|<layer>|<rot_x>|<rot_y>|<rot_z>|<z_offset>[|<x>|<y>[|<embed 1/0>]]
                 add a 3D body from a STEP file: rotations in degrees,
                 z_offset (model height above the board) and x|y (offset
-                from the footprint origin) in mils, embedded in the
+                from the footprint origin) in units, embedded in the
                 library unless embed is 0. Read the result back with
                 get_footprint_primitives (bodies_3d); its rotations and
                 z offset appear only once the library is saved.
 
+    Mechanical aliases (e.g. Mechanical Layer 13) are normalized. Unknown layers
+    are rejected before creating objects; No Layer is not a valid destination.
+    Layer resolution is checked in Altium; mechanical layers 1..16 also have
+    explicit enum fallbacks when String2Layer cannot resolve their names.
     The library is left modified and unsaved; the user saves it.
 
     Returns:
@@ -2368,17 +2617,46 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
     """
     logger.info(f"Creating footprints batch from {spec_file}")
 
-    response = await altium_bridge.execute_command(
-        "create_footprints_batch",
-        {"spec_file": spec_file}
-    )
+    try:
+        prepared_spec = footprint_editor.prepare_batch_file(spec_file, EXCHANGE_DIR, units)
+        expected = footprint_editor.batch_expectations(prepared_spec)
+        accepted_layers = footprint_editor.batch_layer_names(prepared_spec)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
+    try:
+        response = await altium_bridge.execute_command(
+            "create_footprints_batch", {"spec_file": str(prepared_spec)})
+    except Exception as exc:
+        response = {"success": False, "error": str(exc)}
+    # Keep the request if completion is unknown; it may still be in use.
+    if "result" in response:
+        prepared_spec.unlink(missing_ok=True)
+
+    if response.get("command_started") is False:
+        prepared_spec.unlink(missing_ok=True)
+        return json.dumps({"success": False, "error": response.get("error"), "saved": False, "may_have_partial_changes": False})
 
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
-        return json.dumps({"success": False, "error": f"Failed batch footprint creation: {error_msg}"})
+        if isinstance(response.get("result"), dict) and response["result"].get("success") is False:
+            return json.dumps(response["result"], indent=2)
+        return json.dumps({"success": False, "error": f"Failed batch footprint creation: {error_msg}",
+                           "outcome_unknown": True, "may_have_partial_changes": True,
+                           "spec_file": str(prepared_spec)})
 
     result = response.get("result", {})
-    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+    if isinstance(result, str):
+        result = json.loads(result)
+    errors = footprint_editor.verify_batch(result, expected)
+    result["input_units"] = footprint_editor.batch_units(units)
+    result["verification"] = {"passed": not errors, "errors": errors}
+    result["success"] = not errors and not result.get("failed") and not result.get("problems") and not result.get("primitive_errors")
+    if result["success"]:
+        result["accepted_layers"] = accepted_layers
+    result["may_have_partial_changes"] = not result["success"] and bool(result.get("created") or result.get("edited"))
+    if errors:
+        result["error"] = "batch footprint property readback failed"
+    return json.dumps(result, indent=2)
 
 @_tool()
 async def build_schematic(ctx: Context, parts: list, wires: list = None,
@@ -2568,7 +2846,690 @@ async def get_schematic_pins(ctx: Context, sheet_path: str, designators: list = 
     return json.dumps({"success": True, "unit": unit, "count": len(pins), "pins": pins}, indent=2)
 
 @_tool()
-async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: str = "mil",
+async def set_schematic_sheet_properties(ctx: Context, sheet_path: str, sheet_size: Optional[str] = None) -> str:
+    """Read/change ISO format of an exact saved or open named unsaved SchDoc.
+
+    sheet_size: A0..A4. Omit to read. Changes only SheetStyle, marks changes
+    Modified, verifies the size and never saves or changes project membership.
+    """
+    try:
+        spec = schematic_document.prepare_sheet(sheet_path, sheet_size)
+        return await schematic_document.execute(altium_bridge, EXCHANGE_DIR, "set_schematic_sheet_properties", spec)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
+
+
+@_tool(read_only=True)
+async def zoom_schematic(ctx: Context, sheet_path: str, mode: str = "all") -> str:
+    """Focus an exact SchDoc and fit objects or the page using native SCH:Zoom.
+
+    mode='all' fits objects; 'sheet' fits the page. Works with named unsaved sheets. Preserves
+    Modified and never saves or edits objects. Use get_screenshot(view_type='sch')
+    afterwards for native PNG pixels instead of reconstructed drawing previews.
+    """
+    try:
+        spec = schematic_document.prepare_sheet(sheet_path, mode=mode)
+        return await schematic_document.execute(altium_bridge, EXCHANGE_DIR, "zoom_schematic", spec)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
+
+
+@_tool()
+async def save_project(ctx: Context, project_path: str, dry_run: bool = False) -> str:
+    """Save only one exact OPEN local PrjPcb/LibPkg; never save source documents.
+
+    Saving must be authorized. All sources must exist on disk and be clean.
+    Uses FocusedProject SaveObject after exact focus verification, restores prior
+    project focus, checks source states/files and verifies disk membership.
+    dry_run=True preflights without saving or changing focus/membership; it does
+    not establish that Altium will accept a later real save. No Save All.
+    """
+    try:
+        spec = schematic_document.prepare_project(project_path, dry_run)
+        return await schematic_document.execute(altium_bridge, EXCHANGE_DIR, "save_project", spec)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "project_saved": False, "may_have_partial_changes": False})
+
+
+@_tool()
+async def edit_sheet_symbols(ctx: Context, sheet_path: str, operations: list) -> str:
+    """Read/create/update/delete native Sheet Symbols and their Sheet Entries; never save.
+
+    Exact saved or open named unsaved SchDoc, coordinates in mils. operations=[]
+    reads symbols/entries with UIDs, ownership and coordinates. Operations:
+    {op:'add', properties:{designator,filename,x,y,width,height,entries:[]}},
+    {op:'update', unique_id, properties:{...}}, {op:'delete', unique_id}.
+    x/y is the symbol's lower-left corner. filename references one child SchDoc;
+    it is not created/opened or added to a project. Entries: {name,side,offset,
+    io_type?}; side=left/right/top/bottom, io_type=unspecified/input/output/
+    bidirectional. Offset is mils from top on vertical sides, from left on
+    horizontal sides, strictly inside the edge. Names and positions are distinct.
+    Omit entries on update to preserve them; supply the COMPLETE desired list
+    to replace entries (new entry UIDs), [] clears them. Symbol UID is preserved.
+    Only one operation per existing symbol per batch. Targets, names and resulting
+    entry bounds are checked before editing. One undo group. Returns native
+    readback/verification; inspect may_have_partial_changes before retrying errors.
+    Does not compile or create child Ports/wires. Use edit_schematic for those.
+    """
+    try:
+        spec = schematic_diagram.prepare_symbols(sheet_path, operations)
+        result = await schematic_diagram.execute(altium_bridge, EXCHANGE_DIR, "edit_sheet_symbols", spec)
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
+
+
+@_tool()
+async def draw_block_diagram(ctx: Context, sheet_path: str, blocks: list, links: list, notes: list) -> str:
+    """Add a non-electrical block diagram to an exact SchDoc, in memory only.
+
+    Coordinates in mils, y increases upward. blocks:[{id,text,x,y,width,height}],
+    x/y=lower-left. links:[{from,to,text?,from_side?,to_side?,points?,arrow?}],
+    sides left/right/top/bottom. Defaults choose facing sides and orthogonal
+    center routes; arrow defaults True. Optional points:[[x,y],...] is the FULL
+    orthogonal route including both side-center anchors. Crossing block interiors
+    is rejected; supply points for detours. notes:[{x,y,text}]. Lists may be empty.
+    Creates native rectangles, labels and polylines, including graphical arrowheads.
+    Creates NO electrical wires, nets, ports or sheet hierarchy. Use edit_sheet_symbols
+    for hierarchy. Does not save, compile or add project members. Validates the full
+    request first; one undo group. Returns roles/UIDs, routes and native readback.
+    Calling again appends objects; it does not replace a previous diagram.
+    API errors can leave partial changes: inspect outcome before retrying.
+    """
+    try:
+        spec, routes = schematic_diagram.prepare_diagram(sheet_path, blocks, links, notes)
+        result = await schematic_diagram.execute(altium_bridge, EXCHANGE_DIR, "draw_block_diagram", spec)
+        result["routes"] = routes
+        if spec["count"] and isinstance(result.get("objects"), list):
+            changed = {row["unique_id"] for row in result.get("results", [])}
+            result["objects"] = [obj for obj in result["objects"] if obj.get("unique_id") in changed]
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
+
+
+@_tool()
+async def edit_schematic(ctx: Context, sheet_path: str, operations: list,
+                         unit: str = "mil", save: bool = False, return_mode: str = "full") -> str:
+    """Add, update or delete objects on an exact saved or open named unsaved SchDoc.
+
+    Never saves documents. operations=[] reads the sheet's objects and UIDs.
+    Each operation: {"op":"add|update|delete", "type":"component|wire|net_label|
+    port|power_port|junction|text", "target":{"unique_id":"..."},
+    "properties":{...}}. For components target may instead be {"designator":"R1"}.
+    Omit target for add and properties for delete. One edit per target per batch.
+
+    Properties (all coordinates in mils): component: x,y,orientation(0..3),
+    mirror(bool),designator,comment,description,design_item_id,parameters({name:string}).
+    Set design_item_id="" to detach a copied prototype's DesignItemID. Add a
+    component with source_designator (clone on this sheet), OR symbol_library
+    (existing .SchLib) and symbol. Symbol sources are add-only. wire: points
+    ([x1,y1,x2,y2,...], full replacement). net_label/text: x,y,text,orientation.
+    port: x,y,name,io_type(0..3),style(0..7),width. power_port: x,y,text,
+    orientation,style(0..10),show_net_name(bool). junction: x,y. Add needs x/y
+    (or wire points), plus component designator, port name or label text.
+
+    Validates all targets/sources before editing. API errors may leave partial
+    edits: inspect applied_count, failed_index and may_have_partial_changes;
+    do not blindly retry. Returns results with UIDs and current objects,
+    including component pin electrical connection points for subsequent wiring.
+    Moving a component does not reroute attached wires. Read
+    dev/SCHEMATIC_CONVENTIONS.md before routing. Use fresh UIDs from this sheet.
+
+    Also accepts upstream action operations: move_component, delete_component,
+    place_component, set_parameter, move_text, add_wire, add_net_label,
+    add_power_port, add_junction, add_no_erc and delete_at. These use unit="mil"
+    or "mm" and optionally save=True. Do not mix the two operation formats.
+    UID add/update/delete operations always use mils and never save; use
+    save_document separately. Empty operations read objects in the UID format.
+
+    Action fields (brackets mean optional):
+      move_component: designator, [part], [x,y], [rotation 0/90/180/270], [mirror]
+      delete_component: designator, [part]
+      place_component: library (.SchLib path), symbol, designator, x, y,
+                       [rotation], [mirror], [comment]
+      set_parameter: designator, name, value, [part], [visible]
+      move_text: designator, name (Designator, Comment or a parameter), [part],
+                 [x,y], [justification 0..8], [orientation 0..3], [visible]
+      add_wire: points [[x,y], ...], with at least two points
+      add_net_label: x, y, text, [orientation 0..3], [justification 0..8]
+      add_power_port: x, y, text, [style: bar, arrow, circle, wave, power_ground,
+                      signal_ground, earth], [orientation 0..3], [show_net_name]
+      add_junction / add_no_erc: x, y
+      delete_at: kind (wire, net_label, power_port, junction, no_erc, port, note),
+                 x, y, [text]
+    part selects a multi-part component's part (1=A). Give x and y together.
+    Action operations run in order in one undo group; inspect errors for
+    partial failures. Moving components does not reroute their wires.
+
+    UID operations accept return_mode=full (default), changed (only changed
+    surviving objects) or summary (counts/results without object snapshots).
+    Coordinates, including pin connection points, are always in mils.
+    """
+    if return_mode not in ("full", "changed", "summary"):
+        return json.dumps({"success": False, "error": "return_mode must be full, changed or summary", "saved": False, "applied_count": 0})
+    if isinstance(operations, list) and any(
+        isinstance(op, dict) and isinstance(op.get("op"), str)
+        and op["op"] not in {"add", "update", "delete"} for op in operations
+    ):
+        if return_mode != "full":
+            return json.dumps({"success": False, "error": "compact return modes require UID add/update/delete operations", "saved": False, "applied_count": 0})
+        return await _edit_schematic_actions(ctx, sheet_path, operations, unit, save)
+    if unit != "mil" or save is not False:
+        return json.dumps({"success": False, "saved": False, "applied_count": 0,
+                           "error": "UID operations require unit='mil' and save=False; use save_document separately"})
+    try:
+        spec = validate_schematic_edit(sheet_path, operations)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "applied_count": 0,
+                           "saved": False}, ensure_ascii=False)
+    # Unique files prevent queued calls from overwriting one another's input.
+    spec_path = EXCHANGE_DIR / f"schematic_edit_{uuid.uuid4().hex}.txt"
+    try:
+        write_altium_text(spec_path, spec)
+        response = await altium_bridge.execute_command("edit_schematic", {"spec_file": str(spec_path)})
+        if not response.get("success", False):
+            return json.dumps({"success": False, "error": response.get("error", "bridge failed"),
+                               "saved": False, "may_have_partial_changes": bool(operations),
+                               "spec_file": str(spec_path)})
+        result = response.get("result", {})
+        if return_mode != "full":
+            result = compact_schematic_result(json.loads(result) if isinstance(result, str) else result, return_mode)
+        return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
+    finally:
+        # Keep a timed-out request's spec: a late-starting script still needs it.
+        if 'response' in locals() and response.get("success", False):
+            spec_path.unlink(missing_ok=True)
+
+
+@_tool()
+async def get_schematic_connectivity(ctx: Context, sheet_path: str, compiled: bool = True,
+                                     expected_connections: Optional[list] = None) -> str:
+    """Read pin numbers, electrical-end coordinates (mils) and actual compiler nets
+    for one exact .SchDoc in exactly one open PCB project. Never saves sheets.
+
+    compiled=True recompiles the owning project in memory. False reads the last
+    compiler cache, explicitly marked may_be_stale; fails if there is no model.
+    Reads actual flattened nets from Altium, including cross-sheet connections.
+    Pins missing from the compiler model remain in the result with null net and
+    resolution=not_in_compiled_model. Inspect complete, warnings and compiler
+    error counts. No electrical connectivity is inferred from drawing geometry.
+
+    Optional expected_connections: [{"pins":[{"designator":"C2","pin_number":"1"},
+    {"designator":"TP1","pin_number":"1"}],"net_name":"GND","exact":False}].
+    Each group must share one net; net_name optionally also checks its name.
+    exact=True rejects additional pins ON THIS SHEET, ignoring remote sheets.
+    connected=False instead checks that exactly two pins are on different nets;
+    omit net_name/exact for that case. A single-pin check requires net_name or
+    exact=True. Pin selectors may also include component_uid, part_id and/or
+    instance_id from the response to disambiguate repeated channels/parts.
+    Unknown, ambiguous or unresolved pins fail checks. Returns pins, nets with
+    local members/project pin counts, coverage and optional checks with issues.
+    success describes retrieval; checks.passed describes expected connections.
+    """
+    try:
+        path = schematic_connectivity.validate_request(sheet_path, compiled, expected_connections)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False}, ensure_ascii=False)
+    response = await altium_bridge.execute_command("get_schematic_connectivity", {"sheet_path": path, "compiled": compiled})
+    if not response.get("success", False):
+        return json.dumps({"success": False, "error": response.get("error", "bridge failed"), "saved": False})
+    result = response.get("result", {})
+    if isinstance(result, str):
+        result = json.loads(result)
+    if result.get("success", False):
+        result = schematic_connectivity.reconcile(result)
+        if expected_connections is not None:
+            result["checks"] = schematic_connectivity.check_connections(result, expected_connections)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@_tool(read_only=True)
+async def get_lcsc_component_info(ctx: Context, query: str = "", qty: int = 1, limit: int = 5,
+                                 manufacturer: str = "", exact_mpn: str = "", include_historical: bool = True,
+                                 historical_url: str = "", queries: Optional[list] = None) -> str:
+    """Read single/batch LCSC cards by C-number, exact orderable MPN or text; no Altium.
+
+    Existing query/qty/limit calls remain valid. manufacturer is an exact brand
+    filter (case/spacing and a small documented alias set normalized); exact_mpn
+    is a complete order code string, preserving commas, slashes and suffixes.
+    Both are checked on detail cards, not only search summaries. orderable_mpn
+    is the catalog's full MPN, never an inferred suffix. limit=1..10 applies after
+    filtering; text searches scan at most three 30-row pages. qty is positive.
+    queries replaces query: 1..25 strings or objects with query, id and any lookup
+    option. All entries are preflighted; three workers, identical requests fetched
+    once, results in input order with individual errors/partial_success.
+    include_historical falls back to bounded public LCSC/CN page discovery when
+    no verified current card exists. Optional historical_url is an HTTPS LCSC or
+    item.szlcsc.com product-card hint. Historical pages never supply a fresh USD
+    quote; stock/MOQ/prices stay null. Source URLs and unavailable/blocked sources
+    are explicit in historical_search; empty incomplete results are failures.
+    sales_status is on_sale/not_for_sale/discontinued/unknown with source evidence
+    and region. It is separate from stock and manufacturer lifecycle. Cards retain
+    technical parameters/units, datasheets, quantity pricing and lcsc_parameters.
+    Read-only HTTP only: no Altium changes, saves, persistent cache or purchases.
+    """
+    try:
+        client = lcsc_catalog.LcscClient()
+        if queries is not None:
+            if query:
+                raise ValueError("use query or queries, not both")
+            result = await asyncio.to_thread(client.lookup_many, queries, qty, limit, manufacturer,
+                                             exact_mpn, include_historical, historical_url)
+        else:
+            result = await asyncio.to_thread(client.lookup, query, qty, limit, manufacturer,
+                                             exact_mpn, include_historical, historical_url)
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    except (ValueError, TypeError, lcsc_catalog.LcscError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False}, ensure_ascii=False)
+
+
+@_tool()
+async def set_library_component_lcsc_data(ctx: Context, library_path: str, symbol_name: str,
+                                         lcsc_id: str, qty: int = 1, allow_package_mismatch: bool = False) -> str:
+    """Fill LCSC/JLCPCB fields on an exact existing SchLib symbol after creation.
+
+    Fetches a fresh detail card for an exact C-number, then requires the symbol's
+    unique nonempty MP and MF to match the card's full MPN and manufacturer.
+    MPN preserves punctuation/suffixes; manufacturer uses the lookup's documented
+    case/spacing/brand aliases. Missing/ambiguous identities fail before writing.
+    Package is compared with case/whitespace normalization only. A known conflict
+    blocks by default and reports both values. allow_package_mismatch=True permits
+    only that conflict and returns a warning; it never bypasses MP/MF checks.
+    Missing package data remains explicitly unverified; duplicate Package fields
+    block. Core Package/MF/MP and model bindings are never corrected or replaced.
+    Upserts supplier fields plus source URL/type, UTC fetched-at, sales status,
+    region, raw lifecycle and status evidence via set_library_component_data.
+    A fresh timestamp can make an otherwise identical refresh changed=True.
+    Does not change core parameters, Comment, native Description, models or geometry;
+    never creates Pacage, edits placed components or saves a document. Existing
+    supplier parameter names are reused. Do not edit the symbol concurrently.
+    """
+    try:
+        lcsc_id = lcsc_catalog.validate_code(lcsc_id)
+        lcsc_catalog.validate_quantity(qty)
+        if type(allow_package_mismatch) is not bool:
+            raise ValueError("allow_package_mismatch must be a boolean")
+        library_component_data.prepare_request(library_path, symbol_name, None, None, None, None)
+        component = await asyncio.to_thread(lcsc_catalog.LcscClient().get_product, lcsc_id, qty)
+        current = json.loads(await set_library_component_data(ctx, library_path, symbol_name))
+        if not current.get("success"):
+            return json.dumps(current, ensure_ascii=False)
+        checks = lcsc_catalog.check_target(current["after"], component, allow_package_mismatch)
+        parameters = lcsc_catalog.library_parameters(component)
+    except lcsc_catalog.LcscTargetConflict as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False,
+                           "may_have_partial_changes": False, "lcsc_id": lcsc_id, **exc.report}, ensure_ascii=False)
+    except (ValueError, TypeError, OSError, lcsc_catalog.LcscError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False}, ensure_ascii=False)
+    result = json.loads(await set_library_component_data(ctx, library_path, symbol_name, parameters=parameters))
+    result["lcsc_id"] = component["lcsc_id"]
+    result["lcsc_fetched_at"] = component["fetched_at"]
+    result["lcsc_parameter_names"] = list(parameters)
+    result.update(checks)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@_tool()
+async def verify_library_roundtrip(ctx: Context, library_paths: str | list[str], save: bool = False,
+                                   max_differences: int = 100, coordinate_tolerance_mils: float = .001) -> str:
+    """Compare whole SchLib/PcbLib buffers across an actual close and reopen.
+
+    library_paths: one absolute path or 1..8 distinct saved/open named unsaved
+    library paths. Default save=False never saves and refuses any dirty/unsaved
+    target before closing ANY library. save=True explicitly saves ALL contents
+    of exactly these libraries; use only with user authorization. Existing files
+    are backed up centrally before saves. Never saves sheets or projects.
+
+    Compares all members: geometry, parameters/fonts/visibility, native library
+    properties, model/datafile/pin-pad bindings and exposed 3D body data. Reads
+    saved STEP placements and hashes used embedded decompressed/linked payloads.
+    Dirty PcbLib STEP rotations/payload are unavailable before save: reports that
+    gap and equivalent=None unless an observed difference makes it False.
+    Unknown primitives/custom stacks also remain explicit coverage gaps.
+    equivalent=True applies to fully covered exposed data, not 3D rendering.
+
+    Preserves originally open/closed editors, members/parts/display and previous
+    view; clean closes only, no discard. Restores original focused project.
+    No-save hash/timestamp verification. Coordinate tolerance in mils, 0..1;
+    max_differences caps output only, not comparisons. Full snapshots, backups
+    and report are under the toolkit exchange directory. Incomplete native
+    completion stops; inspect outcome_unknown/save_outcome_unknown before retry.
+    See dev/LIBRARY_ROUNDTRIP.md for coverage and save semantics.
+    """
+    return await library_roundtrip.execute(altium_bridge, EXCHANGE_DIR, library_paths, save,
+                                            max_differences, coordinate_tolerance_mils)
+
+
+@_tool(read_only=True)
+async def validate_library_components(ctx: Context, library_paths: str | list[str],
+                                       component_names: Optional[list[str]] = None,
+                                       rules: Optional[dict] = None, pad_roles: Optional[list[dict]] = None,
+                                       offset: int = 0, limit: int = 50, max_issues: int = 500) -> str:
+    """Validate SchLib/PcbLib buffers without edits, compilation or saves.
+
+    Paths/names/pages follow get_library_components_data. Checks required symbol
+    parameters, native Description/Designator, pin grid/duplicates, every PCB
+    pin map (including implicit same-name maps), and footprint pad dimensions,
+    annular rings, copper/NPTH gaps, solder-mask webs and paste apertures/gaps.
+    Resolves models only inside explicit input PcbLibs, honoring stored links;
+    linked footprints are checked even outside the root page/name filter.
+
+    rules overrides documented defaults: required_parameters; pin_grid_mils,
+    grid_tolerance_mils; min/max_pad_size_mm; min_copper_clearance_mm,
+    min_npth_clearance_mm, min_annular_ring_mm, min_mask_web_mm,
+    min_paste_clearance_mm, max_paste_expansion_mm; optional
+    rule_mask_expansion_mm/rule_paste_expansion_mm; require_footprint and
+    require_shield_mapping. Rule-driven mask/paste values remain unresolved
+    unless supplied. These are configurable checks, not a fabrication standard.
+    pad_roles:[{library_path,footprint_name,pad_name,role:'electrical|shield|npth',
+    paste_required?:bool}]. Native testpoints allow intentional paste suppression.
+    NPTH uses native hole/plating; unconfirmed shield name hints are explicit.
+
+    Geometry covers concentric legacy standard pad stacks, not custom/offset
+    contours or non-pad copper. Rotated rectangles/circles and standard holes
+    are supported; conservative bounds never certify a suspected violation.
+    Reports stable issue codes, severity/measurements, roles, dependencies and
+    coverage. success means execution, valid is false on errors, null when
+    incomplete, true only for fully checked selection. max_issues caps output,
+    not analysis/counts. Dirty buffers, selections, views and disk are preserved.
+    See dev/LIBRARY_VALIDATION.md for defaults, scope and examples.
+    """
+    return await library_validation.execute(altium_bridge, EXCHANGE_DIR, library_paths, component_names,
+                                            rules, pad_roles, offset, limit, max_issues)
+
+
+@_tool(read_only=True)
+async def get_library_components_data(ctx: Context, library_paths: str | list[str],
+                                      component_names: Optional[list[str]] = None,
+                                      fields: Optional[list[str]] = None, offset: int = 0, limit: int = 50) -> str:
+    """Batch-read exact saved/open named unsaved SchLib/PcbLib buffers in one run.
+
+    library_paths: one absolute path or 1..16 distinct paths. component_names:
+    omitted for all, otherwise 1..500 distinct exact case-insensitive native
+    symbol/footprint names (not Component ID parameters or substring searches).
+    Reads dirty buffers without reload, never changes the active member/part/
+    display mode and restores the previous document view. Newly opened libraries
+    remain open; never compiles, edits objects or saves documents.
+
+    fields defaults to ['properties','parameters','models']; optional sections
+    'pins','pads' request detailed arrays. Pass all five names for full data.
+    SchLib properties: Designator template, ComponentKind/name/code, Comment,
+    description, part/display counts and current part/mode. parameters is the
+    native name/value dictionary; models includes footprint/datafile bindings,
+    raw maps and parsed pin_map (one-to-many). pins covers all parts/modes with
+    numbers, names, native x/y/length in mils, ownership, electrical/visibility,
+    UIDs, descriptions, IEEE symbols and pin parameters.
+    PcbLib properties: native Height in mm and description; pads: every physical
+    pad name/layer and native Testpoint Top/Bottom booleans. No fabricated PcbLib
+    symbol parameters/ComponentKind; unsupported sections are listed per library.
+    This is library metadata, not placed/compiled connectivity or a file-link audit.
+
+    offset/limit paginate matching members across input library order, each
+    library sorted by native case-insensitive name; limit 1..500, default 50.
+    Missing names are explicit, with complete=False; row/library errors preserve
+    other results and set success=False. has_more/next_offset describe pagination.
+    Partial page errors occupy a page slot. Read-only annotations, disk hash/
+    timestamp checks, Modified/selection/view verification; no ad-hoc scripts.
+    """
+    return await library_components_data.execute(altium_bridge, EXCHANGE_DIR, library_paths,
+                                                  component_names, fields, offset, limit)
+
+
+@_tool()
+async def set_library_view(ctx: Context, library_path: str, component_name: Optional[str] = None,
+                           part_id: Optional[int] = None, display_mode: Optional[int] = None,
+                           fit: bool = True, view_mode: Optional[str] = None, camera: Optional[str] = None) -> str:
+    """Navigate an exact saved/open named unsaved SchLib or PcbLib without saving.
+
+    component_name matches one exact symbol/footprint, case-insensitively; omitted
+    uses its current member. SchLib: part_id is 1-based, display_mode is 0-based;
+    both are checked against the symbol counts and read back from the editor.
+    PcbLib: view_mode='2d'|'3d'; camera='top'|'bottom'|'front'|'back'|'left'|'right'|
+    'isometric'|'flipped_isometric'. Camera implies 3d; rejects 2d plus camera.
+    SchLib rejects 3d/camera; PcbLib rejects part/display selectors.
+    fit=True fits objects; explicit 3d/camera uses padded physical bounds, then
+    applies camera last (library Zoom All resets its pose). Text-only/empty 3d
+    footprints need fit=False. Omitted mode/camera send no such commands; native
+    fitting can reset orientation. fit=False with no selectors reads
+    the current member/part/display; a missing or ambiguous member is refused.
+
+    Verifies exact native selection, unchanged exposed content/metadata, Modified
+    and disk hash/timestamp. Fit, 2D/3D and camera are fixed native commands;
+    the API has no supported camera/mode readback, so their verification is
+    explicitly dispatch_only. Does not edit primitives, create members, compile,
+    save documents or automate mouse/keyboard input.
+    """
+    return await library_view.execute(altium_bridge, EXCHANGE_DIR, library_path, component_name,
+                                      part_id, display_mode, fit, view_mode, camera)
+
+
+@_tool()
+async def remove_empty_library_component(ctx: Context, library_path: str, component_name: str,
+                                         dry_run: bool = False) -> str:
+    """Remove one genuinely empty SchLib/PcbLib member, without saving documents.
+
+    Exact absolute .SchLib/.PcbLib path, saved or already open with a new unsaved
+    name. Reuses dirty buffers; component_name matches exactly, case-insensitively.
+    Intended for Component_1 / PCBComponent_1 after creating the real component.
+    dry_run=True reports native content assessment and blockers without deleting.
+
+    Any pins, graphics (including hidden/other-part objects), custom parameters,
+    models, description, nondefault Comment/designator, component kind, multipart
+    or alternate modes, linked symbol identity, or nonzero footprint height blocks
+    removal. Native default symbol Designator/Comment placeholders are allowed.
+    An unreadable property fails closed. Refuses the last library member: create
+    the real symbol/footprint first. Missing members are idempotent no-ops.
+
+    Verifies the target disappeared, other member identities/counts/metadata and
+    the file hash/timestamp stayed unchanged. Marks only a changed library dirty.
+    Never deletes a file, updates placed parts, compiles or saves. Inspect
+    may_have_partial_changes/outcome_unknown before retrying failed mutations.
+    """
+    return await empty_library_component.execute(altium_bridge, EXCHANGE_DIR, library_path, component_name, dry_run)
+
+
+@_tool()
+async def update_symbol_primitives(ctx: Context, library_path: str, symbol_name: str, edits: list) -> str:
+    """Update existing SchLib labels, drawing objects and pins in place; never save.
+
+    Exact absolute existing .SchLib; reuses dirty buffers. edits=[] reads current
+    objects, UIDs, owner_part_id/display_mode and properties. Each edit:
+    {target:{type:'label',owner_part_id:1,text:'RED'},properties:{text:'Red'}}.
+    Targets match exactly once by unique_id and/or current property values within
+    this symbol; add part/display selectors for multipart symbols. One edit per
+    object per batch. All targets are resolved before mutation; no add/delete.
+
+    Types/properties (mils, y up): label: text,x,y,orientation(0..3),justification
+    (0..8),color,font_name,font_size,font_bold/font_italic/font_underline/font_strikeout.
+    line/rectangle: x1,y1,x2,y2,line_width(0..3),color; rectangle adds is_solid,
+    area_color. polyline/polygon: vertices:[{x,y},...],line_width,color; polygon adds
+    is_solid,area_color. arc: cx,cy,radius,start_angle,end_angle,line_width,color.
+    ellipse: cx,cy,radius,secondary_radius,line_width,color,is_solid,area_color.
+    pin: pin_name,description,x,y,length,orientation,electrical(0..7),show_name,
+    show_designator,is_hidden,color. Colors are native BGR integers. Supply coordinate
+    pairs together. Pin numbers, object UID and part/display ownership are read-only
+    (pin_number can select pins); use set_library_component_data for model maps.
+
+    Preserves symbol/object identity, unrequested properties, parameters and models.
+    One undo group, idempotent no-ops and native readback/disk verification.
+    Does not recreate symbols, update placed parts, compile or save documents.
+    Inspect may_have_partial_changes/outcome_unknown before retrying failures.
+    """
+    return await symbol_primitives.execute(altium_bridge, EXCHANGE_DIR, library_path, symbol_name, edits)
+
+
+@_tool()
+async def set_library_component_properties(ctx: Context, library_path: str, symbol_name: str,
+                                           designator_template: Optional[str] = None,
+                                           component_kind: Optional[str] = None) -> str:
+    """Set native default Designator and Component Type on one existing SchLib symbol.
+
+    Exact absolute saved .SchLib path; reuses open unsaved changes without reload.
+    designator_template: J?, D?, C?, etc.; prefix starts with a letter and contains
+    letters/digits/underscore, followed by one '?', at most 64 characters.
+    component_kind: standard, mechanical, graphical, net_tie_bom, net_tie_no_bom,
+    standard_no_bom. Case-insensitive UI labels also work, e.g. 'Standard (No BOM)',
+    'Net Tie (In BOM)' and 'Net Tie'. Native ComponentKind is changed; no custom
+    BOM parameter is created. Omit either field to preserve it; omit both to read.
+    Preserves parameters, models, geometry and other symbols. Does not renumber
+    placed components, update a project/PCB, compile or save any document.
+    One undo group, readback and disk verification; identical requests are no-ops.
+    On failure inspect may_have_partial_changes/outcome_unknown before retrying.
+    """
+    return await library_component_properties.execute(altium_bridge, EXCHANGE_DIR, library_path,
+                                                       symbol_name, designator_template, component_kind)
+
+
+@_tool()
+async def set_library_component_data(ctx: Context, library_path: str, symbol_name: str,
+                                     parameters: Optional[dict] = None, footprint_models: Optional[list] = None,
+                                     comment: Optional[str] = None, description: Optional[str] = None) -> str:
+    """Upsert parameters and PCB footprint models on an exact existing SchLib symbol.
+    Never saves documents or updates placed components. Omit edits to read metadata.
+    parameters maps names to string values; Comment/Designator are reserved (use
+    comment separately; use set_library_component_properties for Designator/type).
+    Existing parameter visibility and unrelated data remain.
+    footprint_models: [{"model_name":"R_0603","library_path":"C:/Lib/Parts.PcbLib",
+    "pin_map":{"1":["2"],"2":["1"]},"is_current":true,"description":"optional"}].
+    Each model requires an existing PcbLib/footprint and a complete pin_map across
+    all symbol parts. One pin may map to several pads; pads cannot be reused by
+    different pins. Numbers are exact strings. Unsupported map delimiters fail.
+    Models are upserted by case-insensitive PCBLIB name; other models are kept.
+    Explicitly selecting a current footprint deselects other PCB models only.
+    Omitted is_current preserves existing state; new models default inactive.
+    All references are checked before edits. Locked/managed models and read-only
+    parameters are rejected. Returns before/after metadata and readback verification;
+    on API/readback failure inspect may_have_partial_changes before retrying.
+    """
+    try:
+        spec = library_component_data.prepare_request(library_path, symbol_name, parameters, footprint_models, comment, description)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
+    spec_path = EXCHANGE_DIR / f"library_data_{uuid.uuid4().hex}.txt"
+    try:
+        write_altium_text(spec_path, spec)
+        response = await altium_bridge.execute_command("set_library_component_data", {"spec_file": str(spec_path)})
+        if not response.get("success", False):
+            return json.dumps({"success": False, "error": response.get("error", "bridge failed"),
+                               "saved": False, "may_have_partial_changes": bool(parameters or footprint_models or comment is not None or description is not None),
+                               "spec_file": str(spec_path)})
+        result = response.get("result", {})
+        if isinstance(result, str):
+            result = json.loads(result)
+        for key in ("before", "after"):
+            if key in result:
+                library_component_data.enrich(result[key])
+        if result.get("success"):
+            errors = library_component_data.verify(result["after"], parameters, footprint_models, comment, description)
+            if result.get("changed") and result.get("is_modified") is not True:
+                errors.append("library is not marked Modified after metadata edits")
+            result["verification"] = {"passed": not errors, "errors": errors}
+            if errors:
+                result.update(success=False, error="library metadata readback mismatch", may_have_partial_changes=result["changed"])
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    finally:
+        if 'response' in locals() and response.get("success", False):
+            spec_path.unlink(missing_ok=True)
+
+
+@_tool()
+async def clone_schematic_components(ctx: Context, source_sheet: str, target_sheet: str, designators: list) -> str:
+    """Clone placed components between two exact different SchDocs, without saving.
+
+    designators is a case-insensitive list of 1..500 distinct designators. Copies
+    ALL placed parts of each requested multipart component. Preserves designators,
+    coordinates, rotation/mirror, parameter text/visibility, pins, primitives and
+    library/model links; assigns fresh component and nonempty child UIDs. Source
+    remains unchanged; only target becomes Modified. Both paths must exist on disk
+    or identify already-open named unsaved SchDocs; open buffers are never reloaded.
+    Preflight rejects missing/ambiguous sources and any target designator collision
+    before cloning anything. Does not copy external wires, labels, sheet graphics,
+    compile, update PCB or change project membership. Preserved designators need
+    reannotation when both sheets remain in one project. API errors may leave
+    partial copies: inspect cloned_count, components, failed_index and uncertainty
+    before retrying. Returns source/clone preservation and old-to-new UID mappings.
+    """
+    return await schematic_cloning.execute(altium_bridge, EXCHANGE_DIR, source_sheet, target_sheet, designators)
+
+
+@_tool()
+async def close_document(ctx: Context, document_path: str, require_clean: bool = True) -> str:
+    """Close one exact open document or PrjPcb/LibPkg by absolute path; never save.
+
+    require_clean=True refuses a modified target. For a project, preflight also
+    checks all its open source/generated documents before closing any of them,
+    then closes those documents and the project. False explicitly DISCARDS their
+    unsaved changes; use only when discarding is authorized. Already-closed or
+    missing targets succeed idempotently without opening files. Closing one editor
+    does not remove its saved source membership. Script documents/projects are
+    unsupported. Returns affected/closed/discarded/remaining paths and verifies
+    unrelated open documents retain their state. API errors can leave a partial
+    close; inspect may_have_partial_changes/close_outcome_unknown before retrying.
+    """
+    return await document_closing.execute(altium_bridge, EXCHANGE_DIR, document_path, require_clean)
+
+
+@_tool()
+async def open_document(ctx: Context, document_path: str) -> str:
+    """Open/focus an exact existing SchDoc/PcbDoc/SchLib/PcbLib by absolute path.
+
+    Use this to open a symbol or footprint library without a search/read side
+    operation. Reuses an already-open document, including named unsaved files,
+    without reloading it or clearing Modified. A closed target must exist on
+    disk; missing files fail rather than creating a blank document. Never saves,
+    compiles, installs a library or adds project membership. Returns opened,
+    already_open, exact identity, Modified state and verification. Showing a
+    document may change the current project to its owner; use select_project
+    separately when project context matters.
+    """
+    return await document_management.execute(altium_bridge, EXCHANGE_DIR, "open_document", document_path)
+
+
+@_tool()
+async def create_document(ctx: Context, document_path: str, document_kind: Optional[str] = None) -> str:
+    """Create a named unsaved document in Free Documents; never saves or adds it to a project.
+
+    Requires an absolute local path with an existing parent directory. Supports
+    .SchDoc (SCH), .PcbDoc (PCB), .SchLib (SCHLIB), .PcbLib (PCBLIB). Optional
+    document_kind must match the extension. Rejects existing files/open documents.
+    Use add_document_to_project separately. On failure inspect partial changes.
+    """
+    return await document_management.execute(altium_bridge, EXCHANGE_DIR, "create_document",
+                                             document_path, document_kind=document_kind)
+
+
+@_tool()
+async def save_document(ctx: Context, document_path: str, dry_run: bool = False) -> str:
+    """Save ONLY the exact open SchDoc/PcbDoc/SchLib/PcbLib at its assigned local path.
+
+    Call only when the user authorizes saving that document. This writes a file;
+    it never invokes Save All, saves a project, renames or reloads a document.
+    Works for named unsaved documents created by create_document. dry_run=True
+    validates the open target without writing or clearing Modified; it does not
+    guarantee the editor will accept a later save. Rejects read-only/network paths.
+    Returns native save status, Modified state and disk SHA-256 readback. A timeout
+    may have written the file: inspect save_outcome_unknown before retrying.
+    """
+    return await document_management.execute(altium_bridge, EXCHANGE_DIR, "save_document",
+                                             document_path, dry_run=dry_run)
+
+
+@_tool()
+async def add_document_to_project(ctx: Context, project_path: str, document_path: str) -> str:
+    """Add one exact document to an exact OPEN .PrjPcb or .LibPkg, in memory only.
+
+    Supports SchDoc/PcbDoc/SchLib/PcbLib; LibPkg supports libraries only. The source
+    must exist on disk or be an open named unsaved document. Idempotent when already
+    included. Does not depend on project focus, compile, save documents or save the
+    project. Project membership must later be saved explicitly in Altium to persist.
+    On API failure inspect may_have_partial_changes and membership before retrying.
+    """
+    return await document_management.execute(altium_bridge, EXCHANGE_DIR, "add_document_to_project",
+                                             document_path, project_path=project_path)
+
+
+async def _edit_schematic_actions(ctx: Context, sheet_path: str, operations: list, unit: str = "mil",
                          save: bool = False) -> str:
     """
     Change an existing schematic sheet: move, rotate, delete or place parts,
@@ -2706,19 +3667,25 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     if error:
         return json.dumps({"success": False, "error": error})
     logger.info(f"Editing {sheet_path}: {len(lines)} operations")
-    # Part names and parameter values may hold text that is not plain ASCII
-    write_altium_text(EXCHANGE_DIR / "sch_edit_spec.txt", "\n".join(lines) + "\n")
-    response = await altium_bridge.execute_command("edit_schematic", {
-        "sheet_path": sheet_path, "save": bool(save)})
-    if not response.get("success", False):
-        return json.dumps({"success": False,
-                           "error": f"Failed to edit the sheet: {response.get('error', 'unknown error')}"})
-    result = response.get("result", {})
-    if isinstance(result, str):
-        return result
-    if result.get("errors"):
-        result["success"] = False
-    return json.dumps(result, indent=2)
+    # Unique input also isolates queued calls from other server processes.
+    spec_path = EXCHANGE_DIR / f"schematic_actions_{uuid.uuid4().hex}.txt"
+    write_altium_text(spec_path, "\n".join(lines) + "\n")
+    try:
+        response = await altium_bridge.execute_command("edit_schematic_actions", {
+            "sheet_path": sheet_path, "save": bool(save), "spec_file": str(spec_path)})
+        if not response.get("success", False):
+            return json.dumps({"success": False, "saved": False,
+                               "may_have_partial_changes": True, "spec_file": str(spec_path),
+                               "error": f"Failed to edit the sheet: {response.get('error', 'unknown error')}"})
+        result = response.get("result", {})
+        if isinstance(result, str):
+            result = json.loads(result)
+        if result.get("errors"):
+            result["success"] = False
+        return json.dumps(result, indent=2)
+    finally:
+        if 'response' in locals() and response.get("success", False):
+            spec_path.unlink(missing_ok=True)
 
 # Changes the design: a timeout leaves its outcome unknown, so no blind retry
 MUTATING_COMMANDS.add("edit_schematic")
@@ -2908,9 +3875,23 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
             LIBRARY|<path to .SchLib>   (optional first line: opens/focuses;
                                          an already-open library is only
                                          focused, never reloaded)
-            SYMBOL|<name>|<description>|<part_count>
+            SYMBOL|<name>|<description>[|part_count[|designator_template[|component_kind]]]
+                Defaults: 1, U?, standard. Examples: |1|J?|standard or
+                |1|D?|Standard (No BOM). Blank optional fields use defaults.
+                Native ComponentKind names: standard, mechanical, graphical,
+                net_tie_bom, net_tie_no_bom, standard_no_bom; UI labels accepted.
+                Creation-only header fields, validated across the whole batch;
+                set inside the creation transaction, not as custom parameters.
+            PARAM|<name>|<value>   (required metadata for each SYMBOL)
             PIN|<same pipe fields as create_schematic_symbol pins>
             GRAPHIC|<same entry format as create_schematic_symbol graphics>
+            Every new symbol requires Value, MF, MP, HelpURL, Package, Type,
+            Instructions and System with actual nonempty string values, plus
+            a searchable description (category, function/specifications, package).
+            Use Package; Pacage is rejected. All blocks are checked before edits.
+            Values after PARAM's second | are preserved, including additional |.
+            SYMPARAM can also provide creation metadata. Existing-symbol edit
+            blocks do not require the creation schema.
             EDITSYMBOL|<name>   edit an existing symbol instead (its pins
                                 and graphics are left alone; a missing
                                 symbol is reported as failed, never created)
@@ -2971,40 +3952,50 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
              and problems (e.g. a pin number not in the symbol, an unknown
              IEEE symbol or justification)
     """
+    try:
+        text, symbols = symbol_metadata.prepare_batch(spec_file)
+    except (ValueError, TypeError, OSError) as exc:
+        return json.dumps({"success": False, "error": str(exc), "saved": False, "may_have_partial_changes": False})
     logger.info(f"Creating symbols batch from {spec_file}")
-
-    # The script opens or focuses the LIBRARY| path as written, so a short
-    # (8.3) or forward-slash path would open a second copy of a library that
-    # is open. Altium gets a copy with the long path; the caller's file is
-    # left as it is.
-    copy = None
+    prepared_file = EXCHANGE_DIR / f"symbols_batch_{uuid.uuid4().hex}.txt"
+    write_altium_text(prepared_file, text)
     try:
-        fixed = spec_with_long_library(read_altium_text(spec_file))
-    except OSError:
-        fixed = None  # missing or unreadable: the script reports it
-    if fixed is not None:
-        fd, copy = tempfile.mkstemp(prefix="symbols_spec_", suffix=".txt", dir=EXCHANGE_DIR)
-        os.close(fd)
-        write_altium_text(copy, fixed)
-    try:
-        response = await altium_bridge.execute_command(
-            "create_symbols_batch",
-            {"spec_file": copy or spec_file}
-        )
+        response = await altium_bridge.execute_command("create_symbols_batch", {"spec_file": str(prepared_file)})
     finally:
-        if copy:
-            try:
-                os.remove(copy)
-            except OSError:
-                pass
+        if 'response' in locals() and response.get("success", False):
+            prepared_file.unlink(missing_ok=True)
 
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error in batch symbol creation: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed batch creation: {error_msg}"})
+        details = response.get("result", {})
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except ValueError:
+                details = {}
+        if not isinstance(details, dict):
+            details = {}
+        return json.dumps({**details, "success": False, "error": f"Failed batch creation: {error_msg}",
+                           "saved": False, "may_have_partial_changes": True, "spec_file": str(prepared_file)})
 
     result = response.get("result", {})
-    return json.dumps(result, indent=2) if not isinstance(result, str) else result
+    if isinstance(result, str):
+        result = json.loads(result)
+    results = result.get("components", [])
+    errors = []
+    if len(results) != len(symbols):
+        errors.append("created-symbol readback count mismatch")
+    for item, request in zip(results, symbols):
+        if item.get("component_name") != request["symbol_name"]:
+            errors.append("created-symbol order/name mismatch")
+        symbol_metadata.verify(item, request["description"], request["parameters"], request.get("comment"),
+                               request["designator_template"], request["component_kind"])
+        errors.extend(item["verification"]["errors"])
+    result["verification"] = {"passed": not errors, "errors": errors}
+    result["success"] = not errors and not result.get("failed") and not result.get("problems") and result.get("created") == len(symbols)
+    result["may_have_partial_changes"] = not result["success"] and bool(result.get("created"))
+    return json.dumps(result, indent=2)
 
 @_tool(read_only=True)
 async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_name: str = "") -> str:
@@ -3040,6 +4031,10 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
              PINSYMBOL takes them), their parameters [{name, value}]
              when they have any, and functions ["ETH1_MDIO", ...] (the
              Functions list, as PINFUNC sets it) when they have any
+
+    Use update_symbol_primitives(library_path, symbol_name, []) for editable
+    object selectors/UIDs; pass edits there to change existing graphics or pins
+    without recreating the symbol. This getter remains the broader inventory.
     """
     logger.info(f"Getting symbol primitives (library={library_path}, symbol={symbol_name})")
 
@@ -3115,6 +4110,34 @@ async def create_net_class(ctx: Context, class_name: str, net_names: list) -> st
     logger.info(f"Net class '{class_name}' created/modified successfully")
     return json.dumps(result, indent=2)
     
+@_tool()
+async def set_pcb_component_properties(ctx: Context, pcb_path: str, designators: list,
+                                       component_kind: Optional[str] = None, graphical: Optional[bool] = None,
+                                       include_in_bom: Optional[bool] = None, include_in_pick_place: Optional[bool] = None) -> str:
+    """Read/set native type of placed components in one exact PcbDoc; never save.
+
+    Explicit absolute saved/open named unsaved PCB path; PcbLib targets refused.
+    designators: 1..1000 distinct exact names, case-insensitive, no wildcards.
+    Omit edits to read. component_kind accepts standard, mechanical, graphical,
+    net_tie_bom, net_tie_no_bom, standard_no_bom or their UI labels. graphical=True
+    selects Graphical; False resets a Graphical component to Standard, otherwise
+    retaining a matching current type. BOM/Pick & Place booleans are constraints
+    on the native kind, not independent flags or custom parameters. Retain a
+    matching current kind, otherwise require a unique non-net-tie type; ambiguous
+    or contradictory constraints fail before any component changes. Omitted
+    inclusion fields follow the chosen kind. Standard (No BOM) Pick & Place is
+    null/depends_on_output_settings; no output settings or variants are edited.
+    For M08 use graphical=True, include_in_bom=False, include_in_pick_place=False.
+    All targets preflighted; one undo group; no-op preserves Modified. Preserves
+    pose, footprint/source links, locks and children. Returns native kind and
+    type-policy eligibility, before/after snapshots and disk/readback checks;
+    actual BOM/Pick & Place exports are not generated/verified. Inspect
+    may_have_partial_changes/outcome_unknown before retrying.
+    """
+    return await pcb_component_properties.execute(altium_bridge, EXCHANGE_DIR, pcb_path, designators,
+                                                   component_kind, graphical, include_in_bom, include_in_pick_place)
+
+
 @_tool()
 async def set_component_position(ctx: Context, cmp_designator: str, x: float, y: float, rotation: float = -1) -> str:
     """
@@ -5883,6 +6906,16 @@ def _bring_to_front(hwnd):
             win32process.AttachThreadInput(this_thread, front_thread, False)
 
 
+def _grab_stable_window_image(hwnd, width, height, is_foreground):
+    """Refuse compositor captures if another app takes focus during rendering."""
+    if not is_foreground():
+        raise RuntimeError("Altium lost foreground before capture")
+    image = _grab_window_image(hwnd, width, height)
+    if not is_foreground():
+        raise RuntimeError("Altium lost foreground during capture")
+    return image
+
+
 def _return_foreground(previous_window):
     """Give the window that was in front back the foreground, when Altium
     still has it. Starting any command in Altium brings Altium up, so this is
@@ -5898,13 +6931,18 @@ def _return_foreground(previous_window):
         logger.debug(f"Could not give the foreground back: {e}")
 
 
-def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
-    """Copy a window's pixels, frame included, into an RGB image.
 
+
+def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
+    """Copy the foreground window from the composed desktop into an RGB image.
+
+    Altium's GPU canvas is absent/corrupted in its window device context.
+    The caller brings the window forward before reading the desktop pixels.
     Every GDI object is released even when a step fails, so a failed capture
     does not leak device contexts or the bitmap.
     """
-    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    left, top, _, _ = win32gui.GetWindowRect(hwnd)
+    hwnd_dc = win32gui.GetDC(0)
     mfc_dc = save_dc = bitmap = None
     try:
         mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
@@ -5912,7 +6950,7 @@ def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
         bitmap = win32ui.CreateBitmap()
         bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
         save_dc.SelectObject(bitmap)
-        save_dc.BitBlt((0, 0), (width, height), mfc_dc, (0, 0), win32con.SRCCOPY)
+        save_dc.BitBlt((0, 0), (width, height), mfc_dc, (left, top), win32con.SRCCOPY)
         info = bitmap.GetInfo()
         return Image.frombuffer('RGB', (info['bmWidth'], info['bmHeight']),
                                 bitmap.GetBitmapBits(True), 'raw', 'BGRX', 0, 1)
@@ -5924,7 +6962,7 @@ def _grab_window_image(hwnd, width: int, height: int) -> Image.Image:
             win32gui.DeleteObject(bitmap.GetHandle())
         if mfc_dc is not None:
             mfc_dc.DeleteDC()
-        win32gui.ReleaseDC(hwnd, hwnd_dc)
+        win32gui.ReleaseDC(0, hwnd_dc)
 
 
 @_tool(read_only=True)
@@ -6472,8 +7510,8 @@ def _save_debug_screenshot(label: str, png_bytes: bytes):
 
 
 @_tool(read_only=True)
-async def get_screenshot(ctx: Context, target: str = None, view_type: str = None,
-                         zoom_to: list = None, open_if_closed: bool = False):
+async def get_screenshot(ctx: Context, view_type: str = None, zoom_to: list = None,
+                         target: str = None, open_if_closed: bool = False):
     """
     Take a screenshot of exactly one thing in Altium, returned as viewable image content.
 
@@ -6500,7 +7538,7 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
 
     Args:
         target (str): What to capture, see above. Default "current".
-        view_type (str): Old form, kept for compatibility: 'pcb' or 'sch' brings
+        view_type (str): Old form, kept for compatibility: pcb, sch, pcblib or schlib brings
             some document of that kind to the front (opening one if none is
             open) and captures the whole window. Ignored when target is given.
         zoom_to (list, optional): Component designators (e.g. ["U12", "R42"]).
@@ -6515,6 +7553,11 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
         captured_document, view_type, whether anything was switched, opened or
         closed) plus the PNG image.
     """
+    # Keep both Python positional forms; MCP clients use named arguments.
+    if target is None and isinstance(view_type, str) and (
+        view_type in ("current", "document", "dialog") or view_type.startswith(("document:", "panel:", "region:"))
+    ):
+        target, view_type = view_type, None
     view_type = screenshot_target.implied_view_type(target, view_type, zoom_to)
     try:
         resolved = screenshot_target.resolve(target, view_type)
@@ -6847,6 +7890,10 @@ async def _view_type_screenshot(view_type: str, zoom_to: list = None):
     """The old get_screenshot: view_type 'pcb'/'sch' focuses some document of
     that kind (opening one when none is open) and captures the whole window."""
     logger.info(f"Taking screenshot of Altium {view_type} window (zoom_to={zoom_to})")
+    if not isinstance(view_type, str) or view_type.lower() not in ("pcb", "sch", "pcblib", "schlib"):
+        return json.dumps({"success": False, "error": "view_type must be pcb, sch, pcblib or schlib"})
+    if zoom_to and view_type.lower() != "pcb":
+        return json.dumps({"success": False, "error": "zoom_to is supported for PCB views only"})
     previous_window = win32gui.GetForegroundWindow()
 
     try:
@@ -6874,8 +7921,8 @@ async def _view_type_screenshot(view_type: str, zoom_to: list = None):
         focus_info = focus_info if isinstance(focus_info, dict) else {}
         focused_kind = str(focus_info.get("focused_kind", "") or "").upper()
         focused_document = focus_info.get("focused_document", "")
-        wanted_kind = {"pcb": "PCB", "sch": "SCH"}.get(view_type.lower())
-        if wanted_kind and focused_kind and focused_kind != wanted_kind:
+        wanted_kind = {"pcb": "PCB", "sch": "SCH", "pcblib": "PCBLIB", "schlib": "SCHLIB"}[view_type.lower()]
+        if focused_kind != wanted_kind:
             logger.error(f"Requested {view_type} view but {focused_kind} document is focused")
             return json.dumps({
                 "success": False,
@@ -6990,7 +8037,7 @@ async def _view_type_screenshot(view_type: str, zoom_to: list = None):
                 except Exception as e:
                     logger.warning(f"Could not bring window to foreground: {e}")
                 if not activated:
-                    logger.warning("Altium is not the foreground window; the capture may show an unpainted view")
+                    return {"success": False, "error": "Cannot capture Altium: foreground activation was not confirmed"}
                 # A freshly switched-to document needs a moment to render.
                 time.sleep(1.0)
 
@@ -7005,7 +8052,7 @@ async def _view_type_screenshot(view_type: str, zoom_to: list = None):
                 # Take screenshot using GDI functions instead of ImageGrab
                 try:
                     try:
-                        img = _grab_window_image(hwnd, width, height)
+                        img = _grab_stable_window_image(hwnd, width, height, altium_is_foreground)
                     finally:
                         # Not when the user has already moved on by themselves
                         if previous_pid not in (0, altium_pid) and altium_is_foreground():
@@ -7026,6 +8073,7 @@ async def _view_type_screenshot(view_type: str, zoom_to: list = None):
                         "window_class": window["class_name"],
                         "view_type": view_type,
                         "foreground_confirmed": activated,
+                        "capture_backend": "desktop_compositor",
                         "image_format": "PNG",
                         "debug_file": debug_filename,
                         "image_data": png_bytes
@@ -7672,6 +8720,38 @@ async def _simple_command(command: str, params: dict, what: str) -> str:
     return result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@_tool()
+async def open_project(ctx: Context, project_path: str) -> str:
+    """Open and select an exact saved PrjPcb/LibPkg by absolute Windows path.
+
+    Reuses an already-open project instead of reopening it. A closed target must
+    exist on disk; missing paths fail without creating a project. Verifies the
+    exact current project and preservation of preexisting document open/Modified
+    states. Never saves, compiles, closes existing projects/documents or rewrites
+    memberships. Altium may restore source tabs when loading a closed project.
+    Use select_project when the project is already open and opening is unwanted.
+    A bridge failure may have opened/selected the target; inspect before retrying.
+    """
+    return await project_selection.execute(altium_bridge, EXCHANGE_DIR, project_path, open_if_closed=True)
+
+
+@_tool()
+async def select_project(ctx: Context, project_path: str) -> str:
+    """Select one exact already-open PrjPcb or LibPkg by absolute Windows path.
+
+    Uses Altium's current-project API; does not open a sheet to infer its owner.
+    Never opens a closed project, opens/closes/reloads documents, compiles, saves,
+    changes project membership or clears Modified. Works for empty open projects.
+    Repeated selection is idempotent (changed=false). Returns previous/current
+    project paths, before/after document states and readback verification.
+    The active editor tab is independent: board/library editing tools retain
+    their own document targeting rules. Closed/ambiguous paths fail without
+    selecting a different project; available_project_paths lists open targets.
+    A bridge timeout may have changed focus; inspect it before continuing.
+    """
+    return await project_selection.execute(altium_bridge, EXCHANGE_DIR, project_path)
+
+
 async def _bridge_json(command: str, params: dict, timeout: Optional[float] = None,
                        watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None
                        ) -> Tuple[Optional[dict], str]:
@@ -8174,10 +9254,16 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
 
 @_tool(read_only=True)
 async def get_server_status(ctx: Context) -> str:
-    """Get the current status of the Altium MCP server"""
+    """Read live server identity, startup source fingerprint and configured paths.
+
+    Does not launch Altium or execute a script. altium_found and script_found
+    only check file existence; they do not verify Altium scripting health.
+    """
     altium_bridge.config.discover_altium()
     status = {
         "server": "Running",
+        **SERVER_INFO,
+        "uptime_seconds": int(time.monotonic() - SERVER_STARTED_MONOTONIC),
         "altium_exe": altium_bridge.config.altium_exe_path,
         "script_path": altium_bridge.config.script_path,
         "altium_found": os.path.exists(altium_bridge.config.altium_exe_path),
@@ -8188,6 +9274,7 @@ async def get_server_status(ctx: Context) -> str:
 
 if __name__ == "__main__":
     logger.info("Starting Altium MCP Server...")
+    logger.info("Server identity: %s", json.dumps(SERVER_INFO))
     logger.info(f"Using MCP directory: {MCP_DIR}")
     
     # Initialize the directory

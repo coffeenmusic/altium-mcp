@@ -11,7 +11,9 @@
     "entry_point": "start_server.py",
     "mcp_config": {
       "command": "python",
-      "args": ["${__dirname}/start_server.py"]
+      "args": [
+        "${__dirname}/start_server.py"
+      ]
     }
   },
   "tools": [
@@ -362,6 +364,130 @@
     {
       "name": "get_server_status",
       "description": "Get the current status of the Altium MCP server"
+    },
+    {
+      "name": "edit_footprint_model3d",
+      "description": "Read/edit/replace/delete existing footprint 3D bodies in an exact PcbLib; never save."
+    },
+    {
+      "name": "set_footprint_properties",
+      "description": "Read/set native Height of one existing footprint in an exact .PcbLib; never save."
+    },
+    {
+      "name": "set_footprint_pad_properties",
+      "description": "Read/set native Testpoint Top/Bottom flags on exact existing PcbLib pads; never save."
+    },
+    {
+      "name": "set_footprint_pad_settings",
+      "description": "Update existing PcbLib pads without saving. All names must match one pad each."
+    },
+    {
+      "name": "edit_footprint_primitives",
+      "description": "Change layers of existing track, arc or fill primitives in a PcbLib; never save."
+    },
+    {
+      "name": "get_pcb_api_constants",
+      "description": "Read selected native PCB enum values without arbitrary script evaluation."
+    },
+    {
+      "name": "set_schematic_sheet_properties",
+      "description": "Read/change ISO format of an exact saved or open named unsaved SchDoc."
+    },
+    {
+      "name": "zoom_schematic",
+      "description": "Focus an exact SchDoc and fit objects or the page using native SCH:Zoom."
+    },
+    {
+      "name": "save_project",
+      "description": "Save only one exact OPEN local PrjPcb/LibPkg; never save source documents."
+    },
+    {
+      "name": "edit_sheet_symbols",
+      "description": "Read/create/update/delete native Sheet Symbols and their Sheet Entries; never save."
+    },
+    {
+      "name": "draw_block_diagram",
+      "description": "Add a non-electrical block diagram to an exact SchDoc, in memory only."
+    },
+    {
+      "name": "get_schematic_connectivity",
+      "description": "Read pin numbers, electrical-end coordinates (mils) and actual compiler nets for one exact .SchDoc in exactly one open PCB project. Never saves sheets."
+    },
+    {
+      "name": "get_lcsc_component_info",
+      "description": "Read single/batch LCSC cards by C-number, exact orderable MPN or text; no Altium."
+    },
+    {
+      "name": "set_library_component_lcsc_data",
+      "description": "Fill LCSC/JLCPCB fields on an exact existing SchLib symbol after creation."
+    },
+    {
+      "name": "verify_library_roundtrip",
+      "description": "Compare whole SchLib/PcbLib buffers across an actual close and reopen."
+    },
+    {
+      "name": "validate_library_components",
+      "description": "Validate SchLib/PcbLib buffers without edits, compilation or saves."
+    },
+    {
+      "name": "get_library_components_data",
+      "description": "Batch-read exact saved/open named unsaved SchLib/PcbLib buffers in one run."
+    },
+    {
+      "name": "set_library_view",
+      "description": "Navigate an exact saved/open named unsaved SchLib or PcbLib without saving."
+    },
+    {
+      "name": "remove_empty_library_component",
+      "description": "Remove one genuinely empty SchLib/PcbLib member, without saving documents."
+    },
+    {
+      "name": "update_symbol_primitives",
+      "description": "Update existing SchLib labels, drawing objects and pins in place; never save."
+    },
+    {
+      "name": "set_library_component_properties",
+      "description": "Set native default Designator and Component Type on one existing SchLib symbol."
+    },
+    {
+      "name": "set_library_component_data",
+      "description": "Upsert parameters and PCB footprint models on an exact existing SchLib symbol. Never saves documents or updates placed components. Omit edits to read metadata. parameters maps names to string values; Comment/Designator are reserved (use comment separately; use set_library_component_properties for Designator/type). Existing parameter visibility and unrelated data remain. footprint_models: [{\"model_name\":\"R_0603\",\"library_path\":\"C:/Lib/Parts.PcbLib\", \"pin_map\":{\"1\":[\"2\"],\"2\":[\"1\"]},\"is_current\":true,\"description\":\"optional\"}]. Each model requires an existing PcbLib/footprint and a complete pin_map across all symbol parts. One pin may map to several pads; pads cannot be reused by different pins. Numbers are exact strings. Unsupported map delimiters fail. Models are upserted by case-insensitive PCBLIB name; other models are kept. Explicitly selecting a current footprint deselects other PCB models only. Omitted is_current preserves existing state; new models default inactive. All references are checked before edits. Locked/managed models and read-only parameters are rejected. Returns before/after metadata and readback verification; on API/readback failure inspect may_have_partial_changes before retrying."
+    },
+    {
+      "name": "clone_schematic_components",
+      "description": "Clone placed components between two exact different SchDocs, without saving."
+    },
+    {
+      "name": "close_document",
+      "description": "Close one exact open document or PrjPcb/LibPkg by absolute path; never save."
+    },
+    {
+      "name": "open_document",
+      "description": "Open/focus an exact existing SchDoc/PcbDoc/SchLib/PcbLib by absolute path."
+    },
+    {
+      "name": "create_document",
+      "description": "Create a named unsaved document in Free Documents; never saves or adds it to a project."
+    },
+    {
+      "name": "save_document",
+      "description": "Save ONLY the exact open SchDoc/PcbDoc/SchLib/PcbLib at its assigned local path."
+    },
+    {
+      "name": "add_document_to_project",
+      "description": "Add one exact document to an exact OPEN .PrjPcb or .LibPkg, in memory only."
+    },
+    {
+      "name": "set_pcb_component_properties",
+      "description": "Read/set native type of placed components in one exact PcbDoc; never save."
+    },
+    {
+      "name": "open_project",
+      "description": "Open and select an exact saved PrjPcb/LibPkg by absolute Windows path."
+    },
+    {
+      "name": "select_project",
+      "description": "Select one exact already-open PrjPcb or LibPkg by absolute Windows path."
     }
   ],
   "compatibility": {

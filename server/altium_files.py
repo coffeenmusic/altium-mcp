@@ -12,6 +12,7 @@ rule (UTF-8 mode, or Python 3.15+, makes it UTF-8 on every machine).
 import codecs
 import ctypes
 import os
+import struct
 from pathlib import Path
 
 
@@ -28,6 +29,17 @@ def read_altium_text(path) -> str:
 def write_altium_text(path, text: str) -> None:
     """Write text for the Altium scripts to read."""
     Path(path).write_text(text, encoding="utf-8-sig")
+
+
+def ensure_unicode_table(folder):
+    """Provide UTF-16 code units that DelphiScript's byte-sized Chr cannot build."""
+    path = Path(folder) / "unicode_utf16.bin"
+    content = codecs.BOM_UTF16_LE + struct.pack("<65280H", *range(256, 65536))
+    if not path.is_file() or path.read_bytes() != content:
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    return path
 
 
 def long_path(path):

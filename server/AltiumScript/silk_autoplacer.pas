@@ -97,7 +97,7 @@ var
   TopBot: Integer;
 begin
   TopBot := eTopLayer;
-  if (Layer2String(SlkLayer) = 'Bottom Overlay') then
+  if (PCBLayerName(SlkLayer) = 'Bottom Overlay') then
     TopBot := eBottomLayer;
 
   result := MkSet(SlkLayer);
@@ -1033,7 +1033,7 @@ begin
   end;
 
   SilkscreenHor := APS_SilkscreenHor(Silkscreen);
-  CompLayerName := Layer2String(Silkscreen.Component.Layer);
+  CompLayerName := PCBLayerName(Silkscreen.Component.Layer);
 
   APS_ResetSize(Silkscreen, MIN_SILK_SIZE);
   APS_CacheAround(Silkscreen, MaxOffset * OFFSET_DELTA);
@@ -1182,7 +1182,7 @@ begin
   end;
 
   SilkscreenHor := APS_SilkscreenHor(Silkscreen);
-  CompLayerName := Layer2String(Silkscreen.Component.Layer);
+  CompLayerName := PCBLayerName(Silkscreen.Component.Layer);
   WigSteps := WIGGLE_RADIUS_MILS div WIGGLE_STEP_MILS;
 
   APS_ResetSize(Silkscreen, MIN_SILK_SIZE);

@@ -173,7 +173,7 @@ begin
                     AddJSONProperty(CompProps, 'description', Component.SourceDescription);
                     AddJSONProperty(CompProps, 'footprint', Component.Pattern);
                     AddJSONNumber(CompProps, 'rotation', Component.Rotation);
-                    AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                    AddJSONProperty(CompProps, 'layer', PCBLayerName(Component.Layer));
                     
                     // Add pin data
                     // Create pad iterator
@@ -200,7 +200,7 @@ begin
                                 AddJSONProperty(PinProps, 'net', NetName);
                                 AddJSONNumber(PinProps, 'x', CoordToMils(Pad.x - xorigin));
                                 AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
-                                AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
+                                AddJSONProperty(PinProps, 'layer', PCBLayerName(Pad.Layer));
                                 
                                 // Add to pins array
                                 PinsArray.Add(BuildJSONObject(PinProps, 3));
@@ -270,7 +270,7 @@ begin
                         AddJSONProperty(CompProps, 'description', Component.SourceDescription);
                         AddJSONProperty(CompProps, 'footprint', Component.Pattern);
                         AddJSONNumber(CompProps, 'rotation', Component.Rotation);
-                        AddJSONProperty(CompProps, 'layer', Layer2String(Component.Layer));
+                        AddJSONProperty(CompProps, 'layer', PCBLayerName(Component.Layer));
                         
                         // Add pin data
                         // Create pad iterator
@@ -297,7 +297,7 @@ begin
                                     AddJSONProperty(PinProps, 'net', NetName);
                                     AddJSONNumber(PinProps, 'x', CoordToMils(Pad.x - xorigin));
                                     AddJSONNumber(PinProps, 'y', CoordToMils(Pad.y - yorigin));
-                                    AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
+                                    AddJSONProperty(PinProps, 'layer', PCBLayerName(Pad.Layer));
                                     
                                     // Add to pins array
                                     PinsArray.Add(BuildJSONObject(PinProps, 3));

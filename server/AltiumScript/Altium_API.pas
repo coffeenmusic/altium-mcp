@@ -69,17 +69,19 @@ begin
 end;
 
 // edit_schematic: sheet_path and save; the edits are in sch_edit_spec.txt
-function ExecuteEditSchematic(RequestData: TStringList): String;
+function ExecuteEditSchematicActions(RequestData: TStringList): String;
 var
     i         : Integer;
-    SheetPath : String;
+    SheetPath, SpecPath : String;
     Save      : Boolean;
 begin
     SheetPath := '';
+    SpecPath := ROOT_DIR + 'sch_edit_spec.txt';
     Save := False;
     for i := 0 to RequestData.Count - 1 do
     begin
-        if Pos('"sheet_path"', RequestData[i]) > 0 then SheetPath := JSONLineValue(RequestData[i])
+        if Pos('"spec_file"', RequestData[i]) > 0 then SpecPath := JSONLineValue(RequestData[i])
+        else if Pos('"sheet_path"', RequestData[i]) > 0 then SheetPath := JSONLineValue(RequestData[i])
         else if Pos('"save"', RequestData[i]) > 0 then Save := Pos('true', RequestData[i]) > 0;
     end;
     if SheetPath = '' then
@@ -87,7 +89,7 @@ begin
         Result := 'ERROR: edit_schematic needs sheet_path';
         Exit;
     end;
-    Result := EditSchematic(SheetPath, ROOT_DIR + 'sch_edit_spec.txt', Save);
+    Result := EditSchematic(SheetPath, SpecPath, Save);
 end;
 
 // Extract the create net class logic
@@ -169,7 +171,7 @@ begin
 end;
 
 // Document kind Client.OpenDocument expects for a file, from its extension
-function DocumentKindForPath(Path: String): String;
+function ClientDocumentKindForPath(Path: String): String;
 var
     Ext : String;
 begin
@@ -320,7 +322,7 @@ begin
                 Paths := DocumentPathsFor(Name, False);
                 if (Paths <> '') and (Pos('|', Paths) = 0) then
                 begin
-                    Doc := Client.OpenDocument(DocumentKindForPath(Paths), Paths);
+                    Doc := Client.OpenDocument(ClientDocumentKindForPath(Paths), Paths);
                     Opened := Doc <> nil;
                     if not Opened then
                     begin
@@ -464,7 +466,7 @@ begin
         Exit;
     end;
     // Checked before closing: a document that cannot be opened again stays open
-    Kind := DocumentKindForPath(Doc.FileName);
+    Kind := ClientDocumentKindForPath(Doc.FileName);
     if Kind = '' then
     begin
         Result := 'ERROR: reload_document reopens .PcbDoc, .SchDoc, .PcbLib, .SchLib and .OutJob files only';
@@ -501,17 +503,21 @@ end;
 function ExecuteCreateSchematicSymbol(RequestData: TStringList): String;
 var
     ParamValue: String;
-    i, ValueStart: Integer;
-    ComponentName: String;
+    i, J, ValueStart: Integer;
+    ComponentName, MetadataPath, Description, Prefix: String;
     PartCount: Integer;
     PinsList: TStringList;
     GraphicsList: TStringList;
+    Metadata, ParametersList: TStringList;
 begin
     // Look for component name
     ComponentName := '';
+    MetadataPath := '';
     PartCount := 1;  // Default to single-part symbol
     PinsList := TStringList.Create;
     GraphicsList := TStringList.Create;
+    Metadata := TStringList.Create;
+    ParametersList := TStringList.Create;
 
     try
         // Parse parameters from the request
@@ -522,6 +528,8 @@ begin
             begin
                 ComponentName := JSONLineValue(RequestData[i]);
             end
+            else if (Pos('"metadata_file"', RequestData[i]) > 0) then
+                MetadataPath := JSONLineValue(RequestData[i])
             // Look for part_count
             else if (Pos('"part_count"', RequestData[i]) > 0) then
             begin
@@ -539,20 +547,24 @@ begin
             else if (Pos('"graphics"', RequestData[i]) > 0) then
             begin
                 i := ReadJSONStringArray(RequestData, i, GraphicsList);
-            end
-            // Look for description
-            else if (Pos('"description"', RequestData[i]) > 0) then
-            begin
-                ValueStart := Pos(':', RequestData[i]) + 1;
-                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                ParamValue := JSONLineValue(RequestData[i]);
-                PinsList.Add('Description=' + ParamValue);
             end;
         end;
 
+        if (MetadataPath = '') or not FileExists(MetadataPath) then
+        begin
+            Result := 'ERROR: required symbol metadata_file is missing; refresh the MCP server';
+            Exit;
+        end;
+        Metadata.LoadFromFile(MetadataPath);
+        Description := EditValue(Metadata, 'description');
+        for J := 0 to StrToInt(EditValue(Metadata, 'parameter_count')) - 1 do
+        begin
+            Prefix := 'p' + IntToStr(J) + '.';
+            ParametersList.Add(EditValue(Metadata, Prefix + 'name') + '=' + EditValue(Metadata, Prefix + 'value'));
+        end;
         if ComponentName <> '' then
         begin
-            Result := CreateSchematicSymbol(ComponentName, PinsList, GraphicsList, PartCount);
+            Result := CreateSchematicSymbol(ComponentName, Description, PinsList, GraphicsList, ParametersList, PartCount);
         end
         else
         begin
@@ -562,6 +574,8 @@ begin
     finally
         PinsList.Free;
         GraphicsList.Free;
+        Metadata.Free;
+        ParametersList.Free;
     end;
 end;
 
@@ -1773,7 +1787,16 @@ begin
             Exit;
         end;
     end
-    else if not (((CommandName = 'get_output_job_containers') or
+    else if (CommandName <> 'edit_schematic') and (CommandName <> 'get_schematic_connectivity') and
+       (CommandName <> 'set_library_component_data') and (CommandName <> 'get_library_components_data') and (CommandName <> 'update_symbol_primitives') and (CommandName <> 'remove_empty_library_component') and (CommandName <> 'set_library_view') and (CommandName <> 'verify_library_roundtrip') and (CommandName <> 'clone_schematic_components') and
+       (CommandName <> 'set_footprint_pad_settings') and (CommandName <> 'edit_footprint_primitives') and
+       (CommandName <> 'get_pcb_api_constants') and (CommandName <> 'set_footprint_properties') and (CommandName <> 'set_footprint_pad_properties') and (CommandName <> 'edit_footprint_model3d') and (CommandName <> 'set_pcb_component_properties') and
+       (CommandName <> 'set_schematic_sheet_properties') and (CommandName <> 'zoom_schematic') and
+       (CommandName <> 'edit_sheet_symbols') and (CommandName <> 'draw_block_diagram') and
+       (CommandName <> 'save_project') and
+       (CommandName <> 'create_document') and (CommandName <> 'save_document') and
+       (CommandName <> 'open_document') and (CommandName <> 'open_project') and (CommandName <> 'close_document') and
+       (CommandName <> 'add_document_to_project') and (CommandName <> 'select_project') and not (((CommandName = 'get_output_job_containers') or
              (CommandName = 'run_output_jobs')) and
             (RequestOutJobPath(RequestData) <> '')) then
     begin
@@ -1844,14 +1867,50 @@ begin
             Result := ExecuteGetSymbolPrimitives(RequestData);
         'create_symbols_batch':
             Result := ExecuteCreateSymbolsBatch(RequestData);
-        'edit_schematic':
-            Result := ExecuteEditSchematic(RequestData);
+        'edit_schematic_actions':
+            Result := ExecuteEditSchematicActions(RequestData);
         'get_schematic_pins':
             Result := GetSchematicPins(RequestText(RequestData, 'sheet_path', ''),
                                        RequestText(RequestData, 'designators', ''));
         'build_circuit':
             Result := BuildCircuitFromSpec(ROOT_DIR + 'circuit_spec.txt',
                                           ROOT_DIR + 'param_placement.txt');
+        'edit_schematic':
+            Result := ExecuteEditSchematic(RequestData);
+        'get_schematic_connectivity':
+            Result := ExecuteSchematicConnectivity(RequestData);
+        'set_library_component_data':
+            Result := ExecuteLibraryComponentData(RequestData);
+        'update_symbol_primitives':
+            Result := ExecuteUpdateSymbolPrimitives(RequestData);
+        'remove_empty_library_component':
+            Result := ExecuteRemoveEmptyLibraryComponent(RequestData);
+        'verify_library_roundtrip':
+            Result := ExecuteVerifyLibraryRoundtrip(RequestData);
+        'set_library_view':
+            Result := ExecuteSetLibraryView(RequestData);
+        'get_library_components_data':
+            Result := ExecuteGetLibraryComponentsData(RequestData);
+        'create_document', 'open_document', 'save_document', 'add_document_to_project':
+            Result := ExecuteManageDocument(CommandName, RequestData);
+        'close_document':
+            Result := ExecuteCloseDocument(RequestData);
+        'clone_schematic_components':
+            Result := ExecuteCloneSchematicComponents(RequestData);
+        'edit_footprint_model3d':
+            Result := ExecuteFootprintModel3D(RequestData);
+        'set_pcb_component_properties':
+            Result := ExecutePCBComponentProperties(RequestData);
+        'set_footprint_pad_settings', 'edit_footprint_primitives', 'get_pcb_api_constants', 'set_footprint_properties', 'set_footprint_pad_properties':
+            Result := ExecuteFootprintLibraryCommand(CommandName, RequestData);
+        'set_schematic_sheet_properties', 'zoom_schematic', 'save_project':
+            Result := ExecuteSchematicDocumentCommand(CommandName, RequestData);
+        'edit_sheet_symbols', 'draw_block_diagram':
+            Result := ExecuteSchematicDiagram(CommandName, RequestData);
+        'open_project':
+            Result := ExecuteOpenProject(RequestData);
+        'select_project':
+            Result := ExecuteSelectProject(RequestData);
         'get_footprint_primitives':
             Result := ExecuteGetFootprintPrimitives(RequestData);
         'create_footprints_batch':
@@ -2018,15 +2077,13 @@ end;
 
 // A script that crashes into the debugger leaves its script project focused,
 // and project-level commands (project info, ERC, ...) would then act on it.
-// Remember the last design project and bring it back to the front instead.
+// Recover the last design project without changing the editor documents.
 procedure EnsureDesignProjectFocused();
 var
     Project, Candidate : IProject;
-    Doc : IDocument;
-    ServerDoc : IServerDocument;
     LastPath, StoreFile : String;
     Store : TStringList;
-    P, I : Integer;
+    P : Integer;
 begin
     StoreFile := ROOT_DIR + 'last_project.txt';
     Project := GetWorkspace.DM_FocusedProject;
@@ -2034,7 +2091,8 @@ begin
     try
         if (Project <> Nil) and not IsScriptProject(Project) then
         begin
-            Store.Text := Project.DM_ProjectFullPath;
+            // ASCII JSON escapes preserve Unicode paths in the ANSI hint file.
+            Store.Text := 'json:' + DocumentJSON(JSONEscapeString(Project.DM_ProjectFullPath));
             Store.SaveToFile(StoreFile);
         end
         else
@@ -2043,7 +2101,14 @@ begin
             if FileExists(StoreFile) then
             begin
                 Store.LoadFromFile(StoreFile);
-                if Store.Count > 0 then LastPath := UpperCase(Trim(Store[0]));
+                if Store.Count > 0 then
+                begin
+                    LastPath := Trim(Store[0]);
+                    // Existing installations may still have a raw-path hint.
+                    if Copy(LastPath, 1, 5) = 'json:' then
+                        LastPath := JSONUnescape(Copy(LastPath, 6, Length(LastPath)));
+                    LastPath := UpperCase(LastPath);
+                end;
             end;
 
             // The remembered project if it is still open, else the first design project
@@ -2056,18 +2121,8 @@ begin
                         Candidate := Project;
             end;
 
-            // Showing one of its already open documents makes it the focused project
-            if Candidate <> Nil then
-                for I := 0 to Candidate.DM_LogicalDocumentCount - 1 do
-                begin
-                    Doc := Candidate.DM_LogicalDocuments(I);
-                    ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
-                    if ServerDoc <> Nil then
-                    begin
-                        Client.ShowDocument(ServerDoc);
-                        Break;
-                    end;
-                end;
+            // Select the project itself, including projects with no open sheets.
+            if Candidate <> Nil then Candidate.DM_SetAsCurrentProject;
         end;
     finally
         Store.Free;
@@ -2142,8 +2197,22 @@ begin
             // Execute the command if valid
             if CommandType <> '' then
             begin
-                EnsureDesignProjectFocused();
+                // Exact project selection must not invoke the legacy fallback,
+                // which can show another project's document before validation.
+                if (CommandType <> 'select_project') and (CommandType <> 'open_project') and
+                   (CommandType <> 'open_document') and (CommandType <> 'close_document') and
+                   (CommandType <> 'clone_schematic_components') and (CommandType <> 'get_library_components_data') and (CommandType <> 'update_symbol_primitives') and (CommandType <> 'remove_empty_library_component') and (CommandType <> 'set_library_view') and (CommandType <> 'verify_library_roundtrip') and
+                   (CommandType <> 'set_footprint_pad_settings') and (CommandType <> 'edit_footprint_primitives') and
+                   (CommandType <> 'get_pcb_api_constants') and (CommandType <> 'set_footprint_properties') and (CommandType <> 'set_footprint_pad_properties') and (CommandType <> 'edit_footprint_model3d') and (CommandType <> 'set_pcb_component_properties') and
+                   (CommandType <> 'set_schematic_sheet_properties') and (CommandType <> 'zoom_schematic') and
+                   (CommandType <> 'edit_sheet_symbols') and (CommandType <> 'draw_block_diagram') and
+                   (CommandType <> 'save_project') then EnsureDesignProjectFocused();
                 Result := ExecuteCommand(CommandType);
+                // Remember an explicitly selected project for later recovery.
+                // This writes only the toolkit's context hint, never a design file.
+                if ((CommandType = 'select_project') or (CommandType = 'open_project')) and
+                   (Pos('"success": true', Result) > 0) then
+                    EnsureDesignProjectFocused();
 
                 if Result <> '' then
                 begin

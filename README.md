@@ -1,12 +1,12 @@
 # Altium MCP Server
 
-TLDR: Use Claude to control or ask questions about your Altium project.
-This is a Model Context Protocol (MCP) server that provides an interface to interact with Altium Designer through Python. The server allows for querying and manipulation of PCB designs programmatically.
+Control and query Altium Designer through an MCP client that supports local stdio servers.
+This Model Context Protocol (MCP) server exposes tools for inspecting and editing PCB designs, schematics, and libraries through Python and Altium's scripting interface. It runs on Windows and is independent of the agent or model provider.
 
 ## Example commands
 - Run all output jobs
 - Create a symbol for the part in the attached datasheet and use the currently open symbol as a reference example.
-- Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `server\symbol_placement_rules.txt` in the extension's install folder as pin placement rules. Please modify for your own preferences; an extension update replaces the file, so keep a copy.)
+- Create a schematic symbol from the attached MPM3650 switching regulator datasheet and make sure to strictly follow the symbol placement rules. (Note: Need to open a schematic library. Uses `server\symbol_placement_rules.txt` in the server's installation directory as pin placement rules. Please modify for your own preferences; an update can replace the file, so keep a copy.)
 - Create an op-amp symbol with a triangle body like the other op-amps in my library (symbols support line/polygon/arc/ellipse/label body graphics, not just rectangles)
 - Find me the LM358 symbol in my opamp library and open it
 - Create a multi-part symbol for a quad op-amp from the attached LM324 datasheet (creates parts A, B, C, D with shared V+/V- power pins)
@@ -21,6 +21,8 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 - Get me all length matching rules
 - Check my project is ready for fabrication: unsaved documents, ERC errors, and which layers my Gerber output job plots
 - Draw a schematic of an LED with a current-limiting resistor on a new sheet, using symbols from my library
+- Edit an existing schematic sheet: add, update or delete components, wires, labels and ports without saving it
+- Read the actual schematic pin-to-net map and check expected connections without saving sheets
 
 ## Videos
 - [RP2354B Symbol & Footprint w/ Claude](https://youtu.be/m8W89txJ2wY): tell Claude to build a symbol and footprint, and it handles the rest
@@ -30,46 +32,194 @@ This is a Model Context Protocol (MCP) server that provides an interface to inte
 More on the [altium-mcp YouTube channel](https://www.youtube.com/@altium-mcp), including the install walkthrough and videos for individual tools below.
 
 ## Installing the MCP Server
-The easiest way to install is to use Claude Code, point it to this repo and ask it to install it for you. Or alternatively, see below.
 
-[Watch on YouTube](https://youtu.be/HKQMK-hluLs)
+1. Install Python 3.10 to 3.14 on Windows and make sure it is available to your MCP client. Python 3.15 is untested.
+2. Clone or download this repository to a local directory.
+3. Register the server in your MCP client using the instructions below.
 
-1. Make sure Claude has Python 3.10 to 3.14 installed: `drop down > File > Settings > Extensions > Advanced > Python`. If not, install Python and add it to PATH. Python 3.15 is untested (see [Bootstrap Venv](#bootstrap-venv-recommended)).
-2. Download the `altium-mcp.dxt` desktop extension file from [releases](https://github.com/coffeenmusic/altium-mcp/releases)
-3. In Claude Desktop on Windows: `drop down > File > Settings > Extensions > Advanced > Install Extension...` Select the .dxt file
+### Codex
 
-You shouldn't need to restart Claude and you should now see altium-mcp in the tool menu near the search bar.
+With the [Codex CLI](https://developers.openai.com/codex/cli/) installed and available on PATH, run this from the repository directory:
 
-![altium-mcp in the tools menu](assets/extension.jpg)
+```powershell
+python .\start_server.py mcp setup --client codex
+```
 
-## Creating a new .dxt (For Developers)
+This runs the official `codex mcp add` command and registers `altium-mcp` with absolute paths to the current Python interpreter and `start_server.py`. It uses Codex's user configuration (`%USERPROFILE%\.codex\config.toml` by default, or the directory set by `CODEX_HOME`), shared by the desktop app, CLI and IDE extension on the same host. Re-running setup replaces the `altium-mcp` entry; other servers are preserved. If `ALTIUM_MCP_HOME` is set, setup includes its absolute path in the server environment.
 
-### Bootstrap Venv (Recommended)
+Setup only registers the server. Prepare dependencies before the first connection to avoid Codex's startup timeout:
 
-This approach ships a small bootstrap script (`start_server.py`) that creates a virtual environment and pip-installs dependencies on the user's machine at first launch. The .dxt is small (about 300 KB) and works on Python 3.10 to 3.14.
+```powershell
+python .\start_server.py --build
+codex mcp get altium-mcp
+```
 
 **Python versions:** 3.10 to 3.13 install the hash-locked `requirements.txt`. 3.14 has no wheel for the locked pillow, so it installs the fallback list in `start_server.py` instead. With `mcp` 1.30 that list no longer caps pydantic, so it also resolves on 3.15, but 3.15 has not been tested.
 
-The older approach of bundling pre-compiled packages in `server/lib/` is no longer recommended — it breaks when the user's Python version doesn't match the version used to build the bundled `.pyd` files (e.g. pydantic_core compiled for 3.11 fails on 3.13).
+Restart Codex or reload its MCP servers, then call `get_server_status` to check the connection. Keep the repository at the registered path; run setup again after moving it or changing Python.
+
+If you use the desktop app without the Codex CLI, add this table to your Codex `config.toml` instead, replacing both paths with your actual locations:
+
+```toml
+[mcp_servers.altium-mcp]
+command = "C:/path/to/python.exe"
+args = ["C:/path/to/altium-mcp/start_server.py"]
+startup_timeout_sec = 60
+```
+
+If the table already exists, update it instead of adding a duplicate. See the [official Codex MCP documentation](https://developers.openai.com/codex/mcp/) for configuration details.
+
+### Other MCP clients
+
+Configure your MCP client to launch `start_server.py` with Python using the stdio transport. Use an absolute path to the script. If Python is not on the client's PATH, use the full path to `python.exe` as the command.
+
+For clients that use an `mcpServers` configuration, a typical entry looks like this. Other clients may use a different configuration format; the launch command and arguments are the same.
+
+```json
+{
+  "mcpServers": {
+    "altium-mcp": {
+      "command": "python",
+      "args": ["C:/path/to/altium-mcp/start_server.py"]
+    }
+  }
+}
+```
+
+Replace the example path with your repository location, then enable or reload the server in your client. Call `get_server_status` to check that the server is connected and Altium was found.
+
+The launcher creates a virtual environment and installs dependencies on first use, which requires network access. To prepare it before connecting the client, run this from the repository directory:
+
+```powershell
+python start_server.py --build
+```
+
+Use the same Python interpreter and `ALTIUM_MCP_HOME` setting as the client. If a first launch exceeds the client's startup timeout, the detached build continues in the background; reconnect after it finishes. Build progress is recorded in `%USERPROFILE%\.altium-mcp\build.log` (or the directory set by `ALTIUM_MCP_HOME`).
+
+Clients that support `.dxt` desktop extensions can alternatively install `altium-mcp.dxt` from [releases](https://github.com/coffeenmusic/altium-mcp/releases) using their extension installer.
+
+## Manual Server Verification
+
+This is a local stdio server: the MCP client starts a Python process and communicates over its stdin/stdout. It has no HTTP health URL or listening port. A successful tool response checks the connection; a saved registration or an existing Python process alone does not.
+
+### 1. Check the registered command
+
+For Codex, run:
+
+```powershell
+codex mcp list
+codex mcp get altium-mcp
+```
+
+Check that the server is enabled and that `command` and `args` point to the intended Python interpreter and repository. These commands inspect configuration; they do not start the server or prove it is responding. Without the Codex CLI, inspect the entry in the desktop app's MCP settings or `config.toml`.
+
+### 2. Check the instance connected to your client
+
+Open Codex with the server enabled and ask:
+
+```text
+Call the altium-mcp get_server_status tool now and show its complete JSON response.
+```
+
+The call takes no arguments and does not launch Altium or execute a script. Check these fields in the actual tool response:
+
+| Field | Meaning |
+| --- | --- |
+| `server` | `Running` means this process answered an MCP tool call. |
+| `server_version` | Altium MCP project version from `pyproject.toml`, captured at startup. |
+| `source_sha256` | Source fingerprint captured at startup; distinguishes local changes with the same project version. |
+| `installation_path`, `server_path` | Installation and entry point used by this process. |
+| `pid` | PID of the Python process answering the call. |
+| `started_at`, `uptime_seconds` | Startup time in UTC and elapsed running time. |
+| `python_executable`, `python_version` | Interpreter running the server, normally inside its dependency venv. |
+| `mcp_sdk_version` | Installed MCP Python SDK version; this is separate from `server_version`. |
+| `altium_found`, `script_found` | Whether the configured Altium executable and script project exist. |
+
+`altium_found: true` does not mean Altium is open or scripting works. To check the Altium bridge too, open a project in Altium, focus it, then call `get_project_info` and confirm it returns that project's details. This reads project information without saving it.
+
+If version or PID fields are absent, the client may still be running an older server. Restart or reload its MCP server and repeat the call.
+
+### 3. Compare the running instance with files on disk
+
+From the repository you expect to be running:
+
+```powershell
+python .\start_server.py --version
+```
+
+This prints JSON with `server_version`, `source_sha256`, `installation_path` and `server_path` without starting a server or installing dependencies. Compare it with the live `get_server_status` response. Matching paths and fingerprints mean the process's startup snapshot matches this installation's current runtime files. A different fingerprint means the files changed after startup or the client is using another copy; restart the client's server and check again.
+
+The fingerprint covers the launcher, top-level server Python modules, bundled DelphiScript sources/projects, symbol placement rules, and dependency/version metadata. Documentation, tests, logs and user configuration are excluded. The project version alone can stay the same across local edits. `unknown` for the version or `null` for the fingerprint means the corresponding metadata could not be read.
+
+Updating files does not reload an already running Python server. After restarting, `started_at` should change and `uptime_seconds` should reset; the PID will usually change too. Compare fingerprints again to confirm the update.
+
+### 4. Inspect Windows processes and logs
+
+To find the launcher and server processes:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" |
+    Where-Object { $_.CommandLine -match 'start_server\.py|[\\/]server[\\/]main\.py' } |
+    Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine
+```
+
+Match `ProcessId` to the `pid` returned by `get_server_status` and inspect its absolute paths. The launcher and server can appear as separate processes. Multiple clients can each run their own instance, so check status through the client you are diagnosing.
+
+From the installation directory, inspect recent server messages:
+
+```powershell
+Get-Content .\server\altium_mcp.log -Tail 60
+```
+
+The startup `Server identity` log entry includes the version, fingerprint, PID and timestamp. Log entries can belong to previous or other client sessions; use the live status call to identify the responding process.
+
+If startup fails while dependencies are being prepared, inspect the build log:
+
+```powershell
+$altiumMcpData = if ($env:ALTIUM_MCP_HOME) { $env:ALTIUM_MCP_HOME } else { Join-Path $env:USERPROFILE '.altium-mcp' }
+Get-Content (Join-Path $altiumMcpData 'build.log') -Tail 60
+```
+
+### 5. Test independently with MCP Inspector
+
+For a manual protocol test without an AI client, use the [official MCP Inspector](https://github.com/modelcontextprotocol/inspector/blob/main/docs/cli-smoke-testing.md). Its current CLI requires Node.js 22.19.0 or newer and npm/npx. From the repository directory, use the same Python interpreter and `ALTIUM_MCP_HOME` setting as your client:
+
+```powershell
+python .\start_server.py --build
+npx @modelcontextprotocol/inspector --cli python .\start_server.py --method initialize --connect-timeout 60000
+npx @modelcontextprotocol/inspector --cli python .\start_server.py --method tools/call --tool-name get_server_status --connect-timeout 60000
+```
+
+The first Inspector command should complete the MCP handshake and report `serverInfo.name: AltiumMCP` and the project version in `serverInfo.version`. The second should return a text content block containing the status JSON described above. The initial npx run can download Inspector. If the configured Python is not on PATH, replace `python` with its quoted absolute path.
+
+Each Inspector command starts and stops its own server instance. It tests the selected installation independently; use step 2 to inspect the instance already connected to Codex. To use Inspector's browser UI instead, run `npx @modelcontextprotocol/inspector python .\start_server.py`, connect to the stdio server, list its tools, and call `get_server_status` with empty arguments (`{}`).
+
+Running `python .\start_server.py` by itself leaves it waiting for MCP messages on stdin. A quiet terminal is expected and does not verify the protocol; use Inspector or an MCP client, and use Ctrl+C to stop a manual launch.
+
+## Launcher and Dependency Environment
+
+`start_server.py` creates a virtual environment and pip-installs dependencies on the user's machine at first launch. This avoids bundling pre-compiled packages in `server/lib/`, which can fail when the user's Python version differs from the version used to build the bundled `.pyd` files.
 
 **How it works:**
 
 1. `start_server.py` (at the repo root) looks for a ready virtual environment in `%USERPROFILE%\.altium-mcp\venvs\<key>`, where `<key>` is a hash of the pinned requirements and the Python version
-2. If it isn't ready, it starts a **detached** builder process (`start_server.py --build`) that creates the venv and pip-installs the dependencies, then waits for it. It installs the hash-locked `requirements.txt` when the package contains it, and falls back to the short `REQUIREMENTS` list in `start_server.py` when the file is missing or the locked wheels don't fit the interpreter. Claude Desktop kills a server that has not answered within about 60 seconds, and restarts servers freely; a build that ran inside the launcher died with it. The detached builder finishes regardless, so a restarted launcher finds the venv ready or a build still in progress.
+2. If it isn't ready, it starts a **detached** builder process (`start_server.py --build`) that creates the venv and pip-installs the dependencies, then waits for it. It installs the hash-locked `requirements.txt` when present, and falls back to the short `REQUIREMENTS` list in `start_server.py` when the file is missing or the locked dependencies cannot be installed for the interpreter. Separating the build from the launcher lets it continue if a client stops or restarts the server during setup.
 3. A lock file (holding the builder's PID) makes sure only one build runs at a time; other launchers wait for it. A lock whose owner has exited is taken over immediately.
 4. It then launches `server/main.py` using the venv's Python
-5. First launch takes ~20-30 seconds; subsequent launches are instant
+5. Subsequent launches reuse the environment while the requirements and Python version remain unchanged
 
 The venv, `config.json`, `build.log` and the server log `altium_mcp.log` live in `%USERPROFILE%\.altium-mcp`, not in the extension folder, because Claude Desktop replaces the extension folder on every update. The slow build therefore happens once per machine (and again only when the requirements or Python version change), and a hand-picked Altium path survives updates. AppData is deliberately avoided: Claude Desktop is an MSIX package, and writes its child processes make under AppData are redirected into `...\Packages\Claude_...\LocalCache`, so a venv built from a terminal and one built by the server would end up in different places. Set the `ALTIUM_MCP_HOME` environment variable to use a different folder. A `config.json` left beside `server/main.py` by an older version is migrated automatically on first start. The server log rotates at 1 MB (three backups) and records INFO and above; set `ALTIUM_MCP_LOG_LEVEL=DEBUG` to include every MCP protocol message.
 
-On a slow network the first build can exceed the client's 60-second startup timeout. The build carries on in the background, so restarting the extension once it has finished is enough; `build.log` shows progress.
+## Optional DXT Packaging (For Developers)
+
+The repository includes a `manifest.json` for clients that support `.dxt` desktop extensions. Packaging is optional; clients can launch the server directly as described above.
 
 **Build steps:**
 
 1. Make sure `start_server.py` exists at the repo root
 2. Make sure `server/main.py` does NOT have the old `site.addsitedir` hack at the top
-3. Update `manifest.json`: set `entry_point` to `start_server.py`, remove any `env`/`PYTHONPATH` fields, and use `manifest_version: "0.3"`
-4. Package the DXT — either use `dxt pack` or manually zip and rename:
+3. Keep `manifest.json` configured with `entry_point` set to `start_server.py`, no bundled-library `PYTHONPATH`, and `manifest_version: "0.3"`
+4. Package the DXT by zipping the files and renaming the archive:
 ```powershell
 Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, requirements.txt, server -DestinationPath altium-mcp.zip
 Rename-Item altium-mcp.zip altium-mcp.dxt
@@ -96,31 +246,15 @@ Rename-Item altium-mcp.zip altium-mcp.dxt
 
 These are hard-won lessons from debugging DXT builds. Violating any of these will produce errors that are difficult to diagnose.
 
-1. **Do NOT use `os.execv()` in `start_server.py`.** The DXT installs to a path containing spaces (`Claude Extensions`). On Windows, `os.execv` splits the path at the space and fails. Use `sys.exit(subprocess.call([...]))` instead.
+1. **Do NOT use `os.execv()` in `start_server.py`.** Installation paths can contain spaces. On Windows, `os.execv` splits the path at the space and fails. Use `sys.exit(subprocess.call([...]))` instead.
 
 2. **Pin `mcp` to an exact version (now `==1.30.0`) and upgrade it deliberately.** An open range pulls in whatever is newest, and FastMCP has changed under the server before: 1.x dropped the `description` kwarg of `FastMCP.__init__()`, and in later 1.x releases a tool declared `-> str` sends its result a second time as `structuredContent` unless it is registered with `structured_output=False` (what `_tool()` in `main.py` does). mcp 2.x is not supported.
 
-3. **Do NOT use `manifest_version: "0.4"` with `"type": "uv"`.** Claude Desktop does not support it yet. You will get `Invalid manifest: server: Required`. Use `"type": "python"` with `manifest_version: "0.3"`.
+3. **Keep the manifest aligned with the Python launcher.** The included manifest uses `"type": "python"` with `manifest_version: "0.3"`. Check the target client's supported manifest format before changing these fields.
 
 4. **After removing the `site.addsitedir` hack from `main.py`, fix the `pathlib.Path` reference.** The hack included `import pathlib` at the top of the file. The logging setup later uses `pathlib.Path(...)` which will throw `NameError` once that import is gone. Change it to `Path(...)` — the `from pathlib import Path` import already exists in the file, just make sure it comes before the logging setup.
 
 5. **Do NOT bundle `server/lib/` in the DXT.** That was the old approach and defeats the purpose of the venv bootstrap.
-
-### Legacy: Bundled server/lib (Not Recommended)
-
-This approach bundles all dependencies in `server/lib/` and sets `PYTHONPATH` to point to it. It produces a much larger .dxt (~17 MB) and **only works if the user's Python version matches the version used to compile the bundled packages**.
-
-1. Populate packages: `python -m pip install --no-cache-dir --target server/lib -r requirements.txt`
-2. Set the manifest `entry_point` to `server/main.py` and add `"env": {"PYTHONPATH": "${__dirname}/server/lib"}` to `mcp_config`
-3. Package: `npm install -g @anthropic-ai/dxt && dxt pack`
-
-### DXT Resources
-- [Desktop Extensions](https://www.anthropic.com/engineering/desktop-extensions)
-- [Desktop Extensions Github](https://github.com/anthropics/dxt)
-- [Getting Started with DXT](https://support.anthropic.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
-- [Python DXT Example Code](https://github.com/anthropics/dxt/tree/main/examples/file-manager-python)
-- [DXT Manifest](https://github.com/anthropics/dxt/blob/main/MANIFEST.md)
-
 
 ## Configuration
 
@@ -158,7 +292,8 @@ The server provides several tools to interact with Altium Designer:
 - `get_schematic_data`: Get schematic data for specified components
 - `create_schematic_symbol` ([YouTube](https://youtu.be/MMP7ZfmbCMI)): Passes pin list with pin type & coordinates to Altium script. Supports multi-part symbols (e.g. quad op-amps) via a `part_count` parameter and an `owner_part_id` field on each pin (use 0 for shared power/GND pins), active-low pin name overbars by placing a backslash after each overbarred character (e.g. `R\E\S\E\T\` renders as `RESET` with overbar), per-pin length and name/designator visibility, and an optional `graphics` list (lines, polylines, polygons, rectangles, arcs, ellipses, labels) for non-rectangular bodies like op-amp triangles and diode glyphs. When creating a symbol, the agent is instructed to first look up a similar symbol in an available library as a style reference (skipped gracefully if no library is available).
 - `get_symbol_primitives`: Inventory a .SchLib (every symbol with per-type primitive counts) or dump one symbol's complete geometry (all graphics + pin details, in mils; `symbol_name="*"` dumps every symbol). Used to gap-analyze a library, to give the agent a reference example when drawing a new symbol, and to verify recreations. The symbol creator round-trips a complete production library set exactly - 514/514 symbols across IC, connector, misc, and passives libraries (dump -> recreate -> dump -> diff, zero differences). Footprint/model links (implementations) are metadata outside the graphics round-trip. Each dumped symbol also reports its Comment (`text`, `visible`) and its parameters (`name`, `value`, `visible`, location in mils as Altium holds it, `justification`, `autoposition`, `font` name and size), and each pin its `description`, its four IEEE symbols (`symbol_inside`, `symbol_inside_edge`, `symbol_outside_edge`, `symbol_outside`) and its parameters (`name`, `value`), so the agent can check symbol properties after setting them.
-- `create_symbols_batch`: Create or edit many symbols in one script run from a plain-text spec file (bulk imports/migrations) - far faster and more robust than one create call per symbol. Besides `SYMBOL`, `PIN` and `GRAPHIC` records it takes:
+- `update_symbol_primitives` (`library_path, symbol_name, edits`): Edit existing SchLib labels, lines, rectangles, polylines, polygons, arcs, ellipses and pins in place. `edits=[]` reads selectors; multipart targets use UIDs and/or current properties. Preserves object identity, pin numbers and model maps; never recreates symbols or saves. See [schema, E08 example and verification](dev/SYMBOL_PRIMITIVES.md).
+- `create_symbols_batch`: Create or edit many symbols in one script run from a plain-text spec file. New symbols accept `SYMBOL|name|description|part_count|designator_template|component_kind`, including `J?`/`D?`/`C?` and `Standard (No BOM)`, set in the creation transaction. Optional fields retain legacy defaults. Required metadata and native readback are verified; existing-symbol edits do not require creation metadata. Use `PARAM` or `SYMPARAM` for creation parameters. See [creation requirements](dev/SYMBOL_CREATION.md). Besides `SYMBOL`, `PIN` and `GRAPHIC` records it takes:
   - `EDITSYMBOL|<name>`: edit an existing symbol. A symbol that is not in the library is reported under `failed`, never created.
   - `COMMENT|<text>[|<visible 1/0>]`: set the Comment. It is hidden unless the visible field is 1. The library editor keeps its own copy of the Comment of the symbol on screen and writes that copy back when it shows another symbol, so for that symbol the tool sets both.
   - `DESCRIPTION|<text>`: set the Description.
@@ -174,10 +309,31 @@ The server provides several tools to interact with Altium Designer:
 - `build_schematic`: Build a wired schematic on a new sheet from a circuit description: parts from a `.SchLib` (full path; `.IntLib` is not supported), wires, junctions, net labels, power ports and notes, in mils (fractions are kept, so metric positions are exact). Returns every placed pin's true connection point, so a second call can route wires from measured coordinates, and lists any part it could not place. The new sheet is kept out of your project.
 - `check_schematic`: Check saved sheets for drafting problems: two-pin parts tapping their net at the pin, net labels away from their wire's free end or hanging off it, text touching wires, pins or other text (with a clear layout suggested), dangling wires, wires slightly out of level, parts whose pins sit a few microns off the grid, and sheet symbol layout. Takes a `.SchDoc`, a `.PrjPcb` or a folder and reads the saved files, so it needs no running Altium. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #64](https://github.com/coffeenmusic/altium-mcp/pull/64), pins off the grid [PR #73](https://github.com/coffeenmusic/altium-mcp/pull/73)).
 - `check_hierarchy`: Check that a project's sheets connect: every sheet entry against the ports of its child sheet (with rename suggestions for pairs that belong together under different names), harness types of entries and ports, one harness type defined differently on two sheets, signal harnesses whose type nobody gives (located, unlike the ERC's "Missing harness type"), and `.Harness` files out of step with their sheet. Reads the saved files, so it needs no running Altium.
-- `edit_schematic`: Change an existing sheet: move, rotate, mirror, delete or place parts, set parameters, move designator and parameter text, add wires, net labels, power ports, junctions and no-ERC markers, and delete objects at a point. Coordinates are in mil or mm, so `check_schematic`'s suggestions apply directly. The whole edit is one undo step in Altium, and the sheet is saved only when asked. `place_component` also places a part from a database library (Excel tables) by `dblib` and `part_number`: the row gives the symbol, footprints, description and parameters (following the field map's visibility and Add To Design settings), and the part is linked to the DbLib as when Altium places it. It also edits sheet symbols (move, resize, colours, name and file name text) and their entries (side, distance, I/O type, style, name), moves a wire vertex together with the wires, junctions, net labels, power ports and port ends on it, and moves a net label, optionally onto the nearest wire end, keeping its font and colour. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #70](https://github.com/coffeenmusic/altium-mcp/pull/70), DbLib parts [PR #91](https://github.com/coffeenmusic/altium-mcp/pull/91), sheet symbols, wire vertices and label moves [PR #92](https://github.com/coffeenmusic/altium-mcp/pull/92)).
 - `get_schematic_pins`: The pins of a sheet's parts, live from Altium: connection point, number, name, electrical type. `edit_schematic` also takes pin references ("U20.VCC", "U20.3", "U1A.3" for part A of a multi-part part) wherever it takes a point, and `add_port` places a port with a fixed width (auto size off). Pins are read before the edit runs, so a part moved or placed in the same call is referred to in a second call. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #78](https://github.com/coffeenmusic/altium-mcp/pull/78)).
 - `render_sheet`: A picture of a schematic sheet or part of it (wires, buses, junctions, component bodies with pin names and numbers, net labels, power ports, ports, sheet symbols, texts), read from the .SchDoc file, so the sheet need not be open. Contributed by [SiboVG](https://github.com/SiboVG) ([PR #87](https://github.com/coffeenmusic/altium-mcp/pull/87)).
-- `get_symbol_placement_rules`: Create symbol's helper tool that reads `server\symbol_placement_rules.txt` in the extension's install folder to get pin placement rules for symbol creation. The file ships empty, so the tool returns neutral guidance (follow a comparable symbol in the user's library, keep pins on a 100 mil grid); put your own rules in it.
+- `edit_schematic`: Supports this fork's UID `add`/`update`/`delete` format on saved or open named unsaved SchDocs, plus upstream named actions (`move_component`, `add_wire`, etc.). Use `operations=[]` to read UIDs and pin connection points in mils. UID operations never save; `return_mode=summary|changed|full` controls response size, and `design_item_id=""` detaches a prototype explicitly. Named actions accept mil/mm and optional `save=True`. Do not mix formats. See [operation formats](dev/EDIT_SCHEMATIC.md). Upstream actions contributed by [SiboVG](https://github.com/SiboVG) ([PR #70](https://github.com/coffeenmusic/altium-mcp/pull/70)).
+- `edit_sheet_symbols` (`sheet_path, operations`): Read/create/update/delete native Sheet Symbols and replace their Sheet Entry lists. Checks exact UIDs, names, bounds, entry ownership and actual positions; never saves or creates child documents. See [hierarchy and diagram authoring](dev/SCHEMATIC_DIAGRAM.md).
+- `draw_block_diagram` (`sheet_path, blocks, links, notes`): Draw non-electrical rectangles, text and orthogonal arrows on an exact SchDoc, including explicit detours. Validates all blocks/routes before editing, returns primitive UIDs and verified native geometry, and never saves. See [schema and live verification](dev/SCHEMATIC_DIAGRAM.md).
+- `get_symbol_placement_rules`: Read this fork's pin-placement and creation-metadata guidance from `server\symbol_placement_rules.txt`. Keep a copy of local customizations before updating.
+- `set_library_component_data`: Read or upsert parameters, Comment/description and PCB footprint models on an exact existing SchLib symbol, including complete pin-to-pad maps and one-to-many mappings. Checks symbol pins and actual PcbLib pads before editing, preserves unrelated models, verifies readback and never saves. See [schema, limits and examples](dev/LIBRARY_COMPONENT_DATA.md).
+- `set_library_component_properties` (`library_path, symbol_name, designator_template=None, component_kind=None`): Set native library designator templates (`J?`, `D?`, `C?`) and Component Type, including `Standard (No BOM)`. Omitted fields are preserved; no placed-component updates or saves. See [supported kinds and verification](dev/LIBRARY_COMPONENT_PROPERTIES.md).
+- `remove_empty_library_component` (`library_path, component_name, dry_run=False`): Remove an exact genuinely empty SchLib/PcbLib member, such as `Component_1` / `PCBComponent_1`, after checking all children and meaningful metadata. Supports named unsaved libraries, protects the last member and populated components, verifies survivors, and never saves. See [empty criteria and verification](dev/EMPTY_LIBRARY_COMPONENT.md).
+- `set_library_view` (`library_path, component_name=None, part_id=None, display_mode=None, fit=True, view_mode=None, camera=None`): Select an exact symbol/section/display mode or footprint, fit its view, and dispatch native PcbLib 2D/3D and camera presets. Preserves content, Modified and files. Selection has native readback; fit/mode/camera verification is explicitly dispatch-only. See [presets, M01 workflow and live checks](dev/LIBRARY_VIEW.md).
+- `get_library_components_data` (`library_paths, component_names=None, fields=None, offset=0, limit=50`): Batch-read one or several SchLib/PcbLib buffers in one native run: parameters, native Designator/ComponentKind, pins, model/pin-pad bindings, Height and Top/Bottom testpoint flags. Select fields and pages; preserves dirty buffers, member/part selection and files, and restores the previous document view. See [schema, scope and examples](dev/LIBRARY_COMPONENTS_DATA.md).
+- `validate_library_components` (`library_paths, component_names=None, rules=None, pad_roles=None, offset=0, limit=50, max_issues=500`): Check required metadata, pin maps/grid, pad dimensions, copper/NPTH clearances, annular rings, mask webs and paste. Classifies electrical/shield/NPTH contacts, checks linked footprints outside the selected page, and reports unresolved rules/geometry explicitly. Read-only; never saves. See [rules, coverage and examples](dev/LIBRARY_VALIDATION.md).
+- `verify_library_roundtrip` (`library_paths, save=False, max_differences=100, coordinate_tolerance_mils=0.001`): Compare whole SchLib/PcbLib buffers across real close/reopen: geometry, parameters, bindings and STEP evidence. Default mode requires saved clean libraries and never saves. Explicit `save=True` backs up and saves only the requested libraries; dirty-buffer STEP gaps remain explicit. See [save policy, comparison scope and verification](dev/LIBRARY_ROUNDTRIP.md).
+- `get_lcsc_component_info` (`query="", qty=1, limit=5, manufacturer="", exact_mpn="", include_historical=True, historical_url="", queries=None`): Read single/batch LCSC cards with strict manufacturer/full order-MPN filters, sale status, technical parameters and quantity pricing. Recovers public historical cards with explicit source/availability errors and no guessed stock/prices; no Altium operation. `set_library_component_lcsc_data` (`library_path, symbol_name, lcsc_id, qty=1, allow_package_mismatch=False`) requires matching MP and MF, blocks known package conflicts by default, and writes supplier fields with source/date/regional sale status. Never saves. See [LCSC lookup and application contracts](dev/LCSC_COMPONENT_DATA.md).
+- `create_document` (`document_path, document_kind=None`): Create a named unsaved SchDoc/PcbDoc/SchLib/PcbLib in Free Documents; rejects existing files/open documents. Never saves or includes it in a project automatically.
+- `save_document` (`document_path, dry_run=False`): Save only one exact open document at its assigned local path, when the user authorizes saving. `dry_run=True` validates without writing. Returns native status and disk SHA-256 verification; never invokes Save All or saves a project.
+- `close_document` (`document_path, require_clean=True`): Close an exact document or PrjPcb/LibPkg without saving. Refuses Modified targets by default; project preflight checks all open source/generated documents before closing any. `require_clean=False` explicitly discards unsaved changes. Repeated closes are idempotent. See [policy, results and verification](dev/CLOSE_DOCUMENT.md).
+- `clone_schematic_components` (`source_sheet, target_sheet, designators`): Copy selected placed components and all their placed multipart sections between exact SchDocs, preserving instance data/pose/models and assigning fresh UIDs. Rejects target designator collisions before editing; copies no external wiring and never saves. Supports open named unsaved sheets. See [contract and verification](dev/SCHEMATIC_CLONING.md).
+- `set_schematic_sheet_properties` (`sheet_path, sheet_size=None`): Read/change standard A0..A4 size on an exact saved or open named unsaved SchDoc, with undo notifications, Modified/readback checks and no saves.
+- `zoom_schematic` (`sheet_path, mode="all"`): Fit schematic objects (`all`) or the page (`sheet`) in the exact sheet's viewport; preserves Modified and never saves.
+- `save_project` (`project_path, dry_run=False`): Save only an exact open local PrjPcb/LibPkg after clean-source and membership preflight; verify disk membership and unchanged source files. `dry_run=True` writes nothing. Live-tested only in dry-run mode under the user's no-save constraint. See [report analysis, contracts and live evidence](dev/POWER_SEQUENCER_SCRIPT_REPLACEMENTS.md).
+- `add_document_to_project` (`project_path, document_path`): Include one saved or open named unsaved document in an exact open PrjPcb/LibPkg, idempotently and without saving documents/project. See [lifecycle behavior, examples and limits](dev/DOCUMENT_MANAGEMENT.md).
+- `select_project` (`project_path`): Make one exact already-open PrjPcb/LibPkg current through Altium's project API. Does not open/reload sheets, compile or save; verifies project identity and unchanged document states. See [behavior, examples and live verification](dev/PROJECT_SELECTION.md).
+- `open_project` (`project_path`): Open and select an exact existing PrjPcb/LibPkg, or reuse it if already open. Never reloads an open project or requests saving/compilation. `open_document` (`document_path`) opens/focuses SchLib/PcbLib libraries and SchDoc/PcbDoc documents while preserving already-open in-memory data. See [opening behavior and examples](dev/OPEN_TARGETS.md).
+- `get_schematic_connectivity` (`sheet_path, compiled=True, expected_connections=None`): Read active pin numbers, electrical-end coordinates in mils and actual flattened net names from the owning Altium project's compiler model. The default compiles in memory; `compiled=False` reads the existing cache and marks it potentially stale. Reports placed pins missing from the compiler model with an unknown net. Optional expected pin groups check common nets, net names, disconnection or exact membership on the target sheet. Never saves sheets. See [schema, examples, alternatives and verification](dev/SCHEMATIC_CONNECTIVITY.md).
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 - `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
 
@@ -254,15 +410,22 @@ Altium pitfalls the tools work around:
 ### PCB Footprint Library
 - `create_pcb_footprint`: Create a new PCB footprint in the currently active .PcbLib document. Supports SMD pads (Rect, Round, Oval shapes) defined in mm relative to the component origin. Auto-generates a courtyard on Mech 15 and silkscreen with a pin 1 indicator (gap in the top-left corner), or accepts explicit courtyard dimensions. Contributed by [coffeedust](https://github.com/coffeedust) ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7)).
 - `get_footprint_primitives`: Inventory a .PcbLib (per-footprint primitive counts) or dump complete footprint geometry - pads with full stack/hole detail, tracks, arcs, fills, texts, regions - in mils, relative to the footprint origin (also for the footprint shown in the editor). Pads also report their paste and solder mask mode and expansion and whether they are `locked`. The reference source when recreating or verifying footprints. A dumped footprint also lists its 3D bodies (`bodies_3d`: model file, whether it is embedded, its X/Y offset, standoff and overall height, layer, model rotation X/Y/Z and Z offset); the bodies themselves are not recreated. The rotations and Z offset are read from the saved library file, because `IPCB_Model.GetState` returns them through out parameters that DelphiScript never receives. A body that is not saved yet has them as null (`placement` says which).
-- `create_footprints_batch`: Create many footprints in one script run from a plain-text spec file: SMD + through-hole pads (holes, slots, plating, rotation, full pad stack, paste and solder mask expansion), tracks, arcs, fills, texts, regions on any layer, and 3D models. Every pad it creates is locked. Records beyond the original set:
-  - `PAD|...|bot_shape|paste_mode|paste_expansion|mask_mode|mask_expansion`: optional paste and solder mask expansion at the end of a PAD record. Modes are TMaskExpansionMode ints: 1 rule, 2 manual (expansion in mils). Mode 0 (no mask) cannot be set on a pad by script: the mode setters ignore it, and the paste-enable and tenting properties are not kept, so it is reported as a problem. Manual values are set through the pad cache, because the `PasteMaskExpansion`/`SolderMaskExpansion` setters stop the script.
+- `edit_footprint_model3d` (`library_path, footprint_name, ..., changes=None, delete=False`): Inventory, move, rotate, embed, replace STEP or delete existing 3D bodies without saving. Select by live body ID or guarded index. Rotation/Z edits require a complete pose because DelphiScript cannot read those out-parameters. See [contract and verification](dev/FOOTPRINT_MODEL3D.md).
+- `set_pcb_component_properties` (`pcb_path, designators, component_kind=None, graphical=None, include_in_bom=None, include_in_pick_place=None`): Set native type of placed PCB components, including Graphical fiducials, with component-type BOM/Pick & Place eligibility. Rejects PcbLib targets; preflights all selectors and never saves or changes output settings. Conditional Standard (No BOM) Pick & Place inclusion is reported explicitly. See [contract and verification](dev/PCB_COMPONENT_PROPERTIES.md).
+- `set_footprint_properties` (`library_path, footprint_name, height_mm=None`): Read/set native footprint Height in mm, with idempotent updates, Modified/readback checks and no saves. Preserves primitives and 3D bodies; `get_footprint_primitives` also reports `height_mm`. See [contract and verification](dev/FOOTPRINT_PROPERTIES.md).
+- `set_footprint_pad_settings`: Set manual solder mask/paste expansions on exact existing PcbLib pads, or reset both to rules. Uses the pad cache, preflights names, verifies readback and never saves.
+- `set_footprint_pad_properties` (`library_path, footprint_name, pad_names, is_testpoint_top=None, is_testpoint_bottom=None`): Read/set native Top/Bottom testpoint flags on selected pads. Checks every target and copper side before editing; preserves omitted flags, geometry, locks and mask/paste settings. Never saves. See [contract and verification](dev/FOOTPRINT_PAD_PROPERTIES.md).
+- `edit_footprint_primitives`: Change layers of existing tracks, arcs and fills selected by complete geometry. Preflights the entire batch; preserves geometry and never saves. See [contracts, report analysis and live-test status](dev/FOOTPRINT_EDITOR.md).
+- `get_pcb_api_constants`: Evaluate each whitelisted shape/cache/layer constant in running Altium and report its availability. `eRound` explicitly falls back to `eRounded` when necessary. STEP path matching and shared canonical layer names are described in [PCB readback fixes](dev/PCB_READBACK_FIXES.md).
+- `create_footprints_batch` (`spec_file, units="mil"`): Create many footprints in one script run. Choose `mm` or legacy-default `mil` for all linear input fields. `FOOTPRINT|name|description|height` sets native Height; PAD fields after mask expansion set Top/Bottom testpoint flags. Creation properties are preflighted and verified without follow-up setters or saves. Supports pads/stacks/holes, graphics, regions, vias and STEP offsets. See [units, schema and verification](dev/FOOTPRINT_CREATION.md). Records beyond the original set:
+  - `PAD|...|bot_shape|paste_mode|paste_expansion|mask_mode|mask_expansion[|testpoint_top|testpoint_bottom]`: optional paste/mask overrides, then native testpoint flags. Modes are TMaskExpansionMode ints: 1 rule, 2 manual (expansion in the selected input unit). Mode 0 (no mask) cannot be set on a pad by script and is reported as a problem. Manual values use the pad cache; testpoint flags use 1/0 with blank/omitted False.
   - `MODEL3D|<STEP file>|<layer>|<rot_x>|<rot_y>|<rot_z>|<z_offset>[|<x>|<y>[|<embed 1/0>]]`: add a 3D body from a STEP file, embedded unless embed is 0.
   - `EDITFOOTPRINT|<name>`: add `MODEL3D` records to an existing footprint; it never creates a footprint, and other records under it are reported and ignored.
 
   Altium keeps the footprint shown in the library editor on the library board, offset by the library origin, and writes it back when another footprint is shown. So a model for the shown footprint is added to the board, at that offset; added to the footprint itself, it would be lost. Round-trip verified against complete production SMD and through-hole libraries. Like `create_symbols_batch`, it leaves the library modified and unsaved, and an `FPLIB|<path>` line focuses the open library rather than reloading it.
 
 ### Both
-- `get_screenshot`: Take a screenshot of exactly one thing in Altium, returned as a proper image the agent can see. `target` says what: `current` (the window as it is, the default; nothing is switched), `document` (the active document's editing area), `document:<file name or path>` (that document's editing area; only an open one unless `open_if_closed`, the previously active document is brought back afterwards and a document opened for the capture is closed again when unchanged), `dialog` (the topmost Altium dialog or popup), `panel:<name>` (e.g. `panel:Projects`) or `region:x,y,w,h` (a rectangle inside Altium's main window, in pixels of a `current` capture; nothing outside Altium is ever captured). `zoom_to` (designators) zooms a board to those components first; given on its own it means `view_type` 'pcb'. The metadata says what was captured (`captured_kind`, `captured_document`, `view_type`) and whether anything was switched, opened or closed. The old `view_type` 'pcb'/'sch' still works as before. Altium comes to the front for about a second for the capture, then the window that was in front gets the foreground back.
+- `get_screenshot`: Take a screenshot of exactly one thing in Altium, returned as a proper image the agent can see. `target` says what: `current` (the window as it is, the default; nothing is switched), `document` (the active document's editing area), `document:<file name or path>` (that document's editing area; only an open one unless `open_if_closed`, the previously active document is brought back afterwards and a document opened for the capture is closed again when unchanged), `dialog` (the topmost Altium dialog or popup), `panel:<name>` (e.g. `panel:Projects`) or `region:x,y,w,h` (a rectangle inside Altium's main window, in pixels of a `current` capture; nothing outside Altium is ever captured). `zoom_to` (designators) zooms a board to those components first; given on its own it means `view_type` 'pcb'. The metadata says what was captured (`captured_kind`, `captured_document`, `view_type`) and whether anything was switched, opened or closed. The old `view_type` 'pcb'/'sch' still works as before. Altium comes to the front for about a second for the capture, then the window that was in front gets the foreground back. The fork also supports view_type="pcblib"/"schlib" with foreground validation.
 
 ### Scripting / Development
 - `run_altium_script`: Run a DelphiScript snippet in an **isolated sandbox** and get back a step-by-step log, the script's result, and - when a script fails - Altium's own error message with the line in your script. Each run is written to a fresh copy of `SandboxScript/Sandbox.pas` with a unique file name and started with `ScriptingSystem:RunScriptFile`, so a script that failed earlier can never be re-run from Altium's script editor. Errors inside the script (undeclared identifiers, calls on nil, bad conversions) are caught and reported without blocking Altium; syntax errors are reported from Altium's error dialog, which the tool answers before stopping the debugger (`-REditScript:Stop`) and confirming with a probe run that the next script will work. The other MCP tools recover the same way when one of their own commands gets stuck. Only scripts the MCP started are ever stopped: a script you are running or debugging in Altium is left alone, and the tool says Altium is busy instead. Scripts may start with their own `var` block, followed by their own functions and procedures; `Exit` ends the script and still returns its result. Assignments to undeclared names, reserved words and directives used as names (`Index`, `Read`, `Default`, ...), and comparisons next to `and`/`or` or after `not` without parentheses are refused before Altium is called, since Altium's own messages for them do not say what is wrong; `skip_lint=True` skips the reserved-word and precedence checks for a false positive. The script's `var` block is global, so declaring a name the sandbox already declares (`var S1 : Integer;`, `MM`, ...) is refused too: use the sandbox's variable without declaring it, or pick another name. The template provides `MM()`, `OpenSchDoc()` and `SaveDoc()` helpers, and `FmtNum()`, `FmtMM()`, `ParseNum()` and `ParseMM()` for numbers with a decimal dot whatever the Windows locale. Before each run the Altium documents the script names by their full path are copied to a per-user folder (`~/.altium-mcp/snapshots` by default), or those given in `snapshot`; a script that works on `GetCurrentPCBBoard` or the focused document names none, and the result then says that nothing was snapshotted. While waiting it closes blocking Altium dialogs (only windows owned by `X2.EXE`) and returns their titles in `dismissed_dialog_titles` - close your own Altium dialogs before running scripts, since an open dialog of yours may be closed too.
@@ -270,7 +433,7 @@ Altium pitfalls the tools work around:
 - `ensure_altium_script_skill`: Check whether the [altium-script skill](https://github.com/coffeenmusic/altium-scripts-skill) (Altium DelphiScript API reference, examples, and conventions) is installed, and install it on request. Skills load at client startup, so a newly installed skill appears after a restart.
 
 ### Server Status
-- `get_server_status`: Check the status of the MCP server, including paths to Altium and script files
+- `get_server_status`: Read the responding process's project/SDK versions, startup source fingerprint, PID, start time, uptime, interpreter and configured Altium/script paths. See [manual server verification](#manual-server-verification).
 
 ## How It Works
 

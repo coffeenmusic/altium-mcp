@@ -288,12 +288,12 @@ var
     Layer    : IPCB_LayerObject;
 begin
     Result := eNoLayer;
-    Name := UpperCase(Trim(Name));
+    Name := UpperCase(PCBCanonicalLayerName(Name));
     Iterator := Board.ElectricalLayerIterator;
     while (Result = eNoLayer) and Iterator.Next do
     begin
         Layer := Iterator.LayerObject;
-        if (UpperCase(Layer.Name) = Name) or (UpperCase(Layer2String(Layer.LayerID)) = Name) then
+        if (UpperCase(Layer.Name) = Name) or (UpperCase(PCBLayerName(Layer.LayerID)) = Name) then
             Result := Layer.LayerID;
     end;
 end;
@@ -451,6 +451,7 @@ begin
        (CommandName = 'add_to_project') or
        (CommandName = 'build_circuit') or
        (CommandName = 'edit_schematic') or
+       (CommandName = 'edit_schematic_actions') or
        (CommandName = 'get_schematic_pins') or
        (CommandName = 'get_symbol_primitives') or
        (CommandName = 'create_symbols_batch') or
@@ -510,6 +511,10 @@ begin
     begin
         if LowerCase(ViewTypeHint) = 'sch' then
             DocumentKind := 'SCH'
+        else if LowerCase(ViewTypeHint) = 'schlib' then
+            DocumentKind := 'SCHLIB'
+        else if LowerCase(ViewTypeHint) = 'pcblib' then
+            DocumentKind := 'PCBLIB'
         else
             DocumentKind := 'PCB';
     end
@@ -793,9 +798,19 @@ begin
         DocType := 'SCH';
         ClassName := 'SchView';
     end
+    else if LowerCase(ViewType) = 'schlib' then
+    begin
+        DocType := 'SCHLIB';
+        ClassName := 'SchView';
+    end
+    else if LowerCase(ViewType) = 'pcblib' then
+    begin
+        DocType := 'PCBLIB';
+        ClassName := 'View_Graphical';
+    end
     else
     begin
-        Result := '{"success": false, "error": "Invalid view type: ' + ViewType + '. Must be ''pcb'' or ''sch''"}';
+        Result := '{"success": false, "error": "View type must be pcb, sch, pcblib or schlib"}';
         Exit;
     end;
 
@@ -1384,7 +1399,22 @@ end;
 // is not open yet: re-opening an open document reloads it from disk and
 // silently discards unsaved changes. Returns nil when it cannot be opened.
 function OpenLibraryDocument(Kind: String; Path: String): IServerDocument;
+var
+    I, J, Matches: Integer;
+    Module: IServerModule;
 begin
+    // Refuse ambiguous aliases instead of selecting or reloading an arbitrary
+    // buffer. In particular, never merge two possibly dirty library buffers.
+    Matches := 0;
+    for I := 0 to Client.Count - 1 do
+    begin
+        Module := Client.ServerModule[I];
+        if Module <> nil then
+            for J := 0 to Module.DocumentCount - 1 do
+                if NormalizedPath(Module.Documents[J].FileName) = NormalizedPath(Path) then
+                    Matches := Matches + 1;
+    end;
+    if Matches > 1 then begin Result := nil; Exit; end;
     Result := FindOpenDocument(Path);
     if (Result = nil) then
         Result := Client.OpenDocument(Kind, Path);
@@ -1629,7 +1659,7 @@ begin
 
         OutputLines := TStringList.Create;
         try
-            OutputLines.Text := BuildJSONObject(ResultProps);
+            OutputLines.Text := DocumentJSON(BuildJSONObject(ResultProps));
             Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_project_info.json');
         finally
             OutputLines.Free;

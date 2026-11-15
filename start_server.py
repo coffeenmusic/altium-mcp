@@ -1,12 +1,16 @@
-"""Bootstrap for the Altium MCP extension.
+"""Bootstrap and client setup for the Altium MCP server.
 
-Two roles in one file:
+Three roles in one file:
 
-  python start_server.py           the LAUNCHER Claude Desktop runs. Makes
-                                   sure a ready venv exists, then execs
+  python start_server.py           the LAUNCHER an MCP client runs. Makes
+                                   sure a ready venv exists, then runs
                                    server/main.py inside it.
   python start_server.py --build   the BUILDER. Creates the venv and installs
                                    the pinned requirements, then exits.
+  python start_server.py mcp setup --client codex
+                                   registers the launcher with Codex.
+  python start_server.py --version reports the version and source fingerprint
+                                   currently on disk without starting a server.
 
 The builder is a separate, DETACHED process on purpose. Claude Desktop gives
 a server about 60 s to answer `initialize` and then kills it, and it also
@@ -15,6 +19,7 @@ install that runs inside the launcher dies with it, leaving a half-built venv
 and a lock nobody will release. A detached builder finishes regardless, so a
 restarted launcher finds the venv ready or a build genuinely in progress.
 """
+import argparse
 import hashlib
 import os
 import shutil
@@ -23,7 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 # The hash-locked set exported by uv. Installed when present, so no
 # dependency of mcp floats to a release it was never tested with (pydantic
@@ -200,6 +205,13 @@ def _release_lock():
 
 # --- builder ----------------------------------------------------------------
 
+def _background_subprocess_options():
+    """Keep non-interactive child processes from opening Windows consoles."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def _build_venv():
     # An existing tree here is a partial build or one whose requirements moved.
     # Either way it cannot be trusted. Removing it first is what stops
@@ -211,18 +223,20 @@ def _build_venv():
                 "Could not remove the existing virtual environment at %s. "
                 "Something is holding it open." % VENV_DIR
             )
-    subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
+    subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)],
+                          **_background_subprocess_options())
     pip = [str(VENV_DIR / "Scripts" / "pip.exe"), "install", "--quiet"]
     installed = False
     if _locked_text():
         # Hashes in the file put pip in hash-checking mode for every package.
         try:
-            subprocess.check_call(pip + ["-r", str(LOCKED_REQUIREMENTS)])
+            subprocess.check_call(pip + ["-r", str(LOCKED_REQUIREMENTS)],
+                                  **_background_subprocess_options())
             installed = True
         except subprocess.CalledProcessError as exc:
             print("locked install failed (%s); falling back to %s" % (exc, REQUIREMENTS))
     if not installed:
-        subprocess.check_call(pip + REQUIREMENTS)
+        subprocess.check_call(pip + REQUIREMENTS, **_background_subprocess_options())
     MARKER.write_text(_marker_payload(), encoding="utf-8")
     _prune_old_venvs()
 
@@ -345,7 +359,7 @@ def build_main():
 def _spawn_builder():
     """Start the builder detached from this process, its console and its job."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--build"]
+    cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--build"]
     log = open(BUILD_LOG, "a", encoding="utf-8", errors="replace")
     log.write("\n=== %s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
     log.flush()
@@ -415,12 +429,69 @@ def ensure_venv():
         "minute." % VENV_DIR))
 
 
-if __name__ == "__main__":
-    if "--build" in sys.argv[1:]:
-        sys.exit(build_main())
+# --- client setup -----------------------------------------------------------
+
+def setup_codex():
+    """Register through the Codex CLI without bootstrapping the server."""
+    codex = shutil.which("codex")
+    if not codex:
+        print("Codex CLI was not found on PATH. Install it or use the manual "
+              "Codex configuration in README.md.", file=sys.stderr)
+        return 1
+
+    command = [codex, "mcp", "add", "altium-mcp"]
+    if os.environ.get("ALTIUM_MCP_HOME"):
+        command += ["--env", "ALTIUM_MCP_HOME=" + str(DATA_DIR.resolve())]
+    command += ["--", sys.executable, str(SCRIPT_DIR / "start_server.py")]
+    try:
+        result = subprocess.call(command)
+    except OSError as exc:
+        print("Could not run the Codex CLI: %s" % exc, file=sys.stderr)
+        return 1
+    if result == 0:
+        print("Registered altium-mcp. Restart Codex or reload its MCP servers, "
+              "then call get_server_status to check the connection.")
+    return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--build", action="store_true",
+                        help="Build the dependency environment and exit.")
+    parser.add_argument("--version", action="store_true",
+                        help="Show the installed version and source fingerprint as JSON, then exit.")
+    commands = parser.add_subparsers(dest="command")
+    mcp = commands.add_parser("mcp", help="Configure an MCP client.")
+    actions = mcp.add_subparsers(dest="action", required=True)
+    setup = actions.add_parser("setup", help="Register this server with an MCP client.")
+    setup.add_argument("--client", required=True, choices=["codex"])
+    args = parser.parse_args(argv)
+
+    if args.version:
+        if args.build or args.command:
+            parser.error("--version cannot be combined with build or client setup")
+        import json
+        from server.server_info import get_build_info
+        print(json.dumps(get_build_info(), indent=2))
+        return 0
+    if args.build:
+        if args.command:
+            parser.error("--build cannot be combined with MCP client setup")
+        return build_main()
+    if args.command == "mcp":
+        return setup_codex()
+
     venv_python = ensure_venv()
     server_path = str(SCRIPT_DIR / "server" / "main.py")
     # main.py keeps config.json in the same per-user folder; hand it the
     # resolved location so the two can never disagree.
     env = dict(os.environ, ALTIUM_MCP_HOME=str(DATA_DIR))
-    sys.exit(subprocess.call([venv_python, server_path], env=env))
+    # Hidden Windows children need explicit pipe handles for MCP stdio.
+    return subprocess.call([venv_python, server_path], env=env,
+                           stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+                           **_background_subprocess_options())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

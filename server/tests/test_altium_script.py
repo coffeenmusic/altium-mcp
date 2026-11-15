@@ -26,6 +26,8 @@ except ImportError:
 
 # Add the parent directory to the path so we can import modules from the main project
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import symbol_metadata
+from altium_files import write_altium_text
 
 # Constants
 MCP_DIR = Path("C:/AltiumMCP")
@@ -452,12 +454,20 @@ class AltiumScriptTest(unittest.TestCase):
         # Create test symbol parameters
         params = {
             "symbol_name": symbol_name,
-            "description": "Test Symbol created by automated test",
             "pins": pins
         }
+        metadata, _ = symbol_metadata.prepare(symbol_name, "Test component, power and logic pins, SMD", pins,
+            {"Value": "Test logic", "MF": "Test fixture", "MP": symbol_name,
+             "HelpURL": "https://example.com/test-fixture", "Package": "SMD",
+             "Type": "SMD", "Instructions": "Fit", "System": "Test"})
+        metadata_file = MCP_DIR / (symbol_name + "_metadata.txt")
+        write_altium_text(metadata_file, metadata)
+        params["metadata_file"] = str(metadata_file)
         
         # Execute the command
         response = self.execute_command("create_schematic_symbol", params)
+        if response.get("success"):
+            metadata_file.unlink(missing_ok=True)
         
         # Verify the response
         self.assertTrue(response.get("success", False), 
