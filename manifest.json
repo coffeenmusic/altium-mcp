@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "altium-mcp",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
   "author": {
     "name": "Stephen Thompson"
@@ -11,7 +11,9 @@
     "entry_point": "start_server.py",
     "mcp_config": {
       "command": "python",
-      "args": ["${__dirname}/start_server.py"]
+      "args": [
+        "${__dirname}/start_server.py"
+      ]
     }
   },
   "tools": [
@@ -28,6 +30,22 @@
       "description": "Read an .OutJob file from disk and return containers, outputs and decoded fabrication settings (Gerber layers, NC Drill, IPC-D-356, pick and place)"
     },
     {
+      "name": "list_open_documents",
+      "description": "List the documents open in Altium: path, kind, unsaved changes, and which one is in front"
+    },
+    {
+      "name": "reload_document",
+      "description": "Close an open document and open it again from disk; refused with unsaved changes unless discard_changes"
+    },
+    {
+      "name": "create_outjob",
+      "description": "Create an .OutJob file, empty or from a template OutJob, and optionally add it to a project"
+    },
+    {
+      "name": "edit_outjob",
+      "description": "Add, change or remove an OutJob's containers, and copy, remove, rename, enable or move its outputs or change one output setting"
+    },
+    {
       "name": "get_project_info",
       "description": "Get the focused project's parameters, documents with unsaved-changes state, sheet count and variants"
     },
@@ -37,7 +55,15 @@
     },
     {
       "name": "get_erc_violations",
-      "description": "Compile the focused project in memory and list ERC/compiler violations by level"
+      "description": "Compile a project (the focused one, or one by path) in memory and list ERC/compiler violations by level"
+    },
+    {
+      "name": "preview_eco",
+      "description": "Show what Update PCB would change (components, nets, classes, rooms) between the compiled project and its board, without running it"
+    },
+    {
+      "name": "compare_netlist",
+      "description": "Compile a project and compare its netlist with a saved snapshot: nets and pins added, removed, renamed or moved"
     },
     {
       "name": "get_board_summary",
@@ -89,11 +115,23 @@
     },
     {
       "name": "check_schematic",
-      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires"
+      "description": "Check saved schematic sheets for drafting problems: pin taps, label placement, text overlaps, dangling wires, slanted wires, pins off the grid"
+    },
+    {
+      "name": "check_hierarchy",
+      "description": "Check that sheet entries match the ports of their child sheets, harness types and harness definitions agree, and every signal harness has a type"
     },
     {
       "name": "edit_schematic",
       "description": "Change an existing schematic sheet as one undo step: move, place or delete parts, set parameters, move text, add wires, labels, power ports and junctions"
+    },
+    {
+      "name": "get_schematic_pins",
+      "description": "List a schematic sheet's pins live from Altium: connection point, number, name and electrical type"
+    },
+    {
+      "name": "render_sheet",
+      "description": "Draw a schematic sheet or part of it as a picture, read from the saved .SchDoc file"
     },
     {
       "name": "get_symbol_placement_rules",
@@ -137,7 +175,11 @@
     },
     {
       "name": "run_drc",
-      "description": "Run the design rule check on a PCB and list the violations"
+      "description": "Run the design rule check on a PCB and list the violations with measured values, optionally filtered by rule, net or area"
+    },
+    {
+      "name": "check_objects_drc",
+      "description": "Run the board's design rules on chosen PCB objects only, without a batch DRC"
     },
     {
       "name": "get_selected_components_coordinates",
@@ -153,7 +195,7 @@
     },
     {
       "name": "place_components",
-      "description": "Place any number of components at absolute positions (x, y, rotation, side) in one undo step"
+      "description": "Place any number of components at absolute positions (x, y, rotation, side, lock, designator and comment text) on a named board, in one undo step"
     },
     {
       "name": "check_placement",
@@ -176,8 +218,40 @@
       "description": "Add a track through waypoints with every segment exactly 0, 45 or 90 degrees"
     },
     {
+      "name": "route_path",
+      "description": "Route a net through waypoints at 0/45/90 degrees, changing layer with vias, in one undo step and checked against the rules"
+    },
+    {
       "name": "place_vias",
       "description": "Add vias to a PCB at positions in mils, with nets and layer spans checked against the board first"
+    },
+    {
+      "name": "get_layout",
+      "description": "Read the layout of a group of components or an area: placement, texts, tracks, arcs, vias, fills, regions, cutouts and pours with their full outlines and settings, in place_copper's form"
+    },
+    {
+      "name": "place_copper",
+      "description": "Add tracks and arcs at any angle, vias, fills, regions, cutouts and polygon pours in one undo step, all checked first; can move and rename nets to repeat a layout"
+    },
+    {
+      "name": "get_unrouted_connections",
+      "description": "List the connections still to be routed for some components, nets or the whole board, naming the pads at each end, with no DRC limit"
+    },
+    {
+      "name": "fanout_pads",
+      "description": "Fan out pads to vias beside them (e.g. ground and power pads to their planes), widths and gaps from the board's rules"
+    },
+    {
+      "name": "route_connections",
+      "description": "Route a group's unrouted connections with a maze router at 0/45/90 degrees, widths and clearance from the board's rules, vias between the layers allowed"
+    },
+    {
+      "name": "delete_pcb_objects",
+      "description": "Rip up copper: tracks, arcs, vias, pours, regions, fills or cutouts picked by kind, net, layer, area or a group's designators; locked objects kept"
+    },
+    {
+      "name": "modify_pcb_objects",
+      "description": "Change the width, via size, net or layer of copper picked as for delete_pcb_objects, in one undo step"
     },
     {
       "name": "place_polygon_pour",
@@ -186,6 +260,38 @@
     {
       "name": "place_cutout",
       "description": "Add a polygon pour cutout or a board cutout to a PCB and repour the polygons it overlaps"
+    },
+    {
+      "name": "repour_polygons",
+      "description": "Repour all polygon pours on a PCB, or those picked by name, net, layer or area, in pour order, as one undo step"
+    },
+    {
+      "name": "get_pour_report",
+      "description": "Report what each polygon pour poured: pieces, islands, slivers, and pours with no net or no copper"
+    },
+    {
+      "name": "objects_in_area",
+      "description": "List the PCB objects in a box with their layer, net, owner, geometry and a ref for the other geometry tools"
+    },
+    {
+      "name": "clearance",
+      "description": "Measure the edge-to-edge gap between two PCB objects and check the clearance rule that applies"
+    },
+    {
+      "name": "drag_copper",
+      "description": "Move a via or a track segment and keep it connected: attached track ends stretch and vias move along"
+    },
+    {
+      "name": "render_pcb",
+      "description": "Draw a PCB area as a picture from its objects, without touching Altium's view"
+    },
+    {
+      "name": "query_objects",
+      "description": "Find PCB objects with Altium's query language (as the PCB Filter panel runs it), with sizes given in a unit and an optional area"
+    },
+    {
+      "name": "which_rule",
+      "description": "Give the design rule the DRC applies to a PCB object or a pair of objects, and whether they pass it"
     },
     {
       "name": "layout_duplicator",
@@ -241,11 +347,15 @@
     },
     {
       "name": "get_screenshot",
-      "description": "Take a screenshot of the Altium window"
+      "description": "Take a screenshot of one named thing in Altium: the window, a document, a dialog, a panel or a screen region"
     },
     {
       "name": "run_altium_script",
       "description": "Run a DelphiScript snippet in an isolated sandbox and get a step-by-step log, its result, and the statement that failed"
+    },
+    {
+      "name": "rollback_altium_script",
+      "description": "Undo a run_altium_script run by restoring the documents it copied before the run, refusing files changed on disk since and documents with unsaved changes"
     },
     {
       "name": "ensure_altium_script_skill",
@@ -254,6 +364,130 @@
     {
       "name": "get_server_status",
       "description": "Get the current status of the Altium MCP server"
+    },
+    {
+      "name": "edit_footprint_model3d",
+      "description": "Read/edit/replace/delete existing footprint 3D bodies in an exact PcbLib; never save."
+    },
+    {
+      "name": "set_footprint_properties",
+      "description": "Read/set native Height of one existing footprint in an exact .PcbLib; never save."
+    },
+    {
+      "name": "set_footprint_pad_properties",
+      "description": "Read/set native Testpoint Top/Bottom flags on exact existing PcbLib pads; never save."
+    },
+    {
+      "name": "set_footprint_pad_settings",
+      "description": "Update existing PcbLib pads without saving. All names must match one pad each."
+    },
+    {
+      "name": "edit_footprint_primitives",
+      "description": "Change layers of existing track, arc or fill primitives in a PcbLib; never save."
+    },
+    {
+      "name": "get_pcb_api_constants",
+      "description": "Read selected native PCB enum values without arbitrary script evaluation."
+    },
+    {
+      "name": "set_schematic_sheet_properties",
+      "description": "Read/change ISO format of an exact saved or open named unsaved SchDoc."
+    },
+    {
+      "name": "zoom_schematic",
+      "description": "Focus an exact SchDoc and fit objects or the page using native SCH:Zoom."
+    },
+    {
+      "name": "save_project",
+      "description": "Save only one exact OPEN local PrjPcb/LibPkg; never save source documents."
+    },
+    {
+      "name": "edit_sheet_symbols",
+      "description": "Read/create/update/delete native Sheet Symbols and their Sheet Entries; never save."
+    },
+    {
+      "name": "draw_block_diagram",
+      "description": "Add a non-electrical block diagram to an exact SchDoc, in memory only."
+    },
+    {
+      "name": "get_schematic_connectivity",
+      "description": "Read pin numbers, electrical-end coordinates (mils) and actual compiler nets for one exact .SchDoc in exactly one open PCB project. Never saves sheets."
+    },
+    {
+      "name": "get_lcsc_component_info",
+      "description": "Read single/batch LCSC cards by C-number, exact orderable MPN or text; no Altium."
+    },
+    {
+      "name": "set_library_component_lcsc_data",
+      "description": "Fill LCSC/JLCPCB fields on an exact existing SchLib symbol after creation."
+    },
+    {
+      "name": "verify_library_roundtrip",
+      "description": "Compare whole SchLib/PcbLib buffers across an actual close and reopen."
+    },
+    {
+      "name": "validate_library_components",
+      "description": "Validate SchLib/PcbLib buffers without edits, compilation or saves."
+    },
+    {
+      "name": "get_library_components_data",
+      "description": "Batch-read exact saved/open named unsaved SchLib/PcbLib buffers in one run."
+    },
+    {
+      "name": "set_library_view",
+      "description": "Navigate an exact saved/open named unsaved SchLib or PcbLib without saving."
+    },
+    {
+      "name": "remove_empty_library_component",
+      "description": "Remove one genuinely empty SchLib/PcbLib member, without saving documents."
+    },
+    {
+      "name": "update_symbol_primitives",
+      "description": "Update existing SchLib labels, drawing objects and pins in place; never save."
+    },
+    {
+      "name": "set_library_component_properties",
+      "description": "Set native default Designator and Component Type on one existing SchLib symbol."
+    },
+    {
+      "name": "set_library_component_data",
+      "description": "Upsert parameters and PCB footprint models on an exact existing SchLib symbol. Never saves documents or updates placed components. Omit edits to read metadata. parameters maps names to string values; Comment/Designator are reserved (use comment separately; use set_library_component_properties for Designator/type). Existing parameter visibility and unrelated data remain. footprint_models: [{\"model_name\":\"R_0603\",\"library_path\":\"C:/Lib/Parts.PcbLib\", \"pin_map\":{\"1\":[\"2\"],\"2\":[\"1\"]},\"is_current\":true,\"description\":\"optional\"}]. Each model requires an existing PcbLib/footprint and a complete pin_map across all symbol parts. One pin may map to several pads; pads cannot be reused by different pins. Numbers are exact strings. Unsupported map delimiters fail. Models are upserted by case-insensitive PCBLIB name; other models are kept. Explicitly selecting a current footprint deselects other PCB models only. Omitted is_current preserves existing state; new models default inactive. All references are checked before edits. Locked/managed models and read-only parameters are rejected. Returns before/after metadata and readback verification; on API/readback failure inspect may_have_partial_changes before retrying."
+    },
+    {
+      "name": "clone_schematic_components",
+      "description": "Clone placed components between two exact different SchDocs, without saving."
+    },
+    {
+      "name": "close_document",
+      "description": "Close one exact open document or PrjPcb/LibPkg by absolute path; never save."
+    },
+    {
+      "name": "open_document",
+      "description": "Open/focus an exact existing SchDoc/PcbDoc/SchLib/PcbLib by absolute path."
+    },
+    {
+      "name": "create_document",
+      "description": "Create a named unsaved document in Free Documents; never saves or adds it to a project."
+    },
+    {
+      "name": "save_document",
+      "description": "Save ONLY the exact open SchDoc/PcbDoc/SchLib/PcbLib at its assigned local path."
+    },
+    {
+      "name": "add_document_to_project",
+      "description": "Add one exact document to an exact OPEN .PrjPcb or .LibPkg, in memory only."
+    },
+    {
+      "name": "set_pcb_component_properties",
+      "description": "Read/set native type of placed components in one exact PcbDoc; never save."
+    },
+    {
+      "name": "open_project",
+      "description": "Open and select an exact saved PrjPcb/LibPkg by absolute Windows path."
+    },
+    {
+      "name": "select_project",
+      "description": "Select one exact already-open PrjPcb or LibPkg by absolute Windows path."
     }
   ],
   "compatibility": {

@@ -207,14 +207,17 @@ class FootprintEditorTest(unittest.TestCase):
                 self.assertFalse(checked['may_have_partial_changes'])
 
     def test_screenshot_library_request_and_wrong_kind_guard(self):
+        import screenshot_target
         tree = ast.parse((Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8"))
-        function = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "get_screenshot")
-        function.decorator_list = []
+        functions = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+                     and node.name in {"get_screenshot", "_view_type_screenshot"}]
+        for function in functions:
+            function.decorator_list = []
         bridge = self.bridge({"focused_kind": "PCB", "focused_document": "Board.PcbDoc"}, success=True)
         gui = Mock()
         namespace = {"Context": object, "logger": Mock(), "win32gui": gui,
-                     "altium_bridge": bridge, "json": json}
-        exec(compile(ast.Module(body=[function], type_ignores=[]), "screenshot", "exec"), namespace)
+                     "altium_bridge": bridge, "json": json, "screenshot_target": screenshot_target}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "screenshot", "exec"), namespace)
         for kind in ("schlib", "pcblib"):
             result = json.loads(asyncio.run(namespace["get_screenshot"](None, kind)))
             self.assertFalse(result["success"])

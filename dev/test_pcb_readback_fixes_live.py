@@ -5,7 +5,7 @@ import asyncio
 import copy
 import json
 import ntpath
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import sys
 import time
@@ -63,6 +63,10 @@ async def run(args):
 
     try:
         original = await call('project_before', main.get_project_info)
+        project_path = PureWindowsPath(original.get('project_path', ''))
+        if not project_path.is_absolute() or project_path.suffix.lower() not in ('.prjpcb', '.libpkg'):
+            original = None
+            raise RuntimeError('Select a saved design/library project before running this live test')
         library = Path(args.library)
         source_board = Path(args.board)
         guarded = {d['path']: disk_state(Path(d['path'])) for d in original['documents']}
@@ -155,7 +159,14 @@ async def run(args):
                     await call('cleanup_' + path.suffix[1:], main.close_document, str(path), require_clean=False)
                 opened.clear()
                 if previous:
-                    await call('restore_editor', main.open_document, previous)
+                    if PureWindowsPath(previous).is_absolute():
+                        await call('restore_editor', main.open_document, previous)
+                    else:
+                        # Internal pages have names, not absolute design paths.
+                        restored = await main.altium_bridge.execute_command('focus_document',
+                            {'path': previous, 'open_if_closed': 'false'})
+                        record('restore_internal_page', restored)
+                        assert restored.get('success'), restored
                 if original:
                     await call('restore_project', main.select_project, original['project_path'])
                     final = await call('project_after', main.get_project_info)

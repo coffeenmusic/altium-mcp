@@ -170,6 +170,335 @@ begin
     end;
 end;
 
+// Document kind Client.OpenDocument expects for a file, from its extension
+function ClientDocumentKindForPath(Path: String): String;
+var
+    Ext : String;
+begin
+    Ext := UpperCase(ExtractFileExt(Path));
+    if Ext = '.SCHDOC' then Result := 'SCH'
+    else if Ext = '.PCBDOC' then Result := 'PCB'
+    else if Ext = '.SCHLIB' then Result := 'SCHLIB'
+    else if Ext = '.PCBLIB' then Result := 'PCBLIB'
+    else if Ext = '.OUTJOB' then Result := 'OUTPUTJOB'
+    else Result := '';
+end;
+
+// Full paths of the documents in the open projects (free documents included)
+// that Name means, joined with '|'. Name is a full path or a bare file name
+// (case-insensitive). OpenOnly keeps the documents Altium has open.
+function DocumentPathsFor(Name: String; OpenOnly: Boolean): String;
+var
+    P, I    : Integer;
+    Project : IProject;
+    Path    : String;
+    ByPath  : Boolean;
+begin
+    Result := '';
+    ByPath := (Pos('\', Name) > 0) or (Pos('/', Name) > 0);
+    if ByPath then
+    begin
+        if (Client.GetDocumentByPath(Name) <> nil) or ((not OpenOnly) and FileExists(Name)) then
+            Result := Name;
+        Exit;
+    end;
+    for P := -1 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        if P < 0 then
+            Project := GetWorkspace.DM_FreeDocumentsProject
+        else
+            Project := GetWorkspace.DM_Projects(P);
+        if Project = nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            if UpperCase(ExtractFileName(Path)) <> UpperCase(Name) then Continue;
+            if OpenOnly and (Client.GetDocumentByPath(Path) = nil) then Continue;
+            if Pos('|' + UpperCase(Path) + '|', '|' + UpperCase(Result) + '|') > 0 then Continue;
+            if Result <> '' then Result := Result + '|';
+            Result := Result + Path;
+        end;
+    end;
+    // A view that is in no project, such as the Home Page: the document to go
+    // back to after a capture can be one
+    if (Result = '') and (Client.GetDocumentByPath(Name) <> nil) then
+        Result := Name;
+end;
+
+// File names of the open documents of the open projects, for error messages
+function OpenDocumentNames: String;
+var
+    P, I    : Integer;
+    Project : IProject;
+    Path    : String;
+begin
+    Result := '';
+    for P := -1 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        if P < 0 then
+            Project := GetWorkspace.DM_FreeDocumentsProject
+        else
+            Project := GetWorkspace.DM_Projects(P);
+        if Project = nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Path := Project.DM_LogicalDocuments(I).DM_FullPath;
+            // Project files are open too, but are no document to capture
+            if Pos('.PRJ', UpperCase(ExtractFileExt(Path))) = 1 then Continue;
+            if Client.GetDocumentByPath(Path) = nil then Continue;
+            if Pos(', ' + UpperCase(ExtractFileName(Path)) + ', ', ', ' + UpperCase(Result) + ', ') > 0 then Continue;
+            if Result <> '' then Result := Result + ', ';
+            Result := Result + ExtractFileName(Path);
+        end;
+    end;
+end;
+
+// focus_document: bring one named document to the front for a screenshot,
+// and put things back afterwards. Never opens a closed document unless the
+// request says open_if_closed, and only closes (close_path) a document that
+// has no unsaved changes. With no path it only reports what has focus.
+function ExecuteFocusDocument(RequestData: TStringList): String;
+var
+    i            : Integer;
+    Name         : String;
+    ClosePath    : String;
+    OpenIfClosed : Boolean;
+    Designators  : TStringList;
+    Paths        : String;
+    Doc          : IServerDocument;
+    PrevPath     : String;
+    PrevKind     : String;
+    Opened       : Boolean;
+    Closed       : Boolean;
+    Zoomed       : Integer;
+    Props        : TStringList;
+begin
+    Result := '';
+    Name := '';
+    ClosePath := '';
+    OpenIfClosed := False;
+    Opened := False;
+    Closed := False;
+    Zoomed := 0;
+    Designators := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"path"', RequestData[i]) > 0) then
+                Name := Trim(JSONLineValue(RequestData[i]))
+            else if (Pos('"close_path"', RequestData[i]) > 0) then
+                ClosePath := Trim(JSONLineValue(RequestData[i]))
+            else if (Pos('"open_if_closed"', RequestData[i]) > 0) then
+                OpenIfClosed := LowerCase(Trim(JSONLineValue(RequestData[i]))) = 'true'
+            else if (Pos('"designators"', RequestData[i]) > 0) then
+                i := ReadJSONStringArray(RequestData, i, Designators);
+        end;
+
+        PrevPath := '';
+        PrevKind := '';
+        if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+        begin
+            PrevPath := Client.CurrentView.OwnerDocument.FileName;
+            PrevKind := Client.CurrentView.OwnerDocument.Kind;
+        end;
+
+        // Close first: a document this command opened for an earlier capture
+        if ClosePath <> '' then
+        begin
+            Doc := Client.GetDocumentByPath(ClosePath);
+            if (Doc <> nil) and (not DocumentModified(Doc)) then
+            begin
+                Client.CloseDocument(Doc);
+                Closed := True;
+            end;
+        end;
+
+        if Name <> '' then
+        begin
+            Paths := DocumentPathsFor(Name, True);
+            if (Paths = '') and OpenIfClosed then
+            begin
+                Paths := DocumentPathsFor(Name, False);
+                if (Paths <> '') and (Pos('|', Paths) = 0) then
+                begin
+                    Doc := Client.OpenDocument(ClientDocumentKindForPath(Paths), Paths);
+                    Opened := Doc <> nil;
+                    if not Opened then
+                    begin
+                        Result := 'ERROR: Could not open ' + Paths;
+                        Exit;
+                    end;
+                end;
+            end;
+            if Paths = '' then
+            begin
+                if OpenIfClosed then
+                    Result := 'ERROR: No document "' + Name + '" in the open projects'
+                else
+                    Result := 'ERROR: "' + Name + '" is not open, and open_if_closed is false. Open documents: ' + OpenDocumentNames;
+                Exit;
+            end;
+            if Pos('|', Paths) > 0 then
+            begin
+                Result := 'ERROR: "' + Name + '" could mean several documents (' +
+                          StringReplace(Paths, '|', ', ', REPLACEALL) + '); give the full path';
+                Exit;
+            end;
+            Doc := Client.GetDocumentByPath(Paths);
+            if Doc = nil then
+            begin
+                Result := 'ERROR: Could not find the open document ' + Paths;
+                Exit;
+            end;
+            Client.ShowDocument(Doc);
+        end;
+
+        // zoom_to acts on the board in front: the named one, or the active one
+        if (Designators.Count > 0) and (Client.CurrentView <> nil) and
+           (Client.CurrentView.OwnerDocument <> nil) and
+           (UpperCase(Client.CurrentView.OwnerDocument.Kind) = 'PCB') then
+            Zoomed := ZoomToComponents(Designators);
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'previous_document', PrevPath);
+        AddJSONProperty(Props, 'previous_kind', PrevKind);
+        if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+        begin
+            AddJSONProperty(Props, 'focused_document', Client.CurrentView.OwnerDocument.FileName);
+            AddJSONProperty(Props, 'focused_kind', Client.CurrentView.OwnerDocument.Kind);
+        end
+        else
+        begin
+            AddJSONProperty(Props, 'focused_document', '');
+            AddJSONProperty(Props, 'focused_kind', '');
+        end;
+        AddJSONBoolean(Props, 'opened', Opened);
+        AddJSONBoolean(Props, 'closed', Closed);
+        AddJSONInteger(Props, 'zoomed_component_count', Zoomed);
+        Result := BuildJSONObject(Props);
+    finally
+        Designators.Free;
+        Props.Free;
+    end;
+end;
+
+// list_open_documents: every document open in Altium, by the path Altium
+// gives it, with its kind, whether it has unsaved changes, and whether it is
+// the one in front. Client.ServerDocuments is not available to scripts; the
+// server modules' document lists are (as FindOpenDocument walks them).
+function ListOpenDocuments(Dummy: Integer): String;
+var
+    i, j   : Integer;
+    Module : IServerModule;
+    Doc    : IServerDocument;
+    Active : String;
+    Items, Props, ResultProps : TStringList;
+begin
+    Active := '';
+    if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+        Active := NormalizedPath(Client.CurrentView.OwnerDocument.FileName);
+    Items := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        for i := 0 to Client.Count - 1 do
+        begin
+            Module := Client.ServerModule[i];
+            if Module <> nil then
+                for j := 0 to Module.DocumentCount - 1 do
+                begin
+                    Doc := Module.Documents[j];
+                    if Doc.FileName <> '' then
+                    begin
+                        Props := TStringList.Create;
+                        try
+                            AddJSONProperty(Props, 'path', Doc.FileName);
+                            AddJSONProperty(Props, 'kind', Doc.Kind);
+                            AddJSONBoolean(Props, 'modified', DocumentModified(Doc));
+                            AddJSONBoolean(Props, 'active', NormalizedPath(Doc.FileName) = Active);
+                            Items.Add(BuildJSONObject(Props, 1));
+                        finally
+                            Props.Free;
+                        end;
+                    end;
+                end;
+        end;
+        AddJSONBoolean(ResultProps, 'success', True);
+        ResultProps.Add(BuildJSONArray(Items, 'documents'));
+        Result := BuildJSONObject(ResultProps);
+    finally
+        Items.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// reload_document: close the open document at "path" and open it again from
+// disk, e.g. after the file was replaced. Refused while it has unsaved
+// changes unless "discard_changes" is true: it is then marked unmodified
+// first, so closing it asks nothing.
+function ExecuteReloadDocument(RequestData: TStringList): String;
+var
+    i       : Integer;
+    Path    : String;
+    Discard : Boolean;
+    Doc     : IServerDocument;
+    Kind    : String;
+    Props   : TStringList;
+begin
+    Path := '';
+    Discard := False;
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if Pos('"path"', RequestData[i]) > 0 then
+            Path := Trim(JSONLineValue(RequestData[i]));
+        if Pos('"discard_changes"', RequestData[i]) > 0 then
+            Discard := LowerCase(Trim(JSONLineValue(RequestData[i]))) = 'true';
+    end;
+    if Path = '' then
+    begin
+        Result := 'ERROR: reload_document needs the path of an open document';
+        Exit;
+    end;
+    Doc := FindOpenDocument(Path);
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Not open in Altium: ' + Path;
+        Exit;
+    end;
+    // Checked before closing: a document that cannot be opened again stays open
+    Kind := ClientDocumentKindForPath(Doc.FileName);
+    if Kind = '' then
+    begin
+        Result := 'ERROR: reload_document reopens .PcbDoc, .SchDoc, .PcbLib, .SchLib and .OutJob files only';
+        Exit;
+    end;
+    if DocumentModified(Doc) and (not Discard) then
+    begin
+        Result := 'ERROR: ' + ExtractFileName(Doc.FileName) + ' has unsaved changes. Save it first, ' +
+                  'or pass discard_changes=true to drop them.';
+        Exit;
+    end;
+    Path := Doc.FileName;
+    if DocumentModified(Doc) then Doc.SetModified(False);
+    Client.CloseDocument(Doc);
+    Doc := Client.OpenDocument(Kind, Path);
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Closed ' + Path + ' but could not open it again';
+        Exit;
+    end;
+    Client.ShowDocument(Doc);
+    Props := TStringList.Create;
+    try
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'path', Doc.FileName);
+        AddJSONProperty(Props, 'kind', Kind);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Extract the create schematic symbol logic
 function ExecuteCreateSchematicSymbol(RequestData: TStringList): String;
 var
@@ -579,6 +908,56 @@ begin
     finally
         Points.Free;
     end;
+end;
+
+// Function to execute repour polygons
+function ExecuteRepourPolygons(RequestData: TStringList): String;
+begin
+    Result := RepourPolygons(RequestText(RequestData, 'names', ''), RequestText(RequestData, 'net', ''),
+        RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'area', ''),
+        RequestText(RequestData, 'include_shelved', 'false') = 'true');
+end;
+
+// Function to execute the pour report
+function ExecutePourReport(RequestData: TStringList): String;
+begin
+    Result := PourReport(RequestText(RequestData, 'names', ''), RequestText(RequestData, 'net', ''),
+        RequestText(RequestData, 'layer', ''), RequestText(RequestData, 'area', ''),
+        StrToInt(RequestText(RequestData, 'sliver_sq_mils', '100')));
+end;
+
+// Function to execute delete_pcb_objects and modify_pcb_objects
+function ExecuteEditPCBObjects(RequestData: TStringList): String;
+begin
+    Result := EditPCBObjects(RequestText(RequestData, 'action', ''), RequestText(RequestData, 'kinds', ''),
+        RequestText(RequestData, 'net', ''), RequestText(RequestData, 'layer', ''),
+        RequestText(RequestData, 'area', ''), RequestText(RequestData, 'designators', ''),
+        StrToInt(RequestText(RequestData, 'margin', '400000')), RequestText(RequestData, 'include_locked', 'false') = 'true',
+        RequestText(RequestData, 'dry_run', 'true') = 'true',
+        StrToInt(RequestText(RequestData, 'width', '-1')), StrToInt(RequestText(RequestData, 'via_size', '-1')),
+        StrToInt(RequestText(RequestData, 'via_hole', '-1')), RequestText(RequestData, 'set_net', 'false') = 'true',
+        RequestText(RequestData, 'new_net', ''), RequestText(RequestData, 'new_layer', ''));
+end;
+
+// Function to execute query_objects, which_rule and query_restore. The
+// user's selection is kept in a file while the queries run, so that one a
+// stopped query left behind can be restored.
+function ExecuteQuery(CommandName: String; RequestData: TStringList): String;
+var
+    StoreFile : String;
+begin
+    StoreFile := ROOT_DIR + 'query_selection.txt';
+    if CommandName = 'query_objects' then
+        Result := QueryObjects(RequestText(RequestData, 'expr_mm', ''), RequestText(RequestData, 'expr_mil', ''),
+                               StrToInt(RequestText(RequestData, 'limit', '200')), RequestText(RequestData, 'area', ''),
+                               StoreFile)
+    else if CommandName = 'which_rule' then
+        Result := WhichRule(RequestText(RequestData, 'a_mm', ''), RequestText(RequestData, 'a_mil', ''),
+                            RequestText(RequestData, 'b_mm', ''), RequestText(RequestData, 'b_mil', ''),
+                            RequestText(RequestData, 'rule_kind', 'clearance'),
+                            RequestText(RequestData, 'area_a', ''), RequestText(RequestData, 'area_b', ''), StoreFile)
+    else
+        Result := QueryRestore(StoreFile);
 end;
 
 // Extract the create symbols batch logic
@@ -1122,7 +1501,7 @@ begin
             DoCompile := LowerCase(TrimJSON(ParamValue)) <> 'false';
         end;
     end;
-    Result := GetERCViolations(ROOT_DIR, DoCompile);
+    Result := GetERCViolations(ROOT_DIR, DoCompile, RequestText(RequestData, 'project_path', ''));
 end;
 
 // get_component_primitives: "designators" array parameter
@@ -1168,7 +1547,7 @@ begin
             IncludeParams := LowerCase(TrimJSON(ParamValue)) = 'true';
         end;
     end;
-    Result := GetProjectComponents(ROOT_DIR, IncludeParams);
+    Result := GetProjectComponents(ROOT_DIR, IncludeParams, RequestText(RequestData, 'project_path', ''));
 end;
 
 // create_vias: one string of 'x|y|diameter|hole|net|start|end' records
@@ -1194,6 +1573,132 @@ begin
         Result := CreateVias(Records);
     finally
         Records.Free;
+    end;
+end;
+
+// A ';'-separated request string as an upper-case list
+procedure LayoutRequestList(Text: String; List: TStringList);
+var
+    i : Integer;
+    Parts : TStringList;
+begin
+    Parts := TStringList.Create;
+    try
+        Parts.Text := StringReplace(Text, ';', #13#10, REPLACEALL);
+        for i := 0 to Parts.Count - 1 do
+            if Trim(Parts[i]) <> '' then List.Add(UpperCase(Trim(Parts[i])));
+    finally
+        Parts.Free;
+    end;
+end;
+
+// get_layout: layout_designators (';'-separated), layout_area ('x1|y1|x2|y2'
+// in internal units from the board origin, or empty), layout_margin and
+// layout_touching
+function ExecuteGetLayout(RequestData: TStringList): String;
+var
+    i, Margin   : Integer;
+    Area        : String;
+    Touching    : Boolean;
+    LocalNets   : Boolean;
+    Pads        : Boolean;
+    Designators : TStringList;
+begin
+    Area := '';
+    Margin := 0;
+    Touching := False;
+    LocalNets := False;
+    Pads := False;
+    Designators := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if Pos('"layout_designators"', RequestData[i]) > 0 then
+                LayoutRequestList(JSONLineValue(RequestData[i]), Designators)
+            else if Pos('"layout_area"', RequestData[i]) > 0 then
+                Area := JSONLineValue(RequestData[i])
+            else if Pos('"layout_margin"', RequestData[i]) > 0 then
+                Margin := StrToInt(JSONLineValue(RequestData[i]))
+            else if Pos('"layout_touching"', RequestData[i]) > 0 then
+                Touching := Pos('true', RequestData[i]) > 0
+            else if Pos('"layout_local_nets"', RequestData[i]) > 0 then
+                LocalNets := Pos('true', RequestData[i]) > 0
+            else if Pos('"layout_pads"', RequestData[i]) > 0 then
+                Pads := Pos('true', RequestData[i]) > 0;
+        end;
+        if Area <> '' then
+            Result := GetLayout(Designators, True, StrToInt(GetFieldFromPipeString(Area, 0)),
+                                StrToInt(GetFieldFromPipeString(Area, 1)), StrToInt(GetFieldFromPipeString(Area, 2)),
+                                StrToInt(GetFieldFromPipeString(Area, 3)), Margin, Touching, LocalNets, Pads)
+        else
+            Result := GetLayout(Designators, False, 0, 0, 0, 0, Margin, Touching, LocalNets, Pads);
+    finally
+        Designators.Free;
+    end;
+end;
+
+// place_copper: copper_spec_file, the spec pcb_layout.py wrote
+function ExecutePlaceCopper(RequestData: TStringList): String;
+var
+    i : Integer;
+    SpecPath : String;
+begin
+    SpecPath := '';
+    for i := 0 to RequestData.Count - 1 do
+        if Pos('"copper_spec_file"', RequestData[i]) > 0 then
+            SpecPath := JSONLineValue(RequestData[i]);
+    if SpecPath = '' then
+    begin
+        Result := 'ERROR: place_copper needs copper_spec_file';
+        Exit;
+    end;
+    Result := PlaceCopper(SpecPath);
+end;
+
+// get_unrouted_connections: unrouted_nets and unrouted_designators, each
+// ';'-separated (both may be empty: every net)
+function ExecuteGetUnroutedConnections(RequestData: TStringList): String;
+var
+    i : Integer;
+    Nets, Designators : TStringList;
+begin
+    Nets := TStringList.Create;
+    Designators := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if Pos('"unrouted_nets"', RequestData[i]) > 0 then
+                LayoutRequestList(JSONLineValue(RequestData[i]), Nets)
+            else if Pos('"unrouted_designators"', RequestData[i]) > 0 then
+                LayoutRequestList(JSONLineValue(RequestData[i]), Designators);
+        end;
+        Result := GetUnroutedConnections(Nets, Designators);
+    finally
+        Designators.Free;
+        Nets.Free;
+    end;
+end;
+
+// net_rules: net_rules_nets (';'-separated) and net_rules_layer
+function ExecuteNetRules(RequestData: TStringList): String;
+var
+    i : Integer;
+    Nets : TStringList;
+    Layer : String;
+begin
+    Nets := TStringList.Create;
+    Layer := '';
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if Pos('"net_rules_nets"', RequestData[i]) > 0 then
+                Nets.Text := StringReplace(JSONLineValue(RequestData[i]), ';', #13#10, REPLACEALL)
+            else if Pos('"net_rules_layer"', RequestData[i]) > 0 then
+                Layer := JSONLineValue(RequestData[i]);
+        end;
+        Result := NetRules(Nets, Layer);
+    finally
+        Nets.Free;
     end;
 end;
 
@@ -1312,8 +1817,16 @@ begin
             Result := ExecuteCreateNetClass(RequestData);            
         'get_all_component_data':
             Result := GetAllComponentData(ROOT_DIR, False);            
+        'geometry':
+            Result := ExecuteGeometry(RequestData);
         'take_view_screenshot':
             Result := ExecuteTakeViewScreenshot(RequestData);            
+        'focus_document':
+            Result := ExecuteFocusDocument(RequestData);
+        'list_open_documents':
+            Result := ListOpenDocuments(0);
+        'reload_document':
+            Result := ExecuteReloadDocument(RequestData);
         'get_library_symbol_reference':
             Result := GetLibrarySymbolReference(ROOT_DIR);            
         'create_schematic_symbol':
@@ -1356,6 +1869,9 @@ begin
             Result := ExecuteCreateSymbolsBatch(RequestData);
         'edit_schematic_actions':
             Result := ExecuteEditSchematicActions(RequestData);
+        'get_schematic_pins':
+            Result := GetSchematicPins(RequestText(RequestData, 'sheet_path', ''),
+                                       RequestText(RequestData, 'designators', ''));
         'build_circuit':
             Result := BuildCircuitFromSpec(ROOT_DIR + 'circuit_spec.txt',
                                           ROOT_DIR + 'param_placement.txt');
@@ -1421,12 +1937,35 @@ begin
             Result := ExecuteGetProjectComponents(RequestData);
         'get_erc_violations':
             Result := ExecuteGetERCViolations(RequestData);
+        'get_eco_source':
+            Result := GetEcoSource(RequestText(RequestData, 'project_path', ''));
+        'get_eco_target':
+            Result := GetEcoTarget(RequestText(RequestData, 'pcb_path', ''));
         'get_board_summary':
             Result := GetBoardSummary(ROOT_DIR);
         'create_polygon_pour':
             Result := ExecuteCreatePolygonPour(RequestData);
         'create_cutout':
             Result := ExecuteCreateCutout(RequestData);
+        'repour_polygons':
+            Result := ExecuteRepourPolygons(RequestData);
+        'pour_report':
+            Result := ExecutePourReport(RequestData);
+        'edit_pcb_objects':
+            Result := ExecuteEditPCBObjects(RequestData);
+        'query_objects':
+            Result := ExecuteQuery(CommandName, RequestData);
+        'which_rule':
+            Result := ExecuteQuery(CommandName, RequestData);
+        'query_restore':
+            Result := ExecuteQuery(CommandName, RequestData);
+        'release_outjob':
+            Result := ReleaseOutJob(RequestOutJobPath(RequestData));
+        'reopen_outjob':
+            Result := ReopenOutJob(RequestOutJobPath(RequestData));
+        'add_to_project':
+            Result := AddDocumentToProject(RequestText(RequestData, 'project_path', ''),
+                                           RequestOutJobPath(RequestData));
         'get_component_primitives':
             Result := ExecuteGetComponentPrimitives(RequestData);
         'get_routing_geometry':
@@ -1435,6 +1974,14 @@ begin
             Result := ExecuteCreateRouteTracks(RequestData);
         'create_vias':
             Result := ExecuteCreateVias(RequestData);
+        'get_layout':
+            Result := ExecuteGetLayout(RequestData);
+        'place_copper':
+            Result := ExecutePlaceCopper(RequestData);
+        'get_unrouted_connections':
+            Result := ExecuteGetUnroutedConnections(RequestData);
+        'net_rules':
+            Result := ExecuteNetRules(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;

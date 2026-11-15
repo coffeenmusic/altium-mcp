@@ -4,7 +4,7 @@ import json
 from pathlib import Path, PureWindowsPath
 from urllib.parse import urlsplit
 
-from altium_files import read_altium_text
+from altium_files import read_altium_text, spec_with_long_library
 from library_component_properties import designator, kind as component_kind
 
 
@@ -157,7 +157,7 @@ def prepare_batch(spec_file):
                     raise ValueError(f"{kind} belongs only to SYMBOL")
                 current["pins" if kind == "PIN" else "graphics"].append(rest)
                 current["records"].append(kind + "|" + rest)
-            elif kind in {"COMMENT", "DESCRIPTION", "SYMPARAM", "PINPARAM", "PINDESC", "PINSYMBOL"}:
+            elif kind in {"COMMENT", "DESCRIPTION", "SYMPARAM", "PINPARAM", "PINDESC", "PINSYMBOL", "PINFUNC"}:
                 text(rest, kind)
                 current["records"].append(kind + "|" + rest)
                 if current["mode"] == "SYMBOL":
@@ -181,7 +181,8 @@ def prepare_batch(spec_file):
     finish()
     if not block_count:
         raise ValueError("batch must contain at least one SYMBOL or EDITSYMBOL")
-    return "\n".join(prepared_lines) + "\n", symbols
+    prepared = "\n".join(prepared_lines) + "\n"
+    return spec_with_long_library(prepared) or prepared, symbols
 
 
 def verify(result, description, parameters, comment=None, designator_template=None, component_kind=None):

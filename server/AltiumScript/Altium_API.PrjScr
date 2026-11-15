@@ -194,6 +194,22 @@ AnnotationEnabled=1
 [Document14]
 DocumentPath=schematic_document.pas
 AnnotationEnabled=1
+[Document15]
+DocumentPath=pcb_layout.pas
+AnnotationEnabled=1
+AnnotateStartValue=1
+AnnotationIndexControlEnabled=0
+AnnotateSuffix=
+AnnotateScope=All
+AnnotateOrder=-1
+DoLibraryUpdate=1
+DoDatabaseUpdate=1
+ClassGenCCAutoEnabled=1
+ClassGenCCAutoRoomEnabled=0
+ClassGenNCAutoScope=None
+DItemRevisionGUID=
+GenerateClassCluster=0
+DocumentUniqueId=
 
 [OutputGroup1]
 Name=Netlist Outputs
@@ -1182,29 +1198,29 @@ ComparisonOptions5=Kind=Structure Class|MinPercent=75|MinMatch=3|ShowMatch=0|Use
 PageOptions=Record=PageOptions|CenterHorizontal=True|CenterVertical=True|PrintScale=1.00|XCorrection=1.00|YCorrection=1.00|PrintKind=1|BorderSize=5000000|LeftOffset=0|BottomOffset=0|Orientation=2|PaperLength=1000|PaperWidth=1000|Scale=100|PaperSource=7|PrintQuality=-3|MediaType=1|DitherType=10|PrintScaleMode=1|PaperKind=Letter|PaperIndex=1
 
 
-[Document15]
+[Document16]
 DocumentPath=schematic_diagram.pas
 
-[Document16]
+[Document17]
 DocumentPath=symbol_primitives.pas
 
-[Document17]
+[Document18]
 DocumentPath=empty_library_component.pas
 
-[Document18]
+[Document19]
 DocumentPath=library_view.pas
 
-[Document19]
+[Document20]
 DocumentPath=library_components_data.pas
 
-[Document20]
+[Document21]
 DocumentPath=library_roundtrip.pas
 
-[Document21]
+[Document22]
 DocumentPath=footprint_model3d.pas
 
-[Document22]
+[Document23]
 DocumentPath=pcb_component_properties.pas
 
-[Document23]
+[Document24]
 DocumentPath=pcb_layers.pas

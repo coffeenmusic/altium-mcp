@@ -904,6 +904,44 @@ begin
     end;
 end;
 
+// Redraw the library editor's current symbol. The editor draws it from a
+// picture built when the symbol became current, so objects added to it later
+// (new parameters, a shown comment) are not drawn. GraphicallyInvalidate,
+// Begin/EndModify on them, and making the same symbol current again all
+// leave them undrawn; making another symbol current and then this one again
+// rebuilds the picture. False when the library has no other symbol.
+function RedrawCurrentSymbol(Lib: ISch_Lib): Boolean;
+var
+    Current : ISch_Component;
+    Other   : ISch_Component;
+    C       : ISch_Component;
+    It      : ISch_Iterator;
+begin
+    Result := True;
+    if (Lib = nil) then Exit;
+    Current := Lib.CurrentSchComponent;
+    if (Current = nil) then Exit;
+    Other := nil;
+    It := Lib.SchLibIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eSchComponent));
+    C := It.FirstSchObject;
+    while (C <> nil) and (Other = nil) do
+    begin
+        if (C.I_ObjectAddress <> Current.I_ObjectAddress) then
+            Other := C;
+        C := It.NextSchObject;
+    end;
+    Lib.SchIterator_Destroy(It);
+    if (Other = nil) then
+    begin
+        Result := False;
+        Exit;
+    end;
+    Lib.CurrentSchComponent := Other;
+    Lib.CurrentSchComponent := Current;
+    Lib.GraphicallyInvalidate;
+end;
+
 // Finish the current symbol of a batch: create it (Mode 'SYMBOL') or find it
 // (Mode 'EDITSYMBOL' - never created when missing), then apply its edit
 // records. Returns 1 created, 2 edited, 0 nothing to do, -1 failed (the name
@@ -967,6 +1005,7 @@ end;
 //   PINPARAM|<pin number>|<name>|<value>
 //   PINDESC|<pin number>|<text>
 //   PINSYMBOL|<pin number>|<inside|inside_edge|outside_edge|outside>|<IEEE symbol>
+//   PINFUNC|<pin number>|<F1>/<F2>/...   (optional)
 // Records belong to the most recent SYMBOL or EDITSYMBOL line. Far fewer
 // Altium script launches than one create call per symbol.
 function CreateSymbolsBatch(SpecFilePath: String): String;
@@ -991,7 +1030,10 @@ var
     EditedCount   : Integer;
     Outcome       : Integer;
     i             : Integer;
+    EditsApplied  : Boolean;
+    SymLib        : ISch_Lib;
 begin
+    EditsApplied := False;
     if not FileExists(SpecFilePath) then
     begin
         Result := 'ERROR: Spec file not found: ' + SpecFilePath;
@@ -1053,6 +1095,8 @@ begin
                 Outcome := BatchFlushSymbol(Mode, CurrentName, CurrentDesc, PartCount, CurrentDesignator, CurrentKind,
                                             PinsList, GraphicsList, ParametersList, ComponentsArray,
                                             EditsList, FailedArray, ProblemsArray);
+                if (Outcome > 0) and (EditsList.Count > 0) then
+                    EditsApplied := True;
                 if (Outcome = 1) then
                     CreatedCount := CreatedCount + 1
                 else if (Outcome = 2) then
@@ -1108,7 +1152,8 @@ begin
                     ProblemsArray.Add('"' + JSONEscapeString('line ' + IntToStr(i + 1) + ': GRAPHIC only belongs to a SYMBOL') + '"');
             end
             else if (Kind = 'COMMENT') or (Kind = 'DESCRIPTION') or (Kind = 'SYMPARAM') or
-                    (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') then
+                    (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') or
+                    (Kind = 'PINFUNC') then
             begin
                 if (CurrentName <> '') then
                     EditsList.Add(Line)
@@ -1120,6 +1165,19 @@ begin
         // Created symbols mark the library already; edits alone do not
         if (EditedCount > 0) then
             MarkDocumentModified(LibPathOfFocusedSchLib(0));
+        // Edits to the symbol on screen are not drawn until it is made current
+        // again. Only the current symbol needs it: the others are drawn afresh
+        // when selected.
+        if EditsApplied then
+        begin
+            SymLib := SchServer.GetCurrentSchDocument;
+            if (SymLib <> nil) then
+                if (SymLib.ObjectID = eSchLib) then
+                    if not RedrawCurrentSymbol(SymLib) then
+                        ProblemsArray.Add('"' + JSONEscapeString(SymLib.CurrentSchComponent.LibReference +
+                            ': the library has no other symbol to switch to, so the editor may not draw its ' +
+                            'new parameters until the library is reopened') + '"');
+        end;
         AddJSONInteger(ResultProps, 'created', CreatedCount);
         AddJSONInteger(ResultProps, 'edited', EditedCount);
         AddJSONBoolean(ResultProps, 'success', (FailedArray.Count = 0) and (ProblemsArray.Count = 0));
@@ -1341,6 +1399,7 @@ begin
                                     AddJSONProperty(PrimProps, 'symbol_outside_edge', IeeeSymbolName(PinObj.Symbol_OuterEdge));
                                     AddJSONProperty(PrimProps, 'symbol_outside', IeeeSymbolName(PinObj.Symbol_Outer));
                                     AddPinParametersJSON(PrimProps, PinObj);
+                                    AddPinFunctionsJSON(PrimProps, PinObj);
                                 end;
                                 eRectangle:
                                 begin
@@ -2462,6 +2521,15 @@ end;
 //   PINSYMBOL|<pin number>|<edge>|<symbol>       set an IEEE symbol of every pin with that
 //                                                number; edge inside, inside_edge,
 //                                                outside_edge or outside
+//   PINFUNC|<pin number>|<F1>/<F2>/...           replace the Functions list (Properties
+//                                                panel > Pin > Functions) of every pin
+//                                                with that number, in that order. Only
+//                                                used when the spec has the record; no
+//                                                pin gets functions from its name. An
+//                                                empty list is refused: a script cannot
+//                                                clear the list. Altium merges repeated
+//                                                names; when the stored list differs,
+//                                                it is reported.
 // By default, visible symbol parameters without x|y go below the body's
 // bottom-left corner, 100 mil apart, in record order. Problems (e.g. no pin with that
 // number) are added to Problems as JSON strings. Returns the records applied.
@@ -2485,6 +2553,7 @@ var
     Edge      : String;
     FontID    : Integer;
     FontSpec  : String;
+    StoredList : String;
 begin
     Result := 0;
     if (Edits.Count = 0) then Exit;
@@ -2583,6 +2652,44 @@ begin
             end;
             Result := Result + 1;
         end
+        else if (Kind = 'PINFUNC') then
+        begin
+            PinNum := Trim(GetFieldFromPipeString(Line, 1));
+            Value := NormalizePinFunctions(GetFieldFromPipeString(Line, 2));
+            Matched := False;
+            StoredList := '';
+            if (Value = '') then
+                Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': PINFUNC for pin ' + PinNum +
+                    ' lists no functions. A script cannot clear a pin''s functions; clear them in the Properties panel') + '"')
+            else
+            begin
+                Iter := Comp.SchIterator_Create;
+                Iter.AddFilter_ObjectSet(MkSet(ePin));
+                Pin := Iter.FirstSchObject;
+                while (Pin <> nil) do
+                begin
+                    if (Pin.Designator = PinNum) then
+                    begin
+                        Matched := True;
+                        SchServer.RobotManager.SendMessage(Pin.I_ObjectAddress, c_BroadCast, SCHM_BeginModify, c_NoEventData);
+                        SetPinFunctions(Pin, Value);
+                        SchServer.RobotManager.SendMessage(Pin.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
+                        StoredList := PinFunctionsText(Pin);
+                    end;
+                    Pin := Iter.NextSchObject;
+                end;
+                Comp.SchIterator_Destroy(Iter);
+                if not Matched then
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': no pin ' + PinNum + ' for PINFUNC') + '"')
+                else
+                begin
+                    Result := Result + 1;
+                    if (StoredList <> Value) then
+                        Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': pin ' + PinNum + ' stored the functions ' +
+                            StoredList + ', not ' + Value + ' (Altium merges repeated names)') + '"');
+                end;
+            end;
+        end
         else if (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') then
         begin
             PinNum := Trim(GetFieldFromPipeString(Line, 1));
@@ -2660,6 +2767,106 @@ begin
     end;
     SchServer.ProcessControl.PostProcess(Lib, '');
     Lib.GraphicallyInvalidate;
+end;
+
+// The value of Key in a '|Key=Value|...|' record, or ''
+function PipeRecordValue(Rec: String; Key: String): String;
+var
+    Start : Integer;
+    Rest  : String;
+begin
+    Result := '';
+    Start := Pos('|' + Key + '=', Rec);
+    if (Start = 0) then Exit;
+    Rest := Copy(Rec, Start + Length(Key) + 2, Length(Rec));
+    if (Pos('|', Rest) > 0) then
+        Result := Copy(Rest, 1, Pos('|', Rest) - 1)
+    else
+        Result := Rest;
+end;
+
+// A pin's Functions list (Properties panel > Pin > Functions) joined with
+// '/', or '' when it has none. ISch_Pin has no property for it; the pin's
+// ExportToParameters lists it as PINDEFINEDFUNCTIONSCOUNT and
+// PINDEFINEDFUNCTION1..n.
+function PinFunctionsText(Pin: ISch_Pin): String;
+var
+    Exported : String;
+    CountText : String;
+    Count, i : Integer;
+begin
+    Result := '';
+    Exported := '|' + Pin.ExportToParameters + '|';
+    CountText := PipeRecordValue(Exported, 'PINDEFINEDFUNCTIONSCOUNT');
+    Count := 0;
+    if (CountText <> '') then Count := StrToInt(CountText);
+    for i := 1 to Count do
+    begin
+        if (i > 1) then Result := Result + '/';
+        Result := Result + PipeRecordValue(Exported, 'PINDEFINEDFUNCTION' + IntToStr(i));
+    end;
+end;
+
+// A PINFUNC list as it will be stored: names trimmed, empty ones dropped,
+// joined with '/'
+function NormalizePinFunctions(List: String): String;
+var
+    Parts : TStringList;
+    i     : Integer;
+begin
+    Result := '';
+    Parts := TStringList.Create;
+    try
+        Parts.Text := StringReplace(List, '/', #13#10, REPLACEALL);
+        for i := 0 to Parts.Count - 1 do
+            if (Trim(Parts[i]) <> '') then
+            begin
+                if (Result <> '') then Result := Result + '/';
+                Result := Result + Trim(Parts[i]);
+            end;
+    finally
+        Parts.Free;
+    end;
+end;
+
+// Replace a pin's Functions list with List ('/'-separated, at least one
+// name). There is no setter for it: SetState_FunctionsFromName rebuilds the
+// list from the pin's name, so the name is swapped for the list and put back.
+// A name with no '/' is ignored by it, so a single function gets a trailing
+// '/'. A name with no function in it is ignored too, which is why a script
+// cannot clear the list.
+procedure SetPinFunctions(Pin: ISch_Pin; List: String);
+var
+    Saved : String;
+begin
+    Saved := Pin.Name;
+    if (Pos('/', List) = 0) then
+        Pin.Name := List + '/'
+    else
+        Pin.Name := List;
+    Pin.SetState_FunctionsFromName;
+    Pin.Name := Saved;
+end;
+
+// Add a pin's Functions list to its JSON properties, when it has any
+procedure AddPinFunctionsJSON(Props: TStringList; Pin: ISch_Pin);
+var
+    Names : TStringList;
+    Items : TStringList;
+    i     : Integer;
+begin
+    Names := TStringList.Create;
+    Items := TStringList.Create;
+    try
+        Names.Text := StringReplace(PinFunctionsText(Pin), '/', #13#10, REPLACEALL);
+        for i := 0 to Names.Count - 1 do
+            Items.Add('"' + JSONEscapeString(Names[i]) + '"');
+        if (Items.Count > 0) then
+            Props.Add(BuildJSONArray(Items, 'functions', 2));
+    finally
+        Names.Free;
+        Items.Free;
+    end;
 end;
 
 // Add a pin's parameters (name, value) to its JSON properties, when it has any
@@ -3044,6 +3251,90 @@ begin
     end;
 end;
 
+// Sets the text Name of Comp (a parameter, or the Designator or Comment) to
+// Value. A missing parameter is added and registered, so undo and the
+// netlist see it. Visible: 1 shown, 0 hidden, -1 unchanged (a new
+// parameter is then hidden).
+procedure SetSchParameter(Comp: ISch_Component; Name, Value: String; Visible: Integer);
+var
+    Obj   : ISch_GraphicalObject;
+    Param : ISch_Parameter;
+begin
+    Obj := FindSchText(Comp, Name);
+    if Obj = nil then
+    begin
+        Param := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+        Param.Name := Name;
+        Param.Text := Value;
+        Param.IsHidden := Visible <> 1;
+        Param.Location := Comp.Location;
+        Comp.AddSchObject(Param);
+        SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
+    end
+    else
+    begin
+        SchBeginModify(Obj);
+        Obj.Text := Value;
+        if Visible >= 0 then Obj.IsHidden := Visible = 0;
+        SchEndModify(Obj);
+    end;
+end;
+
+// Links a placed component to its DbLib row as Altium's own placement from a
+// DbLib does: Rec continues at field First with
+// DB|library|table|key|description|n|name|visible|value...|m|footprint...
+// The footprints replace the symbol's own, the first one current.
+procedure ApplyDbLink(Comp: ISch_Component; Rec: String; First: Integer);
+var
+    Iter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    Old  : TInterfaceList;
+    F, N, i : Integer;
+begin
+    Comp.SourceLibraryName := GetFieldFromPipeString(Rec, First + 1);
+    Comp.LibraryPath := '*';
+    Comp.DatabaseTableName := GetFieldFromPipeString(Rec, First + 2);
+    Comp.DesignItemId := GetFieldFromPipeString(Rec, First + 3);
+    if GetFieldFromPipeString(Rec, First + 4) <> '' then
+        Comp.ComponentDescription := GetFieldFromPipeString(Rec, First + 4);
+    F := First + 5;
+    N := StrToInt(GetFieldFromPipeString(Rec, F));
+    for i := 0 to N - 1 do
+        SetSchParameter(Comp, GetFieldFromPipeString(Rec, F + 1 + 3 * i),
+                        GetFieldFromPipeString(Rec, F + 3 + 3 * i),
+                        StrToInt(GetFieldFromPipeString(Rec, F + 2 + 3 * i)));
+    F := F + 1 + 3 * N;
+    N := StrToIntDef(GetFieldFromPipeString(Rec, F), 0);
+    if N = 0 then Exit;
+    Old := TInterfaceList.Create;
+    try
+        Iter := Comp.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := Iter.FirstSchObject;
+        while Impl <> nil do
+        begin
+            if SameText(Impl.ModelType, 'PCBLIB') then Old.Add(Impl);
+            Impl := Iter.NextSchObject;
+        end;
+        Comp.SchIterator_Destroy(Iter);
+        for i := 0 to Old.Count - 1 do
+            Comp.RemoveSchImplementation(Old.Items[i]);
+    finally
+        Old.Free;
+    end;
+    for i := 1 to N do
+    begin
+        Impl := Comp.AddSchImplementation;
+        Impl.ModelName := GetFieldFromPipeString(Rec, F + i);
+        Impl.ModelType := 'PCBLIB';
+        Impl.ClearAllDatafileLinks;
+        Impl.AddDataFileLink(GetFieldFromPipeString(Rec, F + i), '', 'PCBLib');
+        Impl.UseComponentLibrary := True;
+        Impl.DatabaseDatalinksLocked := True;
+        Impl.IsCurrent := i = 1;
+    end;
+end;
+
 // Place a symbol from a .SchLib on Doc. Opening the library makes it the
 // current document, so Doc is held by reference throughout.
 function PlaceSchComponent(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
@@ -3094,16 +3385,464 @@ begin
     Replica.MoveByXY(StrToInt(GetFieldFromPipeString(Rec, 4)) - Replica.Location.X,
                      StrToInt(GetFieldFromPipeString(Rec, 5)) - Replica.Location.Y);
     if GetFieldFromPipeString(Rec, 8) <> '' then Replica.Comment.Text := GetFieldFromPipeString(Rec, 8);
+    if GetFieldFromPipeString(Rec, 9) = 'DB' then ApplyDbLink(Replica, Rec, 9);
+    Result := True;
+end;
+
+// The sheet symbol whose sheet name (or, failing that, file name) is Name;
+// nil with Msg set when there is none or several
+function FindSheetSymbol(Doc: ISch_Document; Name: String; var Msg: String): ISch_SheetSymbol;
+var
+    Iterator : ISch_Iterator;
+    Sym      : ISch_SheetSymbol;
+    ByName, ByFile : TInterfaceList;
+begin
+    Result := nil;
+    ByName := TInterfaceList.Create;
+    ByFile := TInterfaceList.Create;
+    try
+        Iterator := Doc.SchIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eSheetSymbol));
+        Sym := Iterator.FirstSchObject;
+        while Sym <> nil do
+        begin
+            if SameText(Sym.SheetName.Text, Name) then ByName.Add(Sym);
+            if SameText(Sym.SheetFileName.Text, Name) then ByFile.Add(Sym);
+            Sym := Iterator.NextSchObject;
+        end;
+        Doc.SchIterator_Destroy(Iterator);
+        if ByName.Count = 1 then Result := ByName.Items[0]
+        else if (ByName.Count = 0) and (ByFile.Count = 1) then Result := ByFile.Items[0]
+        else if ByName.Count + ByFile.Count = 0 then Msg := 'no sheet symbol named ' + Name
+        else Msg := IntToStr(ByName.Count + ByFile.Count) + ' sheet symbols match ' + Name + '; give its sheet name';
+    finally
+        ByName.Free;
+        ByFile.Free;
+    end;
+end;
+
+function FindSheetEntry(Sym: ISch_SheetSymbol; Name: String): ISch_SheetEntry;
+var
+    Iterator : ISch_Iterator;
+    Entry    : ISch_SheetEntry;
+begin
+    Result := nil;
+    Iterator := Sym.SchIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eSheetEntry));
+    Entry := Iterator.FirstSchObject;
+    while Entry <> nil do
+    begin
+        if SameText(Entry.Name, Name) then Result := Entry;
+        Entry := Iterator.NextSchObject;
+    end;
+    Sym.SchIterator_Destroy(Iterator);
+end;
+
+// An integer field of Rec, or Keep when it is empty
+function SchField(Rec: String; i: Integer; Keep: Integer): Integer;
+begin
+    Result := StrToIntDef(GetFieldFromPipeString(Rec, i), Keep);
+end;
+
+// Whether an entry on Side (0 left, 1 right, 2 top, 3 bottom) at Distance
+// along it (from the top edge, or from the left edge on the top and bottom
+// sides) lies within a symbol Width wide and Height high
+function EntryFits(Side, Distance, Width, Height: Integer): Boolean;
+begin
+    if (Side = 2) or (Side = 3) then
+        Result := (Distance >= 0) and (Distance < Width)
+    else
+        Result := (Distance >= 0) and (Distance < Height);
+end;
+
+// The name of the first entry of Sym that a symbol Width x Height would
+// leave outside it; '' when every entry fits
+function EntryOutside(Sym: ISch_SheetSymbol; Width, Height: Integer): String;
+var
+    Iterator : ISch_Iterator;
+    Entry    : ISch_SheetEntry;
+begin
+    Result := '';
+    Iterator := Sym.SchIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eSheetEntry));
+    Entry := Iterator.FirstSchObject;
+    while Entry <> nil do
+    begin
+        if Result = '' then
+            if not EntryFits(Entry.Side, Entry.DistanceFromTop, Width, Height) then
+                Result := Entry.Name;
+        Entry := Iterator.NextSchObject;
+    end;
+    Sym.SchIterator_Destroy(Iterator);
+end;
+
+// Puts Entry where its side and distance place it on Sym. Altium recomputes
+// an entry's location from them only when the sheet loads; until then it
+// stays drawn where it was. The symbol's location is its top left corner;
+// the distance runs down from the top on the left and right sides, right
+// from the left edge on the top and bottom.
+procedure PlaceSheetEntry(Sym: ISch_SheetSymbol; Entry: ISch_SheetEntry);
+begin
+    if Entry.Side = 0 then Entry.Location := Point(Sym.Location.X, Sym.Location.Y - Entry.DistanceFromTop)
+    else if Entry.Side = 1 then Entry.Location := Point(Sym.Location.X + Sym.XSize, Sym.Location.Y - Entry.DistanceFromTop)
+    else if Entry.Side = 2 then Entry.Location := Point(Sym.Location.X + Entry.DistanceFromTop, Sym.Location.Y)
+    else Entry.Location := Point(Sym.Location.X + Entry.DistanceFromTop, Sym.Location.Y - Sym.YSize);
+end;
+
+// Places every entry of Sym where its side and distance put it, after a
+// resize moved the right or bottom edge
+procedure PlaceSheetEntries(Sym: ISch_SheetSymbol);
+var
+    Iterator : ISch_Iterator;
+    Entry    : ISch_SheetEntry;
+    Entries  : TInterfaceList;
+    i        : Integer;
+begin
+    Entries := TInterfaceList.Create;
+    try
+        Iterator := Sym.SchIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eSheetEntry));
+        Entry := Iterator.FirstSchObject;
+        while Entry <> nil do
+        begin
+            Entries.Add(Entry);
+            Entry := Iterator.NextSchObject;
+        end;
+        Sym.SchIterator_Destroy(Iterator);
+        for i := 0 to Entries.Count - 1 do
+        begin
+            Entry := Entries.Items[i];
+            SchBeginModify(Entry);
+            PlaceSheetEntry(Sym, Entry);
+            SchEndModify(Entry);
+        end;
+    finally
+        Entries.Free;
+    end;
+end;
+
+// SHEETSYM|sheet|x|y|width|height|fill|border|line_width|name_x|name_y|file_x|file_y
+// (x, y: top left; '' keeps a value). A size that would leave an entry
+// outside the symbol is refused; on a resize the entries on the right and
+// bottom sides move with their edge (wires to them are not dragged).
+function EditSheetSymbol(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
+var
+    Sym : ISch_SheetSymbol;
+    X, Y, W, H : Integer;
+    Outside : String;
+    Resized : Boolean;
+begin
+    Result := False;
+    Sym := FindSheetSymbol(Doc, GetFieldFromPipeString(Rec, 1), Msg);
+    if Sym = nil then Exit;
+    W := SchField(Rec, 4, Sym.XSize);
+    H := SchField(Rec, 5, Sym.YSize);
+    Resized := (W <> Sym.XSize) or (H <> Sym.YSize);
+    if Resized then
+    begin
+        Outside := EntryOutside(Sym, W, H);
+        if Outside <> '' then
+        begin
+            Msg := 'entry ' + Outside + ' would be outside the resized symbol; move it first (edit_sheet_entry distance)';
+            Exit;
+        end;
+    end;
+    SchBeginModify(Sym);
+    // MoveByXY carries the entries and the name and file texts along
+    X := SchField(Rec, 2, Sym.Location.X);
+    Y := SchField(Rec, 3, Sym.Location.Y);
+    if (X <> Sym.Location.X) or (Y <> Sym.Location.Y) then Sym.MoveByXY(X - Sym.Location.X, Y - Sym.Location.Y);
+    Sym.XSize := W;
+    Sym.YSize := H;
+    Sym.AreaColor := SchField(Rec, 6, Sym.AreaColor);
+    Sym.Color := SchField(Rec, 7, Sym.Color);
+    Sym.LineWidth := SchField(Rec, 8, Sym.LineWidth);
+    SchEndModify(Sym);
+    if Resized then PlaceSheetEntries(Sym);
+    if GetFieldFromPipeString(Rec, 9) <> '' then
+    begin
+        SchBeginModify(Sym.SheetName);
+        Sym.SheetName.Autoposition := False;
+        Sym.SheetName.MoveToXY(SchField(Rec, 9, 0), SchField(Rec, 10, 0));
+        SchEndModify(Sym.SheetName);
+    end;
+    if GetFieldFromPipeString(Rec, 11) <> '' then
+    begin
+        SchBeginModify(Sym.SheetFileName);
+        Sym.SheetFileName.Autoposition := False;
+        Sym.SheetFileName.MoveToXY(SchField(Rec, 11, 0), SchField(Rec, 12, 0));
+        SchEndModify(Sym.SheetFileName);
+    end;
+    Result := True;
+end;
+
+// SHEETENTRY|sheet|entry|side|distance|io type|style|new name: distance is
+// from the top edge on the left and right sides, from the left edge on the
+// top and bottom; a place outside the symbol is refused
+function EditSheetEntry(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
+var
+    Sym   : ISch_SheetSymbol;
+    Entry : ISch_SheetEntry;
+    NewSide, NewDistance : Integer;
+begin
+    Result := False;
+    Sym := FindSheetSymbol(Doc, GetFieldFromPipeString(Rec, 1), Msg);
+    if Sym = nil then Exit;
+    Entry := FindSheetEntry(Sym, GetFieldFromPipeString(Rec, 2));
+    if Entry = nil then
+    begin
+        Msg := 'sheet symbol ' + GetFieldFromPipeString(Rec, 1) + ' has no entry ' + GetFieldFromPipeString(Rec, 2);
+        Exit;
+    end;
+    NewSide := SchField(Rec, 3, Entry.Side);
+    NewDistance := SchField(Rec, 4, Entry.DistanceFromTop);
+    if not EntryFits(NewSide, NewDistance, Sym.XSize, Sym.YSize) then
+    begin
+        Msg := 'that distance puts entry ' + Entry.Name + ' outside the sheet symbol';
+        Exit;
+    end;
+    SchBeginModify(Entry);
+    Entry.Side := NewSide;
+    Entry.DistanceFromTop := NewDistance;
+    Entry.IOType := SchField(Rec, 5, Entry.IOType);
+    Entry.Style := SchField(Rec, 6, Entry.Style);
+    if GetFieldFromPipeString(Rec, 7) <> '' then Entry.Name := GetFieldFromPipeString(Rec, 7);
+    PlaceSheetEntry(Sym, Entry);
+    SchEndModify(Entry);
+    Result := True;
+end;
+
+// Whether (X, Y) lies on the segment A-B within Tol, away from its ends
+function InsideSegment(AX, AY, BX, BY, X, Y, Tol: Integer): Boolean;
+var
+    Lo, Hi : Integer;
+    Len, Cross : Double;
+begin
+    Result := False;
+    if (Abs(AX - X) <= Tol) and (Abs(AY - Y) <= Tol) then Exit;
+    if (Abs(BX - X) <= Tol) and (Abs(BY - Y) <= Tol) then Exit;
+    if AX < BX then begin Lo := AX; Hi := BX; end else begin Lo := BX; Hi := AX; end;
+    if (X < Lo - Tol) or (X > Hi + Tol) then Exit;
+    if AY < BY then begin Lo := AY; Hi := BY; end else begin Lo := BY; Hi := AY; end;
+    if (Y < Lo - Tol) or (Y > Hi + Tol) then Exit;
+    Len := Sqrt(Sqr(1.0 * (BX - AX)) + Sqr(1.0 * (BY - AY)));
+    if Len = 0 then Exit;
+    Cross := (1.0 * (BX - AX)) * (Y - AY) - (1.0 * (BY - AY)) * (X - AX);
+    Result := Abs(Cross) / Len <= Tol;
+end;
+
+// Whether an end of Port (its location, or the other end Width along it)
+// is within Tol of (X, Y)
+function PortEndAt(Port: ISch_Port; X, Y, Tol: Integer): Boolean;
+var
+    EX, EY : Integer;
+begin
+    Result := (Abs(Port.Location.X - X) <= Tol) and (Abs(Port.Location.Y - Y) <= Tol);
+    EX := Port.Location.X;
+    EY := Port.Location.Y;
+    // Styles 4 and up (none_vertical, top, bottom, top_bottom) run upwards
+    if Port.Style >= 4 then EY := EY + Port.Width else EX := EX + Port.Width;
+    if (Abs(EX - X) <= Tol) and (Abs(EY - Y) <= Tol) then Result := True;
+end;
+
+// WIREVTX|x|y|to_x|to_y: moves the vertex at x, y of every wire with one
+// there, so wires that meet at it stay joined. Junctions, net labels and
+// power ports located there, and ports with an end there, move along by
+// the same offset, so they stay connected. Refused when a wire passes
+// through the point between its vertices: moving the vertex would break
+// that T connection.
+function MoveWireVertex(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
+var
+    Iterator : ISch_Iterator;
+    Wire     : ISch_Wire;
+    Obj      : ISch_GraphicalObject;
+    Hits, VertexNos : TList;
+    Riders   : TInterfaceList;
+    X, Y, TX, TY, Tol, k, i : Integer;
+    Through  : Boolean;
+    P        : TLocation;
+begin
+    Result := False;
+    X := SchField(Rec, 1, 0);
+    Y := SchField(Rec, 2, 0);
+    TX := SchField(Rec, 3, 0);
+    TY := SchField(Rec, 4, 0);
+    Tol := MilsToCoord(1);
+    Through := False;
+    Hits := TList.Create;
+    VertexNos := TList.Create;
+    Riders := TInterfaceList.Create;
+    try
+        Iterator := Doc.SchIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eWire));
+        Wire := Iterator.FirstSchObject;
+        while Wire <> nil do
+        begin
+            for k := 1 to Wire.VerticesCount do
+            begin
+                if (Abs(Wire.Vertex[k].X - X) <= Tol) and (Abs(Wire.Vertex[k].Y - Y) <= Tol) then
+                begin
+                    Hits.Add(Wire);
+                    VertexNos.Add(k);
+                end;
+                if k < Wire.VerticesCount then
+                    if InsideSegment(Wire.Vertex[k].X, Wire.Vertex[k].Y, Wire.Vertex[k + 1].X,
+                                     Wire.Vertex[k + 1].Y, X, Y, Tol) then
+                        Through := True;
+            end;
+            Wire := Iterator.NextSchObject;
+        end;
+        Doc.SchIterator_Destroy(Iterator);
+        if Hits.Count = 0 then
+        begin
+            Msg := 'no wire has a vertex at that point';
+            Exit;
+        end;
+        if Through then
+        begin
+            Msg := 'a wire passes through that point between its vertices; moving the vertex would disconnect it';
+            Exit;
+        end;
+        Iterator := Doc.SchIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eJunction, eNetLabel, ePowerObject, ePort));
+        Obj := Iterator.FirstSchObject;
+        while Obj <> nil do
+        begin
+            if Obj.ObjectId = ePort then
+            begin
+                if PortEndAt(Obj, X, Y, Tol) then Riders.Add(Obj);
+            end
+            else if (Abs(Obj.Location.X - X) <= Tol) and (Abs(Obj.Location.Y - Y) <= Tol) then
+                Riders.Add(Obj);
+            Obj := Iterator.NextSchObject;
+        end;
+        Doc.SchIterator_Destroy(Iterator);
+        for i := 0 to Hits.Count - 1 do
+        begin
+            Wire := Hits[i];
+            SchBeginModify(Wire);
+            P := Wire.Vertex[VertexNos[i]];
+            P.X := TX;
+            P.Y := TY;
+            Wire.Vertex[VertexNos[i]] := P;
+            SchEndModify(Wire);
+        end;
+        // By the offset, not to the point: a port may meet the vertex with
+        // its far end
+        for i := 0 to Riders.Count - 1 do
+        begin
+            Obj := Riders.Items[i];
+            SchBeginModify(Obj);
+            Obj.MoveByXY(TX - X, TY - Y);
+            SchEndModify(Obj);
+        end;
+        Result := True;
+    finally
+        Hits.Free;
+        VertexNos.Free;
+        Riders.Free;
+    end;
+end;
+
+// The wire end nearest (X, Y) within Radius, in WX, WY; False when none
+function NearestWireEnd(Doc: ISch_Document; X, Y, Radius: Integer; var WX: Integer; var WY: Integer): Boolean;
+var
+    Iterator : ISch_Iterator;
+    Wire     : ISch_Wire;
+    k        : Integer;
+    D, Best  : Double;
+begin
+    Result := False;
+    Best := Radius;
+    Iterator := Doc.SchIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eWire));
+    Wire := Iterator.FirstSchObject;
+    while Wire <> nil do
+    begin
+        for k := 1 to Wire.VerticesCount do
+            if (k = 1) or (k = Wire.VerticesCount) then
+            begin
+                D := Sqrt(Sqr(1.0 * (Wire.Vertex[k].X - X)) + Sqr(1.0 * (Wire.Vertex[k].Y - Y)));
+                if D <= Best then
+                begin
+                    Best := D;
+                    WX := Wire.Vertex[k].X;
+                    WY := Wire.Vertex[k].Y;
+                    Result := True;
+                end;
+            end;
+        Wire := Iterator.NextSchObject;
+    end;
+    Doc.SchIterator_Destroy(Iterator);
+end;
+
+// LABELMOVE|x|y|text|to_x|to_y|orientation|justification|snap radius
+// Moves the net label at x, y (with that text, when given) to to_x, to_y
+// (or keeps its place), then onto the nearest wire end within the radius
+// when one is given
+function MoveNetLabel(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
+var
+    Iterator : ISch_Iterator;
+    Lbl, Found : ISch_NetLabel;
+    X, Y, Tol, TX, TY, WX, WY, Radius, n : Integer;
+begin
+    Result := False;
+    X := SchField(Rec, 1, 0);
+    Y := SchField(Rec, 2, 0);
+    Tol := MilsToCoord(1);
+    Found := nil;
+    n := 0;
+    Iterator := Doc.SchIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eNetLabel));
+    Lbl := Iterator.FirstSchObject;
+    while Lbl <> nil do
+    begin
+        if (Abs(Lbl.Location.X - X) <= Tol) and (Abs(Lbl.Location.Y - Y) <= Tol) and
+           ((GetFieldFromPipeString(Rec, 3) = '') or SameText(Lbl.Text, GetFieldFromPipeString(Rec, 3))) then
+        begin
+            Found := Lbl;
+            n := n + 1;
+        end;
+        Lbl := Iterator.NextSchObject;
+    end;
+    Doc.SchIterator_Destroy(Iterator);
+    if Found = nil then
+    begin
+        Msg := 'no net label at that point';
+        Exit;
+    end;
+    if n > 1 then
+    begin
+        Msg := IntToStr(n) + ' net labels at that point; give text';
+        Exit;
+    end;
+    TX := SchField(Rec, 4, Found.Location.X);
+    TY := SchField(Rec, 5, Found.Location.Y);
+    Radius := SchField(Rec, 8, 0);
+    if Radius > 0 then
+    begin
+        if not NearestWireEnd(Doc, TX, TY, Radius, WX, WY) then
+        begin
+            Msg := 'no wire end within ' + IntToStr(Round(CoordToMils(Radius))) + ' mil of the label''s target';
+            Exit;
+        end;
+        TX := WX;
+        TY := WY;
+    end;
+    SchBeginModify(Found);
+    Found.MoveToXY(TX, TY);
+    Found.Orientation := SchField(Rec, 6, Found.Orientation);
+    Found.Justification := SchField(Rec, 7, Found.Justification);
+    SchEndModify(Found);
     Result := True;
 end;
 
 // One edit record; Msg says why it failed
 function ApplySchEdit(Doc: ISch_Document; Rec: String; var Msg: String): Boolean;
 var
-    Kind, Name : String;
+    Kind       : String;
     Comp       : ISch_Component;
     Obj        : ISch_GraphicalObject;
-    Param      : ISch_Parameter;
     Ambiguous  : Boolean;
     fld, vtx, n, Want : Integer;
 begin
@@ -3151,26 +3890,8 @@ begin
     end
     else if Kind = 'PARAM' then
     begin
-        Name := GetFieldFromPipeString(Rec, 3);
-        Obj := FindSchText(Comp, Name);
-        if Obj = nil then
-        begin
-            Param := SchServer.SchObjectFactory(eParameter, eCreate_Default);
-            Param.Name := Name;
-            Param.Text := GetFieldFromPipeString(Rec, 4);
-            Param.IsHidden := GetFieldFromPipeString(Rec, 5) <> '1';
-            Param.Location := Comp.Location;
-            Comp.AddSchObject(Param);
-            SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_PrimitiveRegistration, Param.I_ObjectAddress);
-        end
-        else
-        begin
-            SchBeginModify(Obj);
-            Obj.Text := GetFieldFromPipeString(Rec, 4);
-            Want := StrToInt(GetFieldFromPipeString(Rec, 5));
-            if Want >= 0 then Obj.IsHidden := Want = 0;
-            SchEndModify(Obj);
-        end;
+        SetSchParameter(Comp, GetFieldFromPipeString(Rec, 3), GetFieldFromPipeString(Rec, 4),
+                        StrToInt(GetFieldFromPipeString(Rec, 5)));
         Result := True;
     end
     else if Kind = 'TEXT' then
@@ -3235,6 +3956,24 @@ begin
         SchRegister(Doc, Obj);
         Result := True;
     end
+    else if Kind = 'PORT' then
+    begin
+        // PORT|x|y|iotype|style|width|name: x, y is the port's left (or
+        // bottom) end; a width other than 0 turns auto size off, so the
+        // port keeps its length and the end a wire meets stays put
+        Obj := SchServer.SchObjectFactory(ePort, eCreate_GlobalCopy);
+        Obj.Location := Point(StrToInt(GetFieldFromPipeString(Rec, 1)), StrToInt(GetFieldFromPipeString(Rec, 2)));
+        Obj.IOType := StrToInt(GetFieldFromPipeString(Rec, 3));
+        Obj.Style := StrToInt(GetFieldFromPipeString(Rec, 4));
+        Obj.Name := GetFieldFromPipeString(Rec, 6);
+        if StrToInt(GetFieldFromPipeString(Rec, 5)) > 0 then
+        begin
+            Obj.AutoSize := False;
+            Obj.Width := StrToInt(GetFieldFromPipeString(Rec, 5));
+        end;
+        SchRegister(Doc, Obj);
+        Result := True;
+    end
     else if (Kind = 'JUNCTION') or (Kind = 'NOERC') then
     begin
         if Kind = 'JUNCTION' then
@@ -3257,8 +3996,101 @@ begin
     end
     else if Kind = 'PLACE' then
         Result := PlaceSchComponent(Doc, Rec, Msg)
+    else if Kind = 'SHEETSYM' then
+        Result := EditSheetSymbol(Doc, Rec, Msg)
+    else if Kind = 'SHEETENTRY' then
+        Result := EditSheetEntry(Doc, Rec, Msg)
+    else if Kind = 'WIREVTX' then
+        Result := MoveWireVertex(Doc, Rec, Msg)
+    else if Kind = 'LABELMOVE' then
+        Result := MoveNetLabel(Doc, Rec, Msg)
     else
         Msg := 'unknown edit ' + Kind;
+end;
+
+// The placed pins of a sheet's components, live from Altium: designator,
+// part, pin number and name, its connection point (hot end) in internal
+// units, electrical type and whether it is hidden. Designators is
+// '|U1|R3|' or '' for every component. Only the pins of the part and display
+// mode each component shows are on the sheet.
+function GetSchematicPins(SheetPath: String; Designators: String): String;
+var
+    Doc       : ISch_Document;
+    ServerDoc : IServerDocument;
+    Iter, PinIter : ISch_Iterator;
+    Comp      : ISch_Component;
+    Pin       : ISch_Pin;
+    HotX, HotY, Count : Integer;
+    Items, Item, Props : TStringList;
+begin
+    Doc := SchServer.GetSchDocumentByPath(SheetPath);
+    if Doc = nil then
+    begin
+        if not FileExists(SheetPath) then
+        begin
+            Result := 'ERROR: Sheet not found: ' + SheetPath;
+            Exit;
+        end;
+        // Opened and shown the way EditSchematic opens a closed sheet
+        ServerDoc := Client.OpenDocument('SCH', SheetPath);
+        if ServerDoc <> nil then Client.ShowDocument(ServerDoc);
+        Doc := SchServer.GetSchDocumentByPath(SheetPath);
+    end;
+    if Doc = nil then
+    begin
+        Result := 'ERROR: Altium could not open the sheet ' + SheetPath;
+        Exit;
+    end;
+    Designators := UpperCase(Designators);
+    Items := TStringList.Create;
+    Item := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Count := 0;
+        Iter := Doc.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := Iter.FirstSchObject;
+        while Comp <> nil do
+        begin
+            if (Designators = '') or (Pos('|' + UpperCase(Comp.Designator.Text) + '|', Designators) > 0) then
+            begin
+                PinIter := Comp.SchIterator_Create;
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                Pin := PinIter.FirstSchObject;
+                while Pin <> nil do
+                begin
+                    if ((Pin.OwnerPartId = 0) or (Pin.OwnerPartId = Comp.CurrentPartID)) and
+                       (Pin.OwnerPartDisplayMode = Comp.DisplayMode) then
+                    begin
+                        GetPinHotEnd(Pin, HotX, HotY);
+                        Item.Clear;
+                        AddJSONProperty(Item, 'designator', Comp.Designator.Text);
+                        AddJSONInteger(Item, 'part', Comp.CurrentPartID);
+                        AddJSONProperty(Item, 'pin', Pin.Designator);
+                        AddJSONProperty(Item, 'name', Pin.Name);
+                        AddJSONInteger(Item, 'x', HotX);
+                        AddJSONInteger(Item, 'y', HotY);
+                        AddJSONInteger(Item, 'electrical', Pin.Electrical);
+                        AddJSONBoolean(Item, 'hidden', Pin.IsHidden);
+                        Items.Add(BuildJSONObject(Item, 1));
+                        Count := Count + 1;
+                    end;
+                    Pin := PinIter.NextSchObject;
+                end;
+                Comp.SchIterator_Destroy(PinIter);
+            end;
+            Comp := Iter.NextSchObject;
+        end;
+        Doc.SchIterator_Destroy(Iter);
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONInteger(Props, 'count', Count);
+        if Items.Count > 0 then Props.Add(BuildJSONArray(Items, 'pins')) else Props.Add('"pins": []');
+        Result := BuildJSONObject(Props);
+    finally
+        Items.Free;
+        Item.Free;
+        Props.Free;
+    end;
 end;
 
 function EditSchematic(SheetPath: String; SpecPath: String; Save: Boolean): String;

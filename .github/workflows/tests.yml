@@ -21,22 +21,41 @@ jobs:
       - name: Install requirements
         run: python -m pip install -r requirements.txt
 
-      # Offline tests only. tests/test_altium_script.py drives a running
-      # Altium Designer and cannot run here. Tests extract MCP functions
-      # without importing main.py or starting the live bridge.
+      # Explicit offline modules: the legacy test_altium_script drives live Altium.
       - name: Run unit tests
         run: >-
           python -m unittest -v
           server.tests.test_altium_files server.tests.test_altium_install
-          server.tests.test_document_management server.tests.test_drc
-          server.tests.test_exchange_lock server.tests.test_label_blocks
-          server.tests.test_launcher_setup server.tests.test_lcsc_catalog
-          server.tests.test_library_component_data server.tests.test_merge_compatibility
-          server.tests.test_open_targets server.tests.test_outjob_parser
-          server.tests.test_pcb_rules server.tests.test_pcb_shapes server.tests.test_pcblib_file
+          server.tests.test_bridge_json server.tests.test_dblib
+          server.tests.test_document_closing server.tests.test_document_management
+          server.tests.test_drc server.tests.test_eco_preview
+          server.tests.test_edit_outjob_tool server.tests.test_empty_library_component
+          server.tests.test_exchange_lock server.tests.test_footprint_batch_properties
+          server.tests.test_footprint_editor server.tests.test_footprint_model3d
+          server.tests.test_footprint_pad_properties server.tests.test_footprint_properties
+          server.tests.test_hierarchy_check server.tests.test_label_blocks
+          server.tests.test_launcher_background server.tests.test_launcher_setup
+          server.tests.test_lcsc_catalog server.tests.test_lcsc_lookup
+          server.tests.test_library_component_data server.tests.test_library_component_properties
+          server.tests.test_library_components_data server.tests.test_library_roundtrip
+          server.tests.test_library_validation server.tests.test_library_view
+          server.tests.test_merge_compatibility server.tests.test_netlist_diff
+          server.tests.test_open_targets server.tests.test_outjob_edit
+          server.tests.test_outjob_parser server.tests.test_pcb_component_properties
+          server.tests.test_pcb_edit server.tests.test_pcb_geometry
+          server.tests.test_pcb_layers server.tests.test_pcb_layout
+          server.tests.test_pcb_query server.tests.test_pcb_rules
+          server.tests.test_pcb_shapes server.tests.test_pcblib_file
           server.tests.test_project_components server.tests.test_project_selection
-          server.tests.test_request_format server.tests.test_routing server.tests.test_sandbox
-          server.tests.test_sch_edit server.tests.test_schematic_check
-          server.tests.test_schematic_connectivity server.tests.test_schematic_editor
-          server.tests.test_script_bundle server.tests.test_server_info server.tests.test_silkscreen
-          server.tests.test_start_server server.tests.test_symbol_metadata server.tests.test_win_processes
+          server.tests.test_render server.tests.test_request_format
+          server.tests.test_router server.tests.test_routing
+          server.tests.test_sandbox server.tests.test_sch_edit
+          server.tests.test_schematic_check server.tests.test_schematic_cloning
+          server.tests.test_schematic_connectivity server.tests.test_schematic_diagram
+          server.tests.test_schematic_document server.tests.test_schematic_editor
+          server.tests.test_screenshot_capture server.tests.test_screenshot_target
+          server.tests.test_script_bundle server.tests.test_server_info
+          server.tests.test_silkscreen server.tests.test_start_server
+          server.tests.test_symbol_metadata server.tests.test_symbol_primitives
+          server.tests.test_tool_docs server.tests.test_unicode_table
+          server.tests.test_upstream_sync server.tests.test_win_processes
