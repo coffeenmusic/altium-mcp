@@ -389,7 +389,15 @@ var
 begin
     Result := nil;
     D := SbxFindDoc(Path);
-    if D = nil then D := Client.OpenDocument('PCB', Path);
+    if D = nil then
+    begin
+        if not FileExists(Path) then
+        begin
+            SandboxLog('BoardByPath: no such file ' + Path);
+            Exit;
+        end;
+        D := Client.OpenDocument('PCB', Path);
+    end;
     if D <> nil then
     begin
         Client.ShowDocument(D);
@@ -399,7 +407,8 @@ begin
 end;
 
 // Mils from the focused board's origin, in internal units: BX(100) is 100 mil
-// right of the origin, BY(50) 50 mil above it
+// right of the origin, BY(50) 50 mil above it. They need a focused board:
+// without one CurrentBoard logs it and the origin is taken as 0
 function BX(Mils : Double) : Integer;
 var
     Board : IPCB_Board;
