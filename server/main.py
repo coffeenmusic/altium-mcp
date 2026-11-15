@@ -7215,7 +7215,9 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     Altium only checks the rule kinds ticked "Batch" in that dialog; an
     enabled rule of any other kind is skipped and shows no violations, as
     if it passed. "rules_not_checked" lists those rules (name, kind,
-    kind_name), with a "warning" that says how to include them.
+    kind_name), with a "warning" that says how to include them. Kinds the
+    dialog does not list (Fanout Control, Layer Pairs, Supply Nets, ...)
+    are never checked by a DRC and are left out.
 
     Args:
         board_path (str): Full path of the .PcbDoc to check. It is opened if

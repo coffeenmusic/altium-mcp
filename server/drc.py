@@ -274,22 +274,62 @@ def _rule_kind(rule: dict) -> str:
     return rule_key(_kind(rule.get("descriptor", "")) or rule.get("kind_name", ""))
 
 
+# The rule kinds listed under Rules To Check in the Design Rule Checker
+# dialog, by IPCB_Rule.RuleKind (TRuleKind). Only these have a Batch tick box.
+# The others are settings for the router, fanout, planes, masks, placement or
+# signal integrity analysis that the check never processes (Fanout Control,
+# Layer Pairs, Supply Nets, Routing Priority, Routing Corners, Solder Mask
+# Expansion, ...); a rule of such a kind has no report block however the
+# dialog is set. A kind not listed here is never reported as skipped.
+CHECKABLE_KINDS = {
+    0: "Clearance", 1: "Parallel Segment", 2: "Width", 3: "Length", 4: "Matched Lengths",
+    5: "Daisy Chain Stub Length", 7: "Routing Topology", 9: "Routing Layers", 11: "Routing Via Style",
+    15: "Short-Circuit", 16: "Un-Routed Net", 17: "Vias Under SMD", 18: "Maximum Via Count",
+    19: "Minimum Annular Ring", 20: "Polygon Connect Style", 21: "Acute Angle", 22: "Room Definition",
+    23: "SMD To Corner", 24: "Component Clearance",
+    29: "Overshoot - Falling Edge", 30: "Overshoot - Rising Edge", 31: "Undershoot - Falling Edge",
+    32: "Undershoot - Rising Edge", 33: "Impedance", 34: "Signal Top Value", 35: "Signal Base Value",
+    36: "Flight Time - Rising Edge", 37: "Flight Time - Falling Edge", 39: "Slope - Rising Edge",
+    40: "Slope - Falling Edge",
+    42: "Hole Size", 43: "Fabrication Testpoint Style", 44: "Fabrication Testpoint Usage",
+    45: "Un-Connected Pin", 46: "SMD To Plane", 47: "SMD Neck-Down", 50: "Height",
+    51: "Differential Pairs Routing", 52: "Hole To Hole Clearance", 53: "Minimum Solder Mask Sliver",
+    54: "Silk To Solder Mask Clearance", 55: "Silk To Silk Clearance", 56: "Net Antennae",
+    57: "Assembly Testpoint Style", 58: "Assembly Testpoint Usage", 60: "SMD Entry",
+    62: "Modified Polygon", 63: "Board Outline Clearance", 64: "Max Via Stub Length (Back Drilling)",
+    65: "Creepage Distance", 66: "Return Path",
+}
+_CHECKABLE_KEYS = {rule_key(n) for n in CHECKABLE_KINDS.values()}
+
+
+def checkable(rule: dict) -> bool:
+    """Whether the Design Rule Checker can check a rule's kind: by its RuleKind
+    number, or without one by its kind name."""
+    kind = rule.get("kind")
+    if isinstance(kind, int) and not isinstance(kind, bool):
+        return kind in CHECKABLE_KINDS
+    return bool({rule_key(rule.get("kind_name") or ""), rule_key(_kind(rule.get("descriptor", "")))}
+                & _CHECKABLE_KEYS)
+
+
 def rules_not_checked(enabled: List[dict], processed: List[str]) -> List[dict]:
     """The enabled rules the check skipped. A batch check only processes the
     rule kinds ticked "Batch" under Rules To Check in the Design Rule Checker
     dialog, and the report has a "Processing Rule : <descriptor>" block for
     each rule it processed; a rule of another kind has none, and no
-    violations either, exactly like a rule that passes.
+    violations either, exactly like a rule that passes. Only kinds that
+    dialog lists count (CHECKABLE_KINDS): a Fanout Control or Supply Nets
+    rule has no block either, but no setting would check it.
 
-    enabled: {"descriptor", "kind_name", ...} for each enabled rule;
+    enabled: {"kind", "kind_name", "descriptor", ...} for each enabled rule;
     processed: the descriptors of the report's blocks (parse_report's rules).
     A rule counts as checked when a block has its descriptor, or failing
     that (the text written differently) any block is of its kind: Batch is
     ticked per kind, so one block of a kind means the kind was checked."""
     blocks = {_norm(b) for b in processed}
     kinds = {rule_key(_kind(b)) for b in blocks}
-    return [r for r in enabled
-            if _norm(r.get("descriptor", "")) not in blocks and _rule_kind(r) not in kinds]
+    return [r for r in enabled if checkable(r)
+            and _norm(r.get("descriptor", "")) not in blocks and _rule_kind(r) not in kinds]
 
 
 def not_checked_warning(skipped: List[dict]) -> str:

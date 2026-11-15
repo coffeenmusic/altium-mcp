@@ -212,6 +212,34 @@ class RulesNotCheckedTest(unittest.TestCase):
         self.assertEqual(drc.rules_not_checked([dict(DIFF_PAIR, descriptor="")], self.processed(REPORT)),
                          [dict(DIFF_PAIR, descriptor="")])
 
+    def test_kinds_the_checker_cannot_check_are_left_out(self):
+        # A 6-layer board: these kinds have no report block either, but the
+        # Design Rule Checker lists no Batch box for them
+        fanout = {"name": "Fanout_BGA", "kind": 49, "kind_name": "Fanout Control",
+                  "descriptor": "Fanout Control (BGA Options = Lines) (IsBGA)"}
+        pairs = {"name": "LayerPairs", "kind": 48, "kind_name": "Layer Pairs",
+                 "descriptor": "Layer Pairs (Enforce layer pairs settings = True) (All)"}
+        supply = {"name": "PlaneNets", "kind": 41, "kind_name": "Supply Nets",
+                  "descriptor": "Supply Nets (Voltage=0V) (InNet('GND'))"}
+        enabled = [CLEARANCE, WIDTH, HOLES, fanout, pairs, supply, DIFF_PAIR]
+        self.assertEqual(drc.rules_not_checked(enabled, self.processed(REPORT)), [DIFF_PAIR])
+        self.assertEqual(drc.rules_not_checked(enabled, self.processed(REPORT_51)), [])
+        # Without a kind number the kind name decides
+        no_number = [{k: v for k, v in r.items() if k != "kind"} for r in (fanout, supply, DIFF_PAIR)]
+        self.assertEqual(drc.rules_not_checked(no_number, self.processed(REPORT)), no_number[2:])
+
+    def test_checkable_kinds(self):
+        for kind in (0, 2, 16, 51, 52, 63):
+            self.assertTrue(drc.checkable({"kind": kind}), kind)
+        # Fanout Control, Layer Pairs, Supply Nets, Routing Priority, Routing
+        # Corners, Solder Mask Expansion, an unknown kind
+        for kind in (49, 48, 41, 8, 10, 13, 99):
+            self.assertFalse(drc.checkable({"kind": kind}), kind)
+        self.assertTrue(drc.checkable({"kind_name": "Un-Routed Net"}))
+        self.assertTrue(drc.checkable({"descriptor": "Width Constraint (Min=0.15mm) (All)"}))
+        self.assertFalse(drc.checkable({"kind_name": "Routing Priority"}))
+
+
 class PanelsTest(unittest.TestCase):
     def test_only_panels_the_check_opened_are_closed(self):
         with mock.patch.object(drc, "_altium_windows", return_value=[7, 9]) as found, \
