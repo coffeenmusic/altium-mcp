@@ -1329,8 +1329,9 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list = None, visib
 
     Names are matched the way Altium shows them, in any case and with or
     without spaces and hyphens: "Multi-Layer" (the layer tab), "Top Solder"
-    (the Layer Stack Manager) and "Top Solder Mask" are all found, and "Mid
-    Layer 1" finds a copper layer renamed e.g. "Inner 1". With a name no
+    (the Layer Stack Manager) and "Top Solder Mask" are all found, "Mid
+    Layer 1" finds a copper layer renamed e.g. "Inner 1", and "Top Silk" or
+    "Top Silkscreen" finds "Top Overlay" (the silkscreen). With a name no
     layer has, nothing is changed and the reply lists the board's layers.
 
     Every reply has previous_state, the visibility before the call; pass it

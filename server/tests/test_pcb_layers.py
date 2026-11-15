@@ -48,6 +48,15 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual([u["name"] for u in unknown], ["Botom Layer", "Mid Layer 3", "Silk"])
         self.assertIn("Bottom Layer", unknown[0]["suggestions"])
 
+    def test_silk_is_the_overlay(self):
+        found, renamed, unknown = pcb_layers.resolve(["Top Silk", "Bottom Silkscreen", "top silk screen"], LAYERS)
+        self.assertEqual(unknown, [])
+        self.assertEqual(found, ["Top Overlay", "Bottom Overlay"])
+        self.assertEqual(renamed["Top Silk"], "Top Overlay")
+        # Bare "Silk" names no one layer: both overlays are suggested, not a mask
+        _, _, unknown = pcb_layers.resolve(["Silk"], LAYERS)
+        self.assertEqual(unknown[0]["suggestions"], ["Top Overlay", "Bottom Overlay"])
+
     def test_displayed(self):
         state = pcb_layers.displayed(LAYERS)
         self.assertEqual(len(state), 16)
@@ -62,10 +71,10 @@ if __name__ == "__main__":
 
 class PlanTest(unittest.TestCase):
     def test_strict_unknown_name_changes_nothing(self):
-        calls, out = pcb_layers.plan(LAYERS, ["Top Layer", "Multi-Layer", "Top Silk"], True, True)
+        calls, out = pcb_layers.plan(LAYERS, ["Top Layer", "Multi-Layer", "Top Glue"], True, True)
         self.assertEqual(calls, [])
         self.assertFalse(out["success"])
-        self.assertEqual([u["name"] for u in out["unresolved"]], ["Top Silk"])
+        self.assertEqual([u["name"] for u in out["unresolved"]], ["Top Glue"])
         self.assertIn("Multi Layer", out["valid_names"])
         self.assertTrue(out["previous_state"]["Drill Guide"] is False)
 
@@ -76,8 +85,8 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(len(out["previous_state"]), 16)
 
     def test_not_strict_sends_unknown_names_as_before(self):
-        calls, out = pcb_layers.plan(LAYERS, ["Top Layer", "Top Silk"], True, True, strict=False)
-        self.assertEqual(calls[0]["layer_names"], ["Top Layer", "Top Silk"])
+        calls, out = pcb_layers.plan(LAYERS, ["Top Layer", "Top Glue"], True, True, strict=False)
+        self.assertEqual(calls[0]["layer_names"], ["Top Layer", "Top Glue"])
         self.assertNotIn("success", out)
 
     def test_every_layer(self):

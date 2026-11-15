@@ -17,7 +17,9 @@ from typing import Dict, List, Tuple
 _IDS = {"toplayer": 1, "bottomlayer": 32, "topoverlay": 33, "bottomoverlay": 34,
         "toppaste": 35, "bottompaste": 36, "topsolder": 37, "topsoldermask": 37,
         "bottomsolder": 38, "bottomsoldermask": 38, "drillguide": 55, "keepout": 56,
-        "keepoutlayer": 56, "drilldrawing": 73, "multilayer": 74}
+        "keepoutlayer": 56, "drilldrawing": 73, "multilayer": 74,
+        # what other tools and fabricators call the overlays
+        "topsilk": 33, "topsilkscreen": 33, "bottomsilk": 34, "bottomsilkscreen": 34}
 _IDS.update({f"midlayer{n}": n + 1 for n in range(1, 31)})
 _IDS.update({f"internalplane{n}": n + 38 for n in range(1, 17)})
 
@@ -47,20 +49,27 @@ def resolve(names: List[str], layers) -> Tuple[List[str], Dict[str, str], List[d
     A name matches a layer's own name in any case and with or without
     spaces, hyphens and underscores, or Altium's name for that layer
     ("Mid Layer 1" for a copper layer renamed "Inner 1", "Top Solder" for
-    "Top Solder Mask", "Multi-Layer" for "Multi Layer")."""
+    "Top Solder Mask", "Multi-Layer" for "Multi Layer", "Top Silk" for "Top
+    Overlay"). Suggestions for an unknown name come from those names too, so
+    "Silk" suggests the overlays."""
     board = board_layers(layers)
     by_key = {}
     for l in board:
         by_key.setdefault(key(l["name"]), l["name"])
     by_id = {str(l.get("layer_id")): l["name"] for l in board}
+    known = dict(by_key)
+    for k, i in _IDS.items():
+        if str(i) in by_id:
+            known.setdefault(k, by_id[str(i)])
     exact = {l["name"] for l in board}
     found, renamed, unknown = [], {}, []
     for name in names:
         k = key(name)
         real = name if name in exact else by_key.get(k) or (by_id.get(str(_IDS[k])) if k in _IDS else None)
         if real is None:
-            close = difflib.get_close_matches(k, list(by_key), n=3, cutoff=0.6)
-            unknown.append({"name": name, "suggestions": [by_key[c] for c in close]})
+            close = [c for c in known if len(k) >= 3 and k in c]
+            close += difflib.get_close_matches(k, list(known), n=6, cutoff=0.6)
+            unknown.append({"name": name, "suggestions": list(dict.fromkeys(known[c] for c in close))[:3]})
             continue
         if real != name:
             renamed[name] = real
