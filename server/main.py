@@ -6559,48 +6559,24 @@ async def get_altium_windows(ctx: Context) -> str:
     return json.dumps(await asyncio.to_thread(_run_dpi_aware, collect), indent=2)
 
 
-def _press_button(dialog, caption):
-    """Press the button of a dialog captioned caption (any case, without its
-    & accelerator). Altium's buttons ignore BM_CLICK; posted mouse messages
-    work (see drc.py). The captions found when there is no such button."""
-    buttons = []
-
-    def collect(child, _):
-        if win32gui.IsWindowVisible(child) and win32gui.IsWindowEnabled(child):
-            text = win32gui.GetWindowText(child).replace("&", "").strip()
-            cls = win32gui.GetClassName(child).lower()  # TXPBitBtn, TButton, Button
-            if text and ("btn" in cls or "button" in cls):
-                buttons.append((child, text))
-        return True
-    try:
-        win32gui.EnumChildWindows(dialog, collect, 0)
-    except Exception:
-        pass  # raised when the dialog has no children
-    for child, text in buttons:
-        if text.lower() == caption.strip().lower():
-            win32gui.PostMessage(child, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, 0)
-            win32gui.PostMessage(child, win32con.WM_LBUTTONUP, 0, 0)
-            return True, []
-    return False, [text for _, text in buttons]
-
-
 @_tool()
-async def dismiss_dialog(ctx: Context, dialog: str | int, action: str = "cancel") -> str:
+async def dismiss_dialog(ctx: Context, dialog: str | int) -> str:
     """
     Close an open Altium dialog, such as one left over a board that keeps
-    get_screenshot from capturing it. Only Altium's own dialogs, as
+    get_screenshot from capturing it, as its close box does: whatever it
+    asks about is left unapplied. Only Altium's own dialogs, as
     get_altium_windows lists them: never its main window, a panel or a
     window of another program.
 
+    No button is ever pressed: a button commits what the dialog asks about
+    (Save changes? No, Project Options OK, Execute Changes), and a dialog an
+    agent opened cannot be told from one the user is filling in.
+
     Args:
         dialog (str | int): The dialog's hwnd (from get_altium_windows) or its title
-        action (str): "cancel" (default) closes it as its close box does,
-            which leaves any change in it unapplied. Anything else presses
-            the button with that caption, e.g. "OK", "Yes" or "No".
 
     Returns:
-        str: JSON with closed (the dialog went away), its class and title,
-             and the action taken
+        str: JSON with closed (the dialog went away), its class and title
     """
     def dismiss():
         hwnd, _ = _altium_main_window()
@@ -6611,24 +6587,17 @@ async def dismiss_dialog(ctx: Context, dialog: str | int, action: str = "cancel"
         if target is None:
             return {"success": False, "error": why}
         h = target["hwnd"]
-        if action.strip().lower() == "cancel":
-            win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
-        else:
-            pressed, captions = _press_button(h, action)
-            if not pressed:
-                return {"success": False, "class": target["class"], "title": target["title"],
-                        "error": f"The dialog has no button '{action}'. Its buttons: "
-                                 f"{', '.join(captions) or 'none found'}"}
+        win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
         closed = False
         for _ in range(30):
             time.sleep(0.1)
             if not (win32gui.IsWindow(h) and win32gui.IsWindowVisible(h)):
                 closed = True
                 break
-        out = {"success": closed, "closed": closed, "class": target["class"], "title": target["title"],
-               "action": action}
+        out = {"success": closed, "closed": closed, "class": target["class"], "title": target["title"]}
         if not closed:
-            out["error"] = "The dialog is still open after 3 s"
+            out["error"] = ("The dialog is still open after 3 s. A question with no close box (Yes/No) "
+                            "ignores closing: answer it in Altium.")
         return out
     return json.dumps(await asyncio.to_thread(_run_dpi_aware, dismiss), indent=2)
 

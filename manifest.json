@@ -353,7 +353,7 @@
     },
     {
       "name": "dismiss_dialog",
-      "description": "Close an open Altium dialog by its hwnd or title: cancel it, or press a named button"
+      "description": "Close an open Altium dialog by its hwnd or title, as its close box does; never presses a button"
     },
     {
       "name": "run_altium_script",
