@@ -19,7 +19,9 @@ The pure parts (parsing, choosing a window, clipping) are here so they can be
 tested without Altium; the window walking needs pywin32 and runs on Windows.
 """
 import os
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from altium_files import long_path
@@ -368,24 +370,40 @@ def dismissable(windows: Sequence[Dict], hwnd_or_title) -> Tuple[Optional[Dict],
     if not found:
         return None, f"No open Altium dialog is {hwnd_or_title!r}. Open dialogs: {open_}"
     return None, f"Several Altium dialogs are titled {hwnd_or_title!r}; give the hwnd. Open dialogs: {open_}"
-def save_target(path: Optional[str], roots: Sequence[str]) -> Tuple[Optional[str], str]:
-    """(where to write a capture, "") or (None, why not). An absolute path
-    of a .png file in an existing folder inside one of roots (the user's
-    profile): a screenshot tool should not write just anywhere."""
-    text = (path or "").strip()
-    if not text.lower().endswith(".png") or not os.path.isabs(text):
-        return None, "save_path is the full path of a .png file"
-    full = os.path.realpath(text)
-    if not os.path.isdir(os.path.dirname(full)):
-        return None, f"The folder of save_path does not exist: {os.path.dirname(text)}"
-    for root in roots:
-        root = os.path.realpath(root)
+
+
+# Captures get_screenshot keeps in the server's own folder; older ones are deleted
+CAPTURES_KEPT = 50
+
+# GetCursorPos fails with "Access is denied" while Windows gives this process
+# no input desktop, and a screen copy then shows nothing of Altium
+DESKTOP_DENIED_ERROR = ("Nothing was captured: Windows denies access to the screen, so the desktop is "
+                        "locked or a secure desktop (a UAC prompt, Ctrl+Alt+Del) is showing. Unlock it, "
+                        "or answer the prompt, and try again.")
+
+
+def save_capture(directory: Path, png: bytes, now: float, keep: int = CAPTURES_KEPT) -> str:
+    """Write a capture into directory (the server's own folder) and return
+    its path. A new file every time, named by the time, never one that
+    exists; only the newest `keep` captures stay."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + f"-{int(now * 1000) % 1000:03d}"
+    n = 0
+    while True:
+        path = directory / f"screenshot_{stamp}{f'_{n}' if n else ''}.png"
         try:
-            if os.path.normcase(os.path.commonpath([full, root])) == os.path.normcase(root):
-                return full, ""
-        except ValueError:
-            pass  # another drive
-    return None, "save_path must be inside your user profile folder"
+            with open(path, "xb") as f:
+                f.write(png)
+            break
+        except FileExistsError:
+            n += 1
+    old = sorted(directory.glob("screenshot_*.png"), key=lambda p: (p.stat().st_mtime, p.name))[:-keep]
+    for p in old:
+        try:
+            p.unlink()
+        except OSError:
+            pass  # another server is reading or deleting it
+    return str(path)
 
 
 def park_point(views: Sequence[Rect], screen: Rect, cursor: Tuple[int, int]) -> Optional[Tuple[int, int]]:

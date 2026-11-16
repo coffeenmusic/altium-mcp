@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -259,18 +260,31 @@ class AltiumWindowsTest(unittest.TestCase):
         self.assertEqual(st.dismissable(numbered, "2")[0]["hwnd"], 8)   # an all-digit title
         twins = [dict(ws[0]), dict(ws[0], hwnd=7)]
         self.assertIn("give the hwnd", st.dismissable(twins, "Options for PCB Project Adapter.PrjPcb")[1])
+
 class SaveAndPointerTest(unittest.TestCase):
-    def test_save_target_inside_the_profile_only(self):
-        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as elsewhere:
-            os.mkdir(os.path.join(home, "evidence"))
-            ok, why = st.save_target(os.path.join(home, "evidence", "top.png"), [home])
-            self.assertEqual((ok, why), (os.path.realpath(os.path.join(home, "evidence", "top.png")), ""))
-            for bad in (os.path.join(elsewhere, "top.png"),                    # outside the profile
-                        os.path.join(home, "evidence", "..", "..", "x.png"),   # climbs out of it
-                        os.path.join(home, "missing", "top.png"),              # no such folder
-                        os.path.join(home, "top.jpg"), "top.png", "", None):
-                self.assertIsNone(st.save_target(bad, [home])[0], bad)
-            self.assertIn("user profile", st.save_target(os.path.join(elsewhere, "a.png"), [home])[1])
+    def test_save_capture_never_overwrites_and_keeps_the_newest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "screenshots"
+            now = 1794700000.123
+            first = st.save_capture(folder, b"one", now)
+            second = st.save_capture(folder, b"two", now)        # the same millisecond
+            self.assertNotEqual(first, second)
+            self.assertEqual((Path(first).read_bytes(), Path(second).read_bytes()), (b"one", b"two"))
+            self.assertEqual(Path(first).parent, folder)
+            for path in (first, second):
+                os.utime(path, (now, now))
+            for k in range(5):
+                os.utime(st.save_capture(folder, b"x%d" % k, now + 1 + k, keep=3),
+                         (now + 1 + k, now + 1 + k))
+            kept = sorted(p.read_bytes() for p in folder.glob("screenshot_*.png"))
+            self.assertEqual(kept, [b"x2", b"x3", b"x4"])
+            (folder / "notes.txt").write_text("mine")              # other files are left alone
+            st.save_capture(folder, b"y", now + 9, keep=1)
+            self.assertTrue((folder / "notes.txt").exists())
+
+    def test_locked_desktop_error_says_what_to_do(self):
+        self.assertIn("locked", st.DESKTOP_DENIED_ERROR)
+        self.assertIn("Unlock", st.DESKTOP_DENIED_ERROR)
 
     def test_park_point(self):
         screen = (0, 0, 3840, 1080)

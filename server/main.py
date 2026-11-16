@@ -6471,11 +6471,10 @@ def _save_debug_screenshot(label: str, png_bytes: bytes):
         return None
 
 
-@_tool()  # save_path writes a file
+@_tool(read_only=True)
 async def get_screenshot(ctx: Context, target: str = None, view_type: str = None,
                          zoom_to: list | str = None, open_if_closed: bool = False,
-                         hide_floating_panels: bool = False, save_path: str = None,
-                         hide_hud: bool = True):
+                         hide_floating_panels: bool = False, hide_hud: bool = False):
     """
     Take a screenshot of exactly one thing in Altium, returned as viewable image content.
 
@@ -6522,23 +6521,19 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
         hide_floating_panels (bool): Hide Altium's floating panels that lie
             over the capture while it is taken, and show them again after.
             Default false: they stay, and "warnings" says how much they cover.
-        save_path (str, optional): Also write the PNG to this file: a full
-            path ending in .png, in an existing folder inside your user
-            profile. The reply gives it as saved_path.
         hide_hud (bool): Move the mouse pointer off the document view for
             the capture, and back after, when it is over it: Altium draws its
-            heads-up coordinate display by the pointer. Default true.
+            heads-up coordinate display by the pointer. Default false: it
+            moves the user's real pointer, so only turn it on when nobody is
+            using the mouse.
 
     Returns:
         JSON metadata (what was captured: target, rectangle, captured_kind,
         captured_document, view_type, whether anything was switched, opened or
-        closed, and warnings) plus the PNG image.
+        closed, warnings, and saved_path: the PNG as a file in the server's
+        own folder, where the newest 50 captures are kept; copy it to use
+        the image elsewhere) plus the PNG image.
     """
-    save_to = None
-    if save_path:
-        save_to, why = screenshot_target.save_target(save_path, [str(Path.home())])
-        if save_to is None:
-            return json.dumps({"success": False, "error": why})
     if isinstance(zoom_to, str) and zoom_to.strip().lower() == "board":
         zoom_to = "board"
         target = target if target and target.strip() else "document"
@@ -6549,6 +6544,9 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
         resolved = screenshot_target.resolve(target, view_type)
     except screenshot_target.TargetError as e:
         return json.dumps({"success": False, "error": str(e)})
+    # Before anything is switched in Altium: nothing could be captured
+    if await asyncio.to_thread(_desktop_denied):
+        return json.dumps({"success": False, "error": screenshot_target.DESKTOP_DENIED_ERROR})
     if resolved is None:
         result = await _view_type_screenshot(view_type, zoom_to)
     elif zoom_to and resolved.kind != "document":
@@ -6557,13 +6555,13 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
     else:
         result = await _target_screenshot(resolved, zoom_to, open_if_closed,
                                           hide_floating_panels, hide_hud)
-    if save_to and isinstance(result, list):
+    if isinstance(result, list):
         info = json.loads(result[0])
         try:
-            Path(save_to).write_bytes(result[1].data)
-            info["saved_path"] = save_to
+            info["saved_path"] = await asyncio.to_thread(
+                screenshot_target.save_capture, _data_dir() / "screenshots", result[1].data, time.time())
         except OSError as e:
-            info["save_error"] = f"Could not write save_path: {e.strerror}"
+            info["save_error"] = f"Could not save the capture: {e}"
         result[0] = json.dumps(info)
     return result
 
@@ -6784,7 +6782,18 @@ def _run_dpi_aware(fn):
             set_dpi_context(previous)
 
 
-async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=False, hide_hud=True):
+def _desktop_denied() -> bool:
+    """True while Windows gives this process no input desktop: the screen
+    is locked or a secure desktop (UAC, Ctrl+Alt+Del) is up. GetCursorPos
+    then fails with "Access is denied"; it only reads the pointer."""
+    try:
+        win32api.GetCursorPos()
+        return False
+    except Exception:
+        return True
+
+
+async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=False, hide_hud=False):
     logger.info(f"Screenshot of {t.describe()} (zoom_to={zoom_to}, open_if_closed={open_if_closed})")
     previous_window = win32gui.GetForegroundWindow()
     info = {"success": True, "target": t.describe(), "switched_document": False,
@@ -6890,7 +6899,11 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
                 views = screenshot_target.document_views(_visible_children(hwnd))
                 info["active_document_view"] = views[0].text if views else None
             if hide_hud:
-                pointer = win32api.GetCursorPos()
+                try:
+                    pointer = win32api.GetCursorPos()
+                except Exception:
+                    # locked since the check above: no pointer move, no capture
+                    return {"success": False, "error": screenshot_target.DESKTOP_DENIED_ERROR}
                 view_rects = [v.rect for v in screenshot_target.document_views(_visible_children(hwnd))]
                 spot = screenshot_target.park_point(view_rects, _virtual_screen(), pointer)
                 if spot:
