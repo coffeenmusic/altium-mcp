@@ -7494,9 +7494,16 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
 @_tool(read_only=True)
 async def get_pcb_layer_stackup(ctx: Context) -> str:
     """
-    Get the detailed layer stackup information from the current Altium PCB including
-    copper thickness, dielectric materials, constants, and heights
-    
+    Get the layer stackup of the current Altium PCB.
+
+    Each entry of `layers` is a copper layer, top to bottom, with the dielectric
+    below it (type Core, PrePreg or Unspecified; the last layer has none).
+    `top_surface_dielectric` and `bottom_surface_dielectric` are the solder mask,
+    or null. `total_thickness_*` includes the solder mask and
+    `thickness_without_soldermask_*` does not. A `substack_count` above 1 marks a
+    rigid-flex board: the figures are those of its master stack, and a region of
+    the board may use only part of it.
+
     Returns:
         str: JSON object with detailed layer stackup information
     """
