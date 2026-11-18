@@ -111,6 +111,11 @@ class PickTest(unittest.TestCase):
         self.assertEqual(st.pick_document_view(CHILDREN, "").text, "[24] PD_Mon.SchDoc")
         pcb = [win("TViewComponent", "PCB1.PcbDoc", (933, 103, 1858, 987), "TdxTabSheet")]
         self.assertIsNotNone(st.pick_document_view(pcb, "PCB1.PcbDoc"))
+        # Altium titles a view with unsaved changes with a trailing star
+        for title in ("PCB1.PcbDoc *", "[3] PCB1.PcbDoc *"):
+            modified = [win("TViewComponent", title, (933, 103, 1858, 987), "TdxTabSheet")]
+            self.assertIsNotNone(st.pick_document_view(modified, "PCB1.PcbDoc"), title)
+        self.assertIsNone(st.pick_document_view(pcb, "CB1.PcbDoc"))
 
     def test_is_blank(self):
         from PIL import Image

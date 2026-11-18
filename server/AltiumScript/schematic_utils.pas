@@ -56,7 +56,9 @@ begin
     
     // Check if we have a schematic library document
     CurrentLib := SchServer.GetCurrentSchDocument;
-    if (CurrentLib.ObjectID <> eSchLib) Then
+    if (CurrentLib <> nil) then
+        if (CurrentLib.ObjectID <> eSchLib) then CurrentLib := nil;
+    if (CurrentLib = nil) then
     begin
         Result := 'ERROR: Please open a schematic library document';
         Exit;
@@ -205,7 +207,9 @@ var
 begin
     // Check if we have a schematic library document
     CurrentLib := SchServer.GetCurrentSchDocument;
-    if (CurrentLib.ObjectID <> eSchLib) Then
+    if (CurrentLib <> nil) then
+        if (CurrentLib.ObjectID <> eSchLib) then CurrentLib := nil;
+    if (CurrentLib = nil) then
     begin
         Result := 'ERROR: Please open a schematic library document';
         Exit;
@@ -984,6 +988,19 @@ begin
             end
             else if (Kind = 'SYMBOL') or (Kind = 'EDITSYMBOL') or (Kind = 'END') then
             begin
+                // Before the first symbol: without a schematic library in
+                // front every symbol would fail, with no reason given
+                if (Kind <> 'END') and (Mode = '') then
+                begin
+                    SymLib := SchServer.GetCurrentSchDocument;
+                    if (SymLib <> nil) then
+                        if (SymLib.ObjectID <> eSchLib) then SymLib := nil;
+                    if (SymLib = nil) then
+                    begin
+                        Result := 'ERROR: The focused document is not a schematic library (.SchLib) - focus one or start the spec with a LIBRARY| line. Nothing was created or edited';
+                        Exit;
+                    end;
+                end;
                 // Finish the previous symbol
                 Outcome := BatchFlushSymbol(Mode, CurrentName, CurrentDesc, PartCount,
                                             PinsList, GraphicsList, EditsList, FailedArray, ProblemsArray);

@@ -4799,6 +4799,10 @@ async def set_designator_positions(ctx: Context, placements: list, dry_run: bool
         if "|" in des:
             errors.append(f"placements[{idx}]: designator must not contain '|'")
             continue
+        if board.components[des].side not in ("T", "B"):
+            # as get_designator_options reports it: the checks know only the two overlays
+            errors.append(f"placements[{idx}]: {des}: designator not on an overlay layer")
+            continue
         if ("x" in p) != ("y" in p):
             errors.append(f"placements[{idx}]: give both x and y, or neither")
             continue
@@ -8304,6 +8308,9 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
 
     Courtyard & silkscreen are auto-generated from pad extents + 0.25 mm margin
     unless courtyard_x_mm / courtyard_y_mm are provided explicitly (half-dimensions).
+    The gap is always at the top-left corner of the outline, wherever pad 1
+    is, and the courtyard is always on Mechanical 15. For other conventions
+    use create_footprints_batch, which takes layers by name and any tracks.
 
     Args:
         footprint_name (str): Footprint name as it will appear in the library

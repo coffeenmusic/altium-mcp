@@ -204,6 +204,8 @@ def pick_document_view(children: Sequence[Win], document: str) -> Optional[Win]:
     want = _norm(_file_name(document))
     for v in views:
         title = _norm(v.text)
+        if title.endswith("*"):   # a view with unsaved changes: 'Board.PcbDoc *'
+            title = title[:-1].rstrip()
         if title == want or title.endswith(" " + want) or title.endswith("]" + want):
             return v
     return None
