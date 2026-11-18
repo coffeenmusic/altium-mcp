@@ -5,7 +5,9 @@ or from server/:          python -m unittest tests.test_screenshot_target -v
 """
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -132,6 +134,9 @@ class PickTest(unittest.TestCase):
         self.assertEqual(st.focus_params(t, ("C46",), True),
                          {"path": "PD_Mon.SchDoc", "open_if_closed": "true", "designators": ["C46"]})
         self.assertEqual(st.focus_params(st.parse_target("document"), ["C46"], False)["path"], "")
+        board = st.focus_params(st.parse_target("document"), "board", False)
+        self.assertEqual(board["zoom_board"], "true")
+        self.assertNotIn("designators", board)
 
     def test_view_document(self):
         self.assertEqual(st.view_document("[24] PD_Mon.SchDoc"), "PD_Mon.SchDoc")
@@ -255,6 +260,43 @@ class AltiumWindowsTest(unittest.TestCase):
         self.assertEqual(st.dismissable(numbered, "2")[0]["hwnd"], 8)   # an all-digit title
         twins = [dict(ws[0]), dict(ws[0], hwnd=7)]
         self.assertIn("give the hwnd", st.dismissable(twins, "Options for PCB Project Adapter.PrjPcb")[1])
+
+class SaveAndPointerTest(unittest.TestCase):
+    def test_save_capture_never_overwrites_and_keeps_the_newest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "screenshots"
+            now = 1794700000.123
+            first = st.save_capture(folder, b"one", now)
+            second = st.save_capture(folder, b"two", now)        # the same millisecond
+            self.assertNotEqual(first, second)
+            self.assertEqual((Path(first).read_bytes(), Path(second).read_bytes()), (b"one", b"two"))
+            self.assertEqual(Path(first).parent, folder)
+            for path in (first, second):
+                os.utime(path, (now, now))
+            for k in range(5):
+                os.utime(st.save_capture(folder, b"x%d" % k, now + 1 + k, keep=3),
+                         (now + 1 + k, now + 1 + k))
+            kept = sorted(p.read_bytes() for p in folder.glob("screenshot_*.png"))
+            self.assertEqual(kept, [b"x2", b"x3", b"x4"])
+            (folder / "notes.txt").write_text("mine")              # other files are left alone
+            st.save_capture(folder, b"y", now + 9, keep=1)
+            self.assertTrue((folder / "notes.txt").exists())
+
+    def test_locked_desktop_error_says_what_to_do(self):
+        self.assertIn("locked", st.DESKTOP_DENIED_ERROR)
+        self.assertIn("Unlock", st.DESKTOP_DENIED_ERROR)
+
+    def test_park_point(self):
+        screen = (0, 0, 3840, 1080)
+        view = (300, 100, 1800, 950)
+        self.assertIsNone(st.park_point([view], screen, (100, 100)))     # not over a view: left alone
+        self.assertEqual(st.park_point([view], screen, (900, 500)), (299, 100))
+        split = [view, (1800, 100, 3000, 950)]                           # two views side by side
+        self.assertEqual(st.park_point(split, screen, (2000, 500)), (299, 100))
+        full = (0, 0, 1920, 1080)                                         # filling the left monitor
+        self.assertEqual(st.park_point([full], screen, (5, 5)), (1920, 0))
+        self.assertIsNone(st.park_point([screen], screen, (5, 5)))       # nowhere off the views
+        self.assertIsNone(st.park_point([], screen, (5, 5)))
 
 
 if __name__ == "__main__":

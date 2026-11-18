@@ -19,7 +19,9 @@ The pure parts (parsing, choosing a window, clipping) are here so they can be
 tested without Altium; the window walking needs pywin32 and runs on Windows.
 """
 import os
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from altium_files import long_path
@@ -207,12 +209,15 @@ def pick_document_view(children: Sequence[Win], document: str) -> Optional[Win]:
     return None
 
 
-def focus_params(t: Target, zoom_to: Optional[Sequence[str]], open_if_closed: bool) -> Dict:
+def focus_params(t: Target, zoom_to, open_if_closed: bool) -> Dict:
     """The focus_document request for a document target. The path goes the way
     Altium writes it: as written, an open document may not be recognised, and
-    open_if_closed would then open a second copy of it."""
+    open_if_closed would then open a second copy of it. zoom_to is a list of
+    designators, or "board" for the whole board outline."""
     params = {"path": long_path(t.name), "open_if_closed": "true" if open_if_closed else "false"}
-    if zoom_to:
+    if zoom_to == "board":
+        params["zoom_board"] = "true"
+    elif zoom_to:
         params["designators"] = list(zoom_to)
     return params
 
@@ -365,6 +370,58 @@ def dismissable(windows: Sequence[Dict], hwnd_or_title) -> Tuple[Optional[Dict],
     if not found:
         return None, f"No open Altium dialog is {hwnd_or_title!r}. Open dialogs: {open_}"
     return None, f"Several Altium dialogs are titled {hwnd_or_title!r}; give the hwnd. Open dialogs: {open_}"
+
+
+# Captures get_screenshot keeps in the server's own folder; older ones are deleted
+CAPTURES_KEPT = 50
+
+# GetCursorPos fails with "Access is denied" while Windows gives this process
+# no input desktop, and a screen copy then shows nothing of Altium
+DESKTOP_DENIED_ERROR = ("Nothing was captured: Windows denies access to the screen, so the desktop is "
+                        "locked or a secure desktop (a UAC prompt, Ctrl+Alt+Del) is showing. Unlock it, "
+                        "or answer the prompt, and try again.")
+
+
+def save_capture(directory: Path, png: bytes, now: float, keep: int = CAPTURES_KEPT) -> str:
+    """Write a capture into directory (the server's own folder) and return
+    its path. A new file every time, named by the time, never one that
+    exists; only the newest `keep` captures stay."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + f"-{int(now * 1000) % 1000:03d}"
+    n = 0
+    while True:
+        path = directory / f"screenshot_{stamp}{f'_{n}' if n else ''}.png"
+        try:
+            with open(path, "xb") as f:
+                f.write(png)
+            break
+        except FileExistsError:
+            n += 1
+    old = sorted(directory.glob("screenshot_*.png"), key=lambda p: (p.stat().st_mtime, p.name))[:-keep]
+    for p in old:
+        try:
+            p.unlink()
+        except OSError:
+            pass  # another server is reading or deleting it
+    return str(path)
+
+
+def park_point(views: Sequence[Rect], screen: Rect, cursor: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+    """Where to move the mouse pointer for a capture, or None to leave it:
+    over a document view Altium draws its heads-up coordinate display by
+    the pointer, and a capture would show it. Just outside the views, on
+    the screen: left of them, right of them, above, or below."""
+    if not views:
+        return None
+    l, t = min(v[0] for v in views), min(v[1] for v in views)
+    r, b = max(v[2] for v in views), max(v[3] for v in views)
+    x, y = cursor
+    if not (l <= x < r and t <= y < b):
+        return None
+    for px, py in ((l - 1, t), (r, t), (l, t - 1), (l, b)):
+        if screen[0] <= px < screen[2] and screen[1] <= py < screen[3]:
+            return (px, py)
+    return None
 
 
 def is_blank(img) -> bool:

@@ -6474,8 +6474,8 @@ def _save_debug_screenshot(label: str, png_bytes: bytes):
 
 @_tool(read_only=True)
 async def get_screenshot(ctx: Context, target: str = None, view_type: str = None,
-                         zoom_to: list = None, open_if_closed: bool = False,
-                         hide_floating_panels: bool = False):
+                         zoom_to: list | str = None, open_if_closed: bool = False,
+                         hide_floating_panels: bool = False, hide_hud: bool = False):
     """
     Take a screenshot of exactly one thing in Altium, returned as viewable image content.
 
@@ -6514,29 +6514,57 @@ async def get_screenshot(ctx: Context, target: str = None, view_type: str = None
         zoom_to (list, optional): Component designators (e.g. ["U12", "R42"]).
             PCB only: Altium zooms to them before the capture. Works with
             "document" / "document:<board>" and view_type 'pcb'; given on its
-            own it means view_type 'pcb'.
+            own it means view_type 'pcb'. "board" instead fits the whole
+            board outline in the view (with "document" / "document:<board>";
+            on its own it means target "document").
         open_if_closed (bool): Let "document:<name>" open a document of the
             open projects that is not open yet. Default false.
         hide_floating_panels (bool): Hide Altium's floating panels that lie
             over the capture while it is taken, and show them again after.
             Default false: they stay, and "warnings" says how much they cover.
+        hide_hud (bool): Move the mouse pointer off the document view for
+            the capture, and back after, when it is over it: Altium draws its
+            heads-up coordinate display by the pointer. Default false: it
+            moves the user's real pointer, so only turn it on when nobody is
+            using the mouse.
 
     Returns:
         JSON metadata (what was captured: target, rectangle, captured_kind,
         captured_document, view_type, whether anything was switched, opened or
-        closed, and warnings) plus the PNG image.
+        closed, warnings, and saved_path: the PNG as a file in the server's
+        own folder, where the newest 50 captures are kept; copy it to use
+        the image elsewhere) plus the PNG image.
     """
+    if isinstance(zoom_to, str) and zoom_to.strip().lower() == "board":
+        zoom_to = "board"
+        target = target if target and target.strip() else "document"
+    elif isinstance(zoom_to, str):
+        zoom_to = [zoom_to]   # one designator
     view_type = screenshot_target.implied_view_type(target, view_type, zoom_to)
     try:
         resolved = screenshot_target.resolve(target, view_type)
     except screenshot_target.TargetError as e:
         return json.dumps({"success": False, "error": str(e)})
+    # Before anything is switched in Altium: nothing could be captured
+    if await asyncio.to_thread(_desktop_denied):
+        return json.dumps({"success": False, "error": screenshot_target.DESKTOP_DENIED_ERROR})
     if resolved is None:
-        return await _view_type_screenshot(view_type, zoom_to)
-    if zoom_to and resolved.kind != "document":
+        result = await _view_type_screenshot(view_type, zoom_to)
+    elif zoom_to and resolved.kind != "document":
         return json.dumps({"success": False,
                            "error": "zoom_to works with target 'document' or 'document:<board>' only"})
-    return await _target_screenshot(resolved, zoom_to, open_if_closed, hide_floating_panels)
+    else:
+        result = await _target_screenshot(resolved, zoom_to, open_if_closed,
+                                          hide_floating_panels, hide_hud)
+    if isinstance(result, list):
+        info = json.loads(result[0])
+        try:
+            info["saved_path"] = await asyncio.to_thread(
+                screenshot_target.save_capture, _data_dir() / "screenshots", result[1].data, time.time())
+        except OSError as e:
+            info["save_error"] = f"Could not save the capture: {e}"
+        result[0] = json.dumps(info)
+    return result
 
 
 @_tool(read_only=True)
@@ -6755,7 +6783,18 @@ def _run_dpi_aware(fn):
             set_dpi_context(previous)
 
 
-async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=False):
+def _desktop_denied() -> bool:
+    """True while Windows gives this process no input desktop: the screen
+    is locked or a secure desktop (UAC, Ctrl+Alt+Del) is up. GetCursorPos
+    then fails with "Access is denied"; it only reads the pointer."""
+    try:
+        win32api.GetCursorPos()
+        return False
+    except Exception:
+        return True
+
+
+async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=False, hide_hud=False):
     logger.info(f"Screenshot of {t.describe()} (zoom_to={zoom_to}, open_if_closed={open_if_closed})")
     previous_window = win32gui.GetForegroundWindow()
     info = {"success": True, "target": t.describe(), "switched_document": False,
@@ -6782,6 +6821,8 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
         info["opened_document"] = bool(focus.get("opened"))
         if "zoomed_component_count" in focus:
             info["zoomed_component_count"] = focus["zoomed_component_count"]
+        if "zoomed_board" in focus:
+            info["zoomed_board"] = focus["zoomed_board"]
         if info["switched_document"]:
             restore_path = before
         if info["opened_document"]:
@@ -6813,6 +6854,7 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
         time.sleep(1.0 if info["switched_document"] or info["opened_document"] else 0.4)
 
         hidden = []
+        parked_from = None
         try:
             window = None
             if t.kind == "current":
@@ -6857,6 +6899,18 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
             if t.kind in ("current", "document"):
                 views = screenshot_target.document_views(_visible_children(hwnd))
                 info["active_document_view"] = views[0].text if views else None
+            if hide_hud:
+                try:
+                    pointer = win32api.GetCursorPos()
+                except Exception:
+                    # locked since the check above: no pointer move, no capture
+                    return {"success": False, "error": screenshot_target.DESKTOP_DENIED_ERROR}
+                view_rects = [v.rect for v in screenshot_target.document_views(_visible_children(hwnd))]
+                spot = screenshot_target.park_point(view_rects, _virtual_screen(), pointer)
+                if spot:
+                    win32api.SetCursorPos(spot)
+                    parked_from = pointer
+                    time.sleep(0.3)  # let Altium take the display (and any hover tip) away
             # Altium's own dialogs and floating panels are above its frame:
             # a screen copy would show them over the view
             if t.kind in ("current", "document", "region"):
@@ -6908,6 +6962,11 @@ async def _target_screenshot(t, zoom_to, open_if_closed, hide_floating_panels=Fa
                     win32gui.ShowWindow(h, win32con.SW_SHOWNOACTIVATE)
                 except Exception:
                     pass  # the panel was closed meanwhile
+            if parked_from:
+                try:
+                    win32api.SetCursorPos(parked_from)
+                except Exception:
+                    pass  # e.g. the desktop is locked
             _return_foreground(previous_window)
         buffer = io.BytesIO()
         img.save(buffer, format='PNG')
