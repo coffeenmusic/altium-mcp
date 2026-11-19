@@ -65,7 +65,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 BODY_BEGIN = "// === BEGIN EXPERIMENT"
 BODY_END = "// === END EXPERIMENT"
@@ -1131,6 +1131,16 @@ class Sandbox:
     keep_runs: int = 20
     snapshots_dir: Optional[Path] = None
     dialogs_dir: Optional[Path] = None
+    # called right before Altium is started (the server watches the
+    # foreground then, see foreground_guard.py)
+    on_launch: Optional[Callable[[], object]] = None
+
+    def _launching(self) -> None:
+        if self.on_launch is not None:
+            try:
+                self.on_launch()
+            except Exception:
+                pass
 
     def snapshot_dir(self, run_id: str) -> Optional[Path]:
         """Copies of the documents taken before a run, with manifest.json."""
@@ -1169,9 +1179,11 @@ class Sandbox:
     def launch(self, files: RunFiles) -> None:
         cmd = (f'"{self.altium_exe}" -RScriptingSystem:RunScriptFile('
                f'FileName={files.script}^|ProcName=Run)')
+        self._launching()
         subprocess.Popen(cmd, shell=True)
 
     def stop_debugger(self) -> None:
+        self._launching()
         subprocess.Popen(f'"{self.altium_exe}" -REditScript:Stop', shell=True)
 
     def _run_until_done(self, files: RunFiles, script: str, timeout: float,
