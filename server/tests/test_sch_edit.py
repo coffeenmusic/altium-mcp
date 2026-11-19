@@ -76,6 +76,14 @@ class EncodeTest(unittest.TestCase):
         self.assertEqual(encode_operations([], "mil"), ([], "operations is empty"))
         self.assertIn("unit", encode_operations([{"op": "add_junction", "x": 0, "y": 0}], "inch")[1])
 
+    def test_move_net_label(self):
+        lines, err = encode_operations([{"op": "move_net_label", "x": 88.9, "y": 12.7, "text": "FAR",
+                                         "to_x": 76.2, "to_y": 12.7, "orientation": 0, "justification": 2}], "mm")
+        self.assertEqual((lines, err), (["LABELMOVE|35000000|5000000|FAR|30000000|5000000|0|2|"], ""))
+        lines, _ = encode_operations([{"op": "move_net_label", "x": 1, "y": 2, "snap_to_wire_end": True}])
+        self.assertEqual(lines, ["LABELMOVE|10000|20000||||||1000000"])
+        self.assertIn("together", encode_operations([{"op": "move_net_label", "x": 1, "y": 2, "to_x": 3}])[1])
+
 
 PINS = [
     {"designator": "U20", "pin": "1", "name": "VCC", "x": 1000000, "y": 2000000},

@@ -3962,7 +3962,10 @@ begin
     end;
 end;
 
-function EditSchematic(SheetPath: String; SpecPath: String; Save: Boolean): String;
+// RequireSaved refuses a sheet open with unsaved changes: edits computed
+// from the saved file (apply_schematic_fixes) would not match it, and the
+// save would write the user's unsaved edits too
+function EditSchematic(SheetPath: String; SpecPath: String; Save: Boolean; RequireSaved: Boolean): String;
 var
     Doc       : ISch_Document;
     ServerDoc : IServerDocument;
@@ -3977,6 +3980,13 @@ begin
         Exit;
     end;
     Doc := SchServer.GetSchDocumentByPath(SheetPath);
+    if RequireSaved then
+        if Doc <> nil then
+            if DocumentModified(Client.GetDocumentByPath(SheetPath)) then
+            begin
+                Result := 'ERROR: ' + SheetPath + ' has unsaved changes in Altium; save or revert it first';
+                Exit;
+            end;
     if Doc = nil then
     begin
         if not FileExists(SheetPath) then
