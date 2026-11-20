@@ -105,7 +105,8 @@ TEMPLATE_GLOBALS = [
     "SandboxLog", "SandboxTick", "SbxSaveUndo", "SbxPreProcess", "SbxPostProcess", "SbxPcbPreProcess",
     "SbxPcbPostProcess", "SbxCloseUndo", "MM", "OpenSchDoc", "SaveDoc", "FmtNum", "FmtMM", "ParseNum",
     "ParseMM", "SbxSnapDocs", "SbxDocState", "SbxNoteDoc", "SbxNoteDocsAfter", "SbxCloseDoc",
-    "SbxProjectUnsaved", "SbxNormPath", "SbxFindDoc", "SbxBody", "Run",
+    "SbxProjectUnsaved", "SbxNormPath", "SbxFindDoc", "CurrentBoard", "BoardByPath", "BX", "BY",
+    "SbxBody", "Run",
 ]
 
 # Pascal's reserved words, and the directives and type names that failed the
@@ -606,6 +607,33 @@ def lint_script(body_lines: List[str], line_offset: int = 0, decls: List[str] = 
         problems.append(f"{pre} PreProcess but {post} PostProcess call(s): an edit that is never "
                         "closed breaks Altium's undo history")
     return problems
+
+
+_CURRENT_BOARD = r"PCBServer\s*\.\s*GetCurrentPCBBoard\b"
+
+
+def board_hints(body_lines: List[str], line_offset: int = 0) -> List[str]:
+    """Advice, not a refusal: the board from PCBServer.GetCurrentPCBBoard
+    used without a nil check. It is nil whenever no PCB view is active (after
+    run_drc Altium shows its report), and the call on nil then fails as
+    "Undeclared identifier: <method>", which does not point at the cause."""
+    code = strip_strings_and_comments("\n".join(body_lines))
+    hints = []
+    for lineno, line in enumerate(code.splitlines(), 1):
+        if re.search(_CURRENT_BOARD + r"\s*\.", line, re.IGNORECASE):
+            used = True
+        else:
+            m = re.search(r"([A-Za-z_]\w*)\s*:=\s*" + _CURRENT_BOARD, line, re.IGNORECASE)
+            name = re.escape(m.group(1)) if m else None
+            used = bool(m) and not re.search(
+                rf"\b{name}\s*(<>|=)\s*nil\b|\bnil\s*(<>|=)\s*{name}\b|\bAssigned\s*\(\s*{name}\s*\)",
+                code, re.IGNORECASE)
+        if used:
+            hints.append(f"line {lineno + line_offset}: the board from PCBServer.GetCurrentPCBBoard is used "
+                         f"without a nil check. It is nil when no PCB view is active, and the call on it "
+                         f"then fails as 'Undeclared identifier: <method>'. Use CurrentBoard(0), which logs "
+                         f"the document that is focused instead, or BoardByPath(path).")
+    return hints
 
 
 @dataclass
