@@ -2284,8 +2284,11 @@ async def get_footprint_primitives(ctx: Context, library_path: str = "", footpri
     - footprint_name given (exact, case-insensitive): full geometry dump -
       pads (position, rotation, layer, sizes/shape per stack, hole size/
       type/width/rotation, plating, paste_mode/paste_expansion,
-      mask_mode/mask_expansion, locked), tracks, arcs, fills, texts,
-      regions (outline vertices). Coordinates in mils relative to the
+      mask_mode/mask_expansion, locked), tracks, arcs, fills, texts
+      (a text with a justification set carries "justification", and its
+      x and y are then that point of the text, as the Properties panel
+      shows them and as the TEXT record of create_footprints_batch takes
+      them), regions (outline vertices). Coordinates in mils relative to the
       footprint origin (also for the footprint shown in the editor, which
       Altium holds offset by the library origin); shapes and hole types as
       raw Altium enum ints; layers as names. 3D component bodies are listed
@@ -2366,7 +2369,13 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
             TRACK|x1|y1|x2|y2|width|layer
             ARC|cx|cy|radius|start_angle|end_angle|width|layer
             FILL|x1|y1|x2|y2|rotation|layer
-            TEXT|x|y|size|width|rotation|layer|mirror|ttf|text
+            TEXT|x|y|size|width|rotation|layer|mirror|ttf|text[|justification]
+                justification (optional): the point of the text that sits
+                at x|y, as the Properties panel shows it - bottom_left,
+                bottom_center, bottom_right, center_left, center,
+                center_right, top_left, top_center or top_right. Omitted:
+                x|y is the text's bottom-left corner with no justification
+                set, as before. The text itself cannot contain "|".
             REGION|layer|kind|x1|y1|x2|y2|...
             MODEL3D|<STEP file>|<layer>|<rot_x>|<rot_y>|<rot_z>|<z_offset>[|<x>|<y>[|<embed 1/0>]]
                 add a 3D body from a STEP file: rotations in degrees,
@@ -2381,7 +2390,8 @@ async def create_footprints_batch(ctx: Context, spec_file: str) -> str:
     Returns:
         str: JSON with created and edited counts, models_added,
              primitive_errors, failed names and problems (e.g. a missing
-             model file, mask mode 0, a record EDITFOOTPRINT ignores)
+             model file, mask mode 0, an unknown text justification, a
+             record EDITFOOTPRINT ignores)
     """
     logger.info(f"Creating footprints batch from {spec_file}")
 
@@ -2948,7 +2958,18 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
                                 name, so it works in any document). Omitted
                                 fields keep the parameter's own. A parameter
                                 the tool positions gets Autoposition off, so
-                                Altium does not move it later.
+                                Altium does not move it later. The reference
+                                designator is not a parameter: use
+                                DESIGNATOR for it.
+            DESIGNATOR|<text>[|x|y[|justification[|font[|autoposition 1/0]]]]
+                                change the symbol's reference designator
+                                (e.g. DESIGNATOR|U?). Empty fields keep the
+                                current value, so DESIGNATOR||||||0 only
+                                turns Autoposition off and leaves the
+                                designator where it is. x|y go together and
+                                turn Autoposition off unless the record says
+                                otherwise. justification and font as for
+                                SYMPARAM.
             PINPARAM|<pin number>|<name>|<value>   add (or replace) a hidden
                                 parameter on every pin with that number
             PINDESC|<pin number>|<text>   set the Description of every pin
@@ -2986,7 +3007,7 @@ async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
     Returns:
         str: JSON object with created and edited counts, a failed name list
              and problems (e.g. a pin number not in the symbol, an unknown
-             IEEE symbol or justification)
+             IEEE symbol or justification, a DESIGNATOR with only x)
     """
     logger.info(f"Creating symbols batch from {spec_file}")
 
@@ -3048,10 +3069,12 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
         str: JSON object - inventory mode: {library_name, symbol_count,
              symbols: [{name, description, part_count, <type counts>}]};
              dump mode: {library_name, symbol_name, description, part_count,
-             comment: {text, visible}, parameters: [{name, value, visible,
-             x, y, justification, autoposition, font: {name, size}}],
-             primitives: [...]} - x and y are where Altium holds the
-             parameter now. Pins also carry
+             comment: {text, visible}, designator: {text, visible, x, y,
+             justification, autoposition, font: {name, size}} (the
+             reference designator, as DESIGNATOR sets it), parameters:
+             [{name, value, visible, x, y, justification, autoposition,
+             font: {name, size}}], primitives: [...]} - x and y are where
+             Altium holds the designator or parameter now. Pins also carry
              description, symbol_inside, symbol_inside_edge,
              symbol_outside_edge and symbol_outside (IEEE symbol names as
              PINSYMBOL takes them), their parameters [{name, value}]
