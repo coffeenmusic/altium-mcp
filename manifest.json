@@ -157,7 +157,7 @@
     },
     {
       "name": "get_pcb_layer_stackup",
-      "description": "Get the detailed layer stackup information from the current Altium PCB including copper thickness, dielectric materials, constants, and heights"
+      "description": "Get the layer stackup of the current Altium PCB: copper layers, the dielectric below each, solder mask, and the board thickness with and without solder mask"
     },
     {
       "name": "set_pcb_layer_visibility",

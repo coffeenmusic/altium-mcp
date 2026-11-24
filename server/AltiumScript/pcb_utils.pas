@@ -1030,17 +1030,60 @@ begin
     end;
 end;
 
+// Name of an Altium dielectric type. Rigid-flex stacks can hold real
+// dielectrics with type 0 (eNoDielectric), so callers decide whether a
+// dielectric exists from its position and height, not from this type.
+function StackupDielectricTypeName(DielectricType): String;
+begin
+    if DielectricType = eCore then
+        Result := 'Core'
+    else if DielectricType = ePrePreg then
+        Result := 'PrePreg'
+    else if DielectricType = eSurfaceMaterial then
+        Result := 'Surface Material'
+    else
+        Result := 'Unspecified';
+end;
+
+// JSON for a surface dielectric (solder mask), or null when it has no height
+function StackupSurfaceJSON(DielObj): String;
+var
+    Props : TStringList;
+begin
+    Result := 'null';
+    if DielObj = nil then Exit;
+    if DielObj.DielectricHeight <= 0 then Exit;
+
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'type', StackupDielectricTypeName(DielObj.DielectricType));
+        AddJSONProperty(Props, 'material', DielObj.DielectricMaterial);
+        AddJSONNumber(Props, 'height_mils', DielObj.DielectricHeight / 10000);
+        AddJSONNumber(Props, 'height_um', DielObj.DielectricHeight * 0.00254);
+        AddJSONNumber(Props, 'dielectric_constant', DielObj.DielectricConstant);
+        Result := Trim(BuildJSONObject(Props, 1));
+    finally
+        Props.Free;
+    end;
+end;
+
 // Function to get detailed layer stackup information
 function GetPCBLayerStackup(ROOT_DIR): String;
 var
     Board           : IPCB_Board;
-    LayerIterator   : IPCB_LayerObjectIterator;
+    TheLayerStack   : IPCB_LayerStack_V7;
     LayerObject     : IPCB_LayerObject;
+    NextLayerObject : IPCB_LayerObject;
+    DielObj         : IPCB_DielectricObject;
     StackupArray    : TStringList;
     LayerProps      : TStringList;
     OutputLines     : TStringList;
+    TopSurface      : String;
+    BottomSurface   : String;
     TotalThickness  : Double;
+    SurfaceThickness: Double;
     LayerCount      : Integer;
+    SubstackCount   : Integer;
 begin
     Result := '';
 
@@ -1052,20 +1095,26 @@ begin
         Exit;
     end;
 
+    TheLayerStack := Board.LayerStack_V7;
+    if (TheLayerStack = nil) then
+    begin
+        Result := '{"error": "Failed to retrieve layer stack"}';
+        Exit;
+    end;
+
     // Create arrays for stackup data
     StackupArray := TStringList.Create;
     TotalThickness := 0;
+    SurfaceThickness := 0;
     LayerCount := 0;
-    
+
     try
-        // Get the electrical layer iterator
-        LayerIterator := Board.ElectricalLayerIterator;
-        
-        // Process each electrical layer
-        while LayerIterator.Next do
+        // Walk the copper layers from top to bottom
+        LayerObject := TheLayerStack.FirstLayer;
+        while (LayerObject <> nil) do
         begin
-            LayerObject := LayerIterator.LayerObject;
-            
+            NextLayerObject := TheLayerStack.NextLayer(LayerObject);
+
             // Create layer properties
             LayerProps := TStringList.Create;
             try
@@ -1075,28 +1124,23 @@ begin
                 AddJSONProperty(LayerProps, 'material_type', 'Copper');
                 AddJSONNumber(LayerProps, 'copper_thickness_mils', LayerObject.CopperThickness / 10000);
                 AddJSONNumber(LayerProps, 'copper_thickness_um', LayerObject.CopperThickness * 0.00254);
-                
+
                 // Add copper thickness to total
                 TotalThickness := TotalThickness + (LayerObject.CopperThickness / 10000);
-                
-                // Dielectric information (if present)
-                if LayerObject.Dielectric.DielectricType <> eNoDielectric then
+
+                // The dielectric below this layer. The last copper layer has
+                // none in the stack, though its object can keep a stale height.
+                DielObj := LayerObject.Dielectric;
+                if (NextLayerObject <> nil) and (DielObj.DielectricHeight > 0) then
                 begin
-                    case LayerObject.Dielectric.DielectricType of
-                        eCore: AddJSONProperty(LayerProps, 'dielectric_type', 'Core');
-                        ePrePreg: AddJSONProperty(LayerProps, 'dielectric_type', 'PrePreg');
-                        eSurfaceMaterial: AddJSONProperty(LayerProps, 'dielectric_type', 'Surface Material');
-                    else
-                        AddJSONProperty(LayerProps, 'dielectric_type', 'Unknown');
-                    end;
-                    
-                    AddJSONProperty(LayerProps, 'dielectric_material', LayerObject.Dielectric.DielectricMaterial);
-                    AddJSONNumber(LayerProps, 'dielectric_height_mils', LayerObject.Dielectric.DielectricHeight / 10000);
-                    AddJSONNumber(LayerProps, 'dielectric_height_um', LayerObject.Dielectric.DielectricHeight * 0.00254);
-                    AddJSONNumber(LayerProps, 'dielectric_constant', LayerObject.Dielectric.DielectricConstant);
-                    
+                    AddJSONProperty(LayerProps, 'dielectric_type', StackupDielectricTypeName(DielObj.DielectricType));
+                    AddJSONProperty(LayerProps, 'dielectric_material', DielObj.DielectricMaterial);
+                    AddJSONNumber(LayerProps, 'dielectric_height_mils', DielObj.DielectricHeight / 10000);
+                    AddJSONNumber(LayerProps, 'dielectric_height_um', DielObj.DielectricHeight * 0.00254);
+                    AddJSONNumber(LayerProps, 'dielectric_constant', DielObj.DielectricConstant);
+
                     // Add dielectric thickness to total
-                    TotalThickness := TotalThickness + (LayerObject.Dielectric.DielectricHeight / 10000);
+                    TotalThickness := TotalThickness + (DielObj.DielectricHeight / 10000);
                 end
                 else
                 begin
@@ -1106,29 +1150,53 @@ begin
                     AddJSONNumber(LayerProps, 'dielectric_height_um', 0);
                     AddJSONNumber(LayerProps, 'dielectric_constant', 0);
                 end;
-                
+
                 // Add layer order
                 AddJSONInteger(LayerProps, 'layer_order', LayerCount + 1);
-                
+
                 // Add to stackup array
                 StackupArray.Add(BuildJSONObject(LayerProps, 1));
                 LayerCount := LayerCount + 1;
             finally
                 LayerProps.Free;
             end;
+
+            LayerObject := NextLayerObject;
         end;
-        
+
+        // Solder mask on the outer faces
+        TopSurface := StackupSurfaceJSON(TheLayerStack.DielectricTop);
+        BottomSurface := StackupSurfaceJSON(TheLayerStack.DielectricBottom);
+        if TopSurface <> 'null' then
+            SurfaceThickness := SurfaceThickness + (TheLayerStack.DielectricTop.DielectricHeight / 10000);
+        if BottomSurface <> 'null' then
+            SurfaceThickness := SurfaceThickness + (TheLayerStack.DielectricBottom.DielectricHeight / 10000);
+
+        // More than one substack means rigid-flex: these figures are the
+        // board's master stack, and a given region may use only part of it
+        SubstackCount := 1;
+        try
+            SubstackCount := Board.MasterLayerStack.SubstackCount;
+        except
+            SubstackCount := 1;
+        end;
+
         // Create final stackup object with summary
         LayerProps := TStringList.Create;
         try
             AddJSONInteger(LayerProps, 'total_layers', LayerCount);
-            AddJSONNumber(LayerProps, 'total_thickness_mils', TotalThickness);
-            AddJSONNumber(LayerProps, 'total_thickness_mm', TotalThickness * 0.0254);
+            AddJSONNumber(LayerProps, 'total_thickness_mils', TotalThickness + SurfaceThickness);
+            AddJSONNumber(LayerProps, 'total_thickness_mm', (TotalThickness + SurfaceThickness) * 0.0254);
+            AddJSONNumber(LayerProps, 'thickness_without_soldermask_mils', TotalThickness);
+            AddJSONNumber(LayerProps, 'thickness_without_soldermask_mm', TotalThickness * 0.0254);
+            AddJSONInteger(LayerProps, 'substack_count', SubstackCount);
             AddJSONProperty(LayerProps, 'board_name', ExtractFileName(Board.FileName));
-            
+            LayerProps.Add('"top_surface_dielectric": ' + TopSurface);
+            LayerProps.Add('"bottom_surface_dielectric": ' + BottomSurface);
+
             // Add the layers array
             LayerProps.Add(BuildJSONArray(StackupArray, 'layers'));
-            
+
             // Build the final JSON
             OutputLines := TStringList.Create;
             try
