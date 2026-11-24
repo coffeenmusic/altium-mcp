@@ -279,7 +279,7 @@ class RunQueryTest(unittest.TestCase):
             result = asyncio.run(main._run_query("query_objects", {"board_path": "b.PcbDoc"}))
         return result, calls
 
-    def test_stopped_query_restores_the_selection(self):
+    def test_stopped_query_takes_the_temporary_rule_off(self):
         replies = {"query_objects": {"success": False, "aborted": True, "error": "stopped"},
                    "query_restore": {"success": True, "result": {"success": True, "restored": True}}}
         (result, error), calls = self.run_query(replies, dialog=["Undeclared identifier: InPad"])
