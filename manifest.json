@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "altium-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Altium Designer integration server providing PCB and schematic design automation tools through MCP",
   "author": {
     "name": "Stephen Thompson"
@@ -285,7 +285,7 @@
     },
     {
       "name": "query_objects",
-      "description": "Find PCB objects with Altium's query language (as the PCB Filter panel runs it), with sizes given in a unit and an optional area"
+      "description": "Find PCB objects with Altium's query language (as the PCB Filter panel and rule scopes use it), with sizes given in a unit and an optional area"
     },
     {
       "name": "which_rule",
