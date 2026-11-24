@@ -4038,20 +4038,20 @@ async def _run_query(command: str, params: dict) -> Tuple[Optional[dict], str]:
 
     The dialogs are watched only while the command holds the bridge, and a
     query the watcher gives up on is stopped before the bridge is released
-    (see AltiumBridge.execute_command). A stopped query never restored the
-    user's selection, so query_restore does that after it."""
+    (see AltiumBridge.execute_command). A stopped query leaves its temporary
+    rule on the board, so query_restore takes that off after it."""
     import pcb_query
 
     errors: list = []
-    result, error = await _bridge_json(command, params,
+    result, error = await _bridge_json(command, params, timeout=300,
                                        watcher=lambda abort: pcb_query.watch_errors(errors, abort))
     if errors and result is None:
-        # Stopped mid-query (or failed after a dialog): put the selection back
+        # Stopped mid-query (or failed after a dialog): take the temporary rule off
         _, restore_error = await _bridge_json("query_restore", {"board_path": params.get("board_path", "")})
         message = "Altium could not evaluate the expression: " + errors[0]
         if restore_error:
-            message += (f". The user's selection could not be restored ({restore_error}); "
-                        f"the next query call restores it")
+            message += (f". The temporary rule \"MCP query (temporary)\" could not be taken off the board "
+                        f"({restore_error}); the next query call takes it off")
         return None, message
     if errors:
         return None, "Altium could not read the expression: " + "; ".join(errors)
@@ -4095,12 +4095,15 @@ async def query_objects(ctx: Context, expression: str, area: list = None, unit: 
     runs. Decimals take a dot. Quoted text is sent as written, units and
     commas included (InNet('D0,1'), Comment = '4.7uF 2.2mm').
 
-    The engine works through the selection, so the user's selection is
-    selected again afterwards, also after a query Altium could not
-    evaluate; objects of kinds the PCB Selection Filter (Properties panel)
-    leaves out cannot be selected by a script and stay unselected. A filter
-    applied in the PCB Filter panel is cleared: a script cannot read it back
-    to restore it.
+    The user's selection and an applied filter are left alone. The engine
+    is asked through a disabled design rule named "MCP query (temporary)"
+    that carries the expression as its scope and is on the board only while
+    the call runs; the board's modified flag is put back. (The PCB Filter
+    panel's own process is not used: with script projects installed
+    globally it costs Altium about a hundred window handles a query, never
+    freed.) As in the Filter panel, a polygon pour is matched too when one
+    of its poured regions is. A comparison Altium cannot make (Name = 1,
+    or one without brackets) matches nothing instead of failing.
 
     Args:
         expression (str): The query.
@@ -4141,7 +4144,9 @@ async def query_objects(ctx: Context, expression: str, area: list = None, unit: 
                                      "InNet() and net filters cannot find them, and a repour removes their "
                                      "copper as dead copper if Remove Dead Copper is on.")
     if not result.get("matched"):
-        result["note"] = "Nothing matched."
+        result["note"] = ("Nothing matched. A comparison Altium cannot make also matches nothing: text is "
+                          "quoted (Name = '1', not Name = 1) and each comparison goes in brackets "
+                          "(IsComponent And (Footprint = 'X')).")
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 @_tool(read_only=True)

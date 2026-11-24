@@ -5286,18 +5286,22 @@ begin
     end;
 end;
 
-// Altium's query engine, as the PCB Filter panel runs it: PCB:RunQuery with
-// Apply selects the objects an expression matches, which are read from the
-// selection. The engine reads bare numbers in its own unit, which is not the
+// Altium's query engine, as rule scopes use it: a rule that is added to the
+// board for the length of the call, disabled, carries the expression as its
+// scope, and CheckUnaryScope asks the engine about each object. The rule is
+// taken off again before the call returns, and the board's modified flag is
+// put back. The engine reads bare numbers in its own unit, which is not the
 // board's display unit (a board shown in mil queried in mm), so it is found
-// once per call by asking for a known via or track size.
+// once per call by asking about a known via or track size.
 //
-// Queries change the selection and apply a filter. Each call saves the
-// user's selection first, in memory and as object addresses in StoreFile,
-// and selects it again and clears the filter when done. A call the server
-// stops (an expression Altium cannot evaluate) never gets there: query_restore,
-// or the next query call, selects it again from StoreFile. A filter the user
-// had applied cannot be read by a script, so it is cleared, not restored.
+// The PCB Filter panel's own process (PCB:RunQuery) is not used: on an
+// Altium with global script projects it creates every form of every one of
+// them on each query and never frees them, about a hundred window handles a
+// query, until Altium runs out. This way also leaves the user's selection
+// and applied filter alone.
+//
+// A call that is stopped half way leaves the rule on the board: the next
+// query call, or query_restore, takes it off.
 
 // Number as the query engine reads it: always a dot, whatever the locale
 function QueryNumber(V: Double): String;
@@ -5305,121 +5309,207 @@ begin
     Result := StringReplace(FormatFloat('0.######', V), DecimalSeparator, '.', REPLACEALL);
 end;
 
-procedure QueryClearFilter(Dummy: Integer);
+function QueryRuleName(Dummy: Integer): String;
 begin
-    ResetParameters;
-    AddStringParameter('Clear', 'True');
-    RunProcess('PCB:RunQuery');
+    Result := 'MCP query (temporary)';
 end;
 
-// The objects Expr matches, in Found; the selection is left empty
-procedure RunBoardQuery(Board: IPCB_Board; Expr: String; Found: TInterfaceList);
+// Takes every temporary query rule off the board; how many there were
+function QueryDropRules(Board: IPCB_Board): Integer;
 var
-    i : Integer;
+    Iterator : IPCB_BoardIterator;
+    Rule     : IPCB_Rule;
+    Rules    : TInterfaceList;
+    i        : Integer;
 begin
-    Board.SelectedObjects_Clear;
+    Rules := TInterfaceList.Create;
     try
-        ResetParameters;
-        AddStringParameter('Apply', 'True');
-        AddStringParameter('Expr', Expr);
-        AddStringParameter('Select', 'True');
-        RunProcess('PCB:RunQuery');
-        for i := 0 to Board.SelectecObjectCount - 1 do
-            Found.Add(Board.SelectecObject[i]);
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Rule := Iterator.FirstPCBObject;
+        while Rule <> nil do
+        begin
+            if Rule.Name = QueryRuleName(0) then Rules.Add(Rule);
+            Rule := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+        Result := Rules.Count;
+        if Result > 0 then
+        begin
+            PCBServer.PreProcess;
+            for i := 0 to Rules.Count - 1 do
+            begin
+                Rule := Rules.Items[i];
+                Board.RemovePCBObject(Rule);
+                PCBServer.DestroyPCBObject(Rule);
+            end;
+            PCBServer.PostProcess;
+        end;
     finally
-        Board.SelectedObjects_Clear;
-        QueryClearFilter(0);
+        Rules.Free;
     end;
 end;
 
-// Selects again what a stopped query call saved in StoreFile for this board,
-// clears the filter and deletes the file. How many objects were selected,
-// or -1 when nothing was saved for this board.
-function QueryRestoreSelection(Board: IPCB_Board; StoreFile: String): Integer;
+// 'True' or 'False': the modified flag of the board's document ('' when the
+// document is not found), and putting it back
+function QueryModifiedFlag(Board: IPCB_Board): String;
 var
-    Lines    : TStringList;
+    Doc : IServerDocument;
+begin
+    Result := '';
+    Doc := Client.GetDocumentByPath(Board.FileName);
+    if Doc <> nil then
+        if Doc.Modified then Result := 'True' else Result := 'False';
+end;
+
+procedure QueryPutModifiedFlag(Board: IPCB_Board; Flag: String);
+var
+    Doc : IServerDocument;
+begin
+    if Flag = '' then Exit;
+    Doc := Client.GetDocumentByPath(Board.FileName);
+    if Doc <> nil then
+        if Doc.Modified <> (Flag = 'True') then Doc.Modified := (Flag = 'True');
+end;
+
+// The temporary rule with Expr as its scope, on the board; nil, with
+// Altium's message in Errors, when Altium does not take the expression. The
+// scope is only compiled when the rule goes on the board between PreProcess
+// and PostProcess: a rule that is not on the board matches everything.
+function QueryAddRule(Board: IPCB_Board; Expr: String; Errors: TStringList): IPCB_Rule;
+var
+    Rule : IPCB_Rule;
+begin
+    Result := nil;
+    QueryDropRules(Board);
+    try
+        PCBServer.PreProcess;
+        Rule := PCBServer.PCBRuleFactory(eRule_MaxMinWidth);
+        Rule.Name := QueryRuleName(0);
+        Rule.Enabled := False;
+        Rule.Scope1Expression := Expr;
+        Board.AddPCBObject(Rule);
+        PCBServer.PostProcess;
+        Result := Rule;
+    except
+        Errors.Add(ExceptionMessage);
+        try
+            PCBServer.PostProcess;
+        except
+        end;
+        QueryDropRules(Board);
+    end;
+end;
+
+procedure QueryRemoveRule(Board: IPCB_Board; Rule: IPCB_Rule);
+begin
+    PCBServer.PreProcess;
+    Board.RemovePCBObject(Rule);
+    PCBServer.PostProcess;
+    PCBServer.DestroyPCBObject(Rule);
+end;
+
+// The objects Expr matches, in Found. '' or Altium's message for an
+// expression it cannot evaluate (Found is then empty). As in the PCB Filter
+// panel, a polygon pour counts as matched when one of its poured regions is.
+function RunBoardQuery(Board: IPCB_Board; Expr: String; Found: TInterfaceList): String;
+var
     Iterator : IPCB_BoardIterator;
     Prim     : IPCB_Primitive;
+    Rule     : IPCB_Rule;
+    Errors   : TStringList;
+    Polys    : TInterfaceList;
+    Flag     : String;
+    i        : Integer;
 begin
-    Result := -1;
-    if not FileExists(StoreFile) then Exit;
-    Lines := TStringList.Create;
+    Result := '';
+    Flag := QueryModifiedFlag(Board);
+    Errors := TStringList.Create;
+    Polys := TInterfaceList.Create;
     try
-        Lines.LoadFromFile(StoreFile);
-        if Lines.Count = 0 then Exit;
-        // Saved for another board: left for a query call on that board
-        if UpperCase(Lines[0]) <> UpperCase(Board.FileName) then Exit;
-        Lines.Delete(0);
-        Lines.Sorted := True;
-        Result := 0;
-        Board.SelectedObjects_Clear;
-        QueryClearFilter(0);
-        if Lines.Count > 0 then
+        Rule := QueryAddRule(Board, Expr, Errors);
+        if Rule <> nil then
         begin
             Iterator := Board.BoardIterator_Create;
             Iterator.AddFilter_ObjectSet(MkSet(eArcObject, ePadObject, eViaObject, eTrackObject, eTextObject,
-                eFillObject, eComponentObject, ePolyObject, eRegionObject, eDimensionObject, eComponentBodyObject));
+                eFillObject, eComponentObject, ePolyObject, eRegionObject, eComponentBodyObject, eDimensionObject,
+                eCoordinateObject, eNetObject, eClassObject, eRuleObject, eDifferentialPairObject, eViolationObject,
+                eConnectionObject, eFromToObject, eEmbeddedBoardObject, eSplitPlaneObject));
             Iterator.AddFilter_LayerSet(AllLayers);
             Iterator.AddFilter_Method(eProcessAll);
-            Prim := Iterator.FirstPCBObject;
-            while Prim <> nil do
-            begin
-                if Lines.IndexOf(IntToStr(Prim.I_ObjectAddress)) >= 0 then
+            try
+                Prim := Iterator.FirstPCBObject;
+                while Prim <> nil do
                 begin
-                    Prim.Selected := True;
-                    Result := Result + 1;
+                    if Prim.I_ObjectAddress <> Rule.I_ObjectAddress then
+                        if Rule.CheckUnaryScope(Prim) then
+                        begin
+                            Found.Add(Prim);
+                            if Prim.ObjectId = eRegionObject then
+                                if Prim.InPolygon and (Prim.Polygon <> nil) then
+                                    if Polys.IndexOf(Prim.Polygon) < 0 then Polys.Add(Prim.Polygon);
+                        end;
+                    Prim := Iterator.NextPCBObject;
                 end;
-                Prim := Iterator.NextPCBObject;
+            except
+                Errors.Add(ExceptionMessage);
             end;
             Board.BoardIterator_Destroy(Iterator);
+            QueryRemoveRule(Board, Rule);
         end;
-        DeleteFile(StoreFile);
-    finally
-        Lines.Free;
-    end;
-end;
-
-// Saves the selection in Saved and in StoreFile, first selecting again what
-// a stopped call left in StoreFile
-procedure QuerySaveSelection(Board: IPCB_Board; StoreFile: String; Saved: TInterfaceList);
-var
-    Lines : TStringList;
-    Prim  : IPCB_Primitive;
-    i     : Integer;
-begin
-    QueryRestoreSelection(Board, StoreFile);
-    Lines := TStringList.Create;
-    try
-        Lines.Add(Board.FileName);
-        for i := 0 to Board.SelectecObjectCount - 1 do
+        if Errors.Count > 0 then
         begin
-            Prim := Board.SelectecObject[i];
-            Saved.Add(Prim);
-            Lines.Add(IntToStr(Prim.I_ObjectAddress));
-        end;
-        Lines.SaveToFile(StoreFile);
+            Result := Errors[0];
+            if Result = '' then Result := 'no message';
+            Found.Clear;
+        end
+        else
+            for i := 0 to Polys.Count - 1 do
+                if Found.IndexOf(Polys.Items[i]) < 0 then Found.Add(Polys.Items[i]);
     finally
-        Lines.Free;
+        Errors.Free;
+        Polys.Free;
+        QueryPutModifiedFlag(Board, Flag);
     end;
 end;
 
-// Selects again what QuerySaveSelection saved, with the filter cleared
-procedure QueryEndSelection(Board: IPCB_Board; StoreFile: String; Saved: TInterfaceList);
+// Whether Expr matches Prim (False too when Altium cannot evaluate it)
+function QueryMatchesObject(Board: IPCB_Board; Expr: String; Prim: IPCB_Primitive): Boolean;
 var
-    i : Integer;
+    Rule   : IPCB_Rule;
+    Errors : TStringList;
+    Flag   : String;
 begin
-    Board.SelectedObjects_Clear;
-    for i := 0 to Saved.Count - 1 do
-        Saved.Items[i].Selected := True;
-    DeleteFile(StoreFile);
+    Result := False;
+    Flag := QueryModifiedFlag(Board);
+    Errors := TStringList.Create;
+    try
+        Rule := QueryAddRule(Board, Expr, Errors);
+        if Rule <> nil then
+        begin
+            try
+                Result := Rule.CheckUnaryScope(Prim);
+            except
+                Result := False;
+            end;
+            QueryRemoveRule(Board, Rule);
+        end;
+    finally
+        Errors.Free;
+        QueryPutModifiedFlag(Board, Flag);
+    end;
 end;
 
-// query_restore: the selection a stopped query call left behind
-function QueryRestore(StoreFile: String): String;
+// query_restore: takes off a temporary rule that a stopped query call left
+// on the board
+function QueryRestore(Dummy: Integer): String;
 var
     Board : IPCB_Board;
     Props : TStringList;
     Count : Integer;
+    Flag  : String;
 begin
     Board := GetBoardSafe(0);
     if Board = nil then
@@ -5427,12 +5517,16 @@ begin
         Result := 'ERROR: No PCB document is focused';
         Exit;
     end;
-    Count := QueryRestoreSelection(Board, StoreFile);
+    Flag := QueryModifiedFlag(Board);
+    Count := QueryDropRules(Board);
+    // The stopped call would have put the flag back; a board that had no
+    // other change is not known here, so the flag stays as Altium set it
+    if Count = 0 then QueryPutModifiedFlag(Board, Flag);
     Props := TStringList.Create;
     try
         AddJSONBoolean(Props, 'success', True);
-        AddJSONBoolean(Props, 'restored', Count >= 0);
-        if Count >= 0 then AddJSONInteger(Props, 'selected', Count);
+        AddJSONBoolean(Props, 'restored', Count > 0);
+        AddJSONInteger(Props, 'rules_removed', Count);
         Result := BuildJSONObject(Props);
     finally
         Props.Free;
@@ -5445,7 +5539,6 @@ function QueryUnit(Board: IPCB_Board): String;
 var
     Iterator : IPCB_BoardIterator;
     Prim     : IPCB_Primitive;
-    Found    : TInterfaceList;
     Prop, Kind : String;
     Size     : Integer;
 begin
@@ -5467,20 +5560,12 @@ begin
     begin
         Kind := 'IsTrack'; Prop := 'Width'; Size := Prim.Width;
     end;
-    Found := TInterfaceList.Create;
-    try
-        RunBoardQuery(Board, Kind + ' And (' + Prop + ' > ' + QueryNumber(CoordToMMs(Size) * 0.999) +
-                      ') And (' + Prop + ' < ' + QueryNumber(CoordToMMs(Size) * 1.001) + ')', Found);
-        if Found.Count > 0 then Result := 'mm'
-        else
-        begin
-            RunBoardQuery(Board, Kind + ' And (' + Prop + ' > ' + QueryNumber(CoordToMils(Size) * 0.999) +
-                          ') And (' + Prop + ' < ' + QueryNumber(CoordToMils(Size) * 1.001) + ')', Found);
-            if Found.Count > 0 then Result := 'mil';
-        end;
-    finally
-        Found.Free;
-    end;
+    if QueryMatchesObject(Board, Kind + ' And (' + Prop + ' > ' + QueryNumber(CoordToMMs(Size) * 0.999) +
+                          ') And (' + Prop + ' < ' + QueryNumber(CoordToMMs(Size) * 1.001) + ')', Prim) then
+        Result := 'mm'
+    else if QueryMatchesObject(Board, Kind + ' And (' + Prop + ' > ' + QueryNumber(CoordToMils(Size) * 0.999) +
+                               ') And (' + Prop + ' < ' + QueryNumber(CoordToMils(Size) * 1.001) + ')', Prim) then
+        Result := 'mil';
 end;
 
 // The board's own name of a layer ('GND1' for Mid Layer 1 on a board that
@@ -5634,14 +5719,13 @@ end;
 
 // query_objects: ExprMM and ExprMil are the expression with its unit values
 // written in mm and in mil; the one in the engine's unit is run. Area keeps
-// the objects touching it. StoreFile keeps the user's selection while the
-// queries run.
-function QueryObjects(ExprMM: String; ExprMil: String; Limit: Integer; Area: String; StoreFile: String): String;
+// the objects touching it.
+function QueryObjects(ExprMM: String; ExprMil: String; Limit: Integer; Area: String): String;
 var
     Board : IPCB_Board;
-    Found, Saved : TInterfaceList;
+    Found : TInterfaceList;
     Items, Kinds, Counts, Props : TStringList;
-    Units, Expr, Kind : String;
+    Units, Expr, Kind, Err : String;
     i, k, NoNet : Integer;
 begin
     Board := GetBoardSafe(0);
@@ -5651,20 +5735,19 @@ begin
         Exit;
     end;
     Found := TInterfaceList.Create;
-    Saved := TInterfaceList.Create;
     Items := TStringList.Create;
     Kinds := TStringList.Create;
     Counts := TStringList.Create;
     Props := TStringList.Create;
     try
-        QuerySaveSelection(Board, StoreFile, Saved);
-        try
-            Units := QueryUnit(Board);
-            if Units = 'mil' then Expr := ExprMil else Expr := ExprMM;
-            Expr := QueryLayerNames(Board, Expr);
-            RunBoardQuery(Board, Expr, Found);
-        finally
-            QueryEndSelection(Board, StoreFile, Saved);
+        Units := QueryUnit(Board);
+        if Units = 'mil' then Expr := ExprMil else Expr := ExprMM;
+        Expr := QueryLayerNames(Board, Expr);
+        Err := RunBoardQuery(Board, Expr, Found);
+        if Err <> '' then
+        begin
+            Result := 'ERROR: Altium could not evaluate the expression: ' + Err;
+            Exit;
         end;
         QueryKeepInArea(Board, Found, Area);
         NoNet := 0;
@@ -5696,7 +5779,6 @@ begin
         Result := BuildJSONObject(Props);
     finally
         Found.Free;
-        Saved.Free;
         Items.Free;
         Kinds.Free;
         Counts.Free;
@@ -5759,18 +5841,16 @@ end;
 // which_rule: the rule of RuleName that applies to the one object ExprA
 // matches, or between it and the one ExprB matches with the distance between
 // them, and whether they pass it. ExprB is empty for a one-object kind.
-// AreaA and AreaB keep the objects touching them. StoreFile keeps the user's
-// selection while the queries run.
-function WhichRule(ExprAMM, ExprAMil, ExprBMM, ExprBMil, RuleName, AreaA, AreaB, StoreFile: String): String;
+// AreaA and AreaB keep the objects touching them.
+function WhichRule(ExprAMM, ExprAMil, ExprBMM, ExprBMil, RuleName, AreaA, AreaB: String): String;
 var
     Board     : IPCB_Board;
     A, B      : TInterfaceList;
-    Saved     : TInterfaceList;
     Rule      : IPCB_Rule;
     Violation : IPCB_Violation;
     Kind      : Integer;
     Unary     : Boolean;
-    Units     : String;
+    Units, Err : String;
     Props     : TStringList;
 begin
     Board := GetBoardSafe(0);
@@ -5798,21 +5878,20 @@ begin
     end;
     A := TInterfaceList.Create;
     B := TInterfaceList.Create;
-    Saved := TInterfaceList.Create;
     Props := TStringList.Create;
     try
-        QuerySaveSelection(Board, StoreFile, Saved);
-        try
-            Units := QueryUnit(Board);
-            if Units = 'mil' then RunBoardQuery(Board, QueryLayerNames(Board, ExprAMil), A)
-            else RunBoardQuery(Board, QueryLayerNames(Board, ExprAMM), A);
-            if not Unary then
-            begin
-                if Units = 'mil' then RunBoardQuery(Board, QueryLayerNames(Board, ExprBMil), B)
-                else RunBoardQuery(Board, QueryLayerNames(Board, ExprBMM), B);
-            end;
-        finally
-            QueryEndSelection(Board, StoreFile, Saved);
+        Units := QueryUnit(Board);
+        if Units = 'mil' then Err := RunBoardQuery(Board, QueryLayerNames(Board, ExprAMil), A)
+        else Err := RunBoardQuery(Board, QueryLayerNames(Board, ExprAMM), A);
+        if (Err = '') and (not Unary) then
+        begin
+            if Units = 'mil' then Err := RunBoardQuery(Board, QueryLayerNames(Board, ExprBMil), B)
+            else Err := RunBoardQuery(Board, QueryLayerNames(Board, ExprBMM), B);
+        end;
+        if Err <> '' then
+        begin
+            Result := 'ERROR: Altium could not evaluate the expression: ' + Err;
+            Exit;
         end;
         QueryKeepInArea(Board, A, AreaA);
         QueryKeepInArea(Board, B, AreaB);
@@ -5871,7 +5950,6 @@ begin
     finally
         A.Free;
         B.Free;
-        Saved.Free;
         Props.Free;
     end;
 end;

@@ -938,25 +938,20 @@ begin
         RequestText(RequestData, 'new_net', ''), RequestText(RequestData, 'new_layer', ''));
 end;
 
-// Function to execute query_objects, which_rule and query_restore. The
-// user's selection is kept in a file while the queries run, so that one a
-// stopped query left behind can be restored.
+// Function to execute query_objects, which_rule and query_restore (which
+// takes off the temporary rule a stopped query left on the board)
 function ExecuteQuery(CommandName: String; RequestData: TStringList): String;
-var
-    StoreFile : String;
 begin
-    StoreFile := ROOT_DIR + 'query_selection.txt';
     if CommandName = 'query_objects' then
         Result := QueryObjects(RequestText(RequestData, 'expr_mm', ''), RequestText(RequestData, 'expr_mil', ''),
-                               StrToInt(RequestText(RequestData, 'limit', '200')), RequestText(RequestData, 'area', ''),
-                               StoreFile)
+                               StrToInt(RequestText(RequestData, 'limit', '200')), RequestText(RequestData, 'area', ''))
     else if CommandName = 'which_rule' then
         Result := WhichRule(RequestText(RequestData, 'a_mm', ''), RequestText(RequestData, 'a_mil', ''),
                             RequestText(RequestData, 'b_mm', ''), RequestText(RequestData, 'b_mil', ''),
                             RequestText(RequestData, 'rule_kind', 'clearance'),
-                            RequestText(RequestData, 'area_a', ''), RequestText(RequestData, 'area_b', ''), StoreFile)
+                            RequestText(RequestData, 'area_a', ''), RequestText(RequestData, 'area_b', ''))
     else
-        Result := QueryRestore(StoreFile);
+        Result := QueryRestore(0);
 end;
 
 // Extract the create symbols batch logic
