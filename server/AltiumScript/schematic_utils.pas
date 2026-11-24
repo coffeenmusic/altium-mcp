@@ -903,6 +903,7 @@ end;
 //   COMMENT|<text>[|<visible 1/0>]       set the Comment (hidden unless visible is 1)
 //   DESCRIPTION|<text>                   set the Description
 //   SYMPARAM|<name>|<value>|<visible 1/0>[|x|y[|justification[|font name:size]]]
+//   DESIGNATOR|<text>[|x|y[|justification[|font name:size[|autoposition 1/0]]]]
 //   PINPARAM|<pin number>|<name>|<value>
 //   PINDESC|<pin number>|<text>
 //   PINSYMBOL|<pin number>|<inside|inside_edge|outside_edge|outside>|<IEEE symbol>
@@ -1040,7 +1041,7 @@ begin
                     ProblemsArray.Add('"' + JSONEscapeString('line ' + IntToStr(i + 1) + ': GRAPHIC only belongs to a SYMBOL') + '"');
             end
             else if (Kind = 'COMMENT') or (Kind = 'DESCRIPTION') or (Kind = 'SYMPARAM') or
-                    (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') or
+                    (Kind = 'DESIGNATOR') or (Kind = 'PINPARAM') or (Kind = 'PINDESC') or (Kind = 'PINSYMBOL') or
                     (Kind = 'PINFUNC') then
             begin
                 if (CurrentName <> '') then
@@ -2388,6 +2389,9 @@ end;
 //                                                add or replace a symbol parameter;
 //                                                one the tool positions gets
 //                                                Autoposition off, so it stays put
+//   DESIGNATOR|<text>[|x|y[|justification[|font name:size[|autoposition 1/0]]]]
+//                                                change the reference designator;
+//                                                empty fields keep the current value
 //   PINPARAM|<pin number>|<name>|<value>         add or replace a hidden pin
 //                                                parameter on every pin with that number
 //   PINDESC|<pin number>|<text>                  set the Description of every pin with
@@ -2451,6 +2455,57 @@ begin
             SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_BeginModify, c_NoEventData);
             Comp.ComponentDescription := GetFieldFromPipeString(Line, 1);
             SchServer.RobotManager.SendMessage(Comp.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
+            Result := Result + 1;
+        end
+        else if (Kind = 'DESIGNATOR') then
+        begin
+            // The symbol's reference designator (not a parameter: it is its
+            // own child object). Empty fields keep the current value.
+            Value := Trim(GetFieldFromPipeString(Line, 1));
+            Just := -1;
+            if (Trim(GetFieldFromPipeString(Line, 4)) <> '') then
+            begin
+                Just := JustificationValue(GetFieldFromPipeString(Line, 4));
+                if (Just < 0) then
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': unknown justification ' +
+                        Trim(GetFieldFromPipeString(Line, 4)) + ' for DESIGNATOR') + '"');
+            end;
+            FontID := -1;
+            FontSpec := Trim(GetFieldFromPipeString(Line, 5));
+            if (FontSpec <> '') then
+            begin
+                FontID := FontIDFromSpec(FontSpec);
+                if (FontID < 0) then
+                    Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': font ' + FontSpec +
+                        ' for DESIGNATOR is not <font name>:<size>') + '"');
+            end;
+            Edge := Trim(GetFieldFromPipeString(Line, 6));
+            if (Edge <> '') and (Edge <> '0') and (Edge <> '1') then
+                Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': DESIGNATOR autoposition is 1 or 0, not ' + Edge) + '"');
+            SchServer.RobotManager.SendMessage(Comp.Designator.I_ObjectAddress, c_BroadCast, SCHM_BeginModify, c_NoEventData);
+            if (Value <> '') then
+                Comp.Designator.Text := Value;
+            // Autoposition first: while it is on, Altium puts the designator
+            // back where it wants it
+            if (Edge = '1') then
+                Comp.Designator.Autoposition := True
+            else if (Edge = '0') then
+                Comp.Designator.Autoposition := False;
+            if (Trim(GetFieldFromPipeString(Line, 2)) <> '') and (Trim(GetFieldFromPipeString(Line, 3)) <> '') then
+            begin
+                // A location only holds with Autoposition off
+                if (Edge = '') then
+                    Comp.Designator.Autoposition := False;
+                Comp.Designator.Location := Point(MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 2)))),
+                                                  MilsToCoord(SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 3)))));
+            end
+            else if (Trim(GetFieldFromPipeString(Line, 2)) <> '') or (Trim(GetFieldFromPipeString(Line, 3)) <> '') then
+                Problems.Add('"' + JSONEscapeString(Comp.LibReference + ': DESIGNATOR needs both x and y, location not changed') + '"');
+            if (Just >= 0) then
+                Comp.Designator.Justification := Just;
+            if (FontID >= 0) then
+                Comp.Designator.FontID := FontID;
+            SchServer.RobotManager.SendMessage(Comp.Designator.I_ObjectAddress, c_BroadCast, SCHM_EndModify, c_NoEventData);
             Result := Result + 1;
         end
         else if (Kind = 'SYMPARAM') then
@@ -2779,8 +2834,8 @@ begin
     end;
 end;
 
-// Add a symbol's Comment (text, visible) and its parameters (name, value,
-// visible, location in mils) to its JSON properties
+// Add a symbol's Comment (text, visible), its reference designator and its
+// parameters (name, value, visible, location in mils) to its JSON properties
 procedure AddSymbolPropertiesJSON(Props: TStringList; Comp: ISch_Component);
 var
     Iter   : ISch_Iterator;
@@ -2793,6 +2848,20 @@ begin
         AddJSONProperty(PProps, 'text', Comp.Comment.Text);
         AddJSONBoolean(PProps, 'visible', not Comp.Comment.IsHidden);
         Props.Add('"comment": ' + BuildJSONObject(PProps, 2));
+    finally
+        PProps.Free;
+    end;
+
+    PProps := TStringList.Create;
+    try
+        AddJSONProperty(PProps, 'text', Comp.Designator.Text);
+        AddJSONBoolean(PProps, 'visible', not Comp.Designator.IsHidden);
+        AddJSONNumber(PProps, 'x', CoordToMils(Comp.Designator.Location.X));
+        AddJSONNumber(PProps, 'y', CoordToMils(Comp.Designator.Location.Y));
+        AddJSONProperty(PProps, 'justification', JustificationName(Comp.Designator.Justification));
+        AddJSONBoolean(PProps, 'autoposition', Comp.Designator.Autoposition);
+        PProps.Add('"font": ' + FontJSON(Comp.Designator.FontID));
+        Props.Add('"designator": ' + BuildJSONObject(PProps, 2));
     finally
         PProps.Free;
     end;

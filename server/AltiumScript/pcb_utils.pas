@@ -22,6 +22,69 @@ begin
         Result := PCBServer.GetCurrentPCBLibrary;
 end;
 
+// A footprint text's justification (which point of the text sits at its
+// x|y, as the Properties panel shows it) as the name the symbol records use
+// (bottom_left ... center ... top_right); '' for a text that has none (its
+// x|y is then the bottom-left corner, Altium's default)
+function PcbTextJustificationName(Text: IPCB_Text): String;
+var
+    V : Integer;
+begin
+    Result := '';
+    if not Text.AdvanceSnapping then Exit;
+    V := Text.TTFInvertedTextJustify;
+    // TAutoPositionJustify runs down each column (top-left 1, center-left
+    // 2, bottom-left 3, top-center 4 ... bottom-right 9); the names run
+    // along each row from the bottom
+    if (V >= 1) and (V <= 9) then
+        Result := JustificationName((2 - ((V - 1) mod 3)) * 3 + ((V - 1) div 3));
+end;
+
+// Give a footprint text a justification by name; False for an unknown name
+function SetPcbTextJustification(Text: IPCB_Text; Name: String): Boolean;
+var
+    J : Integer;
+begin
+    J := JustificationValue(Name);
+    Result := (J >= 0);
+    if not Result then Exit;
+    Text.AdvanceSnapping := True;
+    Text.TTFInvertedTextJustify := (J mod 3) * 3 + (3 - (J div 3));
+end;
+
+// Put the justified point of every justified text of a footprint just
+// created at the text's location (until now its bottom-left corner). Altium
+// works out a text's extent, and with it the justified point (its snap
+// point), only for the footprint shown in the editor, so the footprint is
+// shown first.
+procedure AnchorJustifiedTexts(PcbLib: IPCB_Library; LibComp: IPCB_LibComponent);
+var
+    Iter : IPCB_GroupIterator;
+    Text : IPCB_Text;
+    X, Y : Integer;
+begin
+    if (PcbLib = nil) or (LibComp = nil) then Exit;
+    PcbLib.CurrentComponent := LibComp;
+    Iter := LibComp.GroupIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eTextObject));
+    Text := Iter.FirstPCBObject;
+    while (Text <> nil) do
+    begin
+        if Text.AdvanceSnapping then
+        begin
+            X := Text.XLocation;
+            Y := Text.YLocation;
+            Text.BeginModify;
+            Text.SnapPointX := X;
+            Text.SnapPointY := Y;
+            Text.EndModify;
+            Text.GraphicallyInvalidate;
+        end;
+        Text := Iter.NextPCBObject;
+    end;
+    LibComp.GroupIterator_Destroy(Iter);
+end;
+
 // Create many footprints in a single script run from a spec file (plain
 // text, pipe-delimited; coords in mils, layers as names, shapes/hole types
 // as raw enum ints - symmetric with get_footprint_primitives):
@@ -36,7 +99,7 @@ end;
 //   TRACK|x1|y1|x2|y2|width|layer
 //   ARC|cx|cy|radius|start_angle|end_angle|width|layer
 //   FILL|x1|y1|x2|y2|rotation|layer
-//   TEXT|x|y|size|width|rotation|layer|mirror|ttf|text
+//   TEXT|x|y|size|width|rotation|layer|mirror|ttf|text[|justification]
 function CreateFootprintsBatch(SpecFilePath: String): String;
 var
     PcbLib      : IPCB_Library;
@@ -66,6 +129,7 @@ var
     PrimErrors  : Integer;
     OX, OY      : Integer;
     i, V        : Integer;
+    NeedSnap    : Boolean;
     Matched     : Boolean;
     Shown       : Boolean;
     Problems    : TStringList;
@@ -85,6 +149,7 @@ begin
     LibComp := nil;
     PcbLib := nil;
     CurMode := '';
+    NeedSnap := False;
     Shown := False;
     OX := 0;
     OY := 0;
@@ -127,6 +192,9 @@ begin
                 end
                 else if (Kind = 'FOOTPRINT') or (Kind = 'EDITFOOTPRINT') then
                 begin
+                    if NeedSnap then
+                        AnchorJustifiedTexts(PcbLib, LibComp);
+                    NeedSnap := False;
                     PcbLib := GetPcbLibSafe(0);
                     // Focus can drift between chunks - retry via the opened
                     // document before giving up
@@ -353,8 +421,22 @@ begin
                     // line-based spec file
                     Text.Text := StringReplace(GetFieldFromPipeString(Line, 9), '<NL>', #13#10, REPLACEALL);
                     Text.Rotation := SafeStrToFloat(Trim(GetFieldFromPipeString(Line, 5)));
+                    // Optional justification: the point of the text at x|y
+                    FieldValue := Trim(GetFieldFromPipeString(Line, 10));
+                    Matched := False;
+                    if (FieldValue <> '') then
+                    begin
+                        Matched := SetPcbTextJustification(Text, FieldValue);
+                        if not Matched then
+                            Problems.Add('"' + JSONEscapeString(LibComp.Name + ': unknown justification ' + FieldValue +
+                                ' for TEXT, left without one') + '"');
+                    end;
                     LibComp.AddPCBObject(Text);
                     PCBServer.SendMessageToRobots(LibComp.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Text.I_ObjectAddress);
+                    // Its justified point is put at x|y when the footprint
+                    // is complete
+                    if Matched then
+                        NeedSnap := True;
                 end;
             except
                 PrimErrors := PrimErrors + 1;
@@ -363,6 +445,8 @@ begin
             end;
         end;
 
+        if NeedSnap then
+            AnchorJustifiedTexts(PcbLib, LibComp);
         PCBServer.PostProcess;
         if (LibComp <> nil) and (PcbLib <> nil) then
         begin
@@ -603,14 +687,26 @@ begin
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'text');
                                     AddJSONProperty(PrimProps, 'text', Prim.Text);
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.XLocation - OX));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.YLocation - OY));
+                                    // A justified text is held by its snap
+                                    // point, as the Properties panel shows it
+                                    if (PcbTextJustificationName(Prim) <> '') then
+                                    begin
+                                        AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.SnapPointX - OX));
+                                        AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.SnapPointY - OY));
+                                    end
+                                    else
+                                    begin
+                                        AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.XLocation - OX));
+                                        AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.YLocation - OY));
+                                    end;
                                     AddJSONNumber(PrimProps, 'size', CoordToMils(Prim.Size));
                                     AddJSONNumber(PrimProps, 'width', CoordToMils(Prim.Width));
                                     AddJSONNumber(PrimProps, 'rotation', Prim.Rotation);
                                     AddJSONProperty(PrimProps, 'layer', Layer2String(Prim.Layer));
                                     AddJSONBoolean(PrimProps, 'mirror', Prim.MirrorFlag);
                                     AddJSONBoolean(PrimProps, 'ttf', Prim.UseTTFonts);
+                                    if (PcbTextJustificationName(Prim) <> '') then
+                                        AddJSONProperty(PrimProps, 'justification', PcbTextJustificationName(Prim));
                                 end;
                                 eRegionObject:
                                 begin
