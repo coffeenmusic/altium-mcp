@@ -843,5 +843,41 @@ class RollbackToolTest(unittest.TestCase):
         self.assertIn(shown.replace("'", "''"), calls[2])
 
 
+class BoardHintTest(unittest.TestCase):
+    def hints(self, script):
+        sp = sandbox.split_var_block(script)
+        return sandbox.board_hints(sp.routines + sp.body, sp.routines_offset)
+
+    def test_board_used_without_nil_check(self):
+        script = ("var\n  Board : IPCB_Board;\n  It : IPCB_BoardIterator;\n"
+                  "Board := PCBServer.GetCurrentPCBBoard;\nIt := Board.BoardIterator_Create;")
+        hints = self.hints(script)
+        self.assertEqual(len(hints), 1)
+        self.assertIn("line 4", hints[0])
+        self.assertIn("CurrentBoard(0)", hints[0])
+        self.assertEqual(len(self.hints("I1 := PCBServer.GetCurrentPCBBoard.XOrigin;")), 1)
+
+    def test_board_used_in_a_routine(self):
+        script = ("var\n  N : Integer;\nfunction Origin(D : Integer) : Integer;\nbegin\n"
+                  "  Result := PCBServer.GetCurrentPCBBoard.XOrigin;\nend;\nN := Origin(0);")
+        hints = self.hints(script)
+        self.assertEqual(len(hints), 1)
+        self.assertIn("line 5", hints[0])
+
+    def test_nil_checked_or_helper_passes(self):
+        for check in ("if Board = nil then Exit;", "if nil <> Board then I1 := 1;",
+                      "if not Assigned(Board) then Exit;", "if board <> NIL then I1 := 1;"):
+            self.assertEqual(self.hints("Board := PCBServer.GetCurrentPCBBoard;\n" + check), [], check)
+        self.assertEqual(self.hints("Board := CurrentBoard(0);\nI1 := Board.XOrigin;"), [])
+        self.assertEqual(self.hints("S1 := 'PCBServer.GetCurrentPCBBoard.X';\n// GetCurrentPCBBoard.X"), [])
+
+    def test_template_defines_board_helpers(self):
+        # before the script's routines, so those can call them
+        routines = TEMPLATE.index(sandbox.ROUTINES_BEGIN)
+        for name in ("CurrentBoard", "BoardByPath", "BX", "BY"):
+            m = re.search(r"(?m)^function " + name + r"\(", TEMPLATE)
+            self.assertTrue(m and m.start() < routines, name)
+
+
 if __name__ == "__main__":
     unittest.main()
