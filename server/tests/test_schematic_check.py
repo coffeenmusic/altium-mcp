@@ -340,6 +340,121 @@ class PinOffGridTest(unittest.TestCase):
         self.assertEqual(self.check(3.15), [])    # a metric symbol on an imperial grid
 
 
+def port_rec(name, x, y, width=500):
+    return {"RECORD": 18, **at(x, y), "WIDTH": width // 10, "HEIGHT": 10, "STYLE": 2, "NAME": name,
+            "FONTID": 1}
+
+
+class ElectricalTest(unittest.TestCase):
+    def issues(self, extra):
+        recs = [
+            {"HEADER": "x"},
+            {"RECORD": 31, "FONTIDCOUNT": 1, "SIZE1": 10, "FONTNAME1": "Times New Roman", "SNAPGRIDSIZE": 10},
+            {"RECORD": 1, "LIBREFERENCE": "RES", **at(1000, 3000), "CURRENTPARTID": 1},
+            {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 1, "PINLENGTH": 10,
+             **at(1000, 3000), "DESIGNATOR": "1"},
+            {"RECORD": 2, "OWNERINDEX": 1, "OWNERPARTID": 1, "PINCONGLOMERATE": 3, "PINLENGTH": 10,
+             **at(1000, 2800), "DESIGNATOR": "2"},
+            {"RECORD": 34, "OWNERINDEX": 1, **at(1150, 2900), "TEXT": "R1", "NAME": "Designator", "FONTID": 1},
+        ] + extra
+        return sc.Checker(sc.Sheet(parse_records(records_stream(recs)))).run()
+
+    def of(self, issues, kind):
+        return [i for i in issues if i["type"] == kind]
+
+    def test_wire_ending_inside_a_port(self):
+        # the port runs 2000..2500; the wire stops at 2200, inside it
+        issues = self.issues([port_rec("LATCH_EN", 2000, 1000), wire((1500, 1000), (2200, 1000)),
+                              port_rec("IN", 1000, 1000), wire((1500, 1000), (1000, 1000))])
+        hit = self.of(issues, "wire_into_port")
+        self.assertEqual([(i["port"], i["at"]) for i in hit], [("LATCH_EN", [2200, 1000])])
+        self.assertEqual(hit[0]["suggest"]["to"], [2000, 1000])
+
+    def test_port_connected_at_either_end_or_to_nothing(self):
+        issues = self.issues([port_rec("A", 2000, 1000), wire((2500, 1000), (2800, 1000)),
+                              port_rec("B", 4000, 1000)])
+        self.assertEqual([i["port"] for i in self.of(issues, "port_unconnected")], ["B"])
+
+    def test_port_end_on_a_power_port_or_another_port_is_connected(self):
+        issues = self.issues([port_rec("A", 2000, 1000),
+                              {"RECORD": 17, **at(2500, 1000), "STYLE": 4, "ORIENTATION": 3, "TEXT": "GND"},
+                              # C's right end meets D's left end, nothing else
+                              port_rec("C", 2000, 2000), port_rec("D", 2500, 2000),
+                              port_rec("E", 4000, 1000)])
+        self.assertEqual([i["port"] for i in self.of(issues, "port_unconnected")], ["E"])
+
+    def test_single_pin_net(self):
+        # R1 pin 1 wired to a corner and back to nothing; pin 2 goes to a power port
+        issues = self.issues([wire((1000, 3100), (1300, 3100), (1300, 3400)),
+                              wire((1000, 2700), (1000, 2600)),
+                              {"RECORD": 17, **at(1000, 2600), "STYLE": 4, "ORIENTATION": 3, "TEXT": "GND"}])
+        self.assertEqual([(i["designator"], i["pin"]) for i in self.of(issues, "single_pin_net")], [("R1", "1")])
+
+    def test_a_net_joined_by_label_name_is_not_one_pin(self):
+        issues = self.issues([wire((1000, 3100), (1300, 3100)), label("N1", 1300, 3100, just=2),
+                              wire((3000, 3100), (3300, 3100)), label("N1", 3000, 3100)])
+        self.assertEqual(self.of(issues, "single_pin_net"), [])
+
+
+class PortNoErcTest(unittest.TestCase):
+    def test_no_erc_on_a_port_end_silences_it(self):
+        recs = [{"HEADER": "x"},
+                {"RECORD": 31, "FONTIDCOUNT": 1, "SIZE1": 10, "FONTNAME1": "Times New Roman", "SNAPGRIDSIZE": 10},
+                port_rec("SPARE", 4000, 1000), {"RECORD": 22, **at(4500, 1000)},
+                port_rec("LOOSE", 4000, 2000)]
+        issues = sc.Checker(sc.Sheet(parse_records(records_stream(recs)))).run()
+        self.assertEqual([i["port"] for i in issues if i["type"] == "port_unconnected"], ["LOOSE"])
+
+
+class FixesTest(unittest.TestCase):
+    def setUp(self):
+        self.sheet = sc.Sheet(parse_records(records_stream(scene())))
+        self.issues = sc.Checker(self.sheet).run()
+
+    def test_labels_are_moved_not_replaced(self):
+        ops = sc.fixes(self.issues, ["labels"])
+        self.assertEqual(sorted(o["text"] for o in ops), ["FAR", "HANG"])
+        far = next(o for o in ops if o["text"] == "FAR")
+        self.assertEqual(far, {"op": "move_net_label", "x": 3500, "y": 500, "text": "FAR", "to_x": 3000,
+                               "to_y": 500, "orientation": 0, "justification": 0})
+        self.assertFalse(any(o["op"] in ("delete_at", "add_net_label") for o in ops))
+
+    def test_text_layout_once_per_part(self):
+        ops = sc.fixes(self.issues, ["text"])
+        self.assertTrue(ops)
+        self.assertEqual({(o["op"], o["designator"]) for o in ops}, {("move_text", "C1")})
+        self.assertEqual(len(ops), len({o["name"] for o in ops}))   # each text once
+        self.assertEqual(sc.fixes(self.issues, []), [])
+
+    def test_plan_is_one_edit_labels_first(self):
+        ops, before = sc.plan_sheet_fixes(self.sheet, ["labels", "text"])
+        self.assertEqual(before["issue_counts"]["label_not_at_end"], 1)
+        kinds = [o["op"] for o in ops]
+        self.assertEqual(kinds, sorted(kinds, key=lambda k: k != "move_net_label"))
+        self.assertIn("move_text", kinds)
+        # The model's labels moved where the edit puts them
+        far = next(lab for lab in self.sheet.labels if lab["text"] == "FAR")
+        self.assertEqual(far["anchor"], (3000, 500))
+        # Everything the plan covers is gone from a check of the moved labels
+        left = {i["type"] for i in sc.Checker(self.sheet).run()}
+        self.assertFalse(left & {"label_not_at_end", "label_justification"})
+
+    def test_exact_positions_on_a_metric_sheet(self):
+        checker = sc.Checker(self.sheet)
+        self.sheet.metric = True
+        self.assertEqual(checker.exact((3000.0, 500.0)), [76.2, 12.7])
+        sheet = sc.Sheet(parse_records(records_stream(scene())))
+        sheet.metric = True
+        ops = sc.fixes(sc.Checker(sheet).run(), ["labels"])
+        far = next(o for o in ops if o["text"] == "FAR")
+        # exact to the micron, not rounded to 0.01 mm
+        self.assertEqual((far["x"], far["to_x"]), (88.9, 76.2))
+        sheet2 = sc.Sheet(parse_records(records_stream(scene())))
+        sheet2.metric = True
+        sc._move_labels(sheet2, ops)
+        self.assertAlmostEqual(next(lab for lab in sheet2.labels if lab["text"] == "FAR")["anchor"][0], 3000.0)
+
+
 class ProjectTest(unittest.TestCase):
     def test_project_sheets(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -2692,6 +2692,13 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     Returns:
         str: JSON with how many operations were applied and the errors.
     """
+    return await _edit_schematic(sheet_path, operations, unit, save)
+
+
+async def _edit_schematic(sheet_path: str, operations: list, unit: str = "mil", save: bool = False,
+                          require_saved: bool = False) -> str:
+    """edit_schematic's work; require_saved refuses a sheet open in Altium
+    with unsaved changes, before anything changes."""
     import configparser
     import zipfile
     from xml.etree import ElementTree
@@ -2736,7 +2743,7 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     # Part names and parameter values may hold text that is not plain ASCII
     write_altium_text(EXCHANGE_DIR / "sch_edit_spec.txt", "\n".join(lines) + "\n")
     response = await altium_bridge.execute_command("edit_schematic", {
-        "sheet_path": sheet_path, "save": bool(save)})
+        "sheet_path": sheet_path, "save": bool(save), "require_saved": bool(require_saved)})
     if not response.get("success", False):
         return json.dumps({"success": False,
                            "error": f"Failed to edit the sheet: {response.get('error', 'unknown error')}"})
@@ -2786,6 +2793,13 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
         move_component) when the whole part is that far off the grid, else
         shift_contents_by. Pins off by different amounts get no suggestion:
         the symbol needs fixing in its library.
+      * Electrical, from the saved file without compiling:
+        wire_into_port - a wire ends inside a port's body, not at its end,
+        so it does not connect (an auto-sized port shrank away from it);
+        suggest.move_end/to give the end to move. port_unconnected - a port
+        nothing meets at either end. single_pin_net - wires reach one pin
+        and nothing else (no other pin, label, port, power port, bus or
+        sheet entry); a no-ERC marker on the pin silences it.
       * slanted_wire - a wire segment a little (1 um to half a grid) out of
         level or plumb. It looks straight, but dragging a part on it turns it
         diagonal. Usually a symbol whose pins are off the grid (then the
@@ -2799,7 +2813,8 @@ async def check_schematic(ctx: Context, path: str, max_issues_per_sheet: int = 1
         designator left and value right of a vertical cap.
 
     Coordinates are in the sheet's units ("unit": mm for a metric grid,
-    otherwise mil) with Altium's origin at the bottom left.
+    otherwise mil) with Altium's origin at the bottom left. Read-only:
+    apply_schematic_fixes applies the clear-cut label and text suggestions.
 
     Args:
         path: a .SchDoc, a .PrjPcb (every sheet it lists), or a folder (every
@@ -2916,6 +2931,67 @@ async def check_hierarchy(ctx: Context, project: str, min_severity: str = "warni
     except Exception as e:
         return json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"})
     return json.dumps({"success": True, **result}, indent=1, ensure_ascii=False)
+
+
+@_tool()
+async def apply_schematic_fixes(ctx: Context, sheet_path: str, kinds: list = None,
+                                max_issues: int = 150) -> str:
+    """
+    Fix what check_schematic gives a clear-cut suggestion for, on one sheet,
+    and save it. Unlike check_schematic this changes and saves the sheet.
+
+    "labels" moves each net label that sits away from its wire's free end, or
+    hangs off it, to that end with the suggested orientation and
+    justification (moved, so its font and colour stay). "text" moves each
+    part's designator and parameters to the suggested layout that collides
+    with nothing; it is worked out with the labels already moved, since a
+    label moved to its wire's end can land on a part's text.
+
+    The fixes come from the saved file, so a sheet open in Altium with
+    unsaved changes is refused: save or revert it first. Everything is one
+    edit_schematic call: one undo step in Altium. The sheet is then saved
+    and checked again.
+
+    Args:
+        sheet_path (str): Full path of the .SchDoc.
+        kinds (list): Any of "labels" and "text"; both when empty.
+        max_issues (int): Cap on the remaining issues listed.
+
+    Returns:
+        JSON: issue_counts_before and issue_counts_after, the number of
+        operations and how many were applied, errors, and the remaining
+        issues.
+    """
+    import schematic_check
+
+    sheet_path = long_path(sheet_path)
+    kinds = [str(k).strip().lower() for k in (kinds or schematic_check.APPLY_KINDS)]
+    if any(k not in schematic_check.APPLY_KINDS for k in kinds):
+        return json.dumps({"success": False, "error": f"kinds are {', '.join(schematic_check.APPLY_KINDS)}"})
+    if not (sheet_path.lower().endswith(".schdoc") and os.path.isfile(sheet_path)):
+        return json.dumps({"success": False, "error": f"not a saved .SchDoc: {sheet_path}"})
+    try:
+        ops, before = schematic_check.plan_fixes(sheet_path, kinds)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"could not check {sheet_path}: {type(e).__name__}: {e}"})
+    out = {"success": True, "sheet": sheet_path, "issue_counts_before": before["issue_counts"],
+           "operations": len(ops), "applied": 0}
+    if not ops:
+        out["note"] = "Nothing to apply: no clear-cut suggestion of those kinds."
+        return json.dumps(out, indent=1)
+    edited = json.loads(await _edit_schematic(sheet_path, ops, unit=before["unit"], save=True,
+                                              require_saved=True))
+    out["applied"] = edited.get("applied", 0) or 0
+    if edited.get("errors"):
+        out["errors"] = edited["errors"]
+    if not edited.get("applied"):
+        out["success"] = False
+        out["error"] = edited.get("error", "the edit failed")
+        return json.dumps(out, indent=1)
+    after = schematic_check.check_sheet(sheet_path)
+    out["issue_counts_after"] = after["issue_counts"]
+    out["issues"] = after["issues"][:max_issues]
+    return json.dumps(out, indent=1)
 
 @_tool()
 async def create_symbols_batch(ctx: Context, spec_file: str) -> str:
